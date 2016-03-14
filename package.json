@@ -17,9 +17,10 @@
   },
   "homepage": "https://github.com/astrolince/thegman#readme",
   "dependencies": {
-    "heroku-client": "^2.3.2",
+    "heroku-client": "^2.4.1",
     "node-schedule": "^0.3.0",
-    "nodemailer": "^1.9.0",
-    "request": "^2.65.0"
+    "node-telegram-bot-api": "^0.21.1",
+    "nodemailer": "^1.11.0",
+    "request": "^2.69.0"
   }
 }

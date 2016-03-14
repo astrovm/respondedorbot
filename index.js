@@ -3,6 +3,8 @@ var http = require('http'),
     request = require('request'),
     nodemailer = require('nodemailer'),
     transporter = nodemailer.createTransport(),
+    TelegramBot = require('node-telegram-bot-api'),
+    bot = new TelegramBot(process.env.TELE_TOKEN, { polling: true }),
     Heroku = require('heroku-client'),
     heroku = new Heroku({ token: process.env.HEROKU_API_TOKEN }),
     rulerestart = new schedule.RecurrenceRule(),
@@ -21,6 +23,16 @@ var http = require('http'),
             };
         });
     };
+
+bot.onText(/\/ask (.+)/, function (msg, match) {
+  var chatId = msg.chat.id;
+  var random = Math.round(Math.random());
+  if (random === 1) {
+    bot.sendMessage(chatId, 'si');
+  } else {
+    bot.sendMessage(chatId, 'no');
+  }
+});
 
 rulerestart.minute = [25, 55];
 check15.second = [0, 15, 30, 45];
