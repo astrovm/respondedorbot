@@ -43,6 +43,12 @@ bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
   bot.sendMessage(chatId, resp);
 });
 
+bot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
+  var chatId = msg.chat.id;
+  var resp = match[5];
+  bot.sendMessage(chatId, JSON.stringify(msg, null, 4));
+});
+
 rulerestart.minute = [25, 55];
 check15.second = [0, 15, 30, 45];
 
