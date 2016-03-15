@@ -48,7 +48,7 @@ bot.onText(/\/debug (.+)/, function (msg, match) {
   deb=msg.from.id;
 });
 
-bot.onText(/\/test (.+)/, function (msg, match) {
+bot.on('message', function (msg) {
   bot.sendMessage(deb, JSON.stringify(msg, null, 4));
 });
 
