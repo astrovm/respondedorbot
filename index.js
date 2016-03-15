@@ -39,7 +39,7 @@ bot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
 
 bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
   var chatId = msg.chat.id;
-  var resp = match[1];
+  var resp = match[5];
   bot.sendMessage(chatId, resp);
 });
 
