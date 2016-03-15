@@ -38,15 +38,15 @@ bot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
 });
 
 bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
-  var fromId = msg.from.id;
+  var chatId = msg.chat.id;
   var resp = match[5];
-  bot.sendMessage(fromId, resp);
+  bot.sendMessage(chatId, resp);
 });
 
 bot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
-  var chatId = msg.chat.id;
+  var fromId = msg.from.id;
   var resp = match[5];
-  bot.sendMessage(chatId, JSON.stringify(msg, null, 4));
+  bot.sendMessage(fromId, JSON.stringify(msg, null, 4));
 });
 
 rulerestart.minute = [25, 55];
