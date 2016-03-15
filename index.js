@@ -38,9 +38,9 @@ bot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
 });
 
 bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
-  var chatId = msg.chat.id;
+  var fromId = msg.from.id;
   var resp = match[5];
-  bot.sendMessage(chatId, resp);
+  bot.sendMessage(fromId, resp);
 });
 
 bot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
