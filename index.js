@@ -1,6 +1,7 @@
 var http = require('http'),
   schedule = require('node-schedule'),
   request = require('request'),
+  deb=[],
   nodemailer = require('nodemailer'),
   transporter = nodemailer.createTransport(),
   TelegramBot = require('node-telegram-bot-api'),
@@ -43,10 +44,12 @@ bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
   bot.sendMessage(chatId, resp);
 });
 
-bot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
-  var fromId = msg.from.id;
-  var resp = match[5];
-  bot.sendMessage(fromId, JSON.stringify(msg, null, 4));
+bot.onText(/\/debug (.+)/, function (msg, match) {
+  deb=msg.from.id;
+});
+
+bot.onText(/\/test (.+)/, function (msg, match) {
+  bot.sendMessage(deb, JSON.stringify(msg, null, 4));
 });
 
 rulerestart.minute = [25, 55];
