@@ -4,7 +4,8 @@ var http = require('http'),
   nodemailer = require('nodemailer'),
   transporter = nodemailer.createTransport(),
   TelegramBot = require('node-telegram-bot-api'),
-  bot = new TelegramBot(process.env.TELE_TOKEN, { polling: true }),
+  respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
+  respondedor_bot = new TelegramBot(process.env.RESPONDEDOR_BOT_TELE_TOKEN, { polling: true }),
   Heroku = require('heroku-client'),
   heroku = new Heroku({ token: process.env.HEROKU_API_TOKEN }),
   rulerestart = new schedule.RecurrenceRule(),
@@ -24,7 +25,7 @@ var http = require('http'),
     });
   };
 
-bot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
+respondedorbot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
   var chatId = msg.chat.id;
   var opts = {
     reply_to_message_id: msg.message_id
@@ -37,16 +38,29 @@ bot.onText(/\/(a|A)(s|S)(k|K) (.+)/, function (msg, match) {
   }
 });
 
-bot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
+respondedorbot.onText(/\/(e|E)(c|C)(h|H)(o|O) (.+)/, function (msg, match) {
   var chatId = msg.chat.id;
   var resp = match[5];
   bot.sendMessage(chatId, resp);
 });
 
-bot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
+respondedorbot.onText(/\/(t|T)(e|E)(s|S)(t|T) (.+)/, function (msg, match) {
   var fromId = msg.from.id;
   var resp = match[5];
   bot.sendMessage(fromId, JSON.stringify(msg, null, 4));
+});
+
+respondedor_bot.on('message', function (msg) {
+  var chatId = msg.chat.id;
+  var opts = {
+    reply_to_message_id: msg.message_id
+  };
+  var random = Math.round(Math.random());
+  if (random === 1) {
+    bot.sendMessage(chatId, 'si', opts);
+  } else {
+    bot.sendMessage(chatId, 'no', opts);
+  }
 });
 
 rulerestart.minute = [25, 55];
