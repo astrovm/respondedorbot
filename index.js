@@ -31,9 +31,9 @@ respondedorbot.on('message', function (msg) {
   };
   var random = Math.round(Math.random());
   if (random === 1) {
-    bot.sendMessage(chatId, 'si', opts);
+    respondedorbot.sendMessage(chatId, 'si', opts);
   } else {
-    bot.sendMessage(chatId, 'no', opts);
+    respondedorbot.sendMessage(chatId, 'no', opts);
   }
 });
 
