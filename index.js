@@ -47,7 +47,6 @@ var autorulerestart = schedule.scheduleJob(rulerestart, function(){
 
 var autocheck15 = schedule.scheduleJob(check15, function(){
   check('TuxiFeed', 'tuxifeed-duckinto-bugfixes4454', 'http://tuxifeed-duckinto-bugfixes4454.herokuapp.com');
-  check('Inside the firewall', 'insidethefirewall-yolo-octo-46', 'http://insidethefirewall-yolo-octo-46.herokuapp.com');
 });
 
 var port = Number(process.env.PORT || 5000);
