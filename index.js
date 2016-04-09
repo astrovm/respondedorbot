@@ -26,14 +26,17 @@ var http = require('http'),
 
 respondedorbot.on('message', function (msg) {
   var chatId = msg.chat.id;
+  var text = msg.text;
   var opts = {
     reply_to_message_id: msg.message_id
   };
   var random = Math.round(Math.random());
-  if (random === 1) {
-    respondedorbot.sendMessage(chatId, 'si', opts);
-  } else {
-    respondedorbot.sendMessage(chatId, 'no' + msg.text, opts);
+  if (text.match(/^\//)) {
+    if (random === 1) {
+      respondedorbot.sendMessage(chatId, 'si', opts);
+    } else {
+      respondedorbot.sendMessage(chatId, 'no', opts);
+    }
   }
 });
 
