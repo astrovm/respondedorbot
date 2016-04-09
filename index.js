@@ -32,6 +32,14 @@ respondedorbot.on('message', function (msg) {
   };
   var random = Math.round(Math.random());
   if (text.match(/^\//)) {
+    if (text.match(/^\/ask/)) {
+      if (random === 1) {
+        respondedorbot.sendMessage(chatId, 'si', opts);
+      } else {
+        respondedorbot.sendMessage(chatId, 'no', opts);
+      }
+    }
+  } else {
     if (random === 1) {
       respondedorbot.sendMessage(chatId, 'si', opts);
     } else {
