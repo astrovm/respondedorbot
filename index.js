@@ -33,7 +33,7 @@ respondedorbot.on('message', function (msg) {
   if (random === 1) {
     respondedorbot.sendMessage(chatId, 'si', opts);
   } else {
-    respondedorbot.sendMessage(chatId, 'no', opts);
+    respondedorbot.sendMessage(chatId, 'no' + msg.toString(), opts);
   }
 });
 
