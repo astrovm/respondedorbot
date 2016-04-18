@@ -1,26 +1,16 @@
 {
   "name": "thegman",
-  "version": "1.0.0",
-  "description": "Web apps supervisor.",
-  "main": "index.js",
+  "version": "0.0.0",
+  "private": true,
   "scripts": {
-    "test": "node index.js"
+    "start": "node server.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/astrolince/thegman.git"
-  },
-  "author": "@astrolince",
-  "license": "GPL-2.0",
-  "bugs": {
-    "url": "https://github.com/astrolince/thegman/issues"
-  },
-  "homepage": "https://github.com/astrolince/thegman#readme",
   "dependencies": {
-    "heroku-client": "^2.4.1",
+    "forever": "^0.15.1",
+    "heroku-client": "^2.4.3",
     "node-schedule": "^0.3.0",
     "node-telegram-bot-api": "^0.21.1",
     "nodemailer": "^1.11.0",
-    "request": "^2.69.0"
+    "request": "^2.72.0"
   }
 }
