@@ -53,11 +53,11 @@ check15.second = [0, 15, 30, 45];
 
 var autorulerestart = schedule.scheduleJob(rulerestart, function(){
   request('http://thegman.herokuapp.com');
-  heroku.apps('tuxifeed-duckinto-bugfixes4454').dynos().restartAll();
+  heroku.apps('tuxifeed').dynos().restartAll();
 });
 
 var autocheck15 = schedule.scheduleJob(check15, function(){
-  check('TuxiFeed', 'tuxifeed-duckinto-bugfixes4454', 'http://tuxifeed-duckinto-bugfixes4454.herokuapp.com');
+  check('TuxiFeed', 'tuxifeed', 'http://tuxifeed.herokuapp.com');
 });
 
 var port = Number(process.env.PORT || 5000);
