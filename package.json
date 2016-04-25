@@ -8,9 +8,9 @@
   "dependencies": {
     "forever": "^0.15.1",
     "heroku-client": "^2.4.3",
-    "node-schedule": "^0.3.0",
+    "node-schedule": "^1.1.0",
     "node-telegram-bot-api": "^0.21.1",
-    "nodemailer": "^1.11.0",
+    "nodemailer": "^2.3.2",
     "request": "^2.72.0"
   }
 }
