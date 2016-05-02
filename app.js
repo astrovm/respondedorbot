@@ -59,7 +59,9 @@ let autorulerestart = schedule.scheduleJob(rulerestart, function(){
 });
 
 let autocheck15 = schedule.scheduleJob(check15, function(){
+  request('http://thegman.herokuapp.com');
   check('TuxiFeed', 'tuxifeed', 'http://tuxifeed.herokuapp.com');
+  check('Linky', 'linkyurl', 'http://linkyurl.herokuapp.com');
 });
 
 let port = Number(process.env.PORT || 5000);
