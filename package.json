@@ -18,7 +18,7 @@
     "forever": "^0.15.2",
     "heroku-client": "^2.4.3",
     "node-schedule": "^1.1.0",
-    "node-telegram-bot-api": "^0.22.0",
+    "node-telegram-bot-api": "^0.22.1",
     "nodemailer": "^2.4.2",
     "request": "^2.72.0"
   },
