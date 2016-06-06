@@ -15,7 +15,7 @@
     "start": "node app.js"
   },
   "dependencies": {
-    "forever": "^0.15.1",
+    "forever": "^0.15.2",
     "heroku-client": "^2.4.3",
     "node-schedule": "^1.1.0",
     "node-telegram-bot-api": "^0.21.1",
