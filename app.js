@@ -88,16 +88,16 @@ sectmbot.on('message', function (msg) {
   if (text.match(/^\//)) {
     if (text.match(/^\/ask/)) {
       if (random === 1) {
-        sectmbot.sendMessage(chatId, 'si', opts);
+        sectmbot.sendMessage(chatId, 'guau si', opts);
       } else {
-        sectmbot.sendMessage(chatId, 'no', opts);
+        sectmbot.sendMessage(chatId, 'guau no', opts);
       }
     }
   } else {
     if (random === 1) {
-      sectmbot.sendMessage(chatId, 'si', opts);
+      sectmbot.sendMessage(chatId, 'guau si', opts);
     } else {
-      sectmbot.sendMessage(chatId, 'no', opts);
+      sectmbot.sendMessage(chatId, 'guau no', opts);
     }
   }
 });
@@ -112,16 +112,16 @@ secaybot.on('message', function (msg) {
   if (text.match(/^\//)) {
     if (text.match(/^\/ask/)) {
       if (random === 1) {
-        secaybot.sendMessage(chatId, 'si', opts);
+        secaybot.sendMessage(chatId, 'miau si', opts);
       } else {
-        secaybot.sendMessage(chatId, 'no', opts);
+        secaybot.sendMessage(chatId, 'miau no', opts);
       }
     }
   } else {
     if (random === 1) {
-      secaybot.sendMessage(chatId, 'si', opts);
+      secaybot.sendMessage(chatId, 'miau si', opts);
     } else {
-      secaybot.sendMessage(chatId, 'no', opts);
+      secaybot.sendMessage(chatId, 'miau no', opts);
     }
   }
 });
