@@ -7,6 +7,7 @@ let http = require('http'),
   transporter = nodemailer.createTransport(),
   TelegramBot = require('node-telegram-bot-api'),
   respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
+  secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
   Heroku = require('heroku-client'),
   heroku = new Heroku({ token: process.env.HEROKU_API_TOKEN }),
   rulerestart = new schedule.RecurrenceRule(),
@@ -49,6 +50,32 @@ respondedorbot.on('message', function (msg) {
     }
   }
 });
+
+
+secwalbot.on('message', function (msg) {
+  let chatId = msg.chat.id;
+  let text = msg.text;
+  let opts = {
+    reply_to_message_id: msg.message_id
+  };
+  let random = Math.round(Math.random());
+  if (text.match(/^\//)) {
+    if (text.match(/^\/ask/)) {
+      if (random === 1) {
+        respondedorbot.sendMessage(chatId, 'si', opts);
+      } else {
+        respondedorbot.sendMessage(chatId, 'no', opts);
+      }
+    }
+  } else {
+    if (random === 1) {
+      respondedorbot.sendMessage(chatId, 'si', opts);
+    } else {
+      respondedorbot.sendMessage(chatId, 'no', opts);
+    }
+  }
+});
+
 
 rulerestart.minute = [25, 55];
 check15.second = [30];
