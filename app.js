@@ -10,6 +10,7 @@ let http = require('http'),
   secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
   sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true }),
   secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true }),
+  secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true }),
   Heroku = require('heroku-client'),
   heroku = new Heroku({ token: process.env.HEROKU_API_TOKEN }),
   rulerestart = new schedule.RecurrenceRule(),
@@ -126,6 +127,30 @@ secaybot.on('message', function (msg) {
   }
 });
 
+
+secpubot.on('message', function (msg) {
+  let chatId = msg.chat.id;
+  let text = msg.text;
+  let opts = {
+    reply_to_message_id: msg.message_id
+  };
+  let random = Math.round(Math.random());
+  if (text.match(/^\//)) {
+    if (text.match(/^\/ask/)) {
+      if (random === 1) {
+        secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts);
+      } else {
+        secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts);
+      }
+    }
+  } else {
+    if (random === 1) {
+      secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts);
+    } else {
+      secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts);
+    }
+  }
+});
 
 rulerestart.minute = [25, 55];
 check15.second = [30];
