@@ -8,6 +8,8 @@ let http = require('http'),
   TelegramBot = require('node-telegram-bot-api'),
   respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
   secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
+  sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true }),
+  secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true }),
   Heroku = require('heroku-client'),
   heroku = new Heroku({ token: process.env.HEROKU_API_TOKEN }),
   rulerestart = new schedule.RecurrenceRule(),
@@ -72,6 +74,54 @@ secwalbot.on('message', function (msg) {
       secwalbot.sendMessage(chatId, 'si', opts);
     } else {
       secwalbot.sendMessage(chatId, 'no', opts);
+    }
+  }
+});
+
+sectmbot.on('message', function (msg) {
+  let chatId = msg.chat.id;
+  let text = msg.text;
+  let opts = {
+    reply_to_message_id: msg.message_id
+  };
+  let random = Math.round(Math.random());
+  if (text.match(/^\//)) {
+    if (text.match(/^\/ask/)) {
+      if (random === 1) {
+        sectmbot.sendMessage(chatId, 'si', opts);
+      } else {
+        sectmbot.sendMessage(chatId, 'no', opts);
+      }
+    }
+  } else {
+    if (random === 1) {
+      sectmbot.sendMessage(chatId, 'si', opts);
+    } else {
+      sectmbot.sendMessage(chatId, 'no', opts);
+    }
+  }
+});
+
+secaybot.on('message', function (msg) {
+  let chatId = msg.chat.id;
+  let text = msg.text;
+  let opts = {
+    reply_to_message_id: msg.message_id
+  };
+  let random = Math.round(Math.random());
+  if (text.match(/^\//)) {
+    if (text.match(/^\/ask/)) {
+      if (random === 1) {
+        secaybot.sendMessage(chatId, 'si', opts);
+      } else {
+        secaybot.sendMessage(chatId, 'no', opts);
+      }
+    }
+  } else {
+    if (random === 1) {
+      secaybot.sendMessage(chatId, 'si', opts);
+    } else {
+      secaybot.sendMessage(chatId, 'no', opts);
     }
   }
 });
