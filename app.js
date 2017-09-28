@@ -25,26 +25,15 @@ let http = require('http'),
 
 respondedorbot.on('message', function (msg) {
   let chatId = msg.chat.id;
-  let text = msg.text;
   let opts = {
     reply_to_message_id: msg.message_id
   };
   let random = Math.round(Math.random());
-  if (text.match(/^\//)) {
-    if (text.match(/^\/ask/)) {
-      if (random === 1) {
-        respondedorbot.sendMessage(chatId, 'si', opts);
-      } else {
-        respondedorbot.sendMessage(chatId, 'no', opts);
-      }
-    }
+  if (random === 1) {
+    respondedorbot.sendMessage(chatId, 'si', opts)
   } else {
-    if (random === 1) {
-      respondedorbot.sendMessage(chatId, 'si', opts);
-    } else {
-      respondedorbot.sendMessage(chatId, 'no', opts);
-    }
-  }
+    respondedorbot.sendMessage(chatId, 'no', opts)
+  };
 });
 
 
