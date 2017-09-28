@@ -19,7 +19,6 @@
     "heroku-client": "^3.0.3",
     "node-schedule": "^1.2.5",
     "node-telegram-bot-api": "^0.28.0",
-    "nodemailer": "^4.1.1",
     "request": "^2.83.0"
   },
   "repository": {

@@ -3,8 +3,6 @@
 let http = require('http'),
   schedule = require('node-schedule'),
   request = require('request'),
-  nodemailer = require('nodemailer'),
-  transporter = nodemailer.createTransport(),
   TelegramBot = require('node-telegram-bot-api'),
   respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
   secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
@@ -20,11 +18,6 @@ let http = require('http'),
       if (!err && res.statusCode == 200) {
       } else {
         heroku.apps(app).dynos().restartAll();
-        transporter.sendMail({
-          from: process.env.AM,
-          to: process.env.MM,
-          text: title + ' DOWN'
-        });
         console.log(title + ' DOWN');
       };
     });
