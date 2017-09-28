@@ -17,8 +17,8 @@ let http = require('http'),
     request(url, function (err, res) {
       if (!err && res.statusCode == 200) {
       } else {
-        heroku.apps(app).dynos().restartAll();
-        console.log(title + ' DOWN');
+        heroku.apps(app).dynos().restartAll()
+        console.log(title + ' DOWN')
       };
     });
   };
@@ -39,119 +39,75 @@ respondedorbot.on('message', function (msg) {
 
 secwalbot.on('message', function (msg) {
   let chatId = msg.chat.id;
-  let text = msg.text;
   let opts = {
     reply_to_message_id: msg.message_id
   };
   let random = Math.round(Math.random());
-  if (text.match(/^\//)) {
-    if (text.match(/^\/ask/)) {
-      if (random === 1) {
-        secwalbot.sendMessage(chatId, 'si', opts);
-      } else {
-        secwalbot.sendMessage(chatId, 'no', opts);
-      }
-    }
+  if (random === 1) {
+    secwalbot.sendMessage(chatId, 'si', opts)
   } else {
-    if (random === 1) {
-      secwalbot.sendMessage(chatId, 'si', opts);
-    } else {
-      secwalbot.sendMessage(chatId, 'no', opts);
-    }
-  }
+    secwalbot.sendMessage(chatId, 'no', opts)
+  };
 });
 
 sectmbot.on('message', function (msg) {
   let chatId = msg.chat.id;
-  let text = msg.text;
   let opts = {
     reply_to_message_id: msg.message_id
   };
   let random = Math.round(Math.random());
-  if (text.match(/^\//)) {
-    if (text.match(/^\/ask/)) {
-      if (random === 1) {
-        sectmbot.sendMessage(chatId, 'guau si', opts);
-      } else {
-        sectmbot.sendMessage(chatId, 'guau no', opts);
-      }
-    }
+  if (random === 1) {
+    sectmbot.sendMessage(chatId, 'guau si', opts)
   } else {
-    if (random === 1) {
-      sectmbot.sendMessage(chatId, 'guau si', opts);
-    } else {
-      sectmbot.sendMessage(chatId, 'guau no', opts);
-    }
-  }
+    sectmbot.sendMessage(chatId, 'guau no', opts)
+  };
 });
 
 secaybot.on('message', function (msg) {
   let chatId = msg.chat.id;
-  let text = msg.text;
   let opts = {
     reply_to_message_id: msg.message_id
   };
   let random = Math.round(Math.random());
-  if (text.match(/^\//)) {
-    if (text.match(/^\/ask/)) {
-      if (random === 1) {
-        secaybot.sendMessage(chatId, 'miau si', opts);
-      } else {
-        secaybot.sendMessage(chatId, 'miau no', opts);
-      }
-    }
+  if (random === 1) {
+    secaybot.sendMessage(chatId, 'miau si', opts)
   } else {
-    if (random === 1) {
-      secaybot.sendMessage(chatId, 'miau si', opts);
-    } else {
-      secaybot.sendMessage(chatId, 'miau no', opts);
-    }
-  }
+    secaybot.sendMessage(chatId, 'miau no', opts)
+  };
 });
 
 
 secpubot.on('message', function (msg) {
   let chatId = msg.chat.id;
-  let text = msg.text;
   let opts = {
     reply_to_message_id: msg.message_id
   };
   let random = Math.round(Math.random());
-  if (text.match(/^\//)) {
-    if (text.match(/^\/ask/)) {
-      if (random === 1) {
-        secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts);
-      } else {
-        secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts);
-      }
-    }
+  if (random === 1) {
+    secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts)
   } else {
-    if (random === 1) {
-      secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts);
-    } else {
-      secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts);
-    }
-  }
+    secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts)
+  };
 });
 
 rulerestart.minute = [25, 55];
 check15.second = [30];
 
 let autorulerestart = schedule.scheduleJob(rulerestart, function(){
-  request('http://thegman.herokuapp.com');
-  heroku.apps('tuxifeed').dynos().restartAll();
+  request('http://thegman.herokuapp.com')
+  heroku.apps('tuxifeed').dynos().restartAll()
 });
 
 let autocheck15 = schedule.scheduleJob(check15, function(){
-  request('http://thegman.herokuapp.com');
-  request('http://linky.tk');
-  check('TuxiFeed', 'tuxifeed', 'http://tuxifeed.herokuapp.com');
+  request('http://thegman.herokuapp.com')
+  request('http://linky.tk')
+  check('TuxiFeed', 'tuxifeed', 'http://tuxifeed.herokuapp.com')
 });
 
 let port = Number(process.env.PORT || 5000);
 http.createServer(function (req, res) {
-  res.writeHead(200, {'Content-Type': 'text/plain'});
-  res.end('The G-Man is watching you.\n');
+  res.writeHead(200, {'Content-Type': 'text/plain'})
+  res.end('The G-Man is watching you.\n')
 }).listen(port, function() {
-  console.log('Listening on ' + port);
+  console.log('Listening on ' + port)
 });
