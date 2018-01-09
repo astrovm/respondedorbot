@@ -1,12 +1,14 @@
 'use strict';
 
 const http = require('http'),
-  TelegramBot = require('node-telegram-bot-api'),
-  respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
-  secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
-  sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true }),
-  secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true }),
-  secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
+      request = require('request'),
+      schedule = require('node-schedule'),
+      TelegramBot = require('node-telegram-bot-api'),
+      respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
+      secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
+      sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true }),
+      secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true }),
+      secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
 
 respondedorbot.on('message', function (msg) {
   const chatId = msg.chat.id;
@@ -73,6 +75,10 @@ secpubot.on('message', function (msg) {
   } else {
     secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts)
   }
+})
+
+const poke = schedule.scheduleJob('*/5 * * * *', function(){
+  request('https://bitfees-ulpqjuzzlu.now.sh/')
 })
 
 const port = Number(process.env.PORT || 5000);
