@@ -1,2 +1,2 @@
 # thegman
-Web apps supervisor.
+bot of bots
