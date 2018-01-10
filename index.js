@@ -1,14 +1,13 @@
 'use strict';
 
-const http = require('http'),
-      request = require('request'),
-      schedule = require('node-schedule'),
-      TelegramBot = require('node-telegram-bot-api'),
-      respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true }),
-      secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true }),
-      sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true }),
-      secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true }),
-      secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
+const request = require('request')
+const schedule = require('node-schedule')
+const TelegramBot = require('node-telegram-bot-api')
+const respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true })
+const secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true })
+const sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true })
+const secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true })
+const secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
 
 respondedorbot.on('message', function (msg) {
   const chatId = msg.chat.id;
