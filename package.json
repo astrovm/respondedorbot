@@ -6,6 +6,9 @@
   "scripts": {
     "start": "micro"
   },
+  "now": {
+    "alias": "thegman"
+  },
   "author": "astrolince",
   "license": "AGPL-3.0+",
   "dependencies": {
