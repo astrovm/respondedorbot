@@ -78,13 +78,8 @@ secpubot.on('message', function (msg) {
 })
 
 const poke = schedule.scheduleJob('*/5 * * * *', function(){
-  request('https://bitfees-ulpqjuzzlu.now.sh/')
+  request('https://bitfees.now.sh/')
+  request('https://thegman.now.sh/')
 })
 
-const port = Number(process.env.PORT || 5000);
-http.createServer(function (req, res) {
-  res.writeHead(200, {'Content-Type': 'text/plain'})
-  res.end('The G-Man is watching you.\n')
-}).listen(port, function() {
-  console.log('Listening on ' + port)
-})
+module.exports = () => 'wake up mr. freeman'
