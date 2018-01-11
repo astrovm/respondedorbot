@@ -1,4 +1,4 @@
-'use strict';
+'use strict'
 
 const request = require('request')
 const schedule = require('node-schedule')
@@ -10,25 +10,25 @@ const secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: tru
 const secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
 
 respondedorbot.on('message', function (msg) {
-  const chatId = msg.chat.id;
+  const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
-  };
-  const random = Math.round(Math.random());
+  }
+  const random = Math.round(Math.random())
   if (random === 1) {
     respondedorbot.sendMessage(chatId, 'si', opts)
   } else {
     respondedorbot.sendMessage(chatId, 'no', opts)
-  };
-});
+  }
+})
 
 
 secwalbot.on('message', function (msg) {
-  const chatId = msg.chat.id;
+  const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
   }
-  const random = Math.round(Math.random());
+  const random = Math.round(Math.random())
   if (random === 1) {
     secwalbot.sendMessage(chatId, 'si', opts)
   } else {
@@ -37,11 +37,11 @@ secwalbot.on('message', function (msg) {
 })
 
 sectmbot.on('message', function (msg) {
-  const chatId = msg.chat.id;
+  const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
   }
-  const random = Math.round(Math.random());
+  const random = Math.round(Math.random())
   if (random === 1) {
     sectmbot.sendMessage(chatId, 'guau si', opts)
   } else {
@@ -50,11 +50,11 @@ sectmbot.on('message', function (msg) {
 })
 
 secaybot.on('message', function (msg) {
-  const chatId = msg.chat.id;
+  const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
   }
-  const random = Math.round(Math.random());
+  const random = Math.round(Math.random())
   if (random === 1) {
     secaybot.sendMessage(chatId, 'miau si', opts)
   } else {
@@ -64,11 +64,11 @@ secaybot.on('message', function (msg) {
 
 
 secpubot.on('message', function (msg) {
-  const chatId = msg.chat.id;
+  const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
   }
-  const random = Math.round(Math.random());
+  const random = Math.round(Math.random())
   if (random === 1) {
     secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts)
   } else {
