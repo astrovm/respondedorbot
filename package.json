@@ -11,10 +11,14 @@
   },
   "author": "astrolince",
   "license": "AGPL-3.0+",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/astrolince/thegman.git"
+  },
   "dependencies": {
     "micro": "^9.1.0",
-    "node-schedule": "^1.2.5",
-    "node-telegram-bot-api": "^0.28.0",
+    "node-schedule": "^1.3.0",
+    "node-telegram-bot-api": "^0.30.0",
     "request": "^2.83.0"
   }
 }
