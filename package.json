@@ -4,7 +4,8 @@
   "description": "bot of bots",
   "main": "index.js",
   "scripts": {
-    "start": "micro"
+    "start": "micro",
+    "test": "standard"
   },
   "now": {
     "alias": "thegman"
@@ -20,5 +21,8 @@
     "node-schedule": "^1.3.0",
     "node-telegram-bot-api": "^0.30.0",
     "request": "^2.83.0"
+  },
+  "devDependencies": {
+    "standard": "*"
   }
 }
