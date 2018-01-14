@@ -9,7 +9,7 @@ const sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: tru
 const secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true })
 const secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
 
-respondedorbot.on('message', function (msg) {
+respondedorbot.on('message', (msg) => {
   const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
@@ -22,8 +22,7 @@ respondedorbot.on('message', function (msg) {
   }
 })
 
-
-secwalbot.on('message', function (msg) {
+secwalbot.on('message', (msg) => {
   const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
@@ -36,7 +35,7 @@ secwalbot.on('message', function (msg) {
   }
 })
 
-sectmbot.on('message', function (msg) {
+sectmbot.on('message', (msg) => {
   const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
@@ -49,7 +48,7 @@ sectmbot.on('message', function (msg) {
   }
 })
 
-secaybot.on('message', function (msg) {
+secaybot.on('message', (msg) => {
   const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
@@ -62,8 +61,7 @@ secaybot.on('message', function (msg) {
   }
 })
 
-
-secpubot.on('message', function (msg) {
+secpubot.on('message', (msg) => {
   const chatId = msg.chat.id
   const opts = {
     reply_to_message_id: msg.message_id
@@ -76,7 +74,7 @@ secpubot.on('message', function (msg) {
   }
 })
 
-const poke = schedule.scheduleJob('*/5 * * * *', function(){
+schedule.scheduleJob('*/5 * * * *', () => {
   request('https://bitfees.now.sh/')
   request('https://thegman.now.sh/')
 })
