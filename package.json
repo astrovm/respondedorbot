@@ -8,7 +8,14 @@
     "test": "standard"
   },
   "now": {
-    "alias": "thegman"
+    "alias": "thegman",
+    "env": {
+      "RESPONDEDORBOT_TELE_TOKEN": "@respondedorbot_tele_token",
+      "SECAYBOT_TELE_TOKEN": "@secaybot_tele_token",
+      "SECPUBOT_TELE_TOKEN": "@secpubot_tele_token",
+      "SECTMBOT_TELE_TOKEN": "@sectmbot_tele_token",
+      "SECWALRBOT_TELE_TOKEN": "@secwalrbot_tele_token"
+    }
   },
   "author": "astrolince",
   "license": "AGPL-3.0+",

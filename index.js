@@ -77,6 +77,7 @@ secpubot.on('message', (msg) => {
 schedule.scheduleJob('*/5 * * * *', () => {
   request('https://bitfees.now.sh/')
   request('https://thegman.now.sh/')
+  request('https://astro-bots.now.sh/')
 })
 
 module.exports = () => 'wake up mr. freeman'
