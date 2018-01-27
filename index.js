@@ -1,78 +1,44 @@
 'use strict'
 
-const request = require('request')
-const schedule = require('node-schedule')
 const TelegramBot = require('node-telegram-bot-api')
-const respondedorbot = new TelegramBot(process.env.RESPONDEDORBOT_TELE_TOKEN, { polling: true })
-const secwalbot = new TelegramBot(process.env.SECWALRBOT_TELE_TOKEN, { polling: true })
-const sectmbot = new TelegramBot(process.env.SECTMBOT_TELE_TOKEN, { polling: true })
-const secaybot = new TelegramBot(process.env.SECAYBOT_TELE_TOKEN, { polling: true })
-const secpubot = new TelegramBot(process.env.SECPUBOT_TELE_TOKEN, { polling: true })
+const schedule = require('node-schedule')
+const request = require('request')
 
-respondedorbot.on('message', (msg) => {
-  const chatId = msg.chat.id
-  const opts = {
-    reply_to_message_id: msg.message_id
+class AddBot {
+  constructor (token, yes, no) {
+    this.token = token
+    this.yes = yes
+    this.no = no
   }
-  const random = Math.round(Math.random())
-  if (random === 1) {
-    respondedorbot.sendMessage(chatId, 'si', opts)
-  } else {
-    respondedorbot.sendMessage(chatId, 'no', opts)
-  }
-})
 
-secwalbot.on('message', (msg) => {
-  const chatId = msg.chat.id
-  const opts = {
-    reply_to_message_id: msg.message_id
+  init () {
+    const bot = new TelegramBot(this.token, { polling: true })
+    bot.on('message', (msg) => {
+      const chatId = msg.chat.id
+      const opts = {
+        reply_to_message_id: msg.message_id
+      }
+      const random = Math.round(Math.random())
+      if (random === 1) {
+        bot.sendMessage(chatId, this.yes, opts)
+      } else {
+        bot.sendMessage(chatId, this.no, opts)
+      }
+    })
   }
-  const random = Math.round(Math.random())
-  if (random === 1) {
-    secwalbot.sendMessage(chatId, 'si', opts)
-  } else {
-    secwalbot.sendMessage(chatId, 'no', opts)
-  }
-})
+}
 
-sectmbot.on('message', (msg) => {
-  const chatId = msg.chat.id
-  const opts = {
-    reply_to_message_id: msg.message_id
-  }
-  const random = Math.round(Math.random())
-  if (random === 1) {
-    sectmbot.sendMessage(chatId, 'guau si', opts)
-  } else {
-    sectmbot.sendMessage(chatId, 'guau no', opts)
-  }
-})
+const respondedorbot = new AddBot(process.env.RESPONDEDORBOT_TELE_TOKEN, 'si', 'no')
+const secwalbot = new AddBot(process.env.SECWALRBOT_TELE_TOKEN, 'si', 'no')
+const sectmbot = new AddBot(process.env.SECTMBOT_TELE_TOKEN, 'guau si', 'guau no')
+const secaybot = new AddBot(process.env.SECAYBOT_TELE_TOKEN, 'miau si', 'miau no')
+const secpubot = new AddBot(process.env.SECPUBOT_TELE_TOKEN, 'RAFRAFAYAYASNJCRA si', 'RAFRAFAYAYASNJCRA no')
 
-secaybot.on('message', (msg) => {
-  const chatId = msg.chat.id
-  const opts = {
-    reply_to_message_id: msg.message_id
-  }
-  const random = Math.round(Math.random())
-  if (random === 1) {
-    secaybot.sendMessage(chatId, 'miau si', opts)
-  } else {
-    secaybot.sendMessage(chatId, 'miau no', opts)
-  }
-})
-
-secpubot.on('message', (msg) => {
-  const chatId = msg.chat.id
-  const opts = {
-    reply_to_message_id: msg.message_id
-  }
-  const random = Math.round(Math.random())
-  if (random === 1) {
-    secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA si', opts)
-  } else {
-    secpubot.sendMessage(chatId, 'RAFRAFAYAYASNJCRA no', opts)
-  }
-})
+respondedorbot.init()
+secwalbot.init()
+sectmbot.init()
+secaybot.init()
+secpubot.init()
 
 schedule.scheduleJob('*/5 * * * *', () => {
   request('https://bitfees.now.sh/')
