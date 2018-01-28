@@ -10,6 +10,7 @@
   "now": {
     "alias": "thegman",
     "env": {
+      "URLS": "@thegman-urls",
       "RESPONDEDORBOT_TELE_TOKEN": "@respondedorbot_tele_token",
       "SECAYBOT_TELE_TOKEN": "@secaybot_tele_token",
       "SECPUBOT_TELE_TOKEN": "@secpubot_tele_token",

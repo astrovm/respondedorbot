@@ -3,6 +3,7 @@
 const TelegramBot = require('node-telegram-bot-api')
 const schedule = require('node-schedule')
 const request = require('request')
+const urls = process.env.URLS.split(' ')
 
 class AddBot {
   constructor (token, yes, no) {
@@ -41,9 +42,9 @@ secaybot.init()
 secpubot.init()
 
 schedule.scheduleJob('*/5 * * * *', () => {
-  request('https://bitfees.now.sh/')
-  request('https://thegman.now.sh/')
-  request('https://astro-bots.now.sh/')
+  for (let i in urls) {
+    request(urls[i])
+  }
 })
 
 module.exports = () => 'wake up mr. freeman'
