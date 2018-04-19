@@ -33,12 +33,14 @@ const respondedorbot = new AddBot(process.env.RESPONDEDORBOT_TELE_TOKEN, 'si', '
 const secwalbot = new AddBot(process.env.SECWALRBOT_TELE_TOKEN, 'si', 'no')
 const sectmbot = new AddBot(process.env.SECTMBOT_TELE_TOKEN, 'guau si', 'guau no')
 const secaybot = new AddBot(process.env.SECAYBOT_TELE_TOKEN, 'miau si', 'miau no')
+const seckibot = new AddBot(process.env.SECKIBOT_TELE_TOKEN, 'miau si', 'miau no')
 const secpubot = new AddBot(process.env.SECPUBOT_TELE_TOKEN, 'RAFRAFAYAYASNJCRA si', 'RAFRAFAYAYASNJCRA no')
 
 respondedorbot.init()
 secwalbot.init()
 sectmbot.init()
 secaybot.init()
+seckibot.init()
 secpubot.init()
 
 schedule.scheduleJob('*/5 * * * *', () => {
