@@ -6,13 +6,13 @@ const request = require('request')
 const urls = process.env.URLS.split(' ')
 
 class AddBot {
-  constructor (token, yes, no) {
+  constructor(token, yes, no) {
     this.token = token
     this.yes = yes
     this.no = no
   }
 
-  init () {
+  init() {
     const bot = new TelegramBot(this.token, { polling: true })
     bot.on('message', (msg) => {
       const chatId = msg.chat.id
