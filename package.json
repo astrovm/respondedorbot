@@ -7,19 +7,6 @@
     "start": "micro",
     "test": "standard"
   },
-  "now": {
-    "version": 2,
-    "alias": "thegman",
-    "env": {
-      "URLS": "@thegman-urls",
-      "RESPONDEDORBOT_TELE_TOKEN": "@respondedorbot_tele_token",
-      "SECAYBOT_TELE_TOKEN": "@secaybot_tele_token",
-      "SECKIBOT_TELE_TOKEN": "@seckibot_tele_token",
-      "SECPUBOT_TELE_TOKEN": "@secpubot_tele_token",
-      "SECTMBOT_TELE_TOKEN": "@sectmbot_tele_token",
-      "SECWALRBOT_TELE_TOKEN": "@secwalrbot_tele_token"
-    }
-  },
   "author": "astrolince",
   "license": "MIT",
   "repository": {
