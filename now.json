@@ -1,6 +1,12 @@
 {
     "name": "thegman",
     "version": 2,
+    "builds": [
+        {
+            "src": "*.js",
+            "use": "@now/node"
+        }
+    ],
     "alias": "thegman",
     "env": {
         "URLS": "@thegman-urls",
