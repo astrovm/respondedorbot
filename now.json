@@ -1,13 +1,19 @@
 {
     "name": "thegman",
+    "alias": "thegman",
     "version": 2,
     "builds": [
         {
-            "src": "*.js",
+            "src": "index.js",
             "use": "@now/node"
         }
     ],
-    "alias": "thegman",
+    "routes": [
+        {
+            "src": "/(.*)",
+            "dest": "/index.js"
+        }
+    ],
     "env": {
         "URLS": "@thegman-urls",
         "RESPONDEDORBOT_TELE_TOKEN": "@respondedorbot_tele_token",
