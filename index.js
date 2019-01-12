@@ -1,6 +1,5 @@
 'use strict'
 
-const micro = require('micro')
 const TelegramBot = require('node-telegram-bot-api')
 const schedule = require('node-schedule')
 const request = require('request')
@@ -50,8 +49,4 @@ schedule.scheduleJob('*/5 * * * *', () => {
   }
 })
 
-const server = micro((req, res) => {
-  return 'wake up mr. freeman'
-})
-
-server.listen(3000)
+module.exports = () => 'wake up mr. freeman'
