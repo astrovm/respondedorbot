@@ -4,7 +4,7 @@
   "description": "bot of bots",
   "main": "index.js",
   "scripts": {
-    "start": "micro",
+    "start": "node index.js",
     "test": "standard"
   },
   "author": "astrolince",
