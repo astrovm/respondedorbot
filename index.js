@@ -49,4 +49,6 @@ schedule.scheduleJob('*/5 * * * *', () => {
   }
 })
 
-module.exports = () => 'wake up mr. freeman'
+module.exports = (req, res) => {
+  res.end(`wake up mr. freeman`)
+}
