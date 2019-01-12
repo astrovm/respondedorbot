@@ -21,7 +21,7 @@
     }
   },
   "author": "astrolince",
-  "license": "AGPL-3.0+",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git://github.com/astrolince/thegman.git"
