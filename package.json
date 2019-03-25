@@ -1,7 +1,7 @@
 {
-  "name": "thegman",
+  "name": "randomresponder",
   "version": "1.0.0",
-  "description": "bot of bots",
+  "description": "Yes or no Telegram bot",
   "main": "index.js",
   "scripts": {
     "start": "micro",
@@ -9,10 +9,6 @@
   },
   "author": "astrolince",
   "license": "MPL-2.0",
-  "repository": {
-    "type": "git",
-    "url": "git://github.com/astrolince/thegman.git"
-  },
   "dependencies": {
     "micro": "^9.3.3",
     "node-schedule": "^1.3.1",

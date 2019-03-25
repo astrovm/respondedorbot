@@ -49,4 +49,4 @@ schedule.scheduleJob('*/5 * * * *', () => {
   }
 })
 
-module.exports = () => 'wake up mr. freeman'
+module.exports = () => 'hola'
