@@ -15,24 +15,26 @@ module.exports = app
 
 app.use(bodyParser.json())
 
-app.post('*', (req, res) => {
+app.post('*', async (req, res) => {
   const token = req.query.token
   const answer = bots[token]
   if (answer) {
     const chatId = req.body.message.chat.id
     const random = Math.round(Math.random())
     if (random === 1) {
-      request.post({
+      const send = await request.post({
         uri: `https://api.telegram.org/bot${token}/sendMessage`,
         json: true,
-        body: { text: answer.yes, chat_id: chatId }
+        body: { text: answer['yes'], chat_id: chatId }
       })
+      console.log(send)
     } else {
-      request.post({
+      const send = await request.post({
         uri: `https://api.telegram.org/bot${token}/sendMessage`,
         json: true,
-        body: { text: answer.no, chat_id: chatId }
+        body: { text: answer['no'], chat_id: chatId }
       })
+      console.log(send)
     }
   }
   res.status(200).send('boludo')
