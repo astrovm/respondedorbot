@@ -1,26 +1,39 @@
 const express = require('express')
 const request = require('request')
 const bodyParser = require('body-parser')
-const TOKEN = process.env.TELEGRAM_TOKEN
+
+let bots = {}
+bots[process.env.RESPONDEDORBOT_TELE_TOKEN] = { yes: 'si', no: 'no' }
+bots[process.env.SECAYBOT_TELE_TOKEN] = { yes: 'miau si', no: 'miau no' }
+bots[process.env.SECKIBOT_TELE_TOKEN] = { yes: 'miau si', no: 'miau no' }
+bots[process.env.SECPUBOT_TELE_TOKEN] = { yes: 'RAFRAFAYAYASNJCRA si', no: 'RAFRAFAYAYASNJCRA no' }
+bots[process.env.SECTMBOT_TELE_TOKEN] = { yes: 'guau si', no: 'guau no' }
+bots[process.env.SECWALRBOT_TELE_TOKEN] = { yes: 'si', no: 'no' }
 
 const app = express()
 module.exports = app
 
 app.use(bodyParser.json())
 
-// curl --request POST --url https://api.telegram.org/botTOKEN/setWebhook --header 'content-type: application/json' --data '{"url": "https://URL.now.sh/bot?token=TOKEN"}'
 app.post('*', (req, res) => {
-  if (req.query.token === TOKEN) {
+  const token = req.query.token
+  const answer = bots[token]
+  if (answer) {
     const chatId = req.body.message.chat.id
-    const text = req.body.message.text
-    console.log(chatId)
-    console.log(text)
-    request.post({
-      uri: `https://api.telegram.org/bot${TOKEN}/sendMessage`,
-      json: true,
-      body: { text: 'hola', chat_id: chatId }
-    })
-    console.log(req.body)
+    const random = Math.round(Math.random())
+    if (random === 1) {
+      request.post({
+        uri: `https://api.telegram.org/bot${token}/sendMessage`,
+        json: true,
+        body: { text: answer.yes, chat_id: chatId }
+      })
+    } else {
+      request.post({
+        uri: `https://api.telegram.org/bot${token}/sendMessage`,
+        json: true,
+        body: { text: answer.no, chat_id: chatId }
+      })
+    }
   }
   res.status(200).send('boludo')
 })
