@@ -1,8 +1,12 @@
 {
-    "alias": "randomresponder",
-    "version": 1,
+    "version": 2,
+    "builds": [
+        {
+            "src": "bot/index.js",
+            "use": "@now/node"
+        }
+    ],
     "env": {
-        "URLS": "@thegman-urls",
         "RESPONDEDORBOT_TELE_TOKEN": "@respondedorbot_tele_token",
         "SECAYBOT_TELE_TOKEN": "@secaybot_tele_token",
         "SECKIBOT_TELE_TOKEN": "@seckibot_tele_token",
