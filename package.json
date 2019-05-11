@@ -1,12 +1,21 @@
 {
   "name": "randomresponder",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "Yes or no Telegram bot",
-  "author": "astrolince <astro@astrolince.com>",
-  "dependencies": {
-    "body-parser": "1.19.0",
-    "express": "4.16.4",
-    "request": "2.88.0"
+  "main": "index.js",
+  "scripts": {
+    "start": "micro",
+    "test": "standard"
   },
-  "license": "MIT"
+  "author": "astrolince",
+  "license": "MPL-2.0",
+  "dependencies": {
+    "micro": "^9.3.3",
+    "node-schedule": "^1.3.1",
+    "node-telegram-bot-api": "^0.30.0",
+    "request": "^2.88.0"
+  },
+  "devDependencies": {
+    "standard": "^12.0.1"
+  }
 }
