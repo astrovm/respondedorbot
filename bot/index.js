@@ -27,15 +27,18 @@ app.post('*', async (req, res) => {
         json: true,
         body: { text: answer['yes'], chat_id: chatId }
       })
-      console.log(send)
+      console.log('Sent yes.')
+      res.status(200).send('Sent yes.')
     } else {
       const send = await request.post({
         uri: `https://api.telegram.org/bot${token}/sendMessage`,
         json: true,
         body: { text: answer['no'], chat_id: chatId }
       })
-      console.log(send)
+      console.log('Sent no.')
+      res.status(200).send('Sent no.')
     }
+  } else {
+    res.status(200).send('No.')
   }
-  res.status(200).send('boludo')
 })
