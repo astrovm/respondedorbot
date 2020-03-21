@@ -1,5 +1,3 @@
-# randomresponder
-
-[![Greenkeeper badge](https://badges.greenkeeper.io/astrolince/randomresponder.svg)](https://greenkeeper.io/)
+# respondedorbot
 
 Yes or no Telegram bot
