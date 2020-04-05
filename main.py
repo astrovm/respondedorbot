@@ -1,23 +1,33 @@
-import telegram
-import random
+from random import randint
+from requests import get
 
 
-def gen_random():
-    rand = random.randint(0, 1)
-    if rand == 1:
+def gen_random(name):
+    randRes = randint(0, 1)
+    randName = randint(0, 2)
+
+    if randRes == 1:
         msj = "si"
     else:
         msj = "no"
+
+    if randName == 1:
+        msj = msj + " boludo"
+    elif randName == 2:
+        msj = msj + " " + name
+
     return msj
 
 
 def responder(request):
     if request.method == "POST":
-        bot = telegram.Bot(token=request.args.get('token'))
-        update = telegram.Update.de_json(request.get_json(force=True), bot)
-        chat_id = update.message.chat.id
-        message_id = update.message.message_id
-        msj = gen_random()
-        bot.sendMessage(chat_id=chat_id,
-                        reply_to_message_id=message_id, text=msj)
+        req = request.get_json()
+        token = str(request.args.get("token"))
+        chat_id = str(req["message"]["chat"]["id"])
+        message_id = str(req["message"]["message_id"])
+        first_name = str(req["message"]["from"]["first_name"])
+        msj = gen_random(first_name)
+        url = 'https://api.telegram.org/bot' + token + '/sendMessage?chat_id=' + \
+            chat_id + '&reply_to_message_id=' + message_id + '&text=' + msj
+        get(url)
     return "ok"
