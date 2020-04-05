@@ -1,3 +1,4 @@
 # respondedorbot
+Yes or no Telegram bot using a GCloud Function
 
-Yes or no Telegram bot
+https://t.me/respondedorbot
