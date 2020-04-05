@@ -1,4 +1,3 @@
-import os
 import telegram
 import random
 
@@ -13,10 +12,12 @@ def gen_random():
 
 
 def responder(request):
-    if request.method == "POST" and request.args.get('token') == os.environ["TELEGRAM_TOKEN"]:
-        bot = telegram.Bot(token=os.environ["TELEGRAM_TOKEN"])
+    if request.method == "POST":
+        bot = telegram.Bot(token=request.args.get('token'))
         update = telegram.Update.de_json(request.get_json(force=True), bot)
         chat_id = update.message.chat.id
+        message_id = update.message.message_id
         msj = gen_random()
-        bot.sendMessage(chat_id=chat_id, text=msj)
+        bot.sendMessage(chat_id=chat_id,
+                        reply_to_message_id=message_id, text=msj)
     return "ok"
