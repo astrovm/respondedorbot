@@ -1,8 +1,11 @@
-from random import randint
+from time import sleep
+from random import randint, uniform
 from requests import get
 
 
 def gen_random(name):
+    sleep(uniform(0, 1))
+
     randRes = randint(0, 1)
     randName = randint(0, 2)
 
@@ -13,8 +16,10 @@ def gen_random(name):
 
     if randName == 1:
         msj = msj + " boludo"
+        sleep(uniform(0, 1))
     elif randName == 2:
         msj = msj + " " + name
+        sleep(uniform(0, 1))
 
     return msj
 
@@ -26,6 +31,12 @@ def responder(request):
 
             req = request.get_json()
             chat_id = str(req["message"]["chat"]["id"])
+
+            url = 'https://api.telegram.org/bot' + token + \
+                '/sendChatAction?chat_id=' + chat_id + '&action=typing'
+
+            get(url)
+
             message_id = str(req["message"]["message_id"])
             first_name = str(req["message"]["from"]["first_name"])
 
