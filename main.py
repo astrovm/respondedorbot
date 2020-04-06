@@ -31,6 +31,10 @@ def responder(request):
 
             req = request.get_json()
             chat_id = str(req["message"]["chat"]["id"])
+            text = str(req["message"]["text"])
+
+            if text.startswith("/") == True and text.startswith("/ask") == False:
+                return "ignored request"
 
             url = 'https://api.telegram.org/bot' + token + \
                 '/sendChatAction?chat_id=' + chat_id + '&action=typing'
