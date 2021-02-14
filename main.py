@@ -130,7 +130,7 @@ def responder(request):
                 reply_to = str(
                     req["message"]["reply_to_message"]["from"]["username"])
 
-                if reply_to != "respondedorbot":
+                if reply_to != "respondedorbot" and msg_text.startswith("/ask") == False:
                     return "ignored request"
             except:
                 if chat_type != "private" and msg_text.startswith("/ask") == False:
