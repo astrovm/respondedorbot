@@ -24,6 +24,35 @@ def gen_random(name):
     return msg
 
 
+def select_random(msg_text):
+    clean_text = msg_text.replace("/random", "").strip()
+
+    if clean_text.startswith(",") or clean_text.startswith("-") or clean_text.endswith(",") or clean_text.endswith("-"):
+        return "habla bien idiota"
+
+    if "," in clean_text:
+        split_msg = clean_text.split(",")
+        values = len(split_msg)
+
+        randValue = randint(0, values - 1)
+        strip_value = split_msg[randValue].strip()
+
+        return strip_value
+
+    if "-" in clean_text:
+        split_msg = clean_text.split("-")
+        values = len(split_msg)
+
+        if values == 2:
+            strip_start = int(split_msg[0].strip())
+            strip_end = int(split_msg[1].strip())
+            rand_num = str(randint(strip_start, strip_end))
+
+            return rand_num
+
+    return "habla bien idiota"
+
+
 def get_prices():
     prices = get(
         "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin%2Cethereum&vs_currencies=usd").json()
@@ -60,6 +89,12 @@ def responder(request):
             chat_id = str(req["message"]["chat"]["id"])
             chat_type = str(req["message"]["chat"]["type"])
             first_name = str(req["message"]["from"]["first_name"])
+
+            if msg_text.startswith("/random"):
+                send_typing(token, chat_id)
+                msg = select_random(msg_text)
+                send_msg(token, chat_id, msg_id, msg)
+                return "ok"
 
             if msg_text.startswith("/prices"):
                 send_typing(token, chat_id)
