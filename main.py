@@ -65,6 +65,19 @@ ETH: {eth} USD"""
     return msg
 
 
+def get_dolar():
+    dolar = get("https://criptoya.com/api/dolar").json()
+
+    msg = f"""Oficial: {dolar["oficial"]}
+Solidario: {dolar["solidario"]}
+MEP: {dolar["mep"]}
+CCL: {dolar["ccl"]}
+Bitcoin: {dolar["ccb"]}
+Blue: {dolar["blue"]}"""
+
+    return msg
+
+
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
@@ -99,6 +112,12 @@ def responder(request):
             if msg_text.startswith("/prices"):
                 send_typing(token, chat_id)
                 msg = get_prices()
+                send_msg(token, chat_id, msg_id, msg)
+                return "ok"
+
+            if msg_text.startswith("/dolar"):
+                send_typing(token, chat_id)
+                msg = get_dolar()
                 send_msg(token, chat_id, msg_id, msg)
                 return "ok"
 
