@@ -1,6 +1,7 @@
 from time import sleep
 from random import randint, uniform
 from requests import get
+from urllib.parse import quote
 
 
 def gen_random(name):
@@ -27,10 +28,10 @@ def gen_random(name):
 def select_random(msg_text):
     clean_text = msg_text.replace("/random", "").strip()
 
-    if clean_text.startswith(",") or clean_text.startswith("-") or clean_text.endswith(",") or clean_text.endswith("-"):
-        return "habla bien idiota"
-
     if "," in clean_text:
+        if clean_text.startswith(",") or clean_text.endswith(","):
+            return "habla bien idiota"
+
         split_msg = clean_text.split(",")
         values = len(split_msg)
 
@@ -40,6 +41,9 @@ def select_random(msg_text):
         return strip_value
 
     if "-" in clean_text:
+        if clean_text.startswith("-") or clean_text.endswith("-"):
+            return "habla bien idiota"
+
         split_msg = clean_text.split("-")
         values = len(split_msg)
 
@@ -86,7 +90,8 @@ def send_typing(token, chat_id):
 
 def send_msg(token, chat_id, msg_id, msg):
     url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
-        chat_id + "&reply_to_message_id=" + msg_id + "&text=" + msg
+        chat_id + "&reply_to_message_id=" + \
+        msg_id + "&text=" + quote(msg, safe='/')
     get(url)
 
 
