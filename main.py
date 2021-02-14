@@ -24,6 +24,19 @@ def gen_random(name):
     return msj
 
 
+def get_prices():
+    prices = get(
+        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin%2Cethereum&vs_currencies=usd").json()
+
+    btc = round(float(prices["bitcoin"]["usd"]))
+    eth = round(float(prices["ethereum"]["usd"]))
+
+    msj = f"""BTC: {btc} USD
+ETH: {eth} USD"""
+
+    return msj
+
+
 def responder(request):
     try:
         if request.method == "POST":
@@ -31,23 +44,35 @@ def responder(request):
 
             req = request.get_json()
             chat_id = str(req["message"]["chat"]["id"])
+            chat_type = str(req["message"]["chat"]["type"])
             text = str(req["message"]["text"])
 
-            if text.startswith("/") == True and text.startswith("/ask") == False:
-                return "ignored request"
+            if text.startswith("/prices") == False:
+                try:
+                    reply_to = str(
+                        req["message"]["reply_to_message"]["from"]["username"])
 
-            url = 'https://api.telegram.org/bot' + token + \
-                '/sendChatAction?chat_id=' + chat_id + '&action=typing'
+                    if reply_to != "respondedorbot":
+                        return "ignored request"
+                except:
+                    if chat_type != "private" and text.startswith("/ask") == False:
+                        return "ignored request"
+
+            url = "https://api.telegram.org/bot" + token + \
+                "/sendChatAction?chat_id=" + chat_id + "&action=typing"
 
             get(url)
 
             message_id = str(req["message"]["message_id"])
             first_name = str(req["message"]["from"]["first_name"])
 
-            msj = gen_random(first_name)
+            if text.startswith("/prices"):
+                msj = get_prices()
+            else:
+                msj = gen_random(first_name)
 
-            url = 'https://api.telegram.org/bot' + token + '/sendMessage?chat_id=' + \
-                chat_id + '&reply_to_message_id=' + message_id + '&text=' + msj
+            url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
+                chat_id + "&reply_to_message_id=" + message_id + "&text=" + msj
 
             get(url)
 
