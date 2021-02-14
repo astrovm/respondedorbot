@@ -10,18 +10,18 @@ def gen_random(name):
     randName = randint(0, 2)
 
     if randRes == 1:
-        msj = "si"
+        msg = "si"
     else:
-        msj = "no"
+        msg = "no"
 
     if randName == 1:
-        msj = msj + " boludo"
+        msg = msg + " boludo"
         sleep(uniform(0, 1))
     elif randName == 2:
-        msj = msj + " " + name
+        msg = msg + " " + name
         sleep(uniform(0, 1))
 
-    return msj
+    return msg
 
 
 def get_prices():
@@ -31,10 +31,21 @@ def get_prices():
     btc = round(float(prices["bitcoin"]["usd"]))
     eth = round(float(prices["ethereum"]["usd"]))
 
-    msj = f"""BTC: {btc} USD
+    msg = f"""BTC: {btc} USD
 ETH: {eth} USD"""
+    return msg
 
-    return msj
+
+def send_typing(token, chat_id):
+    url = "https://api.telegram.org/bot" + token + \
+        "/sendChatAction?chat_id=" + chat_id + "&action=typing"
+    get(url)
+
+
+def send_msg(token, chat_id, msg_id, msg):
+    url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
+        chat_id + "&reply_to_message_id=" + msg_id + "&text=" + msg
+    get(url)
 
 
 def responder(request):
@@ -43,39 +54,32 @@ def responder(request):
             token = str(request.args.get("token"))
 
             req = request.get_json()
+
+            msg_text = str(req["message"]["text"])
+            msg_id = str(req["message"]["message_id"])
             chat_id = str(req["message"]["chat"]["id"])
             chat_type = str(req["message"]["chat"]["type"])
-            text = str(req["message"]["text"])
-
-            if text.startswith("/prices") == False:
-                try:
-                    reply_to = str(
-                        req["message"]["reply_to_message"]["from"]["username"])
-
-                    if reply_to != "respondedorbot":
-                        return "ignored request"
-                except:
-                    if chat_type != "private" and text.startswith("/ask") == False:
-                        return "ignored request"
-
-            url = "https://api.telegram.org/bot" + token + \
-                "/sendChatAction?chat_id=" + chat_id + "&action=typing"
-
-            get(url)
-
-            message_id = str(req["message"]["message_id"])
             first_name = str(req["message"]["from"]["first_name"])
 
-            if text.startswith("/prices"):
-                msj = get_prices()
-            else:
-                msj = gen_random(first_name)
+            if msg_text.startswith("/prices"):
+                send_typing(token, chat_id)
+                msg = get_prices()
+                send_msg(token, chat_id, msg_id, msg)
+                return "ok"
 
-            url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
-                chat_id + "&reply_to_message_id=" + message_id + "&text=" + msj
+            try:
+                reply_to = str(
+                    req["message"]["reply_to_message"]["from"]["username"])
 
-            get(url)
+                if reply_to != "respondedorbot":
+                    return "ignored request"
+            except:
+                if chat_type != "private" and msg_text.startswith("/ask") == False:
+                    return "ignored request"
 
+            send_typing(token, chat_id)
+            msg = gen_random(first_name)
+            send_msg(token, chat_id, msg_id, msg)
             return "ok"
         else:
             return "bad request"
