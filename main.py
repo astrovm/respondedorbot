@@ -71,13 +71,20 @@ ETH: {eth} USD"""
 
 def get_dolar():
     dolar = get("https://criptoya.com/api/dolar").json()
+    dai = get("https://criptoya.com/api/dai/ars/1000").json()
+    dai_ask = 0
+
+    for exchange in dai:
+        if float(dai[exchange]["totalAsk"]) < float(dai_ask) or dai_ask == 0:
+            dai_ask = str(dai[exchange]["totalAsk"])
 
     msg = f"""Oficial: {dolar["oficial"]}
 Solidario: {dolar["solidario"]}
 MEP: {dolar["mep"]}
 CCL: {dolar["ccl"]}
 Bitcoin: {dolar["ccb"]}
-Blue: {dolar["blue"]}"""
+Blue: {dolar["blue"]}
+DAI: {dai_ask}"""
 
     return msg
 
