@@ -16,10 +16,10 @@ def gen_random(name):
         msg = "no"
 
     if randName == 1:
-        msg = msg + " boludo"
+        msg = f"{msg} boludo"
         sleep(uniform(0, 1))
     elif randName == 2:
-        msg = msg + " " + name
+        msg = f"{msg} {name}"
         sleep(uniform(0, 1))
 
     return msg
