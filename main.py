@@ -75,7 +75,12 @@ def get_dolar():
     dai_ask = 0
 
     for exchange in dai:
-        if float(dai[exchange]["totalAsk"]) < float(dai_ask) or dai_ask == 0:
+        ask = float(dai[exchange]["totalAsk"])
+
+        if ask == 0:
+            continue
+
+        if ask < float(dai_ask) or float(dai_ask) == 0:
             dai_ask = str(dai[exchange]["totalAsk"])
 
     msg = f"""Oficial: {dolar["oficial"]}
