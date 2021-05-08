@@ -57,8 +57,14 @@ def select_random(msg_text):
     return "habla bien idiota"
 
 
-def get_prices():
-    prices = get("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h").json()
+def get_prices(msg_text):
+    split_msg = msg_text.strip().split(" ")
+    per_page = 10
+
+    if len(split_msg) > 1:
+        per_page = int(split_msg[1])
+
+    prices = get(f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
 
     msg = ""
 
@@ -138,7 +144,7 @@ def responder(request):
 
             if msg_text.startswith("/prices"):
                 send_typing(token, chat_id)
-                msg = get_prices()
+                msg = get_prices(msg_text)
                 send_msg(token, chat_id, msg_id, msg)
                 return "ok"
 
