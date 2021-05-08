@@ -68,7 +68,7 @@ def get_prices():
         percentage = str(round(float(coin["price_change_percentage_24h"]), 2))
         percentage = percentage if percentage[0] == "-" else "+" + percentage
 
-        line = f"""{ticker}: {price} ({percentage}% 24hs)"""
+        line = f"""{ticker}: {price} USD ({percentage}% 24hs)"""
 
         if prices[0]["symbol"] == coin["symbol"]:
             msg = line
