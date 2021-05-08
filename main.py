@@ -59,13 +59,15 @@ def select_random(msg_text):
 
 def get_prices():
     prices = get(
-        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin%2Cethereum&vs_currencies=usd").json()
+        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin%2Cethereum%2Cdogecoin&vs_currencies=usd").json()
 
     btc = round(float(prices["bitcoin"]["usd"]))
     eth = round(float(prices["ethereum"]["usd"]))
+    doge = round(float(prices["dogecoin"]["usd"]), 4)
 
     msg = f"""BTC: {btc} USD
-ETH: {eth} USD"""
+ETH: {eth} USD
+DOGE: {doge} USD"""
     return msg
 
 
