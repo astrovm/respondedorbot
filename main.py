@@ -61,7 +61,7 @@ def get_prices(msg_text):
     split_msg = msg_text.strip().split(" ")
     per_page = 10
 
-    if len(split_msg) > 1:
+    if len(split_msg) > 1 and int(split_msg[1]) > 0 and int(split_msg[1]) < 101:
         per_page = int(split_msg[1])
 
     prices = get(f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
