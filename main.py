@@ -63,11 +63,13 @@ def get_prices():
     msg = ""
 
     for coin in prices:
+        line = f"""{coin["symbol"].upper()}: {coin["current_price"]} (%{round(float(coin["price_change_percentage_24h"]), 2)})"""
+
         if prices[0]["symbol"] == coin["symbol"]:
-            msg = f"""{coin["symbol"].upper()}: {coin["current_price"]}"""
+            msg = line
         else:
             msg = f"""{msg}
-{coin["symbol"].upper()}: {coin["current_price"]}"""
+{line}"""
 
     return msg
 
