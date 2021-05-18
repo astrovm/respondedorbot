@@ -70,8 +70,8 @@ def get_prices(msg_text):
 
     for coin in prices:
         ticker = coin["symbol"].upper()
-        price = "{:.8f}".format(coin["current_price"]).strip("0").strip(".")
-        percentage = "{:+.2f}".format(coin["price_change_percentage_24h"]).strip("0").strip(".")
+        price = "{:.8f}".format(coin["current_price"]).rstrip("0").rstrip(".")
+        percentage = "{:+.2f}".format(coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
 
         line = f"""{ticker}: {price} USD ({percentage}% 24hs)"""
 
