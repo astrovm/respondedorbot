@@ -58,28 +58,38 @@ def select_random(msg_text):
 
 
 def get_prices(msg_text):
-    split_msg = msg_text.strip().split(" ")
-    per_page = 10
+    try:
+        split_msg = msg_text.strip().split(" ")
+        per_page = 10
 
-    if len(split_msg) > 1 and int(float(split_msg[1])) > 0 and int(float(split_msg[1])) < 101:
-        per_page = int(float(split_msg[1]))
+        if len(split_msg) > 1 and int(
+            float(
+                split_msg[1])) > 0 and int(
+            float(
+                split_msg[1])) < 101:
+            per_page = int(float(split_msg[1]))
 
-    prices = get(f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
+        prices = get(
+            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
 
-    msg = ""
+        msg = ""
 
-    for coin in prices:
-        ticker = coin["symbol"].upper()
-        price = "{:.8f}".format(coin["current_price"]).rstrip("0").rstrip(".")
-        percentage = "{:+.2f}".format(coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
+        for coin in prices:
+            ticker = coin["symbol"].upper()
+            price = "{:.8f}".format(
+                coin["current_price"]).rstrip("0").rstrip(".")
+            percentage = "{:+.2f}".format(
+                coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
 
-        line = f"""{ticker}: {price} USD ({percentage}% 24hs)"""
+            line = f"""{ticker}: {price} USD ({percentage}% 24hs)"""
 
-        if prices[0]["symbol"] == coin["symbol"]:
-            msg = line
-        else:
-            msg = f"""{msg}
+            if prices[0]["symbol"] == coin["symbol"]:
+                msg = line
+            else:
+                msg = f"""{msg}
 {line}"""
+    except BaseException:
+        msg = "que no sabes lo que es un numero boludito"
 
     return msg
 
@@ -157,10 +167,12 @@ def responder(request):
                 reply_to = str(
                     req["message"]["reply_to_message"]["from"]["username"])
 
-                if reply_to != "respondedorbot" and msg_text.startswith("/ask") == False:
+                if reply_to != "respondedorbot" and msg_text.startswith(
+                        "/ask") == False:
                     return "ignored request"
-            except:
-                if chat_type != "private" and msg_text.startswith("/ask") == False:
+            except BaseException:
+                if chat_type != "private" and msg_text.startswith(
+                        "/ask") == False:
                     return "ignored request"
 
             send_typing(token, chat_id)
@@ -169,5 +181,5 @@ def responder(request):
             return "ok"
         else:
             return "bad request"
-    except:
+    except BaseException:
         return "unexpected error"
