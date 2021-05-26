@@ -121,23 +121,28 @@ def get_dolar():
     dollars["dai"] = get_lowest(dai)
     dollars["usdt"] = get_lowest(usdt)
 
-    sorted_dollars = sorted(dollars, key=dollars.__getitem__)
+    dollars = [
+        {"name": "Oficial", "price": dollars["oficial"]},
+        {"name": "Solidario", "price": dollars["solidario"]},
+        {"name": "MEP", "price": dollars["mep"]},
+        {"name": "CCL", "price": dollars["ccl"]},
+        {"name": "Bitcoin", "price": dollars["ccb"]},
+        {"name": "Blue", "price": dollars["blue"]},
+        {"name": "USDC", "price": dollars["usdc"]},
+        {"name": "DAI", "price": dollars["dai"]},
+        {"name": "USDT", "price": dollars["usdt"]},
+    ]
 
-    dollars["oficial"] = ["Oficial", dollars["oficial"]]
-    dollars["solidario"] = ["Solidario", dollars["solidario"]]
-    dollars["mep"] = ["MEP", dollars["mep"]]
-    dollars["ccl"] = ["CCL", dollars["ccl"]]
-    dollars["ccb"] = ["Bitcoin", dollars["ccb"]]
-    dollars["blue"] = ["Blue", dollars["blue"]]
-    dollars["usdc"] = ["USDC", dollars["usdc"]]
-    dollars["dai"] = ["DAI", dollars["dai"]]
-    dollars["usdt"] = ["USDT", dollars["usdt"]]
+    dollars.sort(key=lambda x: x.get("price"))
 
-    msg = f"""{dollars[sorted_dollars[0]][0]}: {"{:.2f}".format(dollars[sorted_dollars[0]][1]).rstrip("0").rstrip(".")}"""
+    for dollar in dollars:
+        line = f"""{dollar["name"]}: {"{:.2f}".format(dollar["price"]).rstrip("0").rstrip(".")}"""
 
-    for dollar in range(1, len(sorted_dollars)):
-        msg = f"""{msg}
-{dollars[sorted_dollars[dollar]][0]}: {"{:.2f}".format(dollars[sorted_dollars[dollar]][1]).rstrip("0").rstrip(".")}"""
+        if dollar["name"] == dollars[0]["name"]:
+            msg = line
+        else:
+            msg = f"""{msg}
+{line}"""
 
     return msg
 
