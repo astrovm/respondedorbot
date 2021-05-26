@@ -147,6 +147,66 @@ def get_dolar():
     return msg
 
 
+def kraken_to_binance(msg_text):
+    clean_msg = msg_text.replace("/krakentobinance", "").strip()
+    user_input = clean_msg.split(",")
+
+    kraken_usdtusd = get(
+        "https://api.kraken.com/0/public/Ticker?pair=USDTUSD").json()
+    kraken_usdcusd = get(
+        "https://api.kraken.com/0/public/Ticker?pair=USDCUSD").json()
+    kraken_daiusd = get(
+        "https://api.kraken.com/0/public/Ticker?pair=DAIUSD").json()
+    binance_busdusdt = get(
+        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDUSDT").json()
+    binance_usdcbusd = get(
+        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=USDCBUSD").json()
+    binance_busddai = get(
+        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDDAI").json()
+
+    kraken_usdtusd_ask = float(kraken_usdtusd["result"]["USDTZUSD"]["a"][0])
+    kraken_usdcusd_ask = float(kraken_usdcusd["result"]["USDCUSD"]["a"][0])
+    kraken_daiusd_ask = float(kraken_daiusd["result"]["DAIUSD"]["a"][0])
+    binance_busdusdt_ask = float(binance_busdusdt["askPrice"])
+    binance_usdcbusd_bid = float(binance_usdcbusd["bidPrice"])
+    binance_busddai_ask = float(binance_busddai["askPrice"])
+
+    usd_amount = float(user_input[0].strip())
+    bank_fee = float(user_input[1].strip())
+    kraken_fee = 0.998
+    kraken_usdt_withdrawal = 1
+    kraken_usdc_withdrawal = 2.5
+    kraken_dai_withdrawal = 2.5
+
+    buy_usdt = round((usd_amount / kraken_usdtusd_ask * kraken_fee -
+                      kraken_usdt_withdrawal) / binance_busdusdt_ask, 4)
+    buy_usdc = round((usd_amount / kraken_usdcusd_ask * kraken_fee -
+                      kraken_usdc_withdrawal) * binance_usdcbusd_bid, 4)
+    buy_dai = round((usd_amount / kraken_daiusd_ask * kraken_fee -
+                     kraken_dai_withdrawal) / binance_busddai_ask, 4)
+
+    usdt_percentage = round(
+        (buy_usdt / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+    usdc_percentage = round(
+        (buy_usdc / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+    dai_percentage = round(
+        (buy_dai / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+
+    results = [{"symbol": "USDT", "amount": buy_usdt, "fee": usdt_percentage},
+               {"symbol": "USDC", "amount": buy_usdc, "fee": usdc_percentage},
+               {"symbol": "DAI", "amount": buy_dai, "fee": dai_percentage}]
+
+    results.sort(key=lambda x: x.get("amount"), reverse=True)
+
+    msg = f"""You sent {str(usd_amount).rstrip("0").rstrip(".")} USD to Kraken paying {str(bank_fee).rstrip("0").rstrip(".")} USD fee to your bank, spending {str(usd_amount + bank_fee).rstrip("0").rstrip(".")} USD in total.\n"""
+
+    for coin in results:
+        msg = f"""{msg}
+Buying {coin["symbol"]} in Kraken you can get {coin["amount"]} BUSD in Binance ({coin["fee"]}% total fee)."""
+
+    return msg
+
+
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
@@ -188,6 +248,12 @@ def responder(request):
             if msg_text.startswith("/dolar"):
                 send_typing(token, chat_id)
                 msg = get_dolar()
+                send_msg(token, chat_id, msg_id, msg)
+                return "ok"
+
+            if msg_text.startswith("/krakentobinance"):
+                send_typing(token, chat_id)
+                msg = kraken_to_binance(msg_text)
                 send_msg(token, chat_id, msg_id, msg)
                 return "ok"
 
