@@ -95,26 +95,49 @@ def get_prices(msg_text):
 
 
 def get_dolar():
-    dolar = get("https://criptoya.com/api/dolar").json()
+    dollars = get("https://criptoya.com/api/dolar").json()
+    usdc = get("https://criptoya.com/api/usdc/ars/1000").json()
     dai = get("https://criptoya.com/api/dai/ars/1000").json()
-    dai_ask = 0
+    usdt = get("https://criptoya.com/api/usdt/ars/1000").json()
 
-    for exchange in dai:
-        ask = float(dai[exchange]["totalAsk"])
+    for dollar in dollars:
+        dollars[dollar] = float(dollars[dollar])
 
-        if ask == 0:
-            continue
+    def get_lowest(prices):
+        lowest_price = 0
 
-        if ask < float(dai_ask) or float(dai_ask) == 0:
-            dai_ask = str(dai[exchange]["totalAsk"])
+        for exchange in prices:
+            ask = float(prices[exchange]["totalAsk"])
 
-    msg = f"""Oficial: {dolar["oficial"]}
-Solidario: {dolar["solidario"]}
-MEP: {dolar["mep"]}
-CCL: {dolar["ccl"]}
-Bitcoin: {dolar["ccb"]}
-Blue: {dolar["blue"]}
-DAI: {dai_ask}"""
+            if ask == 0:
+                continue
+
+            if ask < lowest_price or lowest_price == 0:
+                lowest_price = float(prices[exchange]["totalAsk"])
+
+        return lowest_price
+
+    dollars["usdc"] = get_lowest(usdc)
+    dollars["dai"] = get_lowest(dai)
+    dollars["usdt"] = get_lowest(usdt)
+
+    sorted_dollars = sorted(dollars, key=dollars.__getitem__)
+
+    dollars["oficial"] = ["Oficial", dollars["oficial"]]
+    dollars["solidario"] = ["Solidario", dollars["solidario"]]
+    dollars["mep"] = ["MEP", dollars["mep"]]
+    dollars["ccl"] = ["CCL", dollars["ccl"]]
+    dollars["ccb"] = ["Bitcoin", dollars["ccb"]]
+    dollars["blue"] = ["Blue", dollars["blue"]]
+    dollars["usdc"] = ["USDC", dollars["usdc"]]
+    dollars["dai"] = ["DAI", dollars["dai"]]
+    dollars["usdt"] = ["USDT", dollars["usdt"]]
+
+    msg = f"""{dollars[sorted_dollars[0]][0]}: {"{:.2f}".format(dollars[sorted_dollars[0]][1]).rstrip("0").rstrip(".")}"""
+
+    for dollar in range(1, len(sorted_dollars)):
+        msg = f"""{msg}
+{dollars[sorted_dollars[dollar]][0]}: {"{:.2f}".format(dollars[sorted_dollars[dollar]][1]).rstrip("0").rstrip(".")}"""
 
     return msg
 
