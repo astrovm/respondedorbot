@@ -192,9 +192,9 @@ def kraken_to_binance(msg_text):
     dai_percentage = round(
         (buy_dai / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
 
-    results = [{"symbol": "USDT", "amount": buy_usdt, "fee": usdt_percentage},
-               {"symbol": "USDC", "amount": buy_usdc, "fee": usdc_percentage},
-               {"symbol": "DAI", "amount": buy_dai, "fee": dai_percentage}]
+    results = [{"buy": "USDT", "get": "BUSD", "amount": buy_usdt, "fee": usdt_percentage},
+               {"buy": "USDC", "get": "BUSD", "amount": buy_usdc, "fee": usdc_percentage},
+               {"buy": "DAI", "get": "BUSD", "amount": buy_dai, "fee": dai_percentage}]
 
     results.sort(key=lambda x: x.get("amount"), reverse=True)
 
@@ -202,7 +202,7 @@ def kraken_to_binance(msg_text):
 
     for coin in results:
         msg = f"""{msg}
-Buying {coin["symbol"]} in Kraken you can get {coin["amount"]} BUSD in Binance ({coin["fee"]}% total fee)."""
+Buying {coin["buy"]} in Kraken you can get {coin["amount"]} {coin["get"]} in Binance ({coin["fee"]}% total fee)."""
 
     return msg
 
