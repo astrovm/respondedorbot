@@ -178,12 +178,19 @@ def kraken_to_binance(msg_text):
     kraken_usdc_withdrawal = 2.5
     kraken_dai_withdrawal = 2.5
 
-    buy_usdt = round((usd_amount / kraken_usdtusd_ask * kraken_fee -
-                      kraken_usdt_withdrawal) / binance_busdusdt_ask, 4)
-    buy_usdc = round((usd_amount / kraken_usdcusd_ask * kraken_fee -
-                      kraken_usdc_withdrawal) * binance_usdcbusd_bid, 4)
-    buy_dai = round((usd_amount / kraken_daiusd_ask * kraken_fee -
-                     kraken_dai_withdrawal) / binance_busddai_ask, 4)
+    buy_usdt = round(usd_amount / kraken_usdtusd_ask * kraken_fee -
+                     kraken_usdt_withdrawal, 4)
+    buy_usdc = round(usd_amount / kraken_usdcusd_ask * kraken_fee -
+                     kraken_usdc_withdrawal, 4)
+    buy_dai = round(usd_amount / kraken_daiusd_ask * kraken_fee -
+                    kraken_dai_withdrawal, 4)
+
+    buy_usdtbusd = round((usd_amount / kraken_usdtusd_ask * kraken_fee -
+                          kraken_usdt_withdrawal) / binance_busdusdt_ask, 4)
+    buy_usdcbusd = round((usd_amount / kraken_usdcusd_ask * kraken_fee -
+                          kraken_usdc_withdrawal) * binance_usdcbusd_bid, 4)
+    buy_daibusd = round((usd_amount / kraken_daiusd_ask * kraken_fee -
+                         kraken_dai_withdrawal) / binance_busddai_ask, 4)
 
     usdt_percentage = round(
         (buy_usdt / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
@@ -192,9 +199,37 @@ def kraken_to_binance(msg_text):
     dai_percentage = round(
         (buy_dai / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
 
-    results = [{"buy": "USDT", "get": "BUSD", "amount": buy_usdt, "fee": usdt_percentage},
-               {"buy": "USDC", "get": "BUSD", "amount": buy_usdc, "fee": usdc_percentage},
-               {"buy": "DAI", "get": "BUSD", "amount": buy_dai, "fee": dai_percentage}]
+    usdtbusd_percentage = round(
+        (buy_usdtbusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+    usdcbusd_percentage = round(
+        (buy_usdcbusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+    daibusd_percentage = round(
+        (buy_daibusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
+
+    results = [{"buy": "USDT",
+                "get": "USDT",
+                "amount": buy_usdt,
+                "fee": usdt_percentage},
+               {"buy": "USDC",
+                "get": "USDC",
+                "amount": buy_usdc,
+                "fee": usdc_percentage},
+               {"buy": "DAI",
+                "get": "DAI",
+                "amount": buy_dai,
+                "fee": dai_percentage},
+               {"buy": "USDT",
+                "get": "BUSD",
+                "amount": buy_usdtbusd,
+                "fee": usdtbusd_percentage},
+               {"buy": "USDC",
+                "get": "BUSD",
+                "amount": buy_usdcbusd,
+                "fee": usdcbusd_percentage},
+               {"buy": "DAI",
+                "get": "BUSD",
+                "amount": buy_daibusd,
+                "fee": daibusd_percentage}]
 
     results.sort(key=lambda x: x.get("amount"), reverse=True)
 
