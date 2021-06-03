@@ -157,12 +157,13 @@ def generic_orderbook_match(amount, coin, pair, orderbook):
         order_amount = float(order[1])
         amount_to_match = remaining / order_price if match_with == "asks" else remaining
 
-        if amount_to_match >= order_amount:
+        if amount_to_match > order_amount:
             matched += order_amount if match_with == "asks" else order_amount * order_price
             remaining -= order_amount * order_price if match_with == "asks" else order_amount
         else:
             matched += amount_to_match if match_with == "asks" else amount_to_match * order_price
             remaining -= remaining
+            break
 
     return matched
 
