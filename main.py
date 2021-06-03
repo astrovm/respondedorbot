@@ -147,16 +147,62 @@ def get_dolar():
     return msg
 
 
+def kraken_orderbook_match(pair, convert_from, convert_to, amount):
+    orderbook = get(
+        "https://api.kraken.com/0/public/Depth?pair=" + pair).json()
+    pair_key = list(orderbook["result"].keys())[0]
+    remaining = amount
+    matched = 0
+
+    if pair.rstrip(convert_from) == convert_to:
+        match_with = "asks"
+        for order in orderbook["result"][pair_key][match_with]:
+            order_price = float(order[0])
+            order_amount = float(order[1])
+            amount_to_match = remaining / order_price
+
+            if amount_to_match >= order_amount:
+                matched += order_amount
+                remaining -= order_amount * order_price
+            else:
+                matched += amount_to_match
+                remaining -= remaining
+    else:
+        match_with = "bids"
+        for order in orderbook["result"][pair_key][match_with]:
+            order_price = float(order[0])
+            order_amount = float(order[1])
+            amount_to_match = remaining
+
+            if amount_to_match >= order_amount:
+                matched += order_amount * order_price
+                remaining -= order_amount
+            else:
+                matched += amount_to_match * order_price
+                remaining -= remaining
+
+    return matched
+
+
 def kraken_to_binance(msg_text):
     clean_msg = msg_text.replace("/krakentobinance", "").strip()
     user_input = clean_msg.split(",")
 
-    kraken_usdtusd = get(
-        "https://api.kraken.com/0/public/Ticker?pair=USDTUSD").json()
-    kraken_usdcusd = get(
-        "https://api.kraken.com/0/public/Ticker?pair=USDCUSD").json()
-    kraken_daiusd = get(
-        "https://api.kraken.com/0/public/Ticker?pair=DAIUSD").json()
+    usd_amount = float(user_input[0].strip())
+    bank_fee = float(user_input[1].strip())
+
+    kraken_fee = 0.998
+    kraken_usdt_withdrawal = 1
+    kraken_usdc_withdrawal = 2.5
+    kraken_dai_withdrawal = 2.5
+
+    kraken_usdt_amount = kraken_orderbook_match(
+        "USDTUSD", "USD", "USDT", usd_amount)
+    kraken_usdc_amount = kraken_orderbook_match(
+        "USDCUSD", "USD", "USDC", usd_amount)
+    kraken_dai_amount = kraken_orderbook_match(
+        "DAIUSD", "USD", "DAI", usd_amount)
+
     binance_busdusdt = get(
         "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDUSDT").json()
     binance_usdcbusd = get(
@@ -164,32 +210,22 @@ def kraken_to_binance(msg_text):
     binance_busddai = get(
         "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDDAI").json()
 
-    kraken_usdtusd_ask = float(kraken_usdtusd["result"]["USDTZUSD"]["a"][0])
-    kraken_usdcusd_ask = float(kraken_usdcusd["result"]["USDCUSD"]["a"][0])
-    kraken_daiusd_ask = float(kraken_daiusd["result"]["DAIUSD"]["a"][0])
     binance_busdusdt_ask = float(binance_busdusdt["askPrice"])
     binance_usdcbusd_bid = float(binance_usdcbusd["bidPrice"])
     binance_busddai_ask = float(binance_busddai["askPrice"])
 
-    usd_amount = float(user_input[0].strip())
-    bank_fee = float(user_input[1].strip())
-    kraken_fee = 0.998
-    kraken_usdt_withdrawal = 1
-    kraken_usdc_withdrawal = 2.5
-    kraken_dai_withdrawal = 2.5
-
-    buy_usdt = round(usd_amount / kraken_usdtusd_ask * kraken_fee -
+    buy_usdt = round(kraken_usdt_amount * kraken_fee -
                      kraken_usdt_withdrawal, 4)
-    buy_usdc = round(usd_amount / kraken_usdcusd_ask * kraken_fee -
+    buy_usdc = round(kraken_usdc_amount * kraken_fee -
                      kraken_usdc_withdrawal, 4)
-    buy_dai = round(usd_amount / kraken_daiusd_ask * kraken_fee -
+    buy_dai = round(kraken_dai_amount * kraken_fee -
                     kraken_dai_withdrawal, 4)
 
-    buy_usdtbusd = round((usd_amount / kraken_usdtusd_ask * kraken_fee -
+    buy_usdtbusd = round((kraken_usdt_amount * kraken_fee -
                           kraken_usdt_withdrawal) / binance_busdusdt_ask, 4)
-    buy_usdcbusd = round((usd_amount / kraken_usdcusd_ask * kraken_fee -
+    buy_usdcbusd = round((kraken_usdc_amount * kraken_fee -
                           kraken_usdc_withdrawal) * binance_usdcbusd_bid, 4)
-    buy_daibusd = round((usd_amount / kraken_daiusd_ask * kraken_fee -
+    buy_daibusd = round((kraken_dai_amount * kraken_fee -
                          kraken_dai_withdrawal) / binance_busddai_ask, 4)
 
     usdt_percentage = round(
