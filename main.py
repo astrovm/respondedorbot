@@ -148,7 +148,8 @@ def get_dolar():
 
 
 def generic_orderbook_match(pair, convert_from, convert_to, amount, orderbook):
-    match_with = "asks" if pair.rstrip(convert_from) == convert_to else "bids"
+    match_with = "asks" if pair.removesuffix(
+        convert_from) == convert_to else "bids"
     remaining = amount
     matched = 0
 
