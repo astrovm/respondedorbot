@@ -147,39 +147,46 @@ def get_dolar():
     return msg
 
 
+def generic_orderbook_match(pair, convert_from, convert_to, amount, orderbook):
+    match_with = "asks" if pair.rstrip(convert_from) == convert_to else "bids"
+    remaining = amount
+    matched = 0
+
+    for order in orderbook[match_with]:
+        order_price = float(order[0])
+        order_amount = float(order[1])
+        amount_to_match = remaining / order_price if match_with == "asks" else remaining
+
+        if amount_to_match >= order_amount:
+            matched += order_amount if match_with == "asks" else order_amount * order_price
+            remaining -= order_amount * order_price if match_with == "asks" else order_amount
+        else:
+            matched += amount_to_match if match_with == "asks" else amount_to_match * order_price
+            remaining -= remaining
+
+    return matched
+
+
 def kraken_orderbook_match(pair, convert_from, convert_to, amount):
     orderbook = get(
         "https://api.kraken.com/0/public/Depth?pair=" + pair).json()
     pair_key = list(orderbook["result"].keys())[0]
-    remaining = amount
-    matched = 0
 
-    if pair.rstrip(convert_from) == convert_to:
-        match_with = "asks"
-        for order in orderbook["result"][pair_key][match_with]:
-            order_price = float(order[0])
-            order_amount = float(order[1])
-            amount_to_match = remaining / order_price
+    formatted_orderbook = {"asks": orderbook["result"][pair_key]["asks"],
+                           "bids": orderbook["result"][pair_key]["bids"]}
 
-            if amount_to_match >= order_amount:
-                matched += order_amount
-                remaining -= order_amount * order_price
-            else:
-                matched += amount_to_match
-                remaining -= remaining
-    else:
-        match_with = "bids"
-        for order in orderbook["result"][pair_key][match_with]:
-            order_price = float(order[0])
-            order_amount = float(order[1])
-            amount_to_match = remaining
+    matched = generic_orderbook_match(
+        pair, convert_from, convert_to, amount, formatted_orderbook)
 
-            if amount_to_match >= order_amount:
-                matched += order_amount * order_price
-                remaining -= order_amount
-            else:
-                matched += amount_to_match * order_price
-                remaining -= remaining
+    return matched
+
+
+def binance_orderbook_match(pair, convert_from, convert_to, amount):
+    orderbook = get(
+        "https://www.binance.com/api/v3/depth?symbol=" + pair).json()
+
+    matched = generic_orderbook_match(
+        pair, convert_from, convert_to, amount, orderbook)
 
     return matched
 
@@ -203,17 +210,6 @@ def kraken_to_binance(msg_text):
     kraken_dai_amount = kraken_orderbook_match(
         "DAIUSD", "USD", "DAI", usd_amount)
 
-    binance_busdusdt = get(
-        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDUSDT").json()
-    binance_usdcbusd = get(
-        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=USDCBUSD").json()
-    binance_busddai = get(
-        "https://www.binance.com/api/v3/ticker/bookTicker?symbol=BUSDDAI").json()
-
-    binance_busdusdt_ask = float(binance_busdusdt["askPrice"])
-    binance_usdcbusd_bid = float(binance_usdcbusd["bidPrice"])
-    binance_busddai_ask = float(binance_busddai["askPrice"])
-
     buy_usdt = round(kraken_usdt_amount * kraken_fee -
                      kraken_usdt_withdrawal, 4)
     buy_usdc = round(kraken_usdc_amount * kraken_fee -
@@ -221,12 +217,16 @@ def kraken_to_binance(msg_text):
     buy_dai = round(kraken_dai_amount * kraken_fee -
                     kraken_dai_withdrawal, 4)
 
-    buy_usdtbusd = round((kraken_usdt_amount * kraken_fee -
-                          kraken_usdt_withdrawal) / binance_busdusdt_ask, 4)
-    buy_usdcbusd = round((kraken_usdc_amount * kraken_fee -
-                          kraken_usdc_withdrawal) * binance_usdcbusd_bid, 4)
-    buy_daibusd = round((kraken_dai_amount * kraken_fee -
-                         kraken_dai_withdrawal) / binance_busddai_ask, 4)
+    binance_usdtbusd_amount = binance_orderbook_match(
+        "BUSDUSDT", "USDT", "BUSD", buy_usdt)
+    binance_usdcbusd_amount = binance_orderbook_match(
+        "USDCBUSD", "USDC", "BUSD", buy_usdc)
+    binance_daibusd_amount = binance_orderbook_match(
+        "BUSDDAI", "DAI", "BUSD", buy_dai)
+
+    buy_usdtbusd = round(binance_usdtbusd_amount, 4)
+    buy_usdcbusd = round(binance_usdcbusd_amount, 4)
+    buy_daibusd = round(binance_daibusd_amount, 4)
 
     usdt_percentage = round(
         (buy_usdt / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
