@@ -179,7 +179,9 @@ def generic_orderbook_match(amount, coin, pair, orderbook):
 
 def kraken_orderbook_match(amount, coin, pair):
     orderbook = get(
-        "https://api.kraken.com/0/public/Depth?pair=" + pair).json()
+        "https://api.kraken.com/0/public/Depth?pair=" +
+        pair +
+        "&count=500").json()
     pair_key = list(orderbook["result"].keys())[0]
 
     formatted_orderbook = {"asks": orderbook["result"][pair_key]["asks"],
@@ -192,7 +194,9 @@ def kraken_orderbook_match(amount, coin, pair):
 
 def binance_orderbook_match(amount, coin, pair):
     orderbook = get(
-        "https://www.binance.com/api/v3/depth?symbol=" + pair).json()
+        "https://www.binance.com/api/v3/depth?symbol=" +
+        pair +
+        "&limit=500").json()
 
     matched = generic_orderbook_match(amount, coin, pair, orderbook)
 
@@ -362,10 +366,10 @@ def handle_msg(start_time, token, req):
         msg_to_send = gen_random(first_name)
 
     if start_time:
-        exec_time = time() - start_time
+        exec_time = round(time() - start_time, 4)
         msg_to_send = f"""{msg_to_send}
 
-Execution time: {exec_time} secs"""
+Execution time: {str(exec_time).rstrip("0").rstrip(".")} secs"""
 
     send_msg(token, chat_id, msg_id, msg_to_send)
 
