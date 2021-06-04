@@ -2,6 +2,7 @@ from time import sleep
 from random import randint, uniform
 from requests import get
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
 
 
 def gen_random(name):
@@ -95,10 +96,18 @@ def get_prices(msg_text):
 
 
 def get_dolar():
-    dollars = get("https://criptoya.com/api/dolar").json()
-    usdc = get("https://criptoya.com/api/usdc/ars/1000").json()
-    dai = get("https://criptoya.com/api/dai/ars/1000").json()
-    usdt = get("https://criptoya.com/api/usdt/ars/1000").json()
+    executor = ThreadPoolExecutor(max_workers=5)
+    dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
+    usdc_thread = executor.submit(
+        get, "https://criptoya.com/api/usdc/ars/1000")
+    dai_thread = executor.submit(get, "https://criptoya.com/api/dai/ars/1000")
+    usdt_thread = executor.submit(
+        get, "https://criptoya.com/api/usdt/ars/1000")
+
+    dollars = dollars_thread.result().json()
+    usdc = usdc_thread.result().json()
+    dai = dai_thread.result().json()
+    usdt = usdt_thread.result().json()
 
     for dollar in dollars:
         dollars[dollar] = float(dollars[dollar])
@@ -202,9 +211,17 @@ def kraken_to_binance(msg_text):
     kraken_usdc_withdrawal = 2.5
     kraken_dai_withdrawal = 2.5
 
-    kraken_usdt_amount = kraken_orderbook_match(usd_amount, "USD", "USDTUSD")
-    kraken_usdc_amount = kraken_orderbook_match(usd_amount, "USD", "USDCUSD")
-    kraken_dai_amount = kraken_orderbook_match(usd_amount, "USD", "DAIUSD")
+    kraken_executor = ThreadPoolExecutor(max_workers=5)
+    kraken_usdt_thread = kraken_executor.submit(
+        kraken_orderbook_match, usd_amount, "USD", "USDTUSD")
+    kraken_usdc_thread = kraken_executor.submit(
+        kraken_orderbook_match, usd_amount, "USD", "USDCUSD")
+    kraken_dai_thread = kraken_executor.submit(
+        kraken_orderbook_match, usd_amount, "USD", "DAIUSD")
+
+    kraken_usdt_amount = kraken_usdt_thread.result()
+    kraken_usdc_amount = kraken_usdc_thread.result()
+    kraken_dai_amount = kraken_dai_thread.result()
 
     buy_usdt = round(
         kraken_usdt_amount * kraken_fee,
@@ -214,11 +231,17 @@ def kraken_to_binance(msg_text):
         4) - kraken_usdc_withdrawal
     buy_dai = round(kraken_dai_amount * kraken_fee, 4) - kraken_dai_withdrawal
 
-    binance_usdtbusd_amount = binance_orderbook_match(
-        buy_usdt, "USDT", "BUSDUSDT")
-    binance_usdcbusd_amount = binance_orderbook_match(
-        buy_usdc, "USDC", "USDCBUSD")
-    binance_daibusd_amount = binance_orderbook_match(buy_dai, "DAI", "BUSDDAI")
+    binance_executor = ThreadPoolExecutor(max_workers=5)
+    binance_usdtbusd_thread = binance_executor.submit(
+        binance_orderbook_match, buy_usdt, "USDT", "BUSDUSDT")
+    binance_usdcbusd_thread = binance_executor.submit(
+        binance_orderbook_match, buy_usdc, "USDC", "USDCBUSD")
+    binance_daibusd_thread = binance_executor.submit(
+        binance_orderbook_match, buy_dai, "DAI", "BUSDDAI")
+
+    binance_usdtbusd_amount = binance_usdtbusd_thread.result()
+    binance_usdcbusd_amount = binance_usdcbusd_thread.result()
+    binance_daibusd_amount = binance_daibusd_thread.result()
 
     buy_usdtbusd = round(binance_usdtbusd_amount, 4)
     buy_usdcbusd = round(binance_usdcbusd_amount, 4)
