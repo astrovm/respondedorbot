@@ -1,4 +1,4 @@
-from time import sleep
+from time import sleep, time
 from random import randint, uniform
 from requests import get
 from urllib.parse import quote
@@ -310,58 +310,75 @@ def send_msg(token, chat_id, msg_id, msg):
     get(url)
 
 
+def handle_msg(start_time, token, req):
+    msg_text = str(req["message"]["text"])
+    msg_id = str(req["message"]["message_id"])
+    chat_id = str(req["message"]["chat"]["id"])
+    chat_type = str(req["message"]["chat"]["type"])
+    first_name = str(req["message"]["from"]["first_name"])
+    typing = False
+    msg_to_send = ""
+
+    if msg_text.startswith("/exectime"):
+        msg_text = msg_text.replace("/exectime", "").strip()
+    else:
+        start_time = False
+
+    if msg_text.startswith("/random"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = select_random(msg_text)
+
+    if msg_text.startswith("/prices"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = get_prices(msg_text)
+
+    if msg_text.startswith("/dolar"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = get_dolar()
+
+    if msg_text.startswith("/krakentobinance"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = kraken_to_binance(msg_text)
+
+    if not typing:
+        try:
+            reply_to = str(
+                req["message"]["reply_to_message"]["from"]["username"])
+
+            if reply_to != "respondedorbot" and msg_text.startswith(
+                    "/ask") == False:
+                return "ignored request"
+        except BaseException:
+            if chat_type != "private" and msg_text.startswith(
+                    "/ask") == False:
+                return "ignored request"
+
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = gen_random(first_name)
+
+    if start_time:
+        exec_time = time() - start_time
+        msg_to_send = f"""{msg_to_send}
+
+Execution time: {exec_time} secs"""
+
+    send_msg(token, chat_id, msg_id, msg_to_send)
+
+
 def responder(request):
+    start_time = time()
     try:
         if request.method == "POST":
             token = str(request.args.get("token"))
-
             req = request.get_json()
 
-            msg_text = str(req["message"]["text"])
-            msg_id = str(req["message"]["message_id"])
-            chat_id = str(req["message"]["chat"]["id"])
-            chat_type = str(req["message"]["chat"]["type"])
-            first_name = str(req["message"]["from"]["first_name"])
+            handle_msg(start_time, token, req)
 
-            if msg_text.startswith("/random"):
-                send_typing(token, chat_id)
-                msg = select_random(msg_text)
-                send_msg(token, chat_id, msg_id, msg)
-                return "ok"
-
-            if msg_text.startswith("/prices"):
-                send_typing(token, chat_id)
-                msg = get_prices(msg_text)
-                send_msg(token, chat_id, msg_id, msg)
-                return "ok"
-
-            if msg_text.startswith("/dolar"):
-                send_typing(token, chat_id)
-                msg = get_dolar()
-                send_msg(token, chat_id, msg_id, msg)
-                return "ok"
-
-            if msg_text.startswith("/krakentobinance"):
-                send_typing(token, chat_id)
-                msg = kraken_to_binance(msg_text)
-                send_msg(token, chat_id, msg_id, msg)
-                return "ok"
-
-            try:
-                reply_to = str(
-                    req["message"]["reply_to_message"]["from"]["username"])
-
-                if reply_to != "respondedorbot" and msg_text.startswith(
-                        "/ask") == False:
-                    return "ignored request"
-            except BaseException:
-                if chat_type != "private" and msg_text.startswith(
-                        "/ask") == False:
-                    return "ignored request"
-
-            send_typing(token, chat_id)
-            msg = gen_random(first_name)
-            send_msg(token, chat_id, msg_id, msg)
             return "ok"
         else:
             return "bad request"
