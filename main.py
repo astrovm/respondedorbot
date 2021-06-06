@@ -1,3 +1,4 @@
+from math import floor, log
 from time import sleep, time
 from random import randint, uniform
 from requests import get
@@ -301,6 +302,40 @@ Buying {coin["buy"]} in Kraken you can get {str(coin["amount"]).rstrip("0").rstr
     return msg
 
 
+def convert_base(msg_text):
+    clean_msg = msg_text.replace("/convertbase", "").strip()
+    user_input = clean_msg.split(",")
+
+    user_input_number = user_input[0].strip()
+    base_from = int(user_input[1].strip())
+    decimal = 0
+    index_counter = len(user_input_number) - 1
+
+    for digit in user_input_number:
+        digit_in_ascii = ord(digit)
+        if digit_in_ascii >= 65:
+            digit = digit_in_ascii - 65 + 10
+        decimal += int(digit) * base_from ** index_counter
+        index_counter -= 1
+
+    base_to_convert = int(user_input[2].strip())
+    max_index = floor(log(decimal) / log(base_to_convert))
+    result = ""
+
+    for index in range(max_index, -1, -1):
+        for digit in range(base_to_convert, -1, -1):
+            index_value = digit * base_to_convert**index
+            if decimal - index_value >= 0:
+                if digit > 9:
+                    result += chr(digit - 10 + 65)
+                else:
+                    result += str(digit)
+                decimal -= index_value
+                break
+
+    return f"""{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"""
+
+
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
@@ -327,6 +362,11 @@ def handle_msg(start_time, token, req):
         msg_text = msg_text.replace("/exectime", "").strip()
     else:
         start_time = False
+
+    if msg_text.startswith("/convertbase"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = convert_base(msg_text)
 
     if msg_text.startswith("/random"):
         send_typing(token, chat_id)
