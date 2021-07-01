@@ -212,9 +212,9 @@ def kraken_to_binance(msg_text):
     bank_fee = float(user_input[1].strip())
 
     kraken_fee = 0.998
-    kraken_usdt_withdrawal = 1
-    kraken_usdc_withdrawal = 2.5
-    kraken_dai_withdrawal = 2.5
+    kraken_usdt_withdrawal = 2.5
+    kraken_usdc_withdrawal = 7.5
+    kraken_dai_withdrawal = 15
 
     kraken_executor = ThreadPoolExecutor(max_workers=5)
     kraken_usdt_thread = kraken_executor.submit(
