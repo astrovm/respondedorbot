@@ -78,9 +78,9 @@ def get_prices(msg_text):
             coins = msg_text.upper().replace(" ", "").split(",")
 
             for coin in prices:
-                symbol = coin["symbol"].upper()
-                id = coin["id"].upper()
-                name = coin["name"].upper()
+                symbol = coin["symbol"].upper().replace(" ", "")
+                id = coin["id"].upper().replace(" ", "")
+                name = coin["name"].upper().replace(" ", "")
 
                 if symbol in coins or id in coins or name in coins:
                     new_prices.append(coin)
