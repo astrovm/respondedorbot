@@ -28,13 +28,11 @@ def gen_random(name):
 
 
 def select_random(msg_text):
-    clean_text = msg_text.replace("/random", "").strip()
-
-    if "," in clean_text:
-        if clean_text.startswith(",") or clean_text.endswith(","):
+    if "," in msg_text:
+        if msg_text.startswith(",") or msg_text.endswith(","):
             return "habla bien idiota"
 
-        split_msg = clean_text.split(",")
+        split_msg = msg_text.split(",")
         values = len(split_msg)
 
         randValue = randint(0, values - 1)
@@ -42,11 +40,11 @@ def select_random(msg_text):
 
         return strip_value
 
-    if "-" in clean_text:
-        if clean_text.startswith("-") or clean_text.endswith("-"):
+    if "-" in msg_text:
+        if msg_text.startswith("-") or msg_text.endswith("-"):
             return "habla bien idiota"
 
-        split_msg = clean_text.split("-")
+        split_msg = msg_text.split("-")
         values = len(split_msg)
 
         if values == 2:
@@ -61,18 +59,34 @@ def select_random(msg_text):
 
 def get_prices(msg_text):
     try:
-        split_msg = msg_text.strip().split(" ")
+        prices = []
         per_page = 10
 
-        if len(split_msg) > 1 and int(
-            float(
-                split_msg[1])) > 0 and int(
-            float(
-                split_msg[1])) < 101:
-            per_page = int(float(split_msg[1]))
+        if msg_text.upper().isupper():
+            per_page = 100
+        elif not msg_text == "":
+            custom_number = int(float(msg_text))
+
+            if custom_number > 0 and custom_number < 101:
+                per_page = custom_number
 
         prices = get(
             f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
+
+        if msg_text.upper().isupper():
+            new_prices = []
+            coins = msg_text.upper().replace(" ", "").split(",")
+
+            for coin in prices:
+                symbol = coin["symbol"].upper()
+                id = coin["id"].upper()
+                name = coin["name"].upper()
+
+                if symbol in coins or id in coins or name in coins:
+                    new_prices.append(coin)
+            if new_prices == []:
+                return "ponzis no laburo"
+            prices = new_prices
 
         msg = ""
 
@@ -157,154 +171,8 @@ def get_dolar():
     return msg
 
 
-def generic_orderbook_match(amount, coin, pair, orderbook):
-    match_with = "bids" if pair.removesuffix(coin) == pair else "asks"
-    remaining = amount
-    matched = 0
-
-    for order in orderbook[match_with]:
-        order_price = float(order[0])
-        order_amount = float(order[1])
-        amount_to_match = remaining / order_price if match_with == "asks" else remaining
-
-        if amount_to_match > order_amount:
-            matched += order_amount if match_with == "asks" else order_amount * order_price
-            remaining -= order_amount * order_price if match_with == "asks" else order_amount
-        else:
-            matched += amount_to_match if match_with == "asks" else amount_to_match * order_price
-            remaining -= remaining
-            break
-
-    return matched
-
-
-def kraken_orderbook_match(amount, coin, pair):
-    orderbook = get(
-        "https://api.kraken.com/0/public/Depth?pair=" +
-        pair +
-        "&count=500").json()
-    pair_key = list(orderbook["result"].keys())[0]
-
-    formatted_orderbook = {"asks": orderbook["result"][pair_key]["asks"],
-                           "bids": orderbook["result"][pair_key]["bids"]}
-
-    matched = generic_orderbook_match(amount, coin, pair, formatted_orderbook)
-
-    return matched
-
-
-def binance_orderbook_match(amount, coin, pair):
-    orderbook = get(
-        "https://www.binance.com/api/v3/depth?symbol=" +
-        pair +
-        "&limit=500").json()
-
-    matched = generic_orderbook_match(amount, coin, pair, orderbook)
-
-    return matched
-
-
-def kraken_to_binance(msg_text):
-    clean_msg = msg_text.replace("/krakentobinance", "").strip()
-    user_input = clean_msg.split(",")
-
-    usd_amount = float(user_input[0].strip())
-    bank_fee = float(user_input[1].strip())
-
-    kraken_fee = 0.998
-    kraken_usdt_withdrawal = 2.5
-    kraken_usdc_withdrawal = 7.5
-    kraken_dai_withdrawal = 15
-
-    kraken_executor = ThreadPoolExecutor(max_workers=5)
-    kraken_usdt_thread = kraken_executor.submit(
-        kraken_orderbook_match, usd_amount, "USD", "USDTUSD")
-    kraken_usdc_thread = kraken_executor.submit(
-        kraken_orderbook_match, usd_amount, "USD", "USDCUSD")
-    kraken_dai_thread = kraken_executor.submit(
-        kraken_orderbook_match, usd_amount, "USD", "DAIUSD")
-
-    kraken_usdt_amount = kraken_usdt_thread.result()
-    kraken_usdc_amount = kraken_usdc_thread.result()
-    kraken_dai_amount = kraken_dai_thread.result()
-
-    buy_usdt = round(
-        kraken_usdt_amount * kraken_fee,
-        4) - kraken_usdt_withdrawal
-    buy_usdc = round(
-        kraken_usdc_amount * kraken_fee,
-        4) - kraken_usdc_withdrawal
-    buy_dai = round(kraken_dai_amount * kraken_fee, 4) - kraken_dai_withdrawal
-
-    binance_executor = ThreadPoolExecutor(max_workers=5)
-    binance_usdtbusd_thread = binance_executor.submit(
-        binance_orderbook_match, buy_usdt, "USDT", "BUSDUSDT")
-    binance_usdcbusd_thread = binance_executor.submit(
-        binance_orderbook_match, buy_usdc, "USDC", "USDCBUSD")
-    binance_daibusd_thread = binance_executor.submit(
-        binance_orderbook_match, buy_dai, "DAI", "BUSDDAI")
-
-    binance_usdtbusd_amount = binance_usdtbusd_thread.result()
-    binance_usdcbusd_amount = binance_usdcbusd_thread.result()
-    binance_daibusd_amount = binance_daibusd_thread.result()
-
-    buy_usdtbusd = round(binance_usdtbusd_amount, 4)
-    buy_usdcbusd = round(binance_usdcbusd_amount, 4)
-    buy_daibusd = round(binance_daibusd_amount, 4)
-
-    usdt_percentage = round(
-        (buy_usdt / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-    usdc_percentage = round(
-        (buy_usdc / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-    dai_percentage = round(
-        (buy_dai / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-
-    usdtbusd_percentage = round(
-        (buy_usdtbusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-    usdcbusd_percentage = round(
-        (buy_usdcbusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-    daibusd_percentage = round(
-        (buy_daibusd / (usd_amount + bank_fee) * 100 - 100) * (-1), 4)
-
-    results = [{"buy": "USDT",
-                "get": "USDT",
-                "amount": buy_usdt,
-                "fee": usdt_percentage},
-               {"buy": "USDC",
-                "get": "USDC",
-                "amount": buy_usdc,
-                "fee": usdc_percentage},
-               {"buy": "DAI",
-                "get": "DAI",
-                "amount": buy_dai,
-                "fee": dai_percentage},
-               {"buy": "USDT",
-                "get": "BUSD",
-                "amount": buy_usdtbusd,
-                "fee": usdtbusd_percentage},
-               {"buy": "USDC",
-                "get": "BUSD",
-                "amount": buy_usdcbusd,
-                "fee": usdcbusd_percentage},
-               {"buy": "DAI",
-                "get": "BUSD",
-                "amount": buy_daibusd,
-                "fee": daibusd_percentage}]
-
-    results.sort(key=lambda x: x.get("amount"), reverse=True)
-
-    msg = f"""You sent {str(usd_amount).rstrip("0").rstrip(".")} USD to Kraken paying {str(bank_fee).rstrip("0").rstrip(".")} USD fee to your bank, spending {str(usd_amount + bank_fee).rstrip("0").rstrip(".")} USD in total.\n"""
-
-    for coin in results:
-        msg = f"""{msg}
-Buying {coin["buy"]} in Kraken you can get {str(coin["amount"]).rstrip("0").rstrip(".")} {coin["get"]} in Binance ({str(coin["fee"]).rstrip("0").rstrip(".")}% total fee)."""
-
-    return msg
-
-
 def convert_base(msg_text):
-    clean_msg = msg_text.replace("/convertbase", "").strip()
-    user_input = clean_msg.split(",")
+    user_input = msg_text.split(",")
 
     user_input_number = user_input[0].strip()
     base_from = int(user_input[1].strip())
@@ -363,41 +231,40 @@ def handle_msg(start_time, token, req):
     else:
         start_time = False
 
-    if msg_text.startswith("/convertbase"):
+    split_msg = msg_text.strip().split(" ")
+    lower_cmd = split_msg[0].lower()
+    msg_text = msg_text.replace(split_msg[0], "").strip()
+
+    if lower_cmd.startswith("/convertbase"):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = convert_base(msg_text)
 
-    if msg_text.startswith("/random"):
+    if lower_cmd.startswith("/random"):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = select_random(msg_text)
 
-    if msg_text.startswith("/prices"):
+    if lower_cmd.startswith("/prices"):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_prices(msg_text)
 
-    if msg_text.startswith("/dolar"):
+    if lower_cmd.startswith("/dolar"):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_dolar()
-
-    if msg_text.startswith("/krakentobinance"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = kraken_to_binance(msg_text)
 
     if not typing:
         try:
             reply_to = str(
                 req["message"]["reply_to_message"]["from"]["username"])
 
-            if reply_to != "respondedorbot" and msg_text.startswith(
+            if reply_to != "respondedorbot" and lower_cmd.startswith(
                     "/ask") == False:
                 return "ignored request"
         except BaseException:
-            if chat_type != "private" and msg_text.startswith(
+            if chat_type != "private" and lower_cmd.startswith(
                     "/ask") == False:
                 return "ignored request"
 
