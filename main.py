@@ -62,10 +62,20 @@ def get_prices(msg_text):
         prices = []
         per_page = 10
         vs_currency = "USD"
+        vs_currency_api = "USD"
 
-        if "IN BTC" in msg_text.upper():
-            vs_currency = "BTC"
-            msg_text = msg_text.upper().replace("IN BTC", "").strip()
+        if "IN " in msg_text.upper():
+            words = msg_text.upper().split()
+
+            if words[-1] == "SATS":
+                vs_currency = "sats"
+                vs_currency_api = "BTC"
+            else:
+                vs_currency = words[-1]
+                vs_currency_api = words[-1]
+
+            msg_text = msg_text.upper().replace(
+                f"""IN {words[-1]}""", "").strip()
 
         if msg_text.upper().isupper():  # if the message doesn't contain numbers
             per_page = 100
@@ -76,7 +86,7 @@ def get_prices(msg_text):
                 per_page = custom_number
 
         prices = get(
-            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
+            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
 
         if msg_text.upper().isupper():
             new_prices = []
@@ -96,6 +106,9 @@ def get_prices(msg_text):
         msg = ""
 
         for coin in prices:
+            if vs_currency == "sats":
+                coin["current_price"] = coin["current_price"] * 100000000
+
             ticker = coin["symbol"].upper()
             price = "{:.8f}".format(
                 coin["current_price"]).rstrip("0").rstrip(".")
