@@ -61,8 +61,13 @@ def get_prices(msg_text):
     try:
         prices = []
         per_page = 10
+        vs_currency = "USD"
 
-        if msg_text.upper().isupper():
+        if "IN BTC" in msg_text.upper():
+            vs_currency = "BTC"
+            msg_text = msg_text.upper().replace("IN BTC", "").strip()
+
+        if msg_text.upper().isupper():  # if the message doesn't contain numbers
             per_page = 100
         elif not msg_text == "":
             custom_number = int(float(msg_text))
@@ -71,7 +76,7 @@ def get_prices(msg_text):
                 per_page = custom_number
 
         prices = get(
-            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
+            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
 
         if msg_text.upper().isupper():
             new_prices = []
@@ -97,7 +102,7 @@ def get_prices(msg_text):
             percentage = "{:+.2f}".format(
                 coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
 
-            line = f"""{ticker}: {price} USD ({percentage}% 24hs)"""
+            line = f"""{ticker}: {price} {vs_currency} ({percentage}% 24hs)"""
 
             if prices[0]["symbol"] == coin["symbol"]:
                 msg = line
