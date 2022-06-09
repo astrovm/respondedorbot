@@ -222,6 +222,11 @@ def convert_base(msg_text):
     return f"""{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"""
 
 
+def get_timestamp():
+    now = str(int(time()))
+    return now
+
+
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
@@ -272,6 +277,11 @@ def handle_msg(start_time, token, req):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_dolar()
+
+    if lower_cmd.startswith("/time"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = get_timestamp()
 
     if not typing:
         try:
