@@ -237,23 +237,23 @@ def get_timestamp():
 
 
 def get_help():
-    return """`/ask question` ~ returns the answer to the question
+    return """/ask question ~ returns the answer to the question
 
-`/random pizza, meat, sushi` ~ chooses between the options
-`/random 1-10` ~ returns a random number between 1 and 10
+/random pizza, meat, sushi ~ chooses between the options
+/random 1-10 ~ returns a random number between 1 and 10
 
-`/prices` ~ prices of the top 10 cryptos in usd
-`/prices in btc` ~ prices of the top 10 cryptos in btc
-`/prices 20` ~ prices of the top 20 cryptos in usd
-`/prices 100 in eur` ~ prices of the top 100 cryptos in eur
-`/prices btc` ~ price of bitcoin in usd
-`/prices btc, eth, xmr` ~ prices of bitcoin, ethereum and monero in usd
-`/prices dai in sats` ~ price of dai in satoshis
-`/prices btc, eth, xmr in sats` ~ price of bitcoin, ethereum and monero in satoshis
+/prices ~ prices of the top 10 cryptos in usd
+/prices in btc ~ prices of the top 10 cryptos in btc
+/prices 20 ~ prices of the top 20 cryptos in usd
+/prices 100 in eur ~ prices of the top 100 cryptos in eur
+/prices btc ~ price of bitcoin in usd
+/prices btc, eth, xmr ~ prices of bitcoin, ethereum and monero in usd
+/prices dai in sats ~ price of dai in satoshis
+/prices btc, eth, xmr in sats ~ price of bitcoin, ethereum and monero in satoshis
 
-`/dolar` ~ dollar prices in argentina
+/dolar ~ dollar prices in argentina
 
-`/time` ~ returns the current unix timestamp"""
+/time ~ returns the current unix timestamp"""
 
 
 def send_typing(token, chat_id):
