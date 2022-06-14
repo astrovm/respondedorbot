@@ -136,6 +136,21 @@ def get_prices(msg_text):
     return msg
 
 
+def get_lowest(prices):
+    lowest_price = 0
+
+    for exchange in prices:
+        ask = float(prices[exchange]["totalAsk"])
+
+        if ask == 0:
+            continue
+
+        if ask < lowest_price or lowest_price == 0:
+            lowest_price = float(prices[exchange]["totalAsk"])
+
+    return lowest_price
+
+
 def get_dolar():
     executor = ThreadPoolExecutor(max_workers=5)
     dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
@@ -152,20 +167,6 @@ def get_dolar():
 
     for dollar in dollars:
         dollars[dollar] = float(dollars[dollar])
-
-    def get_lowest(prices):
-        lowest_price = 0
-
-        for exchange in prices:
-            ask = float(prices[exchange]["totalAsk"])
-
-            if ask == 0:
-                continue
-
-            if ask < lowest_price or lowest_price == 0:
-                lowest_price = float(prices[exchange]["totalAsk"])
-
-        return lowest_price
 
     dollars["usdc"] = get_lowest(usdc)
     dollars["dai"] = get_lowest(dai)
@@ -235,6 +236,24 @@ def get_timestamp():
     return now
 
 
+def get_help():
+    return """/ask question
+
+/random pizza, meat, sushi
+/random 1-10
+
+/prices
+/prices 20
+/prices btc
+/prices btc, eth, xmr
+/prices in btc
+/prices dai in sats
+
+/dolar
+
+/time"""
+
+
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
@@ -290,6 +309,11 @@ def handle_msg(start_time, token, req):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_timestamp()
+
+    if lower_cmd.startswith("/help"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = get_help()
 
     if not typing:
         try:
