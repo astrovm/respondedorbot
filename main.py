@@ -88,7 +88,7 @@ def get_prices(msg_text):
         prices = get(
             f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""").json()
 
-        if prices["error"]:
+        if "error" in prices:
             return prices["error"]
 
         if msg_text.upper().isupper():
