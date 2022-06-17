@@ -1,3 +1,5 @@
+import json
+import redis
 from os import environ
 from math import floor, log
 from time import sleep, time
@@ -5,6 +7,14 @@ from random import randint, uniform
 from requests import get
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
+
+
+def config_redis(host=environ.get("REDIS_HOST"), port=environ.get("REDIS_PORT"), password=environ.get("REDIS_PASSWORD")):
+    r = redis.Redis(
+        host=host,
+        port=port,
+        password=password)
+    return r
 
 
 def gen_random(name):
@@ -86,16 +96,24 @@ def get_prices(msg_text):
             if custom_number > 0 and custom_number < 101:
                 per_page = custom_number
 
-        prices = get(
-            f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h""")
+        api_request = f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h"""
+        api_response = get(api_request)
 
-        if prices.status_code != 200 and prices.status_code != 400:
-            return f"""error {prices.status_code}"""
+        r = config_redis()
 
-        prices = prices.json()
-
-        if "error" in prices:
-            return prices["error"]
+        if api_response.status_code == 200:
+            prices = api_response.json()
+            r.set(api_request, json.dumps(prices))
+        elif api_response.status_code == 400:
+            prices = api_response.json()
+            if "error" in prices:
+                return prices["error"]
+            return f"""error {api_response.status_code}"""
+        else:
+            redis_response = r.get(api_request)
+            if redis_response is None:
+                return f"""error {api_response.status_code}"""
+            prices = json.loads(redis_response)
 
         if msg_text.upper().isupper():
             new_prices = []
