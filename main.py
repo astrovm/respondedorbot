@@ -1,3 +1,4 @@
+from os import environ
 from math import floor, log
 from time import sleep, time
 from random import randint, uniform
@@ -348,6 +349,9 @@ def responder(request):
     try:
         if request.method == "POST":
             token = str(request.args.get("token"))
+            if token != environ.get("TELEGRAM_TOKEN"):
+                return "wrong token"
+
             req = request.get_json()
 
             handle_msg(start_time, token, req)
