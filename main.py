@@ -96,7 +96,7 @@ def get_prices(msg_text):
             if custom_number > 0 and custom_number < 101:
                 per_page = custom_number
 
-        api_request = f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page={per_page}&page=1&sparkline=false&price_change_percentage=24h"""
+        api_request = f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h"""
         api_response = get(api_request)
 
         r = config_redis()
@@ -132,7 +132,7 @@ def get_prices(msg_text):
 
         msg = ""
 
-        for coin in prices:
+        for coin in prices[:per_page]:
             if vs_currency == "sats":
                 coin["current_price"] = coin["current_price"] * 100000000
 
