@@ -5,6 +5,7 @@ from math import floor, log
 from time import sleep, time
 from random import randint, uniform
 from requests import get
+from datetime import datetime
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -86,7 +87,7 @@ def get_prices(msg_text):
                 vs_currency_api = words[-1]
 
             msg_text = msg_text.upper().replace(
-                f"""IN {words[-1]}""", "").strip()
+                f"IN {words[-1]}", "").strip()
 
         if msg_text.upper().isupper():  # if the message doesn't contain numbers
             per_page = 100
@@ -96,7 +97,7 @@ def get_prices(msg_text):
             if custom_number > 0 and custom_number < 101:
                 per_page = custom_number
 
-        api_request = f"""https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h"""
+        api_request = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h"
         api_response = get(api_request)
 
         r = config_redis()
@@ -108,11 +109,11 @@ def get_prices(msg_text):
             prices = api_response.json()
             if "error" in prices:
                 return prices["error"]
-            return f"""error {api_response.status_code}"""
+            return f"error {api_response.status_code}"
         else:
             redis_response = r.get(api_request)
             if redis_response is None:
-                return f"""error {api_response.status_code}"""
+                return f"error {api_response.status_code}"
             prices = json.loads(redis_response)
 
         if msg_text.upper().isupper():
@@ -142,7 +143,7 @@ def get_prices(msg_text):
             percentage = "{:+.2f}".format(
                 coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
 
-            line = f"""{ticker}: {price} {vs_currency} ({percentage}% 24hs)"""
+            line = f"{ticker}: {price} {vs_currency} ({percentage}% 24hs)"
 
             if prices[0]["symbol"] == coin["symbol"]:
                 msg = line
@@ -217,6 +218,37 @@ def get_dolar():
     return msg
 
 
+def rainbow():
+    today = datetime.now()
+    since = datetime(day=9, month=1, year=2009)
+    days_since = (today - since).days
+    value = 10 ** (2.66167155005961 *
+                   log(days_since) - 17.9183761889864)
+
+    api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    api_response = get(api_request)
+
+    r = config_redis()
+
+    if api_response.status_code == 200:
+        price = api_response.json()
+        r.set(api_request, json.dumps(price))
+    else:
+        redis_response = r.get(api_request)
+        if redis_response is None:
+            return f"error {api_response.status_code}"
+        price = json.loads(redis_response)
+
+    percentage = ((price["bitcoin"]["usd"] - value) / value)*100
+    if percentage > 0:
+        percentage_txt = f"{percentage:.2f}% overvalued"
+    else:
+        percentage_txt = f"{abs(percentage):.2f}% undervalued"
+
+    msg = f"Today's Bitcoin theoretical value is {value:.2f} USD ({percentage_txt})"
+    return msg
+
+
 def convert_base(msg_text):
     user_input = msg_text.split(",")
 
@@ -247,7 +279,7 @@ def convert_base(msg_text):
                 decimal -= index_value
                 break
 
-    return f"""{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"""
+    return f"{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"
 
 
 def get_timestamp():
@@ -325,6 +357,11 @@ def handle_msg(start_time, token, req):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_dolar()
+
+    if lower_cmd.startswith("/rainbow"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = rainbow()
 
     if lower_cmd.startswith("/time"):
         send_typing(token, chat_id)
