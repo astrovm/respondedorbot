@@ -99,17 +99,21 @@ def get_prices(msg_text):
 
         api_request = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h"
         api_response = get(api_request)
-
-        r = config_redis()
-
-        if api_response.status_code == 200:
-            prices = api_response.json()
-            r.set(api_request, json.dumps(prices))
-        elif api_response.status_code == 400:
+        
+        if api_response.status_code == 400:
             prices = api_response.json()
             if "error" in prices:
                 return prices["error"]
             return f"error {api_response.status_code}"
+
+        r = config_redis()
+        
+        if api_response.status_code != 200:
+            api_response = get(api_request)
+
+        if api_response.status_code == 200:
+            prices = api_response.json()
+            r.set(api_request, json.dumps(prices))
         else:
             redis_response = r.get(api_request)
             if redis_response is None:
