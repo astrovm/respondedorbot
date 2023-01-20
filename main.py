@@ -198,7 +198,8 @@ def get_dolar():
 
     dollars = [
         {"name": "Oficial", "price": dollars["oficial"]},
-        {"name": "Solidario", "price": dollars["oficial"] * 1.75},
+        {"name": "Solidario", "price": dollars["oficial"] * 1.65},
+        {"name": "Tarjeta", "price": dollars["oficial"] * 1.75},
         {"name": "Qatar", "price": dollars["oficial"] * 2},
         {"name": "MEP", "price": dollars["mepgd30"]},
         {"name": "CCL", "price": dollars["cclgd30"]},
