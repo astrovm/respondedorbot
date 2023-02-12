@@ -70,92 +70,49 @@ def select_random(msg_text):
 
 
 def get_prices(msg_text):
-    try:
-        prices = []
-        per_page = 10
-        vs_currency = "USD"
-        vs_currency_api = "USD"
+    prices_number = 10
 
-        if "IN " in msg_text.upper():
-            words = msg_text.upper().split()
+    api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+    parameters = {
+        'start': '1',
+        'limit': '100',
+        'convert': 'USD'
+    }
+    headers = {
+        'Accepts': 'application/json',
+        'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
+    }
 
-            if words[-1] == "SATS":
-                vs_currency = "sats"
-                vs_currency_api = "BTC"
-            else:
-                vs_currency = words[-1]
-                vs_currency_api = words[-1]
+    r = config_redis()
+    redis_response = r.get(api_url)
+    response = json.loads(redis_response)
+    timestamp = int(time())
+    response_timestamp = int(response["timestamp"])
 
-            msg_text = msg_text.upper().replace(
-                f"IN {words[-1]}", "").strip()
+    if redis_response is None or timestamp - response_timestamp > 60:
+        response = get(api_url, params=parameters, headers=headers)
+        prices = json.loads(response.text)
 
-        if msg_text.upper().isupper():  # if the message doesn't contain numbers
-            per_page = 100
-        elif not msg_text == "":
-            custom_number = int(float(msg_text))
+        r.set(api_url, json.dumps(
+            {"timestamp": timestamp, "prices": prices}))
+    else:
+        prices = response["prices"]
 
-            if custom_number > 0 and custom_number < 101:
-                per_page = custom_number
+    msg = ""
 
-        api_request = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency_api}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h"
-        api_response = get(api_request)
-        
-        if api_response.status_code == 400:
-            prices = api_response.json()
-            if "error" in prices:
-                return prices["error"]
-            return f"error {api_response.status_code}"
+    for coin in prices["data"][:prices_number]:
+        ticker = coin["symbol"]
+        price = "{:.4f}".format(
+            coin["quote"]["USD"]["price"]).rstrip("0").rstrip(".")
+        percentage = "{:+.2f}".format(
+            coin["quote"]["USD"]["percent_change_24h"]).rstrip("0").rstrip(".")
+        line = f"{ticker}: {price} USD ({percentage}% 24hs)"
 
-        r = config_redis()
-        
-        if api_response.status_code != 200:
-            api_response = get(api_request)
-
-        if api_response.status_code == 200:
-            prices = api_response.json()
-            r.set(api_request, json.dumps(prices))
+        if prices["data"][0]["symbol"] == coin["symbol"]:
+            msg = line
         else:
-            redis_response = r.get(api_request)
-            if redis_response is None:
-                return f"error {api_response.status_code}"
-            prices = json.loads(redis_response)
-
-        if msg_text.upper().isupper():
-            new_prices = []
-            coins = msg_text.upper().replace(" ", "").split(",")
-
-            for coin in prices:
-                symbol = coin["symbol"].upper().replace(" ", "")
-                id = coin["id"].upper().replace(" ", "")
-                name = coin["name"].upper().replace(" ", "")
-
-                if symbol in coins or id in coins or name in coins:
-                    new_prices.append(coin)
-            if new_prices == []:
-                return "ponzis no laburo"
-            prices = new_prices
-
-        msg = ""
-
-        for coin in prices[:per_page]:
-            if vs_currency == "sats":
-                coin["current_price"] = coin["current_price"] * 100000000
-
-            ticker = coin["symbol"].upper()
-            price = "{:.8f}".format(
-                coin["current_price"]).rstrip("0").rstrip(".")
-            percentage = "{:+.2f}".format(
-                coin["price_change_percentage_24h"]).rstrip("0").rstrip(".")
-
-            line = f"{ticker}: {price} {vs_currency} ({percentage}% 24hs)"
-
-            if prices[0]["symbol"] == coin["symbol"]:
-                msg = line
-            else:
-                msg = f"""{msg}
+            msg = f"""{msg}
 {line}"""
-    except BaseException as e:
-        msg = str(e)
 
     return msg
 
