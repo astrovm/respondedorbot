@@ -89,7 +89,7 @@ def get_prices(msg_text):
     timestamp = int(time())
     response_timestamp = int(response["timestamp"])
 
-    if redis_response is None or timestamp - response_timestamp > 60:
+    if redis_response is None or timestamp - response_timestamp > 200:
         response = get(api_url, params=parameters, headers=headers)
         prices = json.loads(response.text)
 
