@@ -70,41 +70,71 @@ def select_random(msg_text):
 
 
 def get_prices(msg_text):
-    # default number of prices
-    prices_number = 10
-
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+    convert_to = "USD"
     parameters = {
         'start': '1',
         'limit': '100',
-        'convert': 'USD'
+        'convert': convert_to
     }
     headers = {
         'Accepts': 'application/json',
         'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
     }
 
+    # check if the user wants to convert the prices
+    if "IN " in msg_text.upper():
+        words = msg_text.upper().split()
+        coins = ["USD", "EUR", "BTC", "SATS", "ETH",
+                 "XMR", "USDC", "USDT", "DAI", "BUSD"]
+        convert_to = words[-1]
+        if convert_to in coins:
+            if convert_to == "SATS":
+                parameters["convert"] = "BTC"
+            else:
+                parameters["convert"] = convert_to
+            msg_text = msg_text.upper().replace(
+                f"IN {convert_to}", "").strip()
+        else:
+            return f"{convert_to} is not allowed"
+
     # redis config for cache
     r = config_redis()
 
     # get previous api response from redis cache
-    redis_response = r.get(api_url)
-    response = json.loads(redis_response)
+    redis_response = r.get(f"{api_url}{parameters['convert']}")
 
-    # set current timestamp and the timestamp from the last api response
+    # set current timestamp
     timestamp = int(time())
-    response_timestamp = int(response["timestamp"])
 
-    # get new prices if cached prices are older than 200 seconds
-    if redis_response is None or timestamp - response_timestamp > 200:
+    # def function to request new prices and save them in redis
+    def set_new_prices(api_url, parameters, headers, timestamp):
         response = get(api_url, params=parameters, headers=headers)
         prices = json.loads(response.text)
 
-        r.set(api_url, json.dumps(
+        r.set(f"{api_url}{parameters['convert']}", json.dumps(
             {"timestamp": timestamp, "prices": prices}))
+
+        return prices
+
+    # if there's no cached prices request them
+    if redis_response is None:
+        prices = set_new_prices(api_url, parameters, headers, timestamp)
     else:
-        prices = response["prices"]
+        # loads cached prices
+        response = json.loads(redis_response)
+        response_timestamp = int(response["timestamp"])
+
+        # get new prices if cached prices are older than 200 seconds
+        if timestamp - response_timestamp > 200:
+            prices = set_new_prices(api_url, parameters, headers, timestamp)
+        # use cached prices if they are recent
+        else:
+            prices = response["prices"]
+
+    # default number of prices
+    prices_number = 10
 
     # check if the user requested a custom number of prices
     if msg_text != "" and not msg_text.upper().isupper():
@@ -130,12 +160,16 @@ def get_prices(msg_text):
     # generate the message to answer the user
     msg = ""
     for coin in prices["data"][:prices_number]:
+        if convert_to == "SATS":
+            coin["quote"][parameters["convert"]
+                          ]["price"] = coin["quote"][parameters["convert"]]["price"] * 100000000
+
         ticker = coin["symbol"]
         price = "{:.4f}".format(
-            coin["quote"]["USD"]["price"]).rstrip("0").rstrip(".")
+            coin["quote"][parameters["convert"]]["price"]).rstrip("0").rstrip(".")
         percentage = "{:+.2f}".format(
-            coin["quote"]["USD"]["percent_change_24h"]).rstrip("0").rstrip(".")
-        line = f"{ticker}: {price} USD ({percentage}% 24hs)"
+            coin["quote"][parameters["convert"]]["percent_change_24h"]).rstrip("0").rstrip(".")
+        line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
             msg = line
