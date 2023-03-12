@@ -70,8 +70,10 @@ def select_random(msg_text):
 
 
 def get_prices(msg_text):
+    # default number of prices
     prices_number = 10
 
+    # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {
         'start': '1',
@@ -83,12 +85,18 @@ def get_prices(msg_text):
         'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
     }
 
+    # redis config for cache
     r = config_redis()
+
+    # get previous api response from redis cache
     redis_response = r.get(api_url)
     response = json.loads(redis_response)
+
+    # set current timestamp and the timestamp from the last api response
     timestamp = int(time())
     response_timestamp = int(response["timestamp"])
 
+    # get new prices if cached prices are older than 200 seconds
     if redis_response is None or timestamp - response_timestamp > 200:
         response = get(api_url, params=parameters, headers=headers)
         prices = json.loads(response.text)
@@ -98,13 +106,14 @@ def get_prices(msg_text):
     else:
         prices = response["prices"]
 
-    msg = ""
-
+    # check if the user requested a custom number of prices
     if msg_text != "" and not msg_text.upper().isupper():
         custom_number = int(float(msg_text))
         if custom_number > 0 and custom_number < 101:
             prices_number = custom_number
 
+    # generate the message to answer the user
+    msg = ""
     for coin in prices["data"][:prices_number]:
         ticker = coin["symbol"]
         price = "{:.4f}".format(
