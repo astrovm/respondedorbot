@@ -100,6 +100,11 @@ def get_prices(msg_text):
 
     msg = ""
 
+    if msg_text != "" and not msg_text.upper().isupper():
+        custom_number = int(float(msg_text))
+        if custom_number > 0 and custom_number < 101:
+            prices_number = custom_number
+
     for coin in prices["data"][:prices_number]:
         ticker = coin["symbol"]
         price = "{:.4f}".format(
