@@ -164,9 +164,13 @@ def get_prices(msg_text):
             coin["quote"][parameters["convert"]
                           ]["price"] = coin["quote"][parameters["convert"]]["price"] * 100000000
 
+        decimals = "{:.12f}".format(
+            coin["quote"][parameters["convert"]]["price"]).split(".")[-1]
+        zeros = len(decimals) - len(decimals.lstrip("0"))
+
         ticker = coin["symbol"]
-        price = "{:.4f}".format(
-            coin["quote"][parameters["convert"]]["price"]).rstrip("0").rstrip(".")
+        price = "{:.{decimals_number}f}".format(
+            coin["quote"][parameters["convert"]]["price"], decimals_number=zeros + 4).rstrip("0").rstrip(".")
         percentage = "{:+.2f}".format(
             coin["quote"][parameters["convert"]]["percent_change_24h"]).rstrip("0").rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
