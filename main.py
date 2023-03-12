@@ -112,6 +112,21 @@ def get_prices(msg_text):
         if custom_number > 0 and custom_number < 101:
             prices_number = custom_number
 
+    # check if the user requested a list of coins
+    if msg_text.upper().isupper():
+        new_prices = []
+        coins = msg_text.upper().replace(" ", "").split(",")
+
+        for coin in prices["data"]:
+            symbol = coin["symbol"].upper().replace(" ", "")
+            name = coin["name"].upper().replace(" ", "")
+
+            if symbol in coins or name in coins:
+                new_prices.append(coin)
+        if new_prices == []:
+            return "ponzis no laburo"
+        prices["data"] = new_prices
+
     # generate the message to answer the user
     msg = ""
     for coin in prices["data"][:prices_number]:
