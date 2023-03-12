@@ -86,8 +86,8 @@ def get_prices(msg_text):
     # check if the user wants to convert the prices
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
-        coins = ["USD", "EUR", "BTC", "SATS", "ETH",
-                 "XMR", "USDC", "USDT", "DAI", "BUSD"]
+        coins = ["XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY", "COP", "CZK", "DKK", "HKD", "ISK", "IDR", "ILS",
+                 "JPY", "MXN", "TWD", "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR", "USDC", "USDT", "DAI", "BUSD"]
         convert_to = words[-1]
         if convert_to in coins:
             if convert_to == "SATS":
