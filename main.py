@@ -148,8 +148,8 @@ def get_prices(msg_text):
         coins = msg_text.upper().replace(" ", "").split(",")
 
         if "STABLES" in coins or "STABLECOINS" in coins:
-            coins.extend(["USDT", "USDC", "BUSD", "DAI",
-                         "TUSD", "USDP", "USDD", "GUSD"])
+            coins.extend(["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "USDD",
+                         "GUSD", "DOC", "FRAX", "LUSD", "SUSD", "MIMATIC", "MIM", "MAI"])
 
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
