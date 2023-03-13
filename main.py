@@ -82,6 +82,7 @@ def get_prices(msg_text):
         'Accepts': 'application/json',
         'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
     }
+    prices_number = 0
 
     # check if the user wants to convert the prices
     if "IN " in msg_text.upper():
@@ -133,14 +134,18 @@ def get_prices(msg_text):
         else:
             prices = response["prices"]
 
-    # default number of prices
-    prices_number = 10
-
     # check if the user requested a custom number of prices
-    if msg_text != "" and not msg_text.upper().isupper():
-        custom_number = int(float(msg_text))
-        if custom_number > 0:
-            prices_number = custom_number
+    if msg_text != "":
+        numbers = msg_text.upper().replace(" ", "").split(",")
+
+        for n in numbers:
+            try:
+                number = int(float(n))
+                if number > prices_number:
+                    prices_number = number
+            except ValueError:
+                # ignore items which aren't integers
+                pass
 
     # check if the user requested a list of coins
     if msg_text.upper().isupper():
@@ -157,9 +162,16 @@ def get_prices(msg_text):
 
             if symbol in coins or name in coins:
                 new_prices.append(coin)
+
         if new_prices == []:
             return "ponzis no laburo"
+
+        prices_number = len(new_prices)
         prices["data"] = new_prices
+
+    # default number of prices
+    if prices_number < 1:
+        prices_number = 10
 
     # generate the message to answer the user
     msg = ""
