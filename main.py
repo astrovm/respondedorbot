@@ -162,6 +162,8 @@ def get_prices(msg_text):
 
             if symbol in coins or name in coins:
                 new_prices.append(coin)
+            elif prices_number > 0 and coin in prices["data"][:prices_number]:
+                new_prices.append(coin)
 
         if new_prices == []:
             return "ponzis no laburo"
