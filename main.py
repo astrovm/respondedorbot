@@ -139,7 +139,7 @@ def get_prices(msg_text):
     # check if the user requested a custom number of prices
     if msg_text != "" and not msg_text.upper().isupper():
         custom_number = int(float(msg_text))
-        if custom_number > 0 and custom_number < 101:
+        if custom_number > 0:
             prices_number = custom_number
 
     # check if the user requested a list of coins
