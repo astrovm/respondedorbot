@@ -297,8 +297,8 @@ def get_devo(msg_text):
     tarjeta_tax = 1.75
     qatar_tax = 2
 
-    profit = ((1 - fee - dollars["oficial"] / dollars["usdt"])
-              * dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
+    profit = -(fee * dollars["usdt"] + dollars["oficial"] -
+               dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
 
     msg = f"""Profit: {"{:.2f}".format(profit * 100).rstrip("0").rstrip(".")}%
 
