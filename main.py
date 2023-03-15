@@ -266,6 +266,59 @@ def get_dolar():
     return msg
 
 
+def get_devo(msg_text):
+    fee = 0
+    compra = 0
+
+    if "," in msg_text:
+        numbers = msg_text.replace(" ", "").split(",")
+        fee = float(numbers[0])
+        if len(numbers) > 1:
+            compra = float(numbers[1])
+    else:
+        fee = float(msg_text)
+
+    if fee != fee or fee < 0 or fee >= 100 or compra != compra or compra < 0:
+        return "te voy a matar hijo de puta"
+
+    executor = ThreadPoolExecutor(max_workers=5)
+    dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
+    usdt_thread = executor.submit(
+        get, "https://criptoya.com/api/usdt/ars/1000")
+
+    dollars = dollars_thread.result().json()
+    usdt = usdt_thread.result().json()
+
+    for dollar in dollars:
+        dollars[dollar] = float(dollars[dollar])
+
+    dollars["usdt"] = get_lowest(usdt)
+
+    profit = (100 * (dollars["usdt"] - (100 *
+              dollars["oficial"])/(100 - fee)))/dollars["usdt"]
+
+    msg = f"""Profit: {"{:.2f}".format(profit).rstrip("0").rstrip(".")}%
+
+Fee: {"{:.2f}".format(fee).rstrip("0").rstrip(".")}%
+Oficial: {"{:.2f}".format(dollars["oficial"]).rstrip("0").rstrip(".")}
+USDT: {"{:.2f}".format(dollars["usdt"]).rstrip("0").rstrip(".")}
+Qatar: {"{:.2f}".format(dollars["oficial"]*2).rstrip("0").rstrip(".")}
+Tarjeta: {"{:.2f}".format(dollars["oficial"]*1.75).rstrip("0").rstrip(".")}"""
+
+    if compra > 0:
+        compra_ars = compra*(dollars["oficial"]*2)
+        compra_usdt = compra_ars / dollars["usdt"]
+        ganancia_ars = compra_ars/100*profit
+        ganancia_usdt = ganancia_ars/dollars["usdt"]
+        msg = f"""{"{:.2f}".format(compra).rstrip("0").rstrip(".")} USD Qatar = {"{:.2f}".format(compra_ars).rstrip("0").rstrip(".")} ARS = {"{:.2f}".format(compra_usdt).rstrip("0").rstrip(".")} USDT
+Ganarias {"{:.2f}".format(ganancia_ars).rstrip("0").rstrip(".")} ARS / {"{:.2f}".format(ganancia_usdt).rstrip("0").rstrip(".")} USDT
+Total: {"{:.2f}".format(compra_ars+ganancia_ars).rstrip("0").rstrip(".")} ARS / {"{:.2f}".format(compra_usdt+ganancia_usdt).rstrip("0").rstrip(".")} USDT
+
+{msg}"""
+
+    return msg
+
+
 def rainbow():
     today = datetime.now()
     since = datetime(day=9, month=1, year=2009)
@@ -405,6 +458,11 @@ def handle_msg(start_time, token, req):
         send_typing(token, chat_id)
         typing = True
         msg_to_send = get_dolar()
+
+    if lower_cmd.startswith("/devo"):
+        send_typing(token, chat_id)
+        typing = True
+        msg_to_send = get_devo(msg_text)
 
     if lower_cmd.startswith("/rainbow"):
         send_typing(token, chat_id)
