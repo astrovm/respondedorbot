@@ -294,19 +294,22 @@ def get_devo(msg_text):
 
     dollars["usdt"] = get_lowest(usdt)
 
-    profit = (100 * (dollars["usdt"] - (100 *
-              dollars["oficial"])/(100 - fee)))/dollars["usdt"]
+    tarjeta_tax = 1.75
+    qatar_tax = 2
+
+    profit = ((100 - fee) * dollars["usdt"]) / \
+        (dollars["oficial"] * qatar_tax) + 100/qatar_tax - 100
 
     msg = f"""Profit: {"{:.2f}".format(profit).rstrip("0").rstrip(".")}%
 
 Fee: {"{:.2f}".format(fee).rstrip("0").rstrip(".")}%
 Oficial: {"{:.2f}".format(dollars["oficial"]).rstrip("0").rstrip(".")}
 USDT: {"{:.2f}".format(dollars["usdt"]).rstrip("0").rstrip(".")}
-Qatar: {"{:.2f}".format(dollars["oficial"]*2).rstrip("0").rstrip(".")}
-Tarjeta: {"{:.2f}".format(dollars["oficial"]*1.75).rstrip("0").rstrip(".")}"""
+Qatar: {"{:.2f}".format(dollars["oficial"]*qatar_tax).rstrip("0").rstrip(".")}
+Tarjeta: {"{:.2f}".format(dollars["oficial"]*tarjeta_tax).rstrip("0").rstrip(".")}"""
 
     if compra > 0:
-        compra_ars = compra*(dollars["oficial"]*2)
+        compra_ars = compra*(dollars["oficial"]*qatar_tax)
         compra_usdt = compra_ars / dollars["usdt"]
         ganancia_ars = compra_ars/100*profit
         ganancia_usdt = ganancia_ars/dollars["usdt"]
