@@ -272,11 +272,11 @@ def get_devo(msg_text):
 
     if "," in msg_text:
         numbers = msg_text.replace(" ", "").split(",")
-        fee = float(numbers[0])
+        fee = float(numbers[0]) / 100
         if len(numbers) > 1:
             compra = float(numbers[1])
     else:
-        fee = float(msg_text)
+        fee = float(msg_text) / 100
 
     if fee != fee or fee < 0 or fee >= 100 or compra != compra or compra < 0:
         return "te voy a matar hijo de puta"
@@ -297,25 +297,25 @@ def get_devo(msg_text):
     tarjeta_tax = 1.75
     qatar_tax = 2
 
-    profit = ((100 - fee) * dollars["usdt"]) / \
-        (dollars["oficial"] * qatar_tax) + 100/qatar_tax - 100
+    profit = ((1 - fee - dollars["oficial"] / dollars["usdt"])
+              * dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
 
-    msg = f"""Profit: {"{:.2f}".format(profit).rstrip("0").rstrip(".")}%
+    msg = f"""Profit: {"{:.2f}".format(profit * 100).rstrip("0").rstrip(".")}%
 
-Fee: {"{:.2f}".format(fee).rstrip("0").rstrip(".")}%
+Fee: {"{:.2f}".format(fee * 100).rstrip("0").rstrip(".")}%
 Oficial: {"{:.2f}".format(dollars["oficial"]).rstrip("0").rstrip(".")}
 USDT: {"{:.2f}".format(dollars["usdt"]).rstrip("0").rstrip(".")}
-Qatar: {"{:.2f}".format(dollars["oficial"]*qatar_tax).rstrip("0").rstrip(".")}
-Tarjeta: {"{:.2f}".format(dollars["oficial"]*tarjeta_tax).rstrip("0").rstrip(".")}"""
+Qatar: {"{:.2f}".format(dollars["oficial"] * qatar_tax).rstrip("0").rstrip(".")}
+Tarjeta: {"{:.2f}".format(dollars["oficial"] * tarjeta_tax).rstrip("0").rstrip(".")}"""
 
     if compra > 0:
-        compra_ars = compra*(dollars["oficial"]*qatar_tax)
+        compra_ars = compra * (dollars["oficial"] * qatar_tax)
         compra_usdt = compra_ars / dollars["usdt"]
-        ganancia_ars = compra_ars/100*profit
-        ganancia_usdt = ganancia_ars/dollars["usdt"]
+        ganancia_ars = compra_ars * profit
+        ganancia_usdt = ganancia_ars / dollars["usdt"]
         msg = f"""{"{:.2f}".format(compra).rstrip("0").rstrip(".")} USD Qatar = {"{:.2f}".format(compra_ars).rstrip("0").rstrip(".")} ARS = {"{:.2f}".format(compra_usdt).rstrip("0").rstrip(".")} USDT
 Ganarias {"{:.2f}".format(ganancia_ars).rstrip("0").rstrip(".")} ARS / {"{:.2f}".format(ganancia_usdt).rstrip("0").rstrip(".")} USDT
-Total: {"{:.2f}".format(compra_ars+ganancia_ars).rstrip("0").rstrip(".")} ARS / {"{:.2f}".format(compra_usdt+ganancia_usdt).rstrip("0").rstrip(".")} USDT
+Total: {"{:.2f}".format(compra_ars + ganancia_ars).rstrip("0").rstrip(".")} ARS / {"{:.2f}".format(compra_usdt + ganancia_usdt).rstrip("0").rstrip(".")} USDT
 
 {msg}"""
 
