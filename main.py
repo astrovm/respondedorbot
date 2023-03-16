@@ -78,7 +78,7 @@ def select_random(msg_text: str) -> str:
 
 
 # request new prices and save them in redis
-def _set_new_prices(api_url, parameters, headers, timestamp, prices_response, redis_client):
+def _set_new_prices(api_url, parameters, headers, timestamp, redis_client):
     prices_response = get(api_url, params=parameters, headers=headers)
     prices = json.loads(prices_response.text)
 
@@ -108,7 +108,7 @@ def _get_api_or_cache_prices(convert_to):
     # if there's no cached prices request them
     if redis_response is None:
         prices = _set_new_prices(
-            api_url, parameters, headers, timestamp, response, redis_client)
+            api_url, parameters, headers, timestamp, redis_client)
     else:
         # loads cached prices
         response = json.loads(redis_response)
@@ -118,7 +118,7 @@ def _get_api_or_cache_prices(convert_to):
         CACHE_EXPIRATION_TIME_SECONDS = 200
         if timestamp - response_timestamp > CACHE_EXPIRATION_TIME_SECONDS:
             prices = _set_new_prices(
-                api_url, parameters, headers, timestamp, response, redis_client)
+                api_url, parameters, headers, timestamp, redis_client)
         else:
             # use cached prices if they are recent
             prices = response["prices"]
@@ -129,7 +129,9 @@ def _get_api_or_cache_prices(convert_to):
 # get crypto pices from coinmarketcap
 def get_prices(msg_text: str) -> str:
     prices_number = 0
+    # when the user asks for sats we need to ask for btc to the api and convert later
     convert_to = "USD"
+    # here we keep the currency that we'll request to the api
     convert_to_parameter = "USD"
 
     # check if the user wants to convert the prices
