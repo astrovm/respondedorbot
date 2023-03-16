@@ -479,6 +479,15 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
         "/help": get_help
     }
 
+    # Extract bot's username from the message
+    bot_username = "@" + environ.get("TELEGRAM_BOT_USERNAME")
+    if msg_text.startswith("/") and bot_username in msg_text:
+        # Get the command after the bot's username
+        _, cmd = msg_text.split(bot_username)
+        split_cmd = cmd.strip().split(" ")
+        lower_cmd = split_cmd[0].lower()
+        msg_text = cmd.replace(split_cmd[0], "").strip()
+
     if lower_cmd in commands:
         send_typing(token, chat_id)
         typing = True
@@ -488,7 +497,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
         try:
             reply_to = str(
                 req["message"]["reply_to_message"]["from"]["username"])
-            if reply_to != "respondedorbot" and not lower_cmd.startswith("/ask"):
+            if reply_to != environ.get("TELEGRAM_BOT_USERNAME") and not lower_cmd.startswith("/ask"):
                 return "ignored request"
         except KeyError:
             if chat_type != "private" and not lower_cmd.startswith("/ask"):
