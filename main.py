@@ -1,7 +1,7 @@
 import json
 import redis
 from os import environ
-from math import floor, log
+from math import log
 from time import sleep, time
 from random import randint, uniform
 from requests import get
@@ -356,38 +356,54 @@ def rainbow():
     return msg
 
 
-def convert_base(msg_text):
-    # validate input
+def convert_base(msg_text: str) -> str:
+    """
+    Convert a number from one base to another.
+
+    Usage: /convertbase <number>, <base_from>, <base_to>
+
+    Returns a string in the format "<number> in base <base_from> equals to <result> in base <base_to>",
+    or an error message if the input is invalid.
+    """
     try:
-        user_input = msg_text.split(",")
-        if len(user_input) != 3:
+        # Parse input
+        input_parts = msg_text.split(",")
+        if len(input_parts) != 3:
             return "Invalid input. Usage: /convertbase <number>, <base_from>, <base_to>"
-        user_input_number = user_input[0].strip()
-        base_from = int(user_input[1].strip())
-        base_to_convert = int(user_input[2].strip())
-        if not all(c.isdigit() or c.isalpha() for c in user_input_number):
+        number_str, base_from_str, base_to_str = map(str.strip, input_parts)
+        base_from, base_to = map(int, (base_from_str, base_to_str))
+
+        # Validate input
+        if not all(c.isalnum() for c in number_str):
             return "Invalid input. Number must be alphanumeric."
-        if not 2 <= base_from <= 36 or not 2 <= base_to_convert <= 36:
-            return "Invalid base. Base must be between 2 and 36."
+        if not 2 <= base_from <= 36:
+            return f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
+        if not 2 <= base_to <= 36:
+            return f"Invalid input. Base to '{base_to_str}' must be between 2 and 36."
+
+        # Convert input to output base
+        digits = []
+        value = 0
+        for digit in number_str:
+            if digit.isdigit():
+                digit_value = int(digit)
+            else:
+                digit_value = ord(digit.upper()) - ord('A') + 10
+            value = value * base_from + digit_value
+        while value > 0:
+            digit_value = value % base_to
+            if digit_value >= 10:
+                digit = chr(digit_value - 10 + ord('A'))
+            else:
+                digit = str(digit_value)
+            digits.append(digit)
+            value //= base_to
+        result = ''.join(reversed(digits))
+
+        # Format output string
+        return f"{number_str} in base {base_from} equals to {result} in base {base_to}"
     except ValueError:
         return "Invalid input. Base and number must be integers."
-
-    # convert input to decimal
-    decimal = int(user_input_number, base_from)
-
-    # convert decimal to output base
-    digits = []
-    while decimal > 0:
-        digit = decimal % base_to_convert
-        if digit >= 10:
-            digits.append(chr(digit - 10 + ord('A')))
-        else:
-            digits.append(str(digit))
-        decimal //= base_to_convert
-    result = ''.join(reversed(digits))
-
-    # format output string
-    return f"{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"
 
 
 def get_timestamp():
