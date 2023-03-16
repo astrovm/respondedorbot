@@ -69,6 +69,17 @@ def select_random(msg_text):
     return "habla bien idiota"
 
 
+# request new prices and save them in redis
+def set_new_prices(api_url, parameters, headers, timestamp, response, r):
+    response = get(api_url, params=parameters, headers=headers)
+    prices = json.loads(response.text)
+
+    r.set(f"{api_url}{parameters['convert']}", json.dumps(
+        {"timestamp": timestamp, "prices": prices}))
+
+    return prices
+
+
 def get_prices(msg_text):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
@@ -109,19 +120,10 @@ def get_prices(msg_text):
     # set current timestamp
     timestamp = int(time())
 
-    # def function to request new prices and save them in redis
-    def set_new_prices(api_url, parameters, headers, timestamp):
-        response = get(api_url, params=parameters, headers=headers)
-        prices = json.loads(response.text)
-
-        r.set(f"{api_url}{parameters['convert']}", json.dumps(
-            {"timestamp": timestamp, "prices": prices}))
-
-        return prices
-
     # if there's no cached prices request them
     if redis_response is None:
-        prices = set_new_prices(api_url, parameters, headers, timestamp)
+        prices = set_new_prices(api_url, parameters,
+                                headers, timestamp, response, r)
     else:
         # loads cached prices
         response = json.loads(redis_response)
@@ -129,7 +131,8 @@ def get_prices(msg_text):
 
         # get new prices if cached prices are older than 200 seconds
         if timestamp - response_timestamp > 200:
-            prices = set_new_prices(api_url, parameters, headers, timestamp)
+            prices = set_new_prices(
+                api_url, parameters, headers, timestamp, response, r)
         # use cached prices if they are recent
         else:
             prices = response["prices"]
