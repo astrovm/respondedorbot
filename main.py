@@ -237,13 +237,14 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
 
 
 def get_dolar(msg_text: str) -> str:
-    executor = ThreadPoolExecutor(max_workers=5)
-    dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
-    usdc_thread = executor.submit(
-        get, "https://criptoya.com/api/usdc/ars/1000")
-    dai_thread = executor.submit(get, "https://criptoya.com/api/dai/ars/1000")
-    usdt_thread = executor.submit(
-        get, "https://criptoya.com/api/usdt/ars/1000")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
+        usdc_thread = executor.submit(
+            get, "https://criptoya.com/api/usdc/ars/1000")
+        dai_thread = executor.submit(
+            get, "https://criptoya.com/api/dai/ars/1000")
+        usdt_thread = executor.submit(
+            get, "https://criptoya.com/api/usdt/ars/1000")
 
     dollars = dollars_thread.result().json()
     usdc = usdc_thread.result().json()
@@ -273,14 +274,14 @@ def get_dolar(msg_text: str) -> str:
 
     dollars.sort(key=lambda x: x.get("price"))
 
+    msg = ""
     for dollar in dollars:
-        line = f"""{dollar["name"]}: {"{:.2f}".format(dollar["price"]).rstrip("0").rstrip(".")}"""
+        line = f"{dollar['name']}: {'{:.2f}'.format(dollar['price']).rstrip('0').rstrip('.')}"
 
-        if dollar["name"] == dollars[0]["name"]:
+        if dollar == dollars[0]:
             msg = line
         else:
-            msg = f"""{msg}
-{line}"""
+            msg += f"\n{line}"
 
     return msg
 
