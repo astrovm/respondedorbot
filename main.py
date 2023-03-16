@@ -88,10 +88,10 @@ def _set_new_prices(api_url, parameters, headers, timestamp, response, r):
     return prices
 
 
-def get_prices(msg_text: str) -> str:
+# check if prices are cached before request to api
+def _get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    convert_to = "USD"
     parameters = {
         'start': '1',
         'limit': '100',
@@ -101,23 +101,6 @@ def get_prices(msg_text: str) -> str:
         'Accepts': 'application/json',
         'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
     }
-    prices_number = 0
-
-    # check if the user wants to convert the prices
-    if "IN " in msg_text.upper():
-        words = msg_text.upper().split()
-        coins = ["XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY", "COP", "CZK", "DKK", "HKD", "ISK", "INR", "ILS",
-                 "JPY", "MXN", "TWD", "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR", "USDC", "USDT", "DAI", "BUSD"]
-        convert_to = words[-1]
-        if convert_to in coins:
-            if convert_to == "SATS":
-                parameters["convert"] = "BTC"
-            else:
-                parameters["convert"] = convert_to
-            msg_text = msg_text.upper().replace(
-                f"IN {convert_to}", "").strip()
-        else:
-            return f"{convert_to} is not allowed"
 
     # redis config for cache
     r = config_redis()
@@ -144,6 +127,34 @@ def get_prices(msg_text: str) -> str:
         # use cached prices if they are recent
         else:
             prices = response["prices"]
+
+    return prices
+
+
+# get crypto pices from coinmarketcap
+def get_prices(msg_text: str) -> str:
+    prices_number = 0
+    convert_to = "USD"
+    convert_to_parameter = "USD"
+
+    # check if the user wants to convert the prices
+    if "IN " in msg_text.upper():
+        words = msg_text.upper().split()
+        coins = ["XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY", "COP", "CZK", "DKK", "HKD", "ISK", "INR", "ILS",
+                 "JPY", "MXN", "TWD", "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR", "USDC", "USDT", "DAI", "BUSD"]
+        convert_to = words[-1]
+        if convert_to in coins:
+            if convert_to == "SATS":
+                convert_to_parameter = "BTC"
+            else:
+                convert_to_parameter = convert_to
+            msg_text = msg_text.upper().replace(
+                f"IN {convert_to}", "").strip()
+        else:
+            return f"{convert_to} is not allowed"
+
+    # get prices from api or cache
+    prices = _get_api_or_cache_prices(convert_to_parameter)
 
     # check if the user requested a custom number of prices
     if msg_text != "":
@@ -190,18 +201,18 @@ def get_prices(msg_text: str) -> str:
     msg = ""
     for coin in prices["data"][:prices_number]:
         if convert_to == "SATS":
-            coin["quote"][parameters["convert"]
-                          ]["price"] = coin["quote"][parameters["convert"]]["price"] * 100000000
+            coin["quote"][convert_to_parameter
+                          ]["price"] = coin["quote"][convert_to_parameter]["price"] * 100000000
 
         decimals = "{:.12f}".format(
-            coin["quote"][parameters["convert"]]["price"]).split(".")[-1]
+            coin["quote"][convert_to_parameter]["price"]).split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
         price = "{:.{decimals_number}f}".format(
-            coin["quote"][parameters["convert"]]["price"], decimals_number=zeros + 4).rstrip("0").rstrip(".")
+            coin["quote"][convert_to_parameter]["price"], decimals_number=zeros + 4).rstrip("0").rstrip(".")
         percentage = "{:+.2f}".format(
-            coin["quote"][parameters["convert"]]["percent_change_24h"]).rstrip("0").rstrip(".")
+            coin["quote"][convert_to_parameter]["percent_change_24h"]).rstrip("0").rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
