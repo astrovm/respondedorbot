@@ -48,21 +48,23 @@ def gen_random(name: str) -> str:
 
 
 def select_random(msg_text):
+    # take 2 or more comma separated values and select a random one
     if "," in msg_text:
         if msg_text.startswith(",") or msg_text.endswith(","):
-            return "habla bien idiota"
+            return "Please enter valid values separated by commas."
 
         split_msg = msg_text.split(",")
         values = len(split_msg)
 
-        randValue = randint(0, values - 1)
-        strip_value = split_msg[randValue].strip()
+        rand_value = randint(0, values - 1)
+        strip_value = split_msg[rand_value].strip()
 
         return strip_value
 
+    # take a range of 2 numbers and select a random one
     if "-" in msg_text:
         if msg_text.startswith("-") or msg_text.endswith("-"):
-            return "habla bien idiota"
+            return "Please enter a valid range separated by '-'."
 
         split_msg = msg_text.split("-")
         values = len(split_msg)
@@ -73,8 +75,11 @@ def select_random(msg_text):
             rand_num = str(randint(strip_start, strip_end))
 
             return rand_num
+        else:
+            return "Please enter a valid range separated by '-'."
 
-    return "habla bien idiota"
+    # answer if the user didn't use the command properly
+    return "Please enter a valid input. Use ',' to separate values or '-' to specify a range."
 
 
 # request new prices and save them in redis
