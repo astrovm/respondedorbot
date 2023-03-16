@@ -92,40 +92,35 @@ def _set_new_prices(api_url, parameters, headers, timestamp, prices_response, re
 def _get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    parameters = {
-        'start': '1',
-        'limit': '100',
-        'convert': convert_to
-    }
-    headers = {
-        'Accepts': 'application/json',
-        'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"),
-    }
+    parameters = {'start': '1', 'limit': '100', 'convert': convert_to}
+    headers = {'Accepts': 'application/json',
+               'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"), }
 
     # redis config for cache
-    r = config_redis()
+    redis_client = config_redis()
 
     # get previous api response from redis cache
-    redis_response = r.get(f"{api_url}{parameters['convert']}")
+    redis_response = redis_client.get(f"{api_url}{parameters['convert']}")
 
     # set current timestamp
     timestamp = int(time.time())
 
     # if there's no cached prices request them
     if redis_response is None:
-        prices = _set_new_prices(api_url, parameters,
-                                 headers, timestamp, response, r)
+        prices = _set_new_prices(
+            api_url, parameters, headers, timestamp, response, redis_client)
     else:
         # loads cached prices
         response = json.loads(redis_response)
         response_timestamp = int(response["timestamp"])
 
-        # get new prices if cached prices are older than 200 seconds
-        if timestamp - response_timestamp > 200:
+        # get new prices if cached prices are older than CACHE_EXPIRATION_TIME_SECONDS
+        CACHE_EXPIRATION_TIME_SECONDS = 200
+        if timestamp - response_timestamp > CACHE_EXPIRATION_TIME_SECONDS:
             prices = _set_new_prices(
-                api_url, parameters, headers, timestamp, response, r)
-        # use cached prices if they are recent
+                api_url, parameters, headers, timestamp, response, redis_client)
         else:
+            # use cached prices if they are recent
             prices = response["prices"]
 
     return prices
