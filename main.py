@@ -88,7 +88,7 @@ def _set_new_prices(api_url, parameters, headers, timestamp, response, r):
     return prices
 
 
-def get_prices(msg_text):
+def get_prices(msg_text: str) -> str:
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     convert_to = "USD"
@@ -228,7 +228,7 @@ def _get_lowest(prices):
     return lowest_price
 
 
-def get_dolar():
+def get_dolar(msg_text: str) -> str:
     executor = ThreadPoolExecutor(max_workers=5)
     dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
     usdc_thread = executor.submit(
@@ -277,7 +277,7 @@ def get_dolar():
     return msg
 
 
-def get_devo(msg_text):
+def get_devo(msg_text: str) -> str:
     fee = 0
     compra = 0
 
@@ -333,7 +333,7 @@ Total: {"{:.2f}".format(compra_ars + ganancia_ars).rstrip("0").rstrip(".")} ARS 
     return msg
 
 
-def rainbow():
+def rainbow(msg_text: str) -> str:
     today = datetime.now()
     since = datetime(day=9, month=1, year=2009)
     days_since = (today - since).days
@@ -414,11 +414,11 @@ def convert_base(msg_text: str) -> str:
         return "Invalid input. Base and number must be integers."
 
 
-def get_timestamp():
+def get_timestamp(msg_text: str) -> str:
     return f"{int(time.time())}"
 
 
-def get_help():
+def get_help(msg_text: str) -> str:
     return """
 Available commands:
 
