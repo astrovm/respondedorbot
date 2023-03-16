@@ -78,11 +78,11 @@ def select_random(msg_text: str) -> str:
 
 
 # request new prices and save them in redis
-def _set_new_prices(api_url, parameters, headers, timestamp, response, r):
-    response = get(api_url, params=parameters, headers=headers)
-    prices = json.loads(response.text)
+def _set_new_prices(api_url, parameters, headers, timestamp, prices_response, redis_client):
+    prices_response = get(api_url, params=parameters, headers=headers)
+    prices = json.loads(prices_response.text)
 
-    r.set(f"{api_url}{parameters['convert']}", json.dumps(
+    redis_client.set(f"{api_url}{parameters['convert']}", json.dumps(
         {"timestamp": timestamp, "prices": prices}))
 
     return prices
