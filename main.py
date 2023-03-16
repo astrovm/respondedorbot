@@ -357,35 +357,36 @@ def rainbow():
 
 
 def convert_base(msg_text):
-    user_input = msg_text.split(",")
+    # validate input
+    try:
+        user_input = msg_text.split(",")
+        if len(user_input) != 3:
+            return "Invalid input. Usage: /convertbase <number>, <base_from>, <base_to>"
+        user_input_number = user_input[0].strip()
+        base_from = int(user_input[1].strip())
+        base_to_convert = int(user_input[2].strip())
+        if not all(c.isdigit() or c.isalpha() for c in user_input_number):
+            return "Invalid input. Number must be alphanumeric."
+        if not 2 <= base_from <= 36 or not 2 <= base_to_convert <= 36:
+            return "Invalid base. Base must be between 2 and 36."
+    except ValueError:
+        return "Invalid input. Base and number must be integers."
 
-    user_input_number = user_input[0].strip()
-    base_from = int(user_input[1].strip())
-    decimal = 0
-    index_counter = len(user_input_number) - 1
+    # convert input to decimal
+    decimal = int(user_input_number, base_from)
 
-    for digit in user_input_number:
-        digit_in_ascii = ord(digit)
-        if digit_in_ascii >= 65:
-            digit = digit_in_ascii - 65 + 10
-        decimal += int(digit) * base_from ** index_counter
-        index_counter -= 1
+    # convert decimal to output base
+    digits = []
+    while decimal > 0:
+        digit = decimal % base_to_convert
+        if digit >= 10:
+            digits.append(chr(digit - 10 + ord('A')))
+        else:
+            digits.append(str(digit))
+        decimal //= base_to_convert
+    result = ''.join(reversed(digits))
 
-    base_to_convert = int(user_input[2].strip())
-    max_index = floor(log(decimal) / log(base_to_convert))
-    result = ""
-
-    for index in range(max_index, -1, -1):
-        for digit in range(base_to_convert, -1, -1):
-            index_value = digit * base_to_convert**index
-            if decimal - index_value >= 0:
-                if digit > 9:
-                    result += chr(digit - 10 + 65)
-                else:
-                    result += str(digit)
-                decimal -= index_value
-                break
-
+    # format output string
     return f"{user_input_number} in base {base_from} equals to {result} in base {base_to_convert}"
 
 
