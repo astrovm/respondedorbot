@@ -213,7 +213,7 @@ def get_prices(msg_text: str) -> str:
     return msg
 
 
-def _get_lowest(prices):
+def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     lowest_price = float('inf')
 
     for exchange in prices:
