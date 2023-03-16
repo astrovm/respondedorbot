@@ -1,6 +1,7 @@
 import json
 import redis
 import time
+from typing import Dict
 from os import environ
 from math import log
 from random import randint, uniform
@@ -447,7 +448,8 @@ def send_msg(token, chat_id, msg_id, msg):
     get(url)
 
 
-def handle_msg(start_time, token, req):
+def handle_msg(start_time: float, token: str, req: Dict) -> str:
+    """Handle incoming messages and return a response."""
     msg_text = str(req["message"]["text"])
     msg_id = str(req["message"]["message_id"])
     chat_id = str(req["message"]["chat"]["id"])
@@ -465,57 +467,31 @@ def handle_msg(start_time, token, req):
     lower_cmd = split_msg[0].lower()
     msg_text = msg_text.replace(split_msg[0], "").strip()
 
-    if lower_cmd.startswith("/convertbase"):
+    # Map commands to functions
+    commands = {
+        "/convertbase": convert_base,
+        "/random": select_random,
+        "/prices": get_prices,
+        "/dolar": get_dolar,
+        "/devo": get_devo,
+        "/rainbow": rainbow,
+        "/time": get_timestamp,
+        "/help": get_help
+    }
+
+    if lower_cmd in commands:
         send_typing(token, chat_id)
         typing = True
-        msg_to_send = convert_base(msg_text)
+        msg_to_send = commands[lower_cmd](msg_text)
 
-    if lower_cmd.startswith("/random"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = select_random(msg_text)
-
-    if lower_cmd.startswith("/prices"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = get_prices(msg_text)
-
-    if lower_cmd.startswith("/dolar"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = get_dolar()
-
-    if lower_cmd.startswith("/devo"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = get_devo(msg_text)
-
-    if lower_cmd.startswith("/rainbow"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = rainbow()
-
-    if lower_cmd.startswith("/time"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = get_timestamp()
-
-    if lower_cmd.startswith("/help"):
-        send_typing(token, chat_id)
-        typing = True
-        msg_to_send = get_help()
-
-    if not typing:
+    else:
         try:
             reply_to = str(
                 req["message"]["reply_to_message"]["from"]["username"])
-
-            if reply_to != "respondedorbot" and lower_cmd.startswith(
-                    "/ask") == False:
+            if reply_to != "respondedorbot" and not lower_cmd.startswith("/ask"):
                 return "ignored request"
-        except BaseException:
-            if chat_type != "private" and lower_cmd.startswith(
-                    "/ask") == False:
+        except KeyError:
+            if chat_type != "private" and not lower_cmd.startswith("/ask"):
                 return "ignored request"
 
         send_typing(token, chat_id)
@@ -524,9 +500,7 @@ def handle_msg(start_time, token, req):
 
     if start_time:
         exec_time = round(time.time() - start_time, 4)
-        msg_to_send = f"""{msg_to_send}
-
-Execution time: {str(exec_time).rstrip("0").rstrip(".")} secs"""
+        msg_to_send = f"{msg_to_send}\nExecution time: {exec_time:.4f} secs"
 
     send_msg(token, chat_id, msg_id, msg_to_send)
 
