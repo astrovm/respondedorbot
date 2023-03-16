@@ -22,25 +22,29 @@ def config_redis(host=None, port=None, password=None):
     return r
 
 
-def gen_random(name):
-    time.sleep(uniform(0, 1))
-
-    randRes = randint(0, 1)
-    randName = randint(0, 2)
-
-    if randRes == 1:
-        msg = "si"
-    else:
-        msg = "no"
-
-    if randName == 1:
-        msg = f"{msg} boludo"
-        time.sleep(uniform(0, 1))
-    elif randName == 2:
-        msg = f"{msg} {name}"
+def gen_random(name: str) -> str:
+    try:
         time.sleep(uniform(0, 1))
 
-    return msg
+        rand_res = randint(0, 1)
+        rand_name = randint(0, 2)
+
+        if rand_res:
+            msg = "si"
+        else:
+            msg = "no"
+
+        if rand_name == 1:
+            msg = f"{msg} boludo"
+            time.sleep(uniform(0, 1))
+        elif rand_name == 2:
+            msg = f"{msg} {name}"
+            time.sleep(uniform(0, 1))
+
+        return msg
+
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 def select_random(msg_text):
