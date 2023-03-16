@@ -1,8 +1,8 @@
 import json
 import redis
+import time
 from os import environ
 from math import log
-from time import sleep, time
 from random import randint, uniform
 from requests import get
 from datetime import datetime
@@ -19,7 +19,7 @@ def config_redis(host=environ.get("REDIS_HOST"), port=environ.get("REDIS_PORT"),
 
 
 def gen_random(name):
-    sleep(uniform(0, 1))
+    time.sleep(uniform(0, 1))
 
     randRes = randint(0, 1)
     randName = randint(0, 2)
@@ -31,10 +31,10 @@ def gen_random(name):
 
     if randName == 1:
         msg = f"{msg} boludo"
-        sleep(uniform(0, 1))
+        time.sleep(uniform(0, 1))
     elif randName == 2:
         msg = f"{msg} {name}"
-        sleep(uniform(0, 1))
+        time.sleep(uniform(0, 1))
 
     return msg
 
@@ -118,7 +118,7 @@ def get_prices(msg_text):
     redis_response = r.get(f"{api_url}{parameters['convert']}")
 
     # set current timestamp
-    timestamp = int(time())
+    timestamp = int(time.time())
 
     # if there's no cached prices request them
     if redis_response is None:
@@ -407,8 +407,7 @@ def convert_base(msg_text: str) -> str:
 
 
 def get_timestamp():
-    now = str(int(time()))
-    return now
+    return f"{int(time.time())}"
 
 
 def get_help():
@@ -520,7 +519,7 @@ def handle_msg(start_time, token, req):
         msg_to_send = gen_random(first_name)
 
     if start_time:
-        exec_time = round(time() - start_time, 4)
+        exec_time = round(time.time() - start_time, 4)
         msg_to_send = f"""{msg_to_send}
 
 Execution time: {str(exec_time).rstrip("0").rstrip(".")} secs"""
@@ -529,7 +528,7 @@ Execution time: {str(exec_time).rstrip("0").rstrip(".")} secs"""
 
 
 def responder(request):
-    start_time = time()
+    start_time = time.time()
     try:
         if request.method == "POST":
             token = str(request.args.get("token"))
