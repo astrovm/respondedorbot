@@ -11,11 +11,14 @@ from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
 
-def config_redis(host=environ.get("REDIS_HOST"), port=environ.get("REDIS_PORT"), password=environ.get("REDIS_PASSWORD")):
-    r = redis.Redis(
-        host=host,
-        port=port,
-        password=password)
+def config_redis(host=None, port=None, password=None):
+    """
+    Configure a Redis client with the provided or default values and return it.
+    """
+    host = host or environ.get("REDIS_HOST", "localhost")
+    port = port or environ.get("REDIS_PORT", 6379)
+    password = password or environ.get("REDIS_PASSWORD", None)
+    r = redis.Redis(host=host, port=port, password=password)
     return r
 
 
