@@ -70,7 +70,7 @@ def select_random(msg_text):
 
 
 # request new prices and save them in redis
-def set_new_prices(api_url, parameters, headers, timestamp, response, r):
+def _set_new_prices(api_url, parameters, headers, timestamp, response, r):
     response = get(api_url, params=parameters, headers=headers)
     prices = json.loads(response.text)
 
@@ -122,8 +122,8 @@ def get_prices(msg_text):
 
     # if there's no cached prices request them
     if redis_response is None:
-        prices = set_new_prices(api_url, parameters,
-                                headers, timestamp, response, r)
+        prices = _set_new_prices(api_url, parameters,
+                                 headers, timestamp, response, r)
     else:
         # loads cached prices
         response = json.loads(redis_response)
@@ -131,7 +131,7 @@ def get_prices(msg_text):
 
         # get new prices if cached prices are older than 200 seconds
         if timestamp - response_timestamp > 200:
-            prices = set_new_prices(
+            prices = _set_new_prices(
                 api_url, parameters, headers, timestamp, response, r)
         # use cached prices if they are recent
         else:
@@ -205,8 +205,8 @@ def get_prices(msg_text):
     return msg
 
 
-def get_lowest(prices):
-    lowest_price = 0
+def _get_lowest(prices):
+    lowest_price = float('inf')
 
     for exchange in prices:
         ask = float(prices[exchange]["totalAsk"])
@@ -214,8 +214,8 @@ def get_lowest(prices):
         if ask == 0:
             continue
 
-        if ask < lowest_price or lowest_price == 0:
-            lowest_price = float(prices[exchange]["totalAsk"])
+        if ask < lowest_price:
+            lowest_price = ask
 
     return lowest_price
 
@@ -237,9 +237,9 @@ def get_dolar():
     for dollar in dollars:
         dollars[dollar] = float(dollars[dollar])
 
-    dollars["usdc"] = get_lowest(usdc)
-    dollars["dai"] = get_lowest(dai)
-    dollars["usdt"] = get_lowest(usdt)
+    dollars["usdc"] = _get_lowest(usdc)
+    dollars["dai"] = _get_lowest(dai)
+    dollars["usdt"] = _get_lowest(usdt)
 
     dollars = [
         {"name": "Oficial", "price": dollars["oficial"]},
@@ -295,7 +295,7 @@ def get_devo(msg_text):
     for dollar in dollars:
         dollars[dollar] = float(dollars[dollar])
 
-    dollars["usdt"] = get_lowest(usdt)
+    dollars["usdt"] = _get_lowest(usdt)
 
     tarjeta_tax = 1.75
     qatar_tax = 2
