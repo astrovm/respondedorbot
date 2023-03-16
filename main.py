@@ -1,10 +1,10 @@
+import random
 import json
 import redis
 import time
 from typing import Dict
 from os import environ
 from math import log
-from random import randint, uniform
 from requests import get
 from datetime import datetime
 from urllib.parse import quote
@@ -24,10 +24,10 @@ def config_redis(host=None, port=None, password=None):
 
 def gen_random(name: str) -> str:
     try:
-        time.sleep(uniform(0, 1))
+        time.sleep(random.uniform(0, 1))
 
-        rand_res = randint(0, 1)
-        rand_name = randint(0, 2)
+        rand_res = random.randint(0, 1)
+        rand_name = random.randint(0, 2)
 
         if rand_res:
             msg = "si"
@@ -36,10 +36,10 @@ def gen_random(name: str) -> str:
 
         if rand_name == 1:
             msg = f"{msg} boludo"
-            time.sleep(uniform(0, 1))
+            time.sleep(random.uniform(0, 1))
         elif rand_name == 2:
             msg = f"{msg} {name}"
-            time.sleep(uniform(0, 1))
+            time.sleep(random.uniform(0, 1))
 
         return msg
 
@@ -47,38 +47,33 @@ def gen_random(name: str) -> str:
         print(f"Error: {e}")
 
 
-def select_random(msg_text):
-    # take 2 or more comma separated values and select a random one
-    if "," in msg_text:
-        if msg_text.startswith(",") or msg_text.endswith(","):
-            return "Please enter valid values separated by commas."
+def select_random(msg_text: str) -> str:
+    """
+    Given a message text, selects a random value or number based on the format.
 
-        split_msg = msg_text.split(",")
-        values = len(split_msg)
+    Args:
+        msg_text (str): the input message text
 
-        rand_value = randint(0, values - 1)
-        strip_value = split_msg[rand_value].strip()
+    Returns:
+        str: a random value or number, or an error message if the input is invalid
+    """
+    try:
+        # Check if the input is a comma-separated list of values
+        values = [v.strip() for v in msg_text.split(",")]
+        if len(values) >= 2:
+            return random.choice(values)
+    except ValueError:
+        pass
 
-        return strip_value
+    try:
+        # Check if the input is a range of numbers
+        start, end = [int(v.strip()) for v in msg_text.split("-")]
+        if start < end:
+            return str(random.randint(start, end))
+    except ValueError:
+        pass
 
-    # take a range of 2 numbers and select a random one
-    if "-" in msg_text:
-        if msg_text.startswith("-") or msg_text.endswith("-"):
-            return "Please enter a valid range separated by '-'."
-
-        split_msg = msg_text.split("-")
-        values = len(split_msg)
-
-        if values == 2:
-            strip_start = int(split_msg[0].strip())
-            strip_end = int(split_msg[1].strip())
-            rand_num = str(randint(strip_start, strip_end))
-
-            return rand_num
-        else:
-            return "Please enter a valid range separated by '-'."
-
-    # answer if the user didn't use the command properly
+    # Return an error message for invalid inputs
     return "Please enter a valid input. Use ',' to separate values or '-' to specify a range."
 
 
