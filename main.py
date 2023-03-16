@@ -278,7 +278,7 @@ def get_devo(msg_text):
     else:
         fee = float(msg_text) / 100
 
-    if fee != fee or fee < 0 or fee >= 100 or compra != compra or compra < 0:
+    if fee != fee or fee < 0 or fee > 1 or compra != compra or compra < 0:
         return "te voy a matar hijo de puta"
 
     executor = ThreadPoolExecutor(max_workers=5)
