@@ -11,15 +11,57 @@ from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
 
-def config_redis(host=None, port=None, password=None):
+def _config_redis(host=None, port=None, password=None):
     """
     Configure a Redis client with the provided or default values and return it.
     """
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
-    r = redis.Redis(host=host, port=port, password=password)
-    return r
+    redis_client = redis.Redis(host=host, port=port, password=password)
+    return redis_client
+
+
+# request new data and save it in redis
+def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash):
+    response = requests.get(api_url, params=parameters, headers=headers)
+    response_json = json.loads(response.text)
+    redis_value = {"timestamp": timestamp, "data": response_json}
+
+    redis_client.set(request_hash, json.dumps(redis_value))
+
+    return redis_value
+
+
+# generic proxy for caching any request
+def _cached_requests(api_url, parameters={}, headers={}, expiration_time=200):
+    # create unique hash for the request
+    request_hash = str(hash((api_url, parameters, headers, expiration_time)))
+
+    # redis config
+    redis_client = _config_redis()
+
+    # get previous api data from redis cache
+    redis_response = redis_client.get(request_hash)
+
+    # set current timestamp
+    timestamp = int(time.time())
+
+    # if there's no cached data request it
+    if redis_response is None:
+        response = _set_new_data(
+            api_url, parameters, headers, timestamp, redis_client, request_hash)
+    else:
+        # loads cached data
+        response = json.loads(redis_response)
+        response_timestamp = int(response["timestamp"])
+
+        # get new data if cache is older than expiration_time
+        if timestamp - response_timestamp > expiration_time:
+            response = _set_new_data(
+                api_url, parameters, headers, timestamp, redis_client, request_hash)
+
+    return response
 
 
 def gen_random(name: str) -> str:
@@ -77,17 +119,6 @@ def select_random(msg_text: str) -> str:
     return "Please enter a valid input. Use ',' to separate values or '-' to specify a range."
 
 
-# request new prices and save them in redis
-def _set_new_prices(api_url, parameters, headers, timestamp, redis_client):
-    prices_response = requests.get(api_url, params=parameters, headers=headers)
-    prices = json.loads(prices_response.text)
-
-    redis_client.set(f"{api_url}{parameters['convert']}", json.dumps(
-        {"timestamp": timestamp, "prices": prices}))
-
-    return prices
-
-
 # check if prices are cached before request to api
 def _get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
@@ -96,34 +127,9 @@ def _get_api_or_cache_prices(convert_to):
     headers = {'Accepts': 'application/json',
                'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"), }
 
-    # redis config for cache
-    redis_client = config_redis()
+    response = _cached_requests(api_url, parameters, headers, 200)
 
-    # get previous api response from redis cache
-    redis_response = redis_client.get(f"{api_url}{parameters['convert']}")
-
-    # set current timestamp
-    timestamp = int(time.time())
-
-    # if there's no cached prices request them
-    if redis_response is None:
-        prices = _set_new_prices(
-            api_url, parameters, headers, timestamp, redis_client)
-    else:
-        # loads cached prices
-        response = json.loads(redis_response)
-        response_timestamp = int(response["timestamp"])
-
-        # get new prices if cached prices are older than CACHE_EXPIRATION_TIME_SECONDS
-        CACHE_EXPIRATION_TIME_SECONDS = 200
-        if timestamp - response_timestamp > CACHE_EXPIRATION_TIME_SECONDS:
-            prices = _set_new_prices(
-                api_url, parameters, headers, timestamp, redis_client)
-        else:
-            # use cached prices if they are recent
-            prices = response["prices"]
-
-    return prices
+    return response["data"]
 
 
 # get crypto pices from coinmarketcap
@@ -348,7 +354,7 @@ def rainbow(msg_text: str) -> str:
     api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
     api_response = requests.get(api_request)
 
-    r = config_redis()
+    r = _config_redis()
 
     if api_response.status_code == 200:
         price = api_response.json()
