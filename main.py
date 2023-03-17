@@ -139,7 +139,7 @@ def _get_api_or_cache_prices(convert_to):
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {'start': '1', 'limit': '100', 'convert': convert_to}
     headers = {'Accepts': 'application/json',
-               'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY"), }
+               'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY")}
 
     response = _cached_requests(api_url, parameters, headers, 200)
 
