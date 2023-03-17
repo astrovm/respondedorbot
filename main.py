@@ -365,9 +365,8 @@ def rainbow(msg_text: str) -> str:
     value = 10 ** (2.66167155005961 *
                    log(days_since) - 17.9183761889864)
 
-    api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    api_response = _cached_requests(api_request, None, None, 200)
-
+    api_response = _cached_requests("https://api.coingecko.com/api/v3/simple/price", {
+                                    "ids": "bitcoin", "vs_currencies": "usd"}, None, 200)
     price = api_response["data"]
 
     percentage = ((price["bitcoin"]["usd"] - value) / value)*100
