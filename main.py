@@ -365,11 +365,10 @@ def rainbow(msg_text: str) -> str:
     value = 10 ** (2.66167155005961 *
                    log(days_since) - 17.9183761889864)
 
-    api_response = _cached_requests("https://api.coingecko.com/api/v3/simple/price", {
-                                    "ids": "bitcoin", "vs_currencies": "usd"}, None, 200)
-    price = api_response["data"]
+    api_response = _get_api_or_cache_prices("USD")
+    price = api_response["data"][0]["quote"]["USD"]["price"]
 
-    percentage = ((price["bitcoin"]["usd"] - value) / value)*100
+    percentage = ((price - value) / value)*100
     if percentage > 0:
         percentage_txt = f"{percentage:.2f}% overvalued"
     else:
