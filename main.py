@@ -2,10 +2,10 @@ import random
 import json
 import redis
 import time
+import requests
 from typing import Dict
 from os import environ
 from math import log
-from requests import get
 from datetime import datetime
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
@@ -79,7 +79,7 @@ def select_random(msg_text: str) -> str:
 
 # request new prices and save them in redis
 def _set_new_prices(api_url, parameters, headers, timestamp, redis_client):
-    prices_response = get(api_url, params=parameters, headers=headers)
+    prices_response = requests.get(api_url, params=parameters, headers=headers)
     prices = json.loads(prices_response.text)
 
     redis_client.set(f"{api_url}{parameters['convert']}", json.dumps(
@@ -238,13 +238,14 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
 
 def get_dolar(msg_text: str) -> str:
     with ThreadPoolExecutor(max_workers=5) as executor:
-        dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
+        dollars_thread = executor.submit(
+            requests.get, "https://criptoya.com/api/dolar")
         usdc_thread = executor.submit(
-            get, "https://criptoya.com/api/usdc/ars/1000")
+            requests.get, "https://criptoya.com/api/usdc/ars/1000")
         dai_thread = executor.submit(
-            get, "https://criptoya.com/api/dai/ars/1000")
+            requests.get, "https://criptoya.com/api/dai/ars/1000")
         usdt_thread = executor.submit(
-            get, "https://criptoya.com/api/usdt/ars/1000")
+            requests.get, "https://criptoya.com/api/usdt/ars/1000")
 
     dollars = dollars_thread.result().json()
     usdc = usdc_thread.result().json()
@@ -302,9 +303,10 @@ def get_devo(msg_text: str) -> str:
         return "te voy a matar hijo de puta"
 
     executor = ThreadPoolExecutor(max_workers=5)
-    dollars_thread = executor.submit(get, "https://criptoya.com/api/dolar")
+    dollars_thread = executor.submit(
+        requests.get, "https://criptoya.com/api/dolar")
     usdt_thread = executor.submit(
-        get, "https://criptoya.com/api/usdt/ars/1000")
+        requests.get, "https://criptoya.com/api/usdt/ars/1000")
 
     dollars = dollars_thread.result().json()
     usdt = usdt_thread.result().json()
@@ -350,7 +352,7 @@ def rainbow(msg_text: str) -> str:
                    log(days_since) - 17.9183761889864)
 
     api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    api_response = get(api_request)
+    api_response = requests.get(api_request)
 
     r = config_redis()
 
@@ -454,14 +456,14 @@ Available commands:
 def send_typing(token, chat_id):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
-    get(url)
+    requests.get(url)
 
 
 def send_msg(token, chat_id, msg_id, msg):
     url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
         chat_id + "&reply_to_message_id=" + \
         msg_id + "&text=" + quote(msg, safe='/')
-    get(url)
+    requests.get(url)
 
 
 def handle_msg(start_time: float, token: str, req: Dict) -> str:
