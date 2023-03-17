@@ -259,19 +259,19 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
 def get_dolar(msg_text: str) -> str:
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/dolar")
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, 200)
         usdc_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/usdc/ars/1000")
+            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, 200)
         dai_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/dai/ars/1000")
+            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, 200)
         usdt_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/usdt/ars/1000")
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, 200)
 
     dollars = {key: float(value)
-               for key, value in dollars_thread.result().json().items()}
-    usdc = usdc_thread.result().json()
-    dai = dai_thread.result().json()
-    usdt = usdt_thread.result().json()
+               for key, value in dollars_thread.result()["data"].items()}
+    usdc = usdc_thread.result()["data"]
+    dai = dai_thread.result()["data"]
+    usdt = usdt_thread.result()["data"]
     dollars["usdc"] = _get_lowest(usdc)
     dollars["dai"] = _get_lowest(dai)
     dollars["usdt"] = _get_lowest(usdt)
@@ -321,13 +321,13 @@ def get_devo(msg_text: str) -> str:
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/dolar")
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, 200)
         usdt_thread = executor.submit(
-            requests.get, "https://criptoya.com/api/usdt/ars/1000")
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, 200)
 
     dollars = {key: float(value)
-               for key, value in dollars_thread.result().json().items()}
-    usdt = usdt_thread.result().json()
+               for key, value in dollars_thread.result()["data"].items()}
+    usdt = usdt_thread.result()["data"]
     dollars["usdt"] = _get_lowest(usdt)
 
     tarjeta_tax = 1.75
