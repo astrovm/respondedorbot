@@ -40,12 +40,11 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 # generic proxy for caching any request
 def _cached_requests(api_url, parameters, headers, expiration_time):
     # create unique hash for the request
-    data_tuple = (api_url,)
-    if parameters:
-        data_tuple += (frozenset(parameters.items()),)
-    if headers:
-        data_tuple += (frozenset(headers.items()),)
-    request_hash = str(hash(data_tuple))
+    arguments_dict = {"api_url": api_url,
+                      "parameters": parameters,
+                      "headers": headers}
+    arguments_frozen = frozenset(arguments_dict.items())
+    request_hash = str(hash(arguments_frozen))
 
     # redis config
     redis_client = _config_redis()
