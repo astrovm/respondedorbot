@@ -25,12 +25,15 @@ def _config_redis(host=None, port=None, password=None):
 # request new data and save it in redis
 def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash):
     response = requests.get(api_url, params=parameters, headers=headers)
-    response_json = json.loads(response.text)
-    redis_value = {"timestamp": timestamp, "data": response_json}
+    if response.status_code == 200:
+        response_json = json.loads(response.text)
+        redis_value = {"timestamp": timestamp, "data": response_json}
 
-    redis_client.set(request_hash, json.dumps(redis_value))
+        redis_client.set(request_hash, json.dumps(redis_value))
 
-    return redis_value
+        return redis_value
+    else:
+        return {"error": response.status_code}
 
 
 # generic proxy for caching any request
@@ -50,19 +53,24 @@ def _cached_requests(api_url, parameters={}, headers={}, expiration_time=200):
 
     # if there's no cached data request it
     if redis_response is None:
-        response = _set_new_data(
+        new_data = _set_new_data(
             api_url, parameters, headers, timestamp, redis_client, request_hash)
+        return new_data
     else:
         # loads cached data
-        response = json.loads(redis_response)
-        response_timestamp = int(response["timestamp"])
+        cached_data = json.loads(redis_response)
+        cached_data_timestamp = int(cached_data["timestamp"])
 
         # get new data if cache is older than expiration_time
-        if timestamp - response_timestamp > expiration_time:
-            response = _set_new_data(
+        if timestamp - cached_data_timestamp > expiration_time:
+            new_data = _set_new_data(
                 api_url, parameters, headers, timestamp, redis_client, request_hash)
-
-    return response
+            if new_data["timestamp"]:
+                return new_data
+            else:
+                return cached_data
+        else:
+            return cached_data
 
 
 def gen_random(name: str) -> str:
