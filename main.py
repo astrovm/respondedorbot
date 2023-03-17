@@ -140,7 +140,9 @@ def _get_api_or_cache_prices(convert_to):
     headers = {'Accepts': 'application/json',
                'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY")}
 
-    response = _cached_requests(api_url, parameters, headers, 200)
+    cache_expiration_time = 300
+    response = _cached_requests(
+        api_url, parameters, headers, cache_expiration_time)
 
     return response["data"]
 
@@ -256,15 +258,16 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
 
 
 def get_dolar(msg_text: str) -> str:
+    cache_expiration_time = 300
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time)
         usdc_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time)
         dai_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time)
         usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time)
 
     dollars = {key: float(value)
                for key, value in dollars_thread.result()["data"].items()}
@@ -318,11 +321,12 @@ def get_devo(msg_text: str) -> str:
     if fee != fee or fee < 0 or fee > 1 or compra != compra or compra < 0:
         return "te voy a matar hijo de puta"
 
+    cache_expiration_time = 300
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time)
         usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, 200)
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time)
 
     dollars = {key: float(value)
                for key, value in dollars_thread.result()["data"].items()}
