@@ -24,7 +24,12 @@ def _config_redis(host=None, port=None, password=None):
 
 # request new data and save it in redis
 def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash):
+    if parameters == {}:
+        parameters = None
+    if headers == {}:
+        headers = None
     response = requests.get(api_url, params=parameters, headers=headers)
+
     if response.status_code == 200:
         response_json = json.loads(response.text)
         redis_value = {"timestamp": timestamp, "data": response_json}
