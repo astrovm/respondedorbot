@@ -247,14 +247,11 @@ def get_dolar(msg_text: str) -> str:
         usdt_thread = executor.submit(
             requests.get, "https://criptoya.com/api/usdt/ars/1000")
 
-    dollars = dollars_thread.result().json()
+    dollars = {key: float(value)
+               for key, value in dollars_thread.result().json().items()}
     usdc = usdc_thread.result().json()
     dai = dai_thread.result().json()
     usdt = usdt_thread.result().json()
-
-    for dollar in dollars:
-        dollars[dollar] = float(dollars[dollar])
-
     dollars["usdc"] = _get_lowest(usdc)
     dollars["dai"] = _get_lowest(dai)
     dollars["usdt"] = _get_lowest(usdt)
