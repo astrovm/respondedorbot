@@ -525,7 +525,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 
     if start_time:
         exec_time = round(time.time() - start_time, 4)
-        msg_to_send = f"{msg_to_send}\nExecution time: {exec_time:.4f} secs"
+        msg_to_send = f"{msg_to_send}\n\nExecution time: {exec_time:.4f} secs"
 
     send_msg(token, chat_id, msg_id, msg_to_send)
 
