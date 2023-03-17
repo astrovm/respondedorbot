@@ -353,18 +353,9 @@ def rainbow(msg_text: str) -> str:
                    log(days_since) - 17.9183761889864)
 
     api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    api_response = requests.get(api_request)
+    api_response = _cached_requests(api_request, {}, {}, 200)
 
-    r = _config_redis()
-
-    if api_response.status_code == 200:
-        price = api_response.json()
-        r.set(api_request, json.dumps(price))
-    else:
-        redis_response = r.get(api_request)
-        if redis_response is None:
-            return f"error {api_response.status_code}"
-        price = json.loads(redis_response)
+    price = api_response["data"]
 
     percentage = ((price["bitcoin"]["usd"] - value) / value)*100
     if percentage > 0:
