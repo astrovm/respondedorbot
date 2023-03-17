@@ -24,10 +24,6 @@ def _config_redis(host=None, port=None, password=None):
 
 # request new data and save it in redis
 def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash):
-    if parameters == {}:
-        parameters = None
-    if headers == {}:
-        headers = None
     response = requests.get(api_url, params=parameters, headers=headers)
 
     if response.status_code == 200:
@@ -42,10 +38,14 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 
 
 # generic proxy for caching any request
-def _cached_requests(api_url, parameters={}, headers={}, expiration_time=200):
+def _cached_requests(api_url, parameters, headers, expiration_time):
     # create unique hash for the request
-    request_hash = str(
-        hash((api_url, frozenset(parameters.items()), frozenset(headers.items()))))
+    data_tuple = (api_url,)
+    if parameters:
+        data_tuple += (frozenset(parameters.items()),)
+    if headers:
+        data_tuple += (frozenset(headers.items()),)
+    request_hash = str(hash(data_tuple))
 
     # redis config
     redis_client = _config_redis()
@@ -366,7 +366,7 @@ def rainbow(msg_text: str) -> str:
                    log(days_since) - 17.9183761889864)
 
     api_request = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    api_response = _cached_requests(api_request, {}, {}, 200)
+    api_response = _cached_requests(api_request, None, None, 200)
 
     price = api_response["data"]
 
