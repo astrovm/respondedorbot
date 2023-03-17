@@ -302,18 +302,15 @@ def get_devo(msg_text: str) -> str:
     if fee != fee or fee < 0 or fee > 1 or compra != compra or compra < 0:
         return "te voy a matar hijo de puta"
 
-    executor = ThreadPoolExecutor(max_workers=5)
-    dollars_thread = executor.submit(
-        requests.get, "https://criptoya.com/api/dolar")
-    usdt_thread = executor.submit(
-        requests.get, "https://criptoya.com/api/usdt/ars/1000")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        dollars_thread = executor.submit(
+            requests.get, "https://criptoya.com/api/dolar")
+        usdt_thread = executor.submit(
+            requests.get, "https://criptoya.com/api/usdt/ars/1000")
 
-    dollars = dollars_thread.result().json()
+    dollars = {key: float(value)
+               for key, value in dollars_thread.result().json().items()}
     usdt = usdt_thread.result().json()
-
-    for dollar in dollars:
-        dollars[dollar] = float(dollars[dollar])
-
     dollars["usdt"] = _get_lowest(usdt)
 
     tarjeta_tax = 1.75
