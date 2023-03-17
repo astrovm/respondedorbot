@@ -70,7 +70,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time):
         if timestamp - cached_data_timestamp > expiration_time:
             new_data = _set_new_data(
                 api_url, parameters, headers, timestamp, redis_client, request_hash)
-            if new_data["timestamp"]:
+            if "timestamp" in new_data:
                 return new_data
             else:
                 return cached_data
