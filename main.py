@@ -43,8 +43,8 @@ def _cached_requests(api_url, parameters, headers, expiration_time):
     arguments_dict = {"api_url": api_url,
                       "parameters": parameters,
                       "headers": headers}
-    arguments_frozen = frozenset(arguments_dict.items())
-    request_hash = str(hash(arguments_frozen))
+    arguments_str = json.dumps(arguments_dict, sort_keys=True)
+    request_hash = str(hash(arguments_str))
 
     # redis config
     redis_client = _config_redis()
