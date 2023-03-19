@@ -461,13 +461,13 @@ Available commands:
     """
 
 
-def send_typing(token, chat_id):
+def send_typing(token: str, chat_id: str):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
     requests.get(url)
 
 
-def send_msg(token, chat_id, msg_id, msg):
+def send_msg(token: str, chat_id: str, msg_id: str, msg: str):
     url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
         chat_id + "&reply_to_message_id=" + \
         msg_id + "&text=" + quote(msg, safe='/')
@@ -539,7 +539,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 
 
 @functions_framework.http
-def responder(request: Request):
+def responder(request: Request) -> str:
     start_time = time.time()
     try:
         token = str(request.args.get("token"))
