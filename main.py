@@ -477,6 +477,7 @@ def send_msg(token, chat_id, msg_id, msg):
 def handle_msg(start_time: float, token: str, req: Dict) -> str:
     """Handle incoming messages and return a response."""
     msg_text = str(req["message"]["text"])
+    sanitized_msg_text = msg_text
     msg_id = str(req["message"]["message_id"])
     chat_id = str(req["message"]["chat"]["id"])
     chat_type = str(req["message"]["chat"]["type"])
@@ -484,14 +485,15 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
     typing = False
     msg_to_send = ""
 
-    if msg_text.startswith("/exectime"):
-        msg_text = msg_text.replace("/exectime", "").strip()
+    if sanitized_msg_text.startswith("/exectime"):
+        sanitized_msg_text = sanitized_msg_text.replace(
+            "/exectime", "").strip()
     else:
         start_time = False
 
-    split_msg = msg_text.strip().split(" ")
+    split_msg = sanitized_msg_text.strip().split(" ")
     lower_cmd = split_msg[0].lower()
-    msg_text = msg_text.replace(split_msg[0], "").strip()
+    sanitized_msg_text = sanitized_msg_text.replace(split_msg[0], "").strip()
 
     # Map commands to functions
     commands = {
@@ -513,7 +515,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
     if lower_cmd in commands:
         send_typing(token, chat_id)
         typing = True
-        msg_to_send = commands[lower_cmd](msg_text)
+        msg_to_send = commands[lower_cmd](sanitized_msg_text)
 
     else:
         try:
