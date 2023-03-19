@@ -3,6 +3,7 @@ import json
 import redis
 import time
 import requests
+from flask import Request
 from typing import Dict
 from os import environ
 from math import log
@@ -534,7 +535,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
     send_msg(token, chat_id, msg_id, msg_to_send)
 
 
-def responder(request):
+def responder(request: Request):
     start_time = time.time()
     try:
         if request.method == "POST":

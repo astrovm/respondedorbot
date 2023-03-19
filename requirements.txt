@@ -1,2 +1,4 @@
 redis
 requests
+functions_framework
+flask
