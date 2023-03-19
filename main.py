@@ -3,6 +3,7 @@ import json
 import redis
 import time
 import requests
+import functions_framework
 from flask import Request
 from typing import Dict
 from os import environ
@@ -535,20 +536,18 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
     send_msg(token, chat_id, msg_id, msg_to_send)
 
 
+@functions_framework.http
 def responder(request: Request):
     start_time = time.time()
     try:
-        if request.method == "POST":
-            token = str(request.args.get("token"))
-            if token != environ.get("TELEGRAM_TOKEN"):
-                return "wrong token"
+        token = str(request.args.get("token"))
+        if token != environ.get("TELEGRAM_TOKEN"):
+            return "wrong token"
 
-            req = request.get_json()
+        req = request.get_json()
 
-            handle_msg(start_time, token, req)
+        handle_msg(start_time, token, req)
 
-            return "ok"
-        else:
-            return "bad request"
+        return "ok"
     except BaseException:
         return "unexpected error"
