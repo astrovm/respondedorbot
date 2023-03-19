@@ -519,10 +519,10 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
         try:
             reply_to = str(
                 req["message"]["reply_to_message"]["from"]["username"])
-            if reply_to != "respondedorbot" and not lower_cmd.startswith("/ask"):
+            if reply_to != "respondedorbot" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
         except KeyError:
-            if chat_type != "private" and not lower_cmd.startswith("/ask"):
+            if chat_type != "private" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
 
         send_typing(token, chat_id)
