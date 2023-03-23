@@ -8,7 +8,7 @@ from flask import Request
 from typing import Dict
 from os import environ
 from math import log
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -41,7 +41,28 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 
         return redis_value
     else:
-        return {"error": response.status_code}
+        return None
+
+
+# get cached data from previous hour
+def _get_cache_of_previus_hour(hours, api_url, parameters, headers, redis_client):
+    # create unique hash for the request
+    arguments_dict = {"api_url": api_url,
+                      "parameters": parameters,
+                      "headers": headers}
+    arguments_str = json.dumps(arguments_dict, sort_keys=True)
+    request_hash = str(hash(arguments_str))
+
+    # subtract hours to current date
+    date = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d-%H")
+
+    # get previous api data from redis cache
+    redis_response = redis_client.get(date+request_hash)
+
+    if redis_response is None:
+        return None
+    else:
+        return json.loads(redis_response)
 
 
 # generic proxy for caching any request
@@ -264,18 +285,7 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     return lowest_price
 
 
-def get_dolar(msg_text: str) -> str:
-    cache_expiration_time = 300
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True)
-        usdc_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True)
-        dai_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True)
-        usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True)
-
+def _sort_dolars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
     dollars = {key: float(value)
                for key, value in dollars_thread.result()["data"].items()}
     usdc = usdc_thread.result()["data"]
@@ -300,6 +310,24 @@ def get_dolar(msg_text: str) -> str:
     ]
 
     dollars.sort(key=lambda x: x.get("price"))
+
+    return dollars
+
+
+def get_dolar(msg_text: str) -> str:
+    cache_expiration_time = 300
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        dollars_thread = executor.submit(
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True)
+        usdc_thread = executor.submit(
+            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True)
+        dai_thread = executor.submit(
+            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True)
+        usdt_thread = executor.submit(
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True)
+
+    dollars = _sort_dolars(dollars_thread, usdc_thread,
+                           dai_thread, usdt_thread)
 
     msg = ""
     for dollar in dollars:
