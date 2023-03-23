@@ -268,13 +268,13 @@ def get_dolar(msg_text: str) -> str:
     cache_expiration_time = 300
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time)
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True)
         usdc_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time)
+            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True)
         dai_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time)
+            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True)
         usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time)
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True)
 
     dollars = {key: float(value)
                for key, value in dollars_thread.result()["data"].items()}
