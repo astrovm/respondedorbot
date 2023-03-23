@@ -25,14 +25,19 @@ def _config_redis(host=None, port=None, password=None):
 
 
 # request new data and save it in redis
-def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash):
+def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache):
     response = requests.get(api_url, params=parameters, headers=headers)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
         redis_value = {"timestamp": timestamp, "data": response_json}
-
         redis_client.set(request_hash, json.dumps(redis_value))
+
+        # if hourly_cache is True, save the data in redis with the current hour
+        if hourly_cache:
+            # get current date with hour
+            date = datetime.now().strftime("%Y-%m-%d-%H")
+            redis_client.set(date+request_hash, response.text)
 
         return redis_value
     else:
@@ -40,7 +45,7 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 
 
 # generic proxy for caching any request
-def _cached_requests(api_url, parameters, headers, expiration_time):
+def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False):
     # create unique hash for the request
     arguments_dict = {"api_url": api_url,
                       "parameters": parameters,
@@ -60,7 +65,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time):
     # if there's no cached data request it
     if redis_response is None:
         new_data = _set_new_data(
-            api_url, parameters, headers, timestamp, redis_client, request_hash)
+            api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
         return new_data
     else:
         # loads cached data
@@ -70,7 +75,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time):
         # get new data if cache is older than expiration_time
         if timestamp - cached_data_timestamp > expiration_time:
             new_data = _set_new_data(
-                api_url, parameters, headers, timestamp, redis_client, request_hash)
+                api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
             if "timestamp" in new_data:
                 return new_data
             else:
