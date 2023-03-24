@@ -76,7 +76,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     if get_history is not False:
         cache_history = _get_cache_history(
             get_history, request_hash, redis_client)
-        if "timestamp" not in cache_history:
+        if cache_history is not None and "timestamp" not in cache_history:
             cache_history = None
     else:
         cache_history = None
@@ -297,7 +297,7 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     return lowest_price
 
 
-def _sort_dolars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
+def _sort_dollars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
     dollars = {key: float(value)
                for key, value in dollars_thread["data"].items()}
     dollars["solidario"] = dollars["oficial"] * 1.65
@@ -351,7 +351,7 @@ def _sort_dolars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
     return dollars
 
 
-def get_dolar(msg_text: str) -> str:
+def get_dollars(msg_text: str) -> str:
     cache_expiration_time = 300
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
@@ -363,8 +363,8 @@ def get_dolar(msg_text: str) -> str:
         usdt_thread = executor.submit(
             _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True, 24)
 
-    dollars = _sort_dolars(dollars_thread.result(), usdc_thread.result(),
-                           dai_thread.result(), usdt_thread.result())
+    dollars = _sort_dollars(dollars_thread.result(), usdc_thread.result(),
+                            dai_thread.result(), usdt_thread.result())
 
     msg = ""
     for dollar in dollars:
@@ -574,7 +574,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
         "/convertbase": convert_base,
         "/random": select_random,
         "/prices": get_prices,
-        "/dolar": get_dolar,
+        "/dolar": get_dollars,
         "/devo": get_devo,
         "/rainbow": rainbow,
         "/time": get_timestamp,
