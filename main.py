@@ -76,6 +76,8 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     if get_history is not False:
         cache_history = _get_cache_history(
             get_history, request_hash, redis_client)
+    else:
+        cache_history = None
 
     # set current timestamp
     timestamp = int(time.time())
