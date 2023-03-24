@@ -76,6 +76,8 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     if get_history is not False:
         cache_history = _get_cache_history(
             get_history, request_hash, redis_client)
+        if "timestamp" not in cache_history:
+            cache_history = None
     else:
         cache_history = None
 
@@ -297,26 +299,51 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
 
 def _sort_dolars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
     dollars = {key: float(value)
-               for key, value in dollars_thread.result()["data"].items()}
-    usdc = usdc_thread.result()["data"]
-    dai = dai_thread.result()["data"]
-    usdt = usdt_thread.result()["data"]
-    dollars["usdc"] = _get_lowest(usdc)
-    dollars["dai"] = _get_lowest(dai)
-    dollars["usdt"] = _get_lowest(usdt)
+               for key, value in dollars_thread["data"].items()}
+    dollars["solidario"] = dollars["oficial"] * 1.65
+    dollars["tarjeta"] = dollars["oficial"] * 1.75
+    dollars["qatar"] = dollars["oficial"] * 2
+    dollars["usdc"] = _get_lowest(usdc_thread["data"])
+    dollars["dai"] = _get_lowest(dai_thread["data"])
+    dollars["usdt"] = _get_lowest(usdt_thread["data"])
+
+    dollars_history = {}
+    if "history" in dollars_thread:
+        dollars_history = {key: float(value)
+                           for key, value in dollars_thread["history"].items()}
+        dollars_history["solidario"] = dollars_history["oficial"] * 1.65
+        dollars_history["tarjeta"] = dollars_history["oficial"] * 1.75
+        dollars_history["qatar"] = dollars_history["oficial"] * 2
+        if "history" in usdc_thread:
+            dollars_history["usdc"] = _get_lowest(usdc_thread["history"])
+        if "history" in dai_thread:
+            dollars_history["dai"] = _get_lowest(dai_thread["history"])
+        if "history" in usdt_thread:
+            dollars_history["usdt"] = _get_lowest(usdt_thread["history"])
 
     dollars = [
-        {"name": "Oficial", "price": dollars["oficial"]},
-        {"name": "Solidario", "price": dollars["oficial"] * 1.65},
-        {"name": "Tarjeta", "price": dollars["oficial"] * 1.75},
-        {"name": "Qatar", "price": dollars["oficial"] * 2},
-        {"name": "MEP", "price": dollars["mepgd30"]},
-        {"name": "CCL", "price": dollars["cclgd30"]},
-        {"name": "Bitcoin", "price": dollars["ccb"]},
-        {"name": "Blue", "price": dollars["blue"]},
-        {"name": "USDC", "price": dollars["usdc"]},
-        {"name": "DAI", "price": dollars["dai"]},
-        {"name": "USDT", "price": dollars["usdt"]},
+        {"name": "Oficial", "price": dollars["oficial"],
+            "history": dollars_history["oficial"] if "oficial" in dollars_history else None},
+        {"name": "Solidario", "price": dollars["solidario"],
+            "history": dollars_history["solidario"] if "solidario" in dollars_history else None},
+        {"name": "Tarjeta", "price": dollars["tarjeta"],
+            "history": dollars_history["tarjeta"] if "tarjeta" in dollars_history else None},
+        {"name": "Qatar", "price": dollars["qatar"],
+            "history": dollars_history["qatar"] if "qatar" in dollars_history else None},
+        {"name": "MEP", "price": dollars["mepgd30"], "history": dollars_history["mepgd30"]
+            if "mepgd30" in dollars_history else None},
+        {"name": "CCL", "price": dollars["cclgd30"],
+            "history": dollars_history["cclgd30"] if "cclgd30" in dollars_history else None},
+        {"name": "Bitcoin", "price": dollars["ccb"],
+            "history": dollars_history["ccb"] if "ccb" in dollars_history else None},
+        {"name": "Blue", "price": dollars["blue"],
+            "history": dollars_history["blue"] if "blue" in dollars_history else None},
+        {"name": "USDC", "price": dollars["usdc"],
+            "history": dollars_history["usdc"] if "usdc" in dollars_history else None},
+        {"name": "DAI", "price": dollars["dai"], "history": dollars_history["dai"]
+            if "dai" in dollars_history else None},
+        {"name": "USDT", "price": dollars["usdt"],
+            "history": dollars_history["usdt"] if "usdt" in dollars_history else None}
     ]
 
     dollars.sort(key=lambda x: x.get("price"))
@@ -328,20 +355,24 @@ def get_dolar(msg_text: str) -> str:
     cache_expiration_time = 300
     with ThreadPoolExecutor(max_workers=5) as executor:
         dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True)
+            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True, 24)
         usdc_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True)
+            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True, 24)
         dai_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True)
+            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True, 24)
         usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True)
+            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True, 24)
 
-    dollars = _sort_dolars(dollars_thread, usdc_thread,
-                           dai_thread, usdt_thread)
+    dollars = _sort_dolars(dollars_thread.result(), usdc_thread.result(),
+                           dai_thread.result(), usdt_thread.result())
 
     msg = ""
     for dollar in dollars:
         line = f"{dollar['name']}: {'{:.2f}'.format(dollar['price']).rstrip('0').rstrip('.')}"
+        if dollar["history"] is not None:
+            percentage = "{:+.2f}".format(
+                (dollar['price']/dollar["history"]-1)*100).rstrip("0").rstrip(".")
+            line += f" ({percentage}% 24hs)"
 
         if dollar == dollars[0]:
             msg = line
