@@ -37,7 +37,7 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
         if hourly_cache:
             # get current date with hour
             date = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(date+request_hash, response.text)
+            redis_client.set(date+request_hash, json.dumps(redis_value))
 
         return redis_value
     else:
@@ -45,14 +45,7 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 
 
 # get cached data from previous hour
-def _get_cache_of_previus_hour(hours, api_url, parameters, headers, redis_client):
-    # create unique hash for the request
-    arguments_dict = {"api_url": api_url,
-                      "parameters": parameters,
-                      "headers": headers}
-    arguments_str = json.dumps(arguments_dict, sort_keys=True)
-    request_hash = str(hash(arguments_str))
-
+def _get_cache_history(hours, request_hash, redis_client):
     # subtract hours to current date
     date = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d-%H")
 
@@ -66,7 +59,7 @@ def _get_cache_of_previus_hour(hours, api_url, parameters, headers, redis_client
 
 
 # generic proxy for caching any request
-def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False):
+def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False):
     # create unique hash for the request
     arguments_dict = {"api_url": api_url,
                       "parameters": parameters,
@@ -80,6 +73,10 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     # get previous api data from redis cache
     redis_response = redis_client.get(request_hash)
 
+    if get_history is not False:
+        cache_history = _get_cache_history(
+            get_history, request_hash, redis_client)
+
     # set current timestamp
     timestamp = int(time.time())
 
@@ -87,16 +84,27 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     if redis_response is None:
         new_data = _set_new_data(
             api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
+
+        if cache_history is not None:
+            new_data["history"] = cache_history
+
         return new_data
     else:
         # loads cached data
         cached_data = json.loads(redis_response)
         cached_data_timestamp = int(cached_data["timestamp"])
 
+        if cache_history is not None:
+            cached_data["history"] = cache_history
+
         # get new data if cache is older than expiration_time
         if timestamp - cached_data_timestamp > expiration_time:
             new_data = _set_new_data(
                 api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
+
+            if cache_history is not None:
+                new_data["history"] = cache_history
+
             if "timestamp" in new_data:
                 return new_data
             else:
