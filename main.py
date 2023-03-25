@@ -375,10 +375,12 @@ def get_dollar_rates(msg_text: str) -> str:
 def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
     msg_lines = []
     for dollar in dollar_rates:
-        line = f"{dollar['name']}: {dollar['price']:.2f}"
+        price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
+        line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
             percentage = (dollar['price'] / dollar["history"] - 1) * 100
-            line += f" ({percentage:+.2f}% 24hs)"
+            formatted_percentage = f"{percentage:+.2f}".rstrip('0').rstrip('.')
+            line += f" ({formatted_percentage}% 24hs)"
         msg_lines.append(line)
 
     return "\n".join(msg_lines)
