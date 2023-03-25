@@ -415,7 +415,6 @@ def get_devo(msg_text: str) -> str:
     dollars = _to_float(dollars["data"])
     dollars["usdt"] = _get_lowest(usdt["data"])
 
-    tarjeta_tax = 1.75
     qatar_tax = 2
 
     profit = -(fee * dollars["usdt"] + dollars["oficial"] -
@@ -426,8 +425,7 @@ def get_devo(msg_text: str) -> str:
 Fee: {"{:.2f}".format(fee * 100).rstrip("0").rstrip(".")}%
 Oficial: {"{:.2f}".format(dollars["oficial"]).rstrip("0").rstrip(".")}
 USDT: {"{:.2f}".format(dollars["usdt"]).rstrip("0").rstrip(".")}
-Qatar: {"{:.2f}".format(dollars["oficial"] * qatar_tax).rstrip("0").rstrip(".")}
-Tarjeta: {"{:.2f}".format(dollars["oficial"] * tarjeta_tax).rstrip("0").rstrip(".")}"""
+Qatar: {"{:.2f}".format(dollars["oficial"] * qatar_tax).rstrip("0").rstrip(".")}"""
 
     if compra > 0:
         compra_ars = compra * (dollars["oficial"] * qatar_tax)
