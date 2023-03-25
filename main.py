@@ -5,7 +5,7 @@ import time
 import requests
 import functions_framework
 from flask import Request
-from typing import Dict
+from typing import Dict, List
 from os import environ
 from math import log
 from datetime import datetime, timedelta
@@ -353,35 +353,35 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     return sorted_dollar_rates
 
 
-def get_dollars(msg_text: str) -> str:
+def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
+    api_urls = [
+        "https://criptoya.com/api/dolar",
+        "https://criptoya.com/api/usdc/ars/1000",
+        "https://criptoya.com/api/dai/ars/1000",
+        "https://criptoya.com/api/usdt/ars/1000",
+    ]
+
     with ThreadPoolExecutor(max_workers=5) as executor:
-        dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time, True, 24)
-        usdc_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdc/ars/1000", None, None, cache_expiration_time, True, 24)
-        dai_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dai/ars/1000", None, None, cache_expiration_time, True, 24)
-        usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True, 24)
+        api_results = [executor.submit(
+            _cached_requests, url, None, None, cache_expiration_time, True, 24) for url in api_urls]
+        dollars, usdc, dai, usdt = [result.result() for result in api_results]
 
-    dollars = _sort_dollar_rates(dollars_thread.result(), usdc_thread.result(),
-                                 dai_thread.result(), usdt_thread.result())
+    sorted_dollar_rates = _sort_dollar_rates(dollars, usdc, dai, usdt)
 
-    msg = ""
-    for dollar in dollars:
-        line = f"{dollar['name']}: {'{:.2f}'.format(dollar['price']).rstrip('0').rstrip('.')}"
+    return _format_dollar_rates(sorted_dollar_rates)
+
+
+def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
+    msg_lines = []
+    for dollar in dollar_rates:
+        line = f"{dollar['name']}: {dollar['price']:.2f}"
         if dollar["history"] is not None:
-            percentage = "{:+.2f}".format(
-                (dollar['price']/dollar["history"]-1)*100).rstrip("0").rstrip(".")
-            line += f" ({percentage}% 24hs)"
+            percentage = (dollar['price'] / dollar["history"] - 1) * 100
+            line += f" ({percentage:+.2f}% 24hs)"
+        msg_lines.append(line)
 
-        if dollar == dollars[0]:
-            msg = line
-        else:
-            msg += f"\n{line}"
-
-    return msg
+    return "\n".join(msg_lines)
 
 
 def get_devo(msg_text: str) -> str:
@@ -576,7 +576,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
         "/convertbase": convert_base,
         "/random": select_random,
         "/prices": get_prices,
-        "/dolar": get_dollars,
+        "/dolar": get_dollar_rates,
         "/devo": get_devo,
         "/rainbow": rainbow,
         "/time": get_timestamp,
