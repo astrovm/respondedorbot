@@ -2,6 +2,7 @@ import random
 import json
 import redis
 import time
+import hashlib
 import requests
 import functions_framework
 from flask import Request
@@ -65,8 +66,8 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     arguments_dict = {"api_url": api_url,
                       "parameters": parameters,
                       "headers": headers}
-    arguments_str = json.dumps(arguments_dict, sort_keys=True)
-    request_hash = str(hash(arguments_str))
+    arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
+    request_hash = hashlib.md5(arguments_str).hexdigest()
 
     # redis config
     redis_client = _config_redis()
@@ -370,7 +371,8 @@ def _format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
 
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
-    hours_ago = 24
+    hours_ago = int(msg_text) if msg_text.isdecimal() and int(
+        msg_text) >= 0 else 24
     api_urls = [
         "https://criptoya.com/api/dolar",
         "https://criptoya.com/api/usdc/ars/1000",
