@@ -36,8 +36,9 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
         # if hourly_cache is True, save the data in redis with the current hour
         if hourly_cache:
             # get current date with hour
-            date = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(date+request_hash, json.dumps(redis_value))
+            current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+            redis_client.set(current_hour + request_hash,
+                             json.dumps(redis_value))
 
         return redis_value
     else:
@@ -45,17 +46,17 @@ def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request
 
 
 # get cached data from previous hour
-def _get_cache_history(hours, request_hash, redis_client):
+def _get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
-    date = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d-%H")
-
+    timestamp = (datetime.now() - timedelta(hours=hours_ago)
+                 ).strftime("%Y-%m-%d-%H")
     # get previous api data from redis cache
-    redis_response = redis_client.get(date+request_hash)
+    cached_data = redis_client.get(timestamp + request_hash)
 
-    if redis_response is None:
+    if cached_data is None:
         return None
     else:
-        return json.loads(redis_response)
+        return json.loads(cached_data)
 
 
 # generic proxy for caching any request
