@@ -359,7 +359,7 @@ def get_dollar_rates(msg_text: str) -> str:
         "https://criptoya.com/api/dolar",
         "https://criptoya.com/api/usdc/ars/1000",
         "https://criptoya.com/api/dai/ars/1000",
-        "https://criptoya.com/api/usdt/ars/1000",
+        "https://criptoya.com/api/usdt/ars/1000"
     ]
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -402,16 +402,18 @@ def get_devo(msg_text: str) -> str:
         return "te voy a matar hijo de puta"
 
     cache_expiration_time = 300
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        dollars_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/dolar", None, None, cache_expiration_time)
-        usdt_thread = executor.submit(
-            _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time)
+    api_urls = [
+        "https://criptoya.com/api/dolar",
+        "https://criptoya.com/api/usdt/ars/1000"
+    ]
 
-    dollars = {key: float(value)
-               for key, value in dollars_thread.result()["data"].items()}
-    usdt = usdt_thread.result()["data"]
-    dollars["usdt"] = _get_lowest(usdt)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        api_results = [executor.submit(
+            _cached_requests, url, None, None, cache_expiration_time) for url in api_urls]
+        dollars, usdt = [result.result() for result in api_results]
+
+    dollars = _to_float(dollars["data"])
+    dollars["usdt"] = _get_lowest(usdt["data"])
 
     tarjeta_tax = 1.75
     qatar_tax = 2
