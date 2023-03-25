@@ -353,6 +353,20 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     return sorted_dollar_rates
 
 
+def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
+    msg_lines = []
+    for dollar in dollar_rates:
+        price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
+        line = f"{dollar['name']}: {price_formatted}"
+        if dollar["history"] is not None:
+            percentage = (dollar['price'] / dollar["history"] - 1) * 100
+            formatted_percentage = f"{percentage:+.2f}".rstrip('0').rstrip('.')
+            line += f" ({formatted_percentage}% 24hs)"
+        msg_lines.append(line)
+
+    return "\n".join(msg_lines)
+
+
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
     api_urls = [
@@ -370,20 +384,6 @@ def get_dollar_rates(msg_text: str) -> str:
     sorted_dollar_rates = _sort_dollar_rates(dollars, usdc, dai, usdt)
 
     return _format_dollar_rates(sorted_dollar_rates)
-
-
-def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
-    msg_lines = []
-    for dollar in dollar_rates:
-        price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
-        line = f"{dollar['name']}: {price_formatted}"
-        if dollar["history"] is not None:
-            percentage = (dollar['price'] / dollar["history"] - 1) * 100
-            formatted_percentage = f"{percentage:+.2f}".rstrip('0').rstrip('.')
-            line += f" ({formatted_percentage}% 24hs)"
-        msg_lines.append(line)
-
-    return "\n".join(msg_lines)
 
 
 def get_devo(msg_text: str) -> str:
