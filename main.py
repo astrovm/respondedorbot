@@ -322,14 +322,14 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
 
     dollars_history = {}
     if "history" in dollar_rates:
-        dollars_history = _to_float(dollar_rates["history"])
+        dollars_history = _to_float(dollar_rates["history"]["data"])
         dollars_history = _add_derived_rates(
             dollars_history, "oficial", derived_rates)
 
         for rate_type in [("usdc", usdc_rates), ("dai", dai_rates), ("usdt", usdt_rates)]:
             if "history" in rate_type[1]:
                 dollars_history[rate_type[0]] = _get_lowest(
-                    rate_type[1]["history"])
+                    rate_type[1]["history"]["data"])
 
     rate_names = [
         "oficial", "solidario", "tarjeta", "qatar", "mepgd30",
