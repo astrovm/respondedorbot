@@ -354,7 +354,7 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     return sorted_dollar_rates
 
 
-def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
+def _format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
         price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
@@ -362,7 +362,7 @@ def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
         if dollar["history"] is not None:
             percentage = (dollar['price'] / dollar["history"] - 1) * 100
             formatted_percentage = f"{percentage:+.2f}".rstrip('0').rstrip('.')
-            line += f" ({formatted_percentage}% 24hs)"
+            line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
 
     return "\n".join(msg_lines)
@@ -370,6 +370,7 @@ def _format_dollar_rates(dollar_rates: List[Dict]) -> str:
 
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
+    hours_ago = 24
     api_urls = [
         "https://criptoya.com/api/dolar",
         "https://criptoya.com/api/usdc/ars/1000",
@@ -379,12 +380,12 @@ def get_dollar_rates(msg_text: str) -> str:
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         api_results = [executor.submit(
-            _cached_requests, url, None, None, cache_expiration_time, True, 24) for url in api_urls]
+            _cached_requests, url, None, None, cache_expiration_time, True, hours_ago) for url in api_urls]
         dollars, usdc, dai, usdt = [result.result() for result in api_results]
 
     sorted_dollar_rates = _sort_dollar_rates(dollars, usdc, dai, usdt)
 
-    return _format_dollar_rates(sorted_dollar_rates)
+    return _format_dollar_rates(sorted_dollar_rates, hours_ago)
 
 
 def get_devo(msg_text: str) -> str:
@@ -410,7 +411,7 @@ def get_devo(msg_text: str) -> str:
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         api_results = [executor.submit(
-            _cached_requests, url, None, None, cache_expiration_time) for url in api_urls]
+            _cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
         dollars, usdt = [result.result() for result in api_results]
 
     dollars = _to_float(dollars["data"])
