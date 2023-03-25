@@ -297,58 +297,60 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     return lowest_price
 
 
-def _sort_dollars(dollars_thread, usdc_thread, dai_thread, usdt_thread):
-    dollars = {key: float(value)
-               for key, value in dollars_thread["data"].items()}
-    dollars["solidario"] = dollars["oficial"] * 1.65
-    dollars["tarjeta"] = dollars["oficial"] * 1.75
-    dollars["qatar"] = dollars["oficial"] * 2
-    dollars["usdc"] = _get_lowest(usdc_thread["data"])
-    dollars["dai"] = _get_lowest(dai_thread["data"])
-    dollars["usdt"] = _get_lowest(usdt_thread["data"])
+def _to_float(data):
+    return {key: float(value) for key, value in data.items()}
+
+
+def _add_derived_rates(data, base_key, multipliers):
+    for name, multiplier in multipliers.items():
+        data[name] = data[base_key] * multiplier
+    return data
+
+
+def _get_rate_history(data, key):
+    return data.get(key) if key in data else None
+
+
+def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
+    dollars = _to_float(dollar_rates["data"])
+    derived_rates = {"solidario": 1.65, "tarjeta": 1.75, "qatar": 2}
+    dollars = _add_derived_rates(dollars, "oficial", derived_rates)
+
+    dollars["usdc"] = _get_lowest(usdc_rates["data"])
+    dollars["dai"] = _get_lowest(dai_rates["data"])
+    dollars["usdt"] = _get_lowest(usdt_rates["data"])
 
     dollars_history = {}
-    if "history" in dollars_thread:
-        dollars_history = {key: float(value)
-                           for key, value in dollars_thread["history"].items()}
-        dollars_history["solidario"] = dollars_history["oficial"] * 1.65
-        dollars_history["tarjeta"] = dollars_history["oficial"] * 1.75
-        dollars_history["qatar"] = dollars_history["oficial"] * 2
-        if "history" in usdc_thread:
-            dollars_history["usdc"] = _get_lowest(usdc_thread["history"])
-        if "history" in dai_thread:
-            dollars_history["dai"] = _get_lowest(dai_thread["history"])
-        if "history" in usdt_thread:
-            dollars_history["usdt"] = _get_lowest(usdt_thread["history"])
+    if "history" in dollar_rates:
+        dollars_history = _to_float(dollar_rates["history"])
+        dollars_history = _add_derived_rates(
+            dollars_history, "oficial", derived_rates)
 
-    dollars = [
-        {"name": "Oficial", "price": dollars["oficial"],
-            "history": dollars_history["oficial"] if "oficial" in dollars_history else None},
-        {"name": "Solidario", "price": dollars["solidario"],
-            "history": dollars_history["solidario"] if "solidario" in dollars_history else None},
-        {"name": "Tarjeta", "price": dollars["tarjeta"],
-            "history": dollars_history["tarjeta"] if "tarjeta" in dollars_history else None},
-        {"name": "Qatar", "price": dollars["qatar"],
-            "history": dollars_history["qatar"] if "qatar" in dollars_history else None},
-        {"name": "MEP", "price": dollars["mepgd30"], "history": dollars_history["mepgd30"]
-            if "mepgd30" in dollars_history else None},
-        {"name": "CCL", "price": dollars["cclgd30"],
-            "history": dollars_history["cclgd30"] if "cclgd30" in dollars_history else None},
-        {"name": "Bitcoin", "price": dollars["ccb"],
-            "history": dollars_history["ccb"] if "ccb" in dollars_history else None},
-        {"name": "Blue", "price": dollars["blue"],
-            "history": dollars_history["blue"] if "blue" in dollars_history else None},
-        {"name": "USDC", "price": dollars["usdc"],
-            "history": dollars_history["usdc"] if "usdc" in dollars_history else None},
-        {"name": "DAI", "price": dollars["dai"], "history": dollars_history["dai"]
-            if "dai" in dollars_history else None},
-        {"name": "USDT", "price": dollars["usdt"],
-            "history": dollars_history["usdt"] if "usdt" in dollars_history else None}
+        for rate_type in [("usdc", usdc_rates), ("dai", dai_rates), ("usdt", usdt_rates)]:
+            if "history" in rate_type[1]:
+                dollars_history[rate_type[0]] = _get_lowest(
+                    rate_type[1]["history"])
+
+    rate_names = [
+        "oficial", "solidario", "tarjeta", "qatar", "mepgd30",
+        "cclgd30", "ccb", "blue", "usdc", "dai", "usdt"
     ]
 
-    dollars.sort(key=lambda x: x.get("price"))
+    rate_display_names = {
+        "oficial": "Oficial", "solidario": "Solidario", "tarjeta": "Tarjeta", "qatar": "Qatar",
+        "mepgd30": "MEP", "cclgd30": "CCL", "ccb": "Bitcoin", "blue": "Blue",
+        "usdc": "USDC", "dai": "DAI", "usdt": "USDT"
+    }
 
-    return dollars
+    sorted_dollar_rates = [
+        {"name": rate_display_names[name], "price": dollars[name],
+         "history": _get_rate_history(dollars_history, name)}
+        for name in rate_names
+    ]
+
+    sorted_dollar_rates.sort(key=lambda x: x["price"])
+
+    return sorted_dollar_rates
 
 
 def get_dollars(msg_text: str) -> str:
@@ -363,8 +365,8 @@ def get_dollars(msg_text: str) -> str:
         usdt_thread = executor.submit(
             _cached_requests, "https://criptoya.com/api/usdt/ars/1000", None, None, cache_expiration_time, True, 24)
 
-    dollars = _sort_dollars(dollars_thread.result(), usdc_thread.result(),
-                            dai_thread.result(), usdt_thread.result())
+    dollars = _sort_dollar_rates(dollars_thread.result(), usdc_thread.result(),
+                                 dai_thread.result(), usdt_thread.result())
 
     msg = ""
     for dollar in dollars:
