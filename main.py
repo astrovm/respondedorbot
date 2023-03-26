@@ -620,15 +620,11 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 @functions_framework.http
 def responder(request: Request) -> str:
     start_time = time.time()
-    try:
-        token = str(request.args.get("token"))
-        if token != environ.get("TELEGRAM_TOKEN"):
-            return "wrong token"
 
-        req = request.get_json()
+    token = str(request.args.get("token"))
+    if token != environ.get("TELEGRAM_TOKEN"):
+        return "wrong token"
 
-        handle_msg(start_time, token, req)
-
-        return "ok"
-    except BaseException:
-        return "unexpected error"
+    req = request.get_json()
+    handle_msg(start_time, token, req)
+    return "ok"
