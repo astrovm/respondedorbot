@@ -566,7 +566,6 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
     chat_id = str(req["message"]["chat"]["id"])
     chat_type = str(req["message"]["chat"]["type"])
     first_name = str(req["message"]["from"]["first_name"])
-    typing = False
     msg_to_send = ""
 
     if sanitized_msg_text.startswith("/exectime"):
@@ -598,7 +597,6 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 
     if lower_cmd in commands:
         send_typing(token, chat_id)
-        typing = True
         msg_to_send = commands[lower_cmd](sanitized_msg_text)
 
     else:
@@ -612,7 +610,6 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
                 return "ignored request"
 
         send_typing(token, chat_id)
-        typing = True
         msg_to_send = gen_random(first_name)
 
     if start_time:
