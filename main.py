@@ -26,20 +26,22 @@ def _config_redis(host=None, port=None, password=None):
 
 
 # request new data and save it in redis
-def _set_new_data(api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache):
+def _set_new_data(request, timestamp, redis, request_hash, hourly_cache):
+    api_url = request["api_url"]
+    parameters = request["parameters"]
+    headers = request["headers"]
     response = requests.get(api_url, params=parameters, headers=headers)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
         redis_value = {"timestamp": timestamp, "data": response_json}
-        redis_client.set(request_hash, json.dumps(redis_value))
+        redis.set(request_hash, json.dumps(redis_value))
 
         # if hourly_cache is True, save the data in redis with the current hour
         if hourly_cache:
             # get current date with hour
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + request_hash,
-                             json.dumps(redis_value))
+            redis.set(current_hour + request_hash, json.dumps(redis_value))
 
         return redis_value
     else:
@@ -89,7 +91,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     # if there's no cached data request it
     if redis_response is None:
         new_data = _set_new_data(
-            api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
+            arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
 
         if cache_history is not None:
             new_data["history"] = cache_history
@@ -106,7 +108,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
         # get new data if cache is older than expiration_time
         if timestamp - cached_data_timestamp > expiration_time:
             new_data = _set_new_data(
-                api_url, parameters, headers, timestamp, redis_client, request_hash, hourly_cache)
+                arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
 
             if cache_history is not None:
                 new_data["history"] = cache_history
