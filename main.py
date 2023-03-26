@@ -264,13 +264,13 @@ def get_prices(msg_text: str) -> str:
             coin["quote"][convert_to_parameter
                           ]["price"] = coin["quote"][convert_to_parameter]["price"] * 100000000
 
-        decimals = "{:.12f}".format(
-            coin["quote"][convert_to_parameter]["price"]).split(".")[-1]
+        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(
+            ".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
-        price = "{:.{decimals_number}f}".format(
-            coin["quote"][convert_to_parameter]["price"], decimals_number=zeros + 4).rstrip("0").rstrip(".")
+        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip(
+            "0").rstrip(".")
         percentage = f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
             "0").rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
