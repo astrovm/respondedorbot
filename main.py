@@ -1,17 +1,17 @@
-import random
 import json
-import redis
 import time
+import random
 import hashlib
-import requests
-import functions_framework
-from flask import Request
 from typing import Dict, List
 from os import environ
 from math import log
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
+from flask import Request
+import redis
+import requests
+import functions_framework
 
 
 def _config_redis(host=None, port=None, password=None):
@@ -26,22 +26,24 @@ def _config_redis(host=None, port=None, password=None):
 
 
 # request new data and save it in redis
-def _set_new_data(request, timestamp, redis, request_hash, hourly_cache):
+def _set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
-    response = requests.get(api_url, params=parameters, headers=headers)
+    response = requests.get(api_url, params=parameters,
+                            headers=headers, timeout=5)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
         redis_value = {"timestamp": timestamp, "data": response_json}
-        redis.set(request_hash, json.dumps(redis_value))
+        redis_client.set(request_hash, json.dumps(redis_value))
 
         # if hourly_cache is True, save the data in redis with the current hour
         if hourly_cache:
             # get current date with hour
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis.set(current_hour + request_hash, json.dumps(redis_value))
+            redis_client.set(current_hour + request_hash,
+                             json.dumps(redis_value))
 
         return redis_value
     else:
@@ -122,28 +124,24 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
 
 
 def gen_random(name: str) -> str:
-    try:
+    time.sleep(random.uniform(0, 1))
+
+    rand_res = random.randint(0, 1)
+    rand_name = random.randint(0, 2)
+
+    if rand_res:
+        msg = "si"
+    else:
+        msg = "no"
+
+    if rand_name == 1:
+        msg = f"{msg} boludo"
+        time.sleep(random.uniform(0, 1))
+    elif rand_name == 2:
+        msg = f"{msg} {name}"
         time.sleep(random.uniform(0, 1))
 
-        rand_res = random.randint(0, 1)
-        rand_name = random.randint(0, 2)
-
-        if rand_res:
-            msg = "si"
-        else:
-            msg = "no"
-
-        if rand_name == 1:
-            msg = f"{msg} boludo"
-            time.sleep(random.uniform(0, 1))
-        elif rand_name == 2:
-            msg = f"{msg} {name}"
-            time.sleep(random.uniform(0, 1))
-
-        return msg
-
-    except Exception as e:
-        print(f"Error: {e}")
+    return msg
 
 
 def select_random(msg_text: str) -> str:
@@ -222,9 +220,9 @@ def get_prices(msg_text: str) -> str:
     if msg_text != "":
         numbers = msg_text.upper().replace(" ", "").split(",")
 
-        for n in numbers:
+        for number in numbers:
             try:
-                number = int(float(n))
+                number = int(float(number))
                 if number > prices_number:
                     prices_number = number
             except ValueError:
@@ -249,7 +247,7 @@ def get_prices(msg_text: str) -> str:
             elif prices_number > 0 and coin in prices["data"][:prices_number]:
                 new_prices.append(coin)
 
-        if new_prices == []:
+        if not new_prices:
             return "ponzis no laburo"
 
         prices_number = len(new_prices)
@@ -273,8 +271,8 @@ def get_prices(msg_text: str) -> str:
         ticker = coin["symbol"]
         price = "{:.{decimals_number}f}".format(
             coin["quote"][convert_to_parameter]["price"], decimals_number=zeros + 4).rstrip("0").rstrip(".")
-        percentage = "{:+.2f}".format(
-            coin["quote"][convert_to_parameter]["percent_change_24h"]).rstrip("0").rstrip(".")
+        percentage = f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
+            "0").rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
@@ -404,7 +402,7 @@ def get_devo(msg_text: str) -> str:
     else:
         fee = float(msg_text) / 100
 
-    if fee != fee or fee < 0 or fee > 1 or compra != compra or compra < 0:
+    if fee != fee or fee > 1 or compra != compra or compra < 0:
         return "te voy a matar hijo de puta"
 
     cache_expiration_time = 300
@@ -548,14 +546,14 @@ Available commands:
 def send_typing(token: str, chat_id: str):
     url = "https://api.telegram.org/bot" + token + \
         "/sendChatAction?chat_id=" + chat_id + "&action=typing"
-    requests.get(url)
+    requests.get(url, timeout=5)
 
 
 def send_msg(token: str, chat_id: str, msg_id: str, msg: str):
     url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
         chat_id + "&reply_to_message_id=" + \
         msg_id + "&text=" + quote(msg, safe='/')
-    requests.get(url)
+    requests.get(url, timeout=5)
 
 
 def handle_msg(start_time: float, token: str, req: Dict) -> str:
