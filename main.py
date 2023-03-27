@@ -544,26 +544,23 @@ Available commands:
 
 
 def send_typing(token: str, chat_id: str):
-    url = "https://api.telegram.org/bot" + token + \
-        "/sendChatAction?chat_id=" + chat_id + "&action=typing"
+    url = f"https://api.telegram.org/bot{token}/sendChatAction?chat_id={chat_id}&action=typing"
     requests.get(url, timeout=5)
 
 
 def send_msg(token: str, chat_id: str, msg_id: str, msg: str):
-    url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + \
-        chat_id + "&reply_to_message_id=" + \
-        msg_id + "&text=" + quote(msg, safe='/')
+    url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&reply_to_message_id={msg_id}&text={quote(msg, safe='/')}"
     requests.get(url, timeout=5)
 
 
-def handle_msg(start_time: float, token: str, req: Dict) -> str:
+def handle_msg(start_time: float, token: str, message: Dict) -> str:
     """Handle incoming messages and return a response."""
-    msg_text = str(req["message"]["text"])
+    msg_text = str(message["text"]) if "text" in message else ""
     sanitized_msg_text = msg_text
-    msg_id = str(req["message"]["message_id"])
-    chat_id = str(req["message"]["chat"]["id"])
-    chat_type = str(req["message"]["chat"]["type"])
-    first_name = str(req["message"]["from"]["first_name"])
+    msg_id = str(message["message_id"])
+    chat_id = str(message["chat"]["id"])
+    chat_type = str(message["chat"]["type"])
+    first_name = str(message["from"]["first_name"])
     msg_to_send = ""
 
     if sanitized_msg_text.startswith("/exectime"):
@@ -599,8 +596,7 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 
     else:
         try:
-            reply_to = str(
-                req["message"]["reply_to_message"]["from"]["username"])
+            reply_to = str(message["reply_to_message"]["from"]["username"])
             if reply_to != "respondedorbot" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
         except KeyError:
@@ -627,8 +623,13 @@ def responder(request: Request) -> str:
             print(f"wrong token: {token}")
             return "wrong token"
 
-        req = request.get_json()
-        handle_msg(start_time, token, req)
+        request_json = request.get_json()
+        if "message" not in request_json:
+            print(f"not message: {request_json}")
+            return "not message"
+
+        print(f"handling: {request_json}")
+        handle_msg(start_time, token, request_json["message"])
         return "ok"
     except KeyError as key_error:
         print(f"key error: {key_error}")
