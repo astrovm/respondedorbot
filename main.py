@@ -544,13 +544,16 @@ Available commands:
 
 
 def send_typing(token: str, chat_id: str):
-    url = f"https://api.telegram.org/bot{token}/sendChatAction?chat_id={chat_id}&action=typing"
-    requests.get(url, timeout=5)
+    parameters = {"chat_id": chat_id, "action": "typing"}
+    url = f"https://api.telegram.org/bot{token}/sendChatAction"
+    requests.get(url, params=parameters, timeout=5)
 
 
 def send_msg(token: str, chat_id: str, msg_id: str, msg: str):
-    url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={chat_id}&reply_to_message_id={msg_id}&text={quote(msg, safe='/')}"
-    requests.get(url, timeout=5)
+    parameters = {"chat_id": chat_id,
+                  "reply_to_message_id": msg_id, "text": msg}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    requests.get(url, params=parameters, timeout=5)
 
 
 def handle_msg(start_time: float, token: str, message: Dict) -> str:
