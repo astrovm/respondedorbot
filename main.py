@@ -543,13 +543,15 @@ Available commands:
     """
 
 
-def send_typing(token: str, chat_id: str):
+def send_typing(chat_id: str):
+    token = environ.get("TELEGRAM_TOKEN")
     parameters = {"chat_id": chat_id, "action": "typing"}
     url = f"https://api.telegram.org/bot{token}/sendChatAction"
     requests.get(url, params=parameters, timeout=5)
 
 
-def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
+def send_msg(chat_id: str, msg: str, msg_id: str = ""):
+    token = environ.get("TELEGRAM_TOKEN")
     parameters = {"chat_id": chat_id, "text": msg}
     if msg_id != "":
         parameters["reply_to_message_id"] = msg_id
@@ -557,7 +559,7 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
     requests.get(url, params=parameters, timeout=5)
 
 
-def handle_msg(start_time: float, token: str, message: Dict) -> str:
+def handle_msg(start_time: float, message: Dict) -> str:
     """Handle incoming messages and return a response."""
     msg_text = str(message["text"]) if "text" in message else ""
     sanitized_msg_text = msg_text
@@ -595,7 +597,7 @@ def handle_msg(start_time: float, token: str, message: Dict) -> str:
         lower_cmd = lower_cmd.replace(bot_name, "")
 
     if lower_cmd in commands:
-        send_typing(token, chat_id)
+        send_typing(chat_id)
         msg_to_send = commands[lower_cmd](sanitized_msg_text)
 
     else:
@@ -607,14 +609,14 @@ def handle_msg(start_time: float, token: str, message: Dict) -> str:
             if chat_type != "private" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
 
-        send_typing(token, chat_id)
+        send_typing(chat_id)
         msg_to_send = gen_random(first_name)
 
     if start_time:
         exec_time = round(time.time() - start_time, 4)
         msg_to_send = f"{msg_to_send}\n\nExecution time: {exec_time:.4f} secs"
 
-    send_msg(token, chat_id, msg_to_send, msg_id)
+    send_msg(chat_id, msg_to_send, msg_id)
 
 
 @functions_framework.http
@@ -633,7 +635,7 @@ def responder(request: Request) -> str:
             return "not message"
 
         print(f"handling: {request_json}")
-        handle_msg(start_time, token, request_json["message"])
+        handle_msg(start_time, request_json["message"])
         return "ok"
     except KeyError as key_error:
         print(f"key error: {key_error}")
