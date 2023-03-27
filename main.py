@@ -619,12 +619,17 @@ def handle_msg(start_time: float, token: str, req: Dict) -> str:
 
 @functions_framework.http
 def responder(request: Request) -> str:
-    start_time = time.time()
+    try:
+        start_time = time.time()
 
-    token = str(request.args.get("token"))
-    if token != environ.get("TELEGRAM_TOKEN"):
-        return "wrong token"
+        token = str(request.args.get("token"))
+        if token != environ.get("TELEGRAM_TOKEN"):
+            print(f"wrong token: {token}")
+            return "wrong token"
 
-    req = request.get_json()
-    handle_msg(start_time, token, req)
-    return "ok"
+        req = request.get_json()
+        handle_msg(start_time, token, req)
+        return "ok"
+    except KeyError as key_error:
+        print(f"key error: {key_error}")
+        return "key error"
