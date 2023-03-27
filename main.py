@@ -549,9 +549,10 @@ def send_typing(token: str, chat_id: str):
     requests.get(url, params=parameters, timeout=5)
 
 
-def send_msg(token: str, chat_id: str, msg_id: str, msg: str):
-    parameters = {"chat_id": chat_id,
-                  "reply_to_message_id": msg_id, "text": msg}
+def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
+    parameters = {"chat_id": chat_id, "text": msg}
+    if msg_id != "":
+        parameters["reply_to_message_id"] = msg_id
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.get(url, params=parameters, timeout=5)
 
@@ -613,7 +614,7 @@ def handle_msg(start_time: float, token: str, message: Dict) -> str:
         exec_time = round(time.time() - start_time, 4)
         msg_to_send = f"{msg_to_send}\n\nExecution time: {exec_time:.4f} secs"
 
-    send_msg(token, chat_id, msg_id, msg_to_send)
+    send_msg(token, chat_id, msg_to_send, msg_id)
 
 
 @functions_framework.http
