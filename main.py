@@ -6,7 +6,6 @@ from typing import Dict, List
 from os import environ
 from math import log
 from datetime import datetime, timedelta
-from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from flask import Request
 import redis
