@@ -559,6 +559,10 @@ def send_msg(chat_id: str, msg: str, msg_id: str = ""):
     requests.get(url, params=parameters, timeout=5)
 
 
+def admin_report(msg: str):
+    send_msg(environ.get("ADMIN_CHAT_ID"), msg)
+
+
 def handle_msg(start_time: float, message: Dict) -> str:
     """Handle incoming messages and return a response."""
     msg_text = str(message["text"]) if "text" in message else ""
@@ -631,10 +635,8 @@ def responder(request: Request) -> str:
 
         request_json = request.get_json()
         if "message" not in request_json:
-            print(f"not message: {request_json}")
             return "not message"
 
-        print(f"handling: {request_json}")
         handle_msg(start_time, request_json["message"])
         return "ok"
     except KeyError as key_error:
