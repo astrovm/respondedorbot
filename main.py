@@ -565,7 +565,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     """Handle incoming messages and return a response."""
     msg_text = str(message["text"]) if "text" in message else ""
     sanitized_msg_text = msg_text
-    msg_id = str(message["message_id"])
+    msg_id = str(message["message_id"]) if "message_id" in message else ""
     chat_id = str(message["chat"]["id"])
     chat_type = str(message["chat"]["type"])
     first_name = str(message["from"]["first_name"])
