@@ -390,7 +390,10 @@ def get_dollar_rates(msg_text: str) -> str:
     return _format_dollar_rates(sorted_dollar_rates, hours_ago)
 
 
-def get_devo(msg_text: str) -> str:
+def get_devo(msg_text: str = "") -> str:
+    if not msg_text:
+        return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
+
     fee = 0
     compra = 0
 
@@ -403,7 +406,7 @@ def get_devo(msg_text: str) -> str:
         fee = float(msg_text) / 100
 
     if fee != fee or fee > 1 or compra != compra or compra < 0:
-        return "te voy a matar hijo de puta"
+        return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a non-negative number."
 
     cache_expiration_time = 300
     api_urls = [
@@ -646,9 +649,7 @@ def responder(request: Request) -> str:
         return "ok"
     except KeyError as key_error:
         print(f"key error: {key_error}")
-        print(f"request: {request}")
         return "key error"
     except ValueError as value_error:
         print(f"value error: {value_error}")
-        print(f"request: {request}")
         return "value error"
