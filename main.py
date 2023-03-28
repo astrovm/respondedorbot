@@ -8,6 +8,7 @@ from math import log
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from flask import Request
+from cryptography.fernet import Fernet
 import redis
 import requests
 import functions_framework
@@ -620,22 +621,29 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     send_msg(token, chat_id, msg_to_send, msg_id)
 
 
+def decrypt_token(key: str, encrypted_token: str) -> str:
+    fernet = Fernet(key.encode())
+    return fernet.decrypt(encrypted_token.encode()).decode()
+
+
 @functions_framework.http
 def responder(request: Request) -> str:
     try:
         start_time = time.time()
 
-        token = str(request.args.get("token"))
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        encrypted_token = str(request.args.get("token"))
+        key = environ.get("TELEGRAM_TOKEN_KEY")
+        decrypted_token = decrypt_token(key, encrypted_token)
+        token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
+
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
-            print(f"wrong token: {token}")
             return "wrong token"
 
         request_json = request.get_json()
         if "message" not in request_json:
             return "not message"
 
-        handle_msg(token, start_time, request_json["message"])
+        handle_msg(decrypted_token, start_time, request_json["message"])
         return "ok"
     except KeyError as key_error:
         print(f"key error: {key_error}")

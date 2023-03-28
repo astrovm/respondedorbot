@@ -1,3 +1,4 @@
+cryptography
 redis
 requests
 functions_framework
