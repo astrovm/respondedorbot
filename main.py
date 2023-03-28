@@ -635,7 +635,6 @@ def responder(request: Request) -> str:
         key = environ.get("TELEGRAM_TOKEN_KEY")
         decrypted_token = decrypt_token(key, encrypted_token)
         token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
-
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
             return "wrong token"
 
