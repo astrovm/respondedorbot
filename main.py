@@ -646,4 +646,9 @@ def responder(request: Request) -> str:
         return "ok"
     except KeyError as key_error:
         print(f"key error: {key_error}")
+        print(f"request: {request}")
         return "key error"
+    except ValueError as value_error:
+        print(f"value error: {value_error}")
+        print(f"request: {request}")
+        return "value error"
