@@ -427,10 +427,10 @@ def get_devo(msg_text: str) -> str:
 
         msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
 
-    Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
-    Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
-    USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
-    Qatar: {f"{dollars['oficial'] * qatar_tax:.2f}".rstrip("0").rstrip(".")}"""
+Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
+Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
+USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
+Qatar: {f"{dollars['oficial'] * qatar_tax:.2f}".rstrip("0").rstrip(".")}"""
 
         if compra > 0:
             compra_ars = compra * (dollars["oficial"] * qatar_tax)
@@ -438,10 +438,10 @@ def get_devo(msg_text: str) -> str:
             ganancia_ars = compra_ars * profit
             ganancia_usdt = ganancia_ars / dollars["usdt"]
             msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Qatar = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-    Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-    Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 
-    {msg}"""
+{msg}"""
 
         return msg
     except ValueError:
