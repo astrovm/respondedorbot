@@ -572,7 +572,6 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     chat_id = str(message["chat"]["id"])
     chat_type = str(message["chat"]["type"])
     first_name = str(message["from"]["first_name"])
-    bot_name = environ.get("TELEGRAM_USERNAME")
     msg_to_send = ""
 
     if sanitized_msg_text.startswith("/exectime"):
@@ -598,7 +597,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     }
 
     # Check for the bot's name in the command, if applicable
-    bot_name = f"@{bot_name}"
+    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
     if bot_name in lower_cmd:
         lower_cmd = lower_cmd.replace(bot_name, "")
 
@@ -609,7 +608,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     else:
         try:
             reply_to = str(message["reply_to_message"]["from"]["username"])
-            if reply_to != bot_name and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
+            if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
         except KeyError:
             if chat_type != "private" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
