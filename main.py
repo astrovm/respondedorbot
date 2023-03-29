@@ -390,62 +390,62 @@ def get_dollar_rates(msg_text: str) -> str:
     return _format_dollar_rates(sorted_dollar_rates, hours_ago)
 
 
-def get_devo(msg_text: str = "") -> str:
-    if not msg_text:
+def get_devo(msg_text: str) -> str:
+    try:
+        fee = 0
+        compra = 0
+
+        if "," in msg_text:
+            numbers = msg_text.replace(" ", "").split(",")
+            fee = float(numbers[0]) / 100
+            if len(numbers) > 1:
+                compra = float(numbers[1])
+        else:
+            fee = float(msg_text) / 100
+
+        if fee != fee or fee > 1 or compra != compra or compra < 0:
+            return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a positive number."
+
+        cache_expiration_time = 300
+        api_urls = [
+            "https://criptoya.com/api/dolar",
+            "https://criptoya.com/api/usdt/ars/1000"
+        ]
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            api_results = [executor.submit(
+                _cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
+            dollars, usdt = [result.result() for result in api_results]
+
+        dollars = _to_float(dollars["data"])
+        dollars["usdt"] = _get_lowest(usdt["data"])
+
+        qatar_tax = 2
+
+        profit = -(fee * dollars["usdt"] + dollars["oficial"] -
+                   dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
+
+        msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
+
+    Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
+    Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
+    USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
+    Qatar: {f"{dollars['oficial'] * qatar_tax:.2f}".rstrip("0").rstrip(".")}"""
+
+        if compra > 0:
+            compra_ars = compra * (dollars["oficial"] * qatar_tax)
+            compra_usdt = compra_ars / dollars["usdt"]
+            ganancia_ars = compra_ars * profit
+            ganancia_usdt = ganancia_ars / dollars["usdt"]
+            msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Qatar = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+    Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+    Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+
+    {msg}"""
+
+        return msg
+    except ValueError:
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
-
-    fee = 0
-    compra = 0
-
-    if "," in msg_text:
-        numbers = msg_text.replace(" ", "").split(",")
-        fee = float(numbers[0]) / 100
-        if len(numbers) > 1:
-            compra = float(numbers[1])
-    else:
-        fee = float(msg_text) / 100
-
-    if fee != fee or fee > 1 or compra != compra or compra < 0:
-        return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a non-negative number."
-
-    cache_expiration_time = 300
-    api_urls = [
-        "https://criptoya.com/api/dolar",
-        "https://criptoya.com/api/usdt/ars/1000"
-    ]
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        api_results = [executor.submit(
-            _cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
-        dollars, usdt = [result.result() for result in api_results]
-
-    dollars = _to_float(dollars["data"])
-    dollars["usdt"] = _get_lowest(usdt["data"])
-
-    qatar_tax = 2
-
-    profit = -(fee * dollars["usdt"] + dollars["oficial"] -
-               dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
-
-    msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
-
-Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
-Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
-USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
-Qatar: {f"{dollars['oficial'] * qatar_tax:.2f}".rstrip("0").rstrip(".")}"""
-
-    if compra > 0:
-        compra_ars = compra * (dollars["oficial"] * qatar_tax)
-        compra_usdt = compra_ars / dollars["usdt"]
-        ganancia_ars = compra_ars * profit
-        ganancia_usdt = ganancia_ars / dollars["usdt"]
-        msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Qatar = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-
-{msg}"""
-
-    return msg
 
 
 def rainbow(msg_text: str) -> str:
@@ -572,6 +572,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     chat_id = str(message["chat"]["id"])
     chat_type = str(message["chat"]["type"])
     first_name = str(message["from"]["first_name"])
+    bot_name = environ.get("TELEGRAM_USERNAME")
     msg_to_send = ""
 
     if sanitized_msg_text.startswith("/exectime"):
@@ -597,7 +598,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     }
 
     # Check for the bot's name in the command, if applicable
-    bot_name = "@respondedorbot"
+    bot_name = f"@{bot_name}"
     if bot_name in lower_cmd:
         lower_cmd = lower_cmd.replace(bot_name, "")
 
@@ -608,7 +609,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     else:
         try:
             reply_to = str(message["reply_to_message"]["from"]["username"])
-            if reply_to != "respondedorbot" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
+            if reply_to != bot_name and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
                 return "ignored request"
         except KeyError:
             if chat_type != "private" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
