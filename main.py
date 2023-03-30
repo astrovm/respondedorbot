@@ -653,3 +653,6 @@ def responder(request: Request) -> str:
     except ValueError as value_error:
         print(f"value error: {value_error}")
         return "value error"
+    except AttributeError as attribute_error:
+        print(f"attribute error: {attribute_error}")
+        return "attribute error"
