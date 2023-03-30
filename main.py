@@ -632,6 +632,11 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
 @functions_framework.http
 def responder(request: Request) -> str:
     try:
+        update = request.args.get("update")
+        if update == "dollars":
+            get_dollar_rates("")
+            return "dollars updated"
+
         start_time = time.time()
 
         encrypted_token = str(request.args.get("token"))
@@ -647,12 +652,6 @@ def responder(request: Request) -> str:
 
         handle_msg(decrypted_token, start_time, request_json["message"])
         return "ok"
-    except KeyError as key_error:
-        print(f"key error: {key_error}")
-        return "key error"
-    except ValueError as value_error:
-        print(f"value error: {value_error}")
-        return "value error"
-    except AttributeError as attribute_error:
-        print(f"attribute error: {attribute_error}")
-        return "attribute error"
+    except BaseException as error:
+        print(f"error: {error}")
+        return "error"
