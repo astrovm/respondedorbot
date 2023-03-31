@@ -8,7 +8,7 @@ WORKDIR /app
 COPY main.py requirements.txt .
 
 # Install any required packages specified in requirements.txt
-RUN pip install --trusted-host pypi.python.org -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Expose the port the app will run on
 EXPOSE 8080
