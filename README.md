@@ -6,7 +6,7 @@ https://t.me/respondedorbot
 
 ## Set webhook
 
-https://api.telegram.org/bot{bot_token}/setWebhook?url={function_url}?token={encrypted_bot_token}
+https://api.telegram.org/bot{decrypted_token}/setWebhook?url={function_url}?token={encrypted_token}
 
 ## Environment variables
 
