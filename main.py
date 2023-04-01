@@ -630,6 +630,10 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     if bot_name in lower_cmd:
         lower_cmd = lower_cmd.replace(bot_name, "")
 
+    if lower_cmd == "/comando" and not sanitized_msg_text:
+        if "reply_to_message" in message and "text" in message["reply_to_message"]:
+            sanitized_msg_text = message["reply_to_message"]["text"]
+
     if lower_cmd in commands:
         send_typing(token, chat_id)
         msg_to_send = commands[lower_cmd](sanitized_msg_text)
