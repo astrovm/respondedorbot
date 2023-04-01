@@ -679,15 +679,31 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
     return fernet.decrypt(encrypted_token.encode()).decode()
 
 
+def set_webhook(decrypted_token: str, function_url: str, encrypted_token: str):
+    parameters = {"url": f"{function_url}?token={encrypted_token}"}
+    url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
+    requests.get(url, params=parameters, timeout=5)
+
+
+def webhook_check(decrypted_token: str, encrypted_token: str):
+    function_url = environ.get("FUNCTION_URL")
+    response = requests.get(function_url, timeout=5)
+    if response.status_code == 200:
+        set_webhook(decrypted_token, function_url, encrypted_token)
+    else:
+        function_url = environ.get("FUNCTION_URL_BACKUP")
+        set_webhook(decrypted_token, function_url, encrypted_token)
+
+
 @functions_framework.http
 def responder(request: Request) -> str:
     try:
-        update = request.args.get("update")
-        if update == "dollars":
+        start_time = time.time()
+
+        update_dollars = request.args.get("update_dollars")
+        if update_dollars == "true":
             get_dollar_rates("")
             return "dollars updated"
-
-        start_time = time.time()
 
         encrypted_token = str(request.args.get("token"))
         key = environ.get("TELEGRAM_TOKEN_KEY")
@@ -695,6 +711,11 @@ def responder(request: Request) -> str:
         token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
             return "wrong token"
+
+        check_webhook = request.args.get("check_webhook")
+        if check_webhook == "true":
+            webhook_check(decrypted_token, encrypted_token)
+            return "webhook checked"
 
         request_json = request.get_json()
         if "message" not in request_json:
