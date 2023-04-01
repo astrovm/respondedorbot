@@ -1,6 +1,6 @@
 # respondedorbot
 
-Telegram bot running on a Raspberry Pi that answers questions and provides useful information
+Telegram bot running on a Raspberry Pi that answers questions and provides useful information.
 
 https://t.me/respondedorbot
 
