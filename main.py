@@ -63,7 +63,10 @@ def _get_cache_history(hours_ago, request_hash, redis_client):
     if cached_data is None:
         return None
     else:
-        return json.loads(cached_data)
+        cache_history = json.loads(cached_data)
+        if cache_history is not None and "timestamp" not in cache_history:
+            cache_history = None
+        return cache_history
 
 
 # generic proxy for caching any request
@@ -78,14 +81,29 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     # redis config
     redis_client = _config_redis()
 
+    # check if environment variables for connecting to the redis backup are present
+    if (
+        "REDIS_HOST_BACKUP" in environ
+        and "REDIS_PORT_BACKUP" in environ
+        and "REDIS_PASSWORD_BACKUP" in environ
+    ):
+        redis_client_backup = _config_redis(
+            environ.get("REDIS_HOST_BACKUP"),
+            environ.get("REDIS_PORT_BACKUP"),
+            environ.get("REDIS_PASSWORD_BACKUP"),
+        )
+    else:
+        redis_client_backup = None
+
     # get previous api data from redis cache
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
         cache_history = _get_cache_history(
             get_history, request_hash, redis_client)
-        if cache_history is not None and "timestamp" not in cache_history:
-            cache_history = None
+        if cache_history is None and redis_client_backup is not None:
+            cache_history = _get_cache_history(
+                get_history, request_hash, redis_client_backup)
     else:
         cache_history = None
 
