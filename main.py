@@ -2,6 +2,7 @@ import json
 import time
 import random
 import hashlib
+import unicodedata
 from typing import Dict, List
 from os import environ
 from math import log
@@ -522,6 +523,23 @@ def get_timestamp(msg_text: str) -> str:
     return f"{int(time.time())}"
 
 
+def convert_to_command(msg_text: str) -> str:
+    # Convert to uppercase
+    upper_text = msg_text.upper()
+
+    # Replace Ñ with NI
+    replaced_text = upper_text.replace("Ñ", "NI")
+
+    # Normalize the text by removing accents and converting to ASCII
+    normalized_text = unicodedata.normalize(
+        'NFD', replaced_text).encode('ascii', 'ignore').decode('utf-8')
+
+    # Replace spaces with underscores and add a forward slash at the beginning
+    command = '/' + normalized_text.replace(' ', '_')
+
+    return command
+
+
 def get_help(msg_text: str) -> str:
     return """
 Available commands:
@@ -593,6 +611,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
         "/devo": get_devo,
         "/rainbow": rainbow,
         "/time": get_timestamp,
+        "/comando": convert_to_command,
         "/help": get_help
     }
 
