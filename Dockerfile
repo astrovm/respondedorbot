@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy the main.py and requirements.txt files into the container
-COPY main.py requirements.txt .
+COPY main.py requirements.txt ./
 
 # Install any required packages specified in requirements.txt
 RUN pip install -r requirements.txt
@@ -14,4 +14,4 @@ RUN pip install -r requirements.txt
 EXPOSE 8080
 
 # Define the command to run the app
-CMD ["functions-framework", "--target", "responder"]
+CMD ["functions-framework", "--target", "responder", "--port", "8080"]
