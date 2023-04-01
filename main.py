@@ -536,17 +536,16 @@ def convert_to_command(msg_text: str) -> str:
     normalized_text = unicodedata.normalize(
         'NFD', replaced_text).encode('ascii', 'ignore').decode('utf-8')
 
-    # Replace specific punctuation marks with their respective words
-    punct_replacements = {
+    # Replace specific punctuation marks with their respective words using str.translate
+    punct_replacements = str.maketrans({
         ' ': '_',
         '?': '_SIGNODEPREGUNTA',
         '!': '_SIGNODEEXCLAMACION',
-    }
-    for punct, replacement in punct_replacements.items():
-        normalized_text = normalized_text.replace(punct, replacement)
+    })
+    translated_text = normalized_text.translate(punct_replacements)
 
     # Add a forward slash at the beginning
-    command = '/' + normalized_text
+    command = '/' + translated_text
 
     return command
 
