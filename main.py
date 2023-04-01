@@ -623,8 +623,7 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
     if lower_cmd in commands:
         send_typing(token, chat_id)
         msg_to_send = commands[lower_cmd](sanitized_msg_text)
-
-    else:
+    elif not lower_cmd.startswith("/") or lower_cmd == "/ask":
         try:
             reply_to = str(message["reply_to_message"]["from"]["username"])
             if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
