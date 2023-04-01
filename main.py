@@ -3,6 +3,7 @@ import time
 import random
 import hashlib
 import unicodedata
+import re
 from typing import Dict, List
 from os import environ
 from math import log
@@ -527,15 +528,25 @@ def convert_to_command(msg_text: str) -> str:
     # Convert to uppercase
     upper_text = msg_text.upper()
 
-    # Replace Ñ with NI
-    replaced_text = upper_text.replace("Ñ", "NI")
+    # Replace standalone Ñ with ENIE, otherwise replace with NI
+    replaced_text = re.sub(r'\bÑ\b', 'ENIE', upper_text)
+    replaced_text = replaced_text.replace('Ñ', 'NI')
 
     # Normalize the text by removing accents and converting to ASCII
     normalized_text = unicodedata.normalize(
         'NFD', replaced_text).encode('ascii', 'ignore').decode('utf-8')
 
-    # Replace spaces with underscores and add a forward slash at the beginning
-    command = '/' + normalized_text.replace(' ', '_')
+    # Replace specific punctuation marks with their respective words
+    punct_replacements = {
+        ' ': '_',
+        '?': '_SIGNODEPREGUNTA',
+        '!': '_SIGNODEEXCLAMACION',
+    }
+    for punct, replacement in punct_replacements.items():
+        normalized_text = normalized_text.replace(punct, replacement)
+
+    # Add a forward slash at the beginning
+    command = '/' + normalized_text
 
     return command
 
