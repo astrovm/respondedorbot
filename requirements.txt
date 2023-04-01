@@ -1,5 +1,5 @@
-cryptography
-redis
-requests
-functions_framework
-flask
+cryptography==40.0.1
+redis==4.5.4
+requests==2.28.2
+functions-framework==3.3.0
+flask==2.2.3
