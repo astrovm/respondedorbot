@@ -593,6 +593,10 @@ Available commands:
     """
 
 
+def get_instance_name(msg_text: str) -> str:
+    return environ.get("FRIENDLY_INSTANCE_NAME")
+
+
 def send_typing(token: str, chat_id: str):
     parameters = {"chat_id": chat_id, "action": "typing"}
     url = f"https://api.telegram.org/bot{token}/sendChatAction"
@@ -608,6 +612,7 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
 
 
 def admin_report(token: str, msg: str):
+    msg = f"Admin report from {environ.get('FRIENDLY_INSTANCE_NAME')}: {msg}"
     send_msg(token, environ.get("ADMIN_CHAT_ID"), msg)
 
 
@@ -621,6 +626,7 @@ def initialize_commands() -> Dict[str, Callable]:
         "/rainbow": rainbow,
         "/time": get_timestamp,
         "/comando": convert_to_command,
+        "/instance": get_instance_name,
         "/help": get_help,
     }
 
@@ -698,6 +704,8 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     if function_response.status_code == 200:
         return True
     else:
+        admin_report(
+            decrypted_token, f"main webhook failed with error {function_response.status_code}")
         current_function_url = environ.get("CURRENT_FUNCTION_URL")
         webhook_result = set_telegram_webhook(
             decrypted_token, current_function_url, encrypted_token)
@@ -731,7 +739,6 @@ def process_request_parameters(request: Request, decrypted_token: str, encrypted
 
     request_json = request.get_json()
     if "message" not in request_json:
-        print(f"not message: {request_json}""")
         return "not message", 200
 
     handle_msg(decrypted_token, request_json["message"])

@@ -23,6 +23,7 @@ Telegram bot running on a Raspberry Pi that answers questions and provides usefu
 - REDIS_PASSWORD_BACKUP: The password for authenticating with the backup Redis server (if required).
 - CURRENT_FUNCTION_URL: The URL of the current instance.
 - MAIN_FUNCTION_URL: The URL of the primary instance that should be used if it's not down.
+- FRIENDLY_INSTANCE_NAME: A human-readable name for the current instance, used in admin reports and notifications to identify the source of the message.
 
 ## License
 
