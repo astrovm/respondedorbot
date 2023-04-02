@@ -1,18 +1,21 @@
-import json
-import time
-import random
 import hashlib
-import unicodedata
+import json
+import random
 import re
-from typing import Dict, List, Tuple, Callable
-from os import environ
-from math import log
-from datetime import datetime, timedelta
+import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from flask import Request
-from cryptography.fernet import Fernet
+from datetime import datetime, timedelta
+from math import log
+from os import environ
+from typing import Dict, List, Tuple, Callable
+
 import redis
 import requests
+from cryptography.fernet import Fernet
+from flask import Request
+from requests.exceptions import RequestException
+
 import functions_framework
 
 
@@ -698,20 +701,25 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
         return False
 
 
+def handle_webhook_failure(decrypted_token: str, encrypted_token: str, error_message: str) -> bool:
+    admin_report(decrypted_token, error_message)
+    current_function_url = environ.get("CURRENT_FUNCTION_URL")
+    webhook_result = set_telegram_webhook(
+        decrypted_token, current_function_url, encrypted_token)
+    return webhook_result
+
+
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     parameters = {"update_webhook": "true", "token": encrypted_token}
-    function_response = requests.get(
-        main_function_url, params=parameters, timeout=5)
-    if function_response.status_code == 200:
-        return True
-    else:
-        admin_report(
-            decrypted_token, f"main webhook failed with error {function_response.status_code}")
-        current_function_url = environ.get("CURRENT_FUNCTION_URL")
-        webhook_result = set_telegram_webhook(
-            decrypted_token, current_function_url, encrypted_token)
-        return webhook_result
+    try:
+        function_response = requests.get(
+            main_function_url, params=parameters, timeout=5)
+        function_response.raise_for_status()
+    except RequestException as request_error:
+        error_message = f"main webhook failed with error: {str(request_error)}"
+        return handle_webhook_failure(decrypted_token, encrypted_token, error_message)
+    return True
 
 
 def is_secret_token_valid(request: Request) -> bool:
