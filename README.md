@@ -2,11 +2,11 @@
 
 Telegram bot running on a Raspberry Pi that answers questions and provides useful information.
 
-https://t.me/respondedorbot
+<https://t.me/respondedorbot>
 
 ## Set webhook
 
-https://api.telegram.org/bot{decrypted_token}/setWebhook?url={function_url}?token={encrypted_token}
+<https://api.telegram.org/bot{decrypted_token}/setWebhook?url={function_url}?token={encrypted_token}>
 
 ## Environment variables
 
@@ -18,6 +18,11 @@ https://api.telegram.org/bot{decrypted_token}/setWebhook?url={function_url}?toke
 - REDIS_HOST: The hostname or IP address of the Redis server.
 - REDIS_PORT: The port number on which the Redis server is running.
 - REDIS_PASSWORD: The password for authenticating with the Redis server (if required).
+- REDIS_HOST_BACKUP: The hostname or IP address of the backup Redis server.
+- REDIS_PORT_BACKUP: The port number on which the backup Redis server is running.
+- REDIS_PASSWORD_BACKUP: The password for authenticating with the backup Redis server (if required).
+- FUNCTION_URL: The primary URL for the webhook function.
+- FUNCTION_URL_BACKUP: The backup URL for the webhook function in case the primary one is unavailable.
 
 ## License
 
