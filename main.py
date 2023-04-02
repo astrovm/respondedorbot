@@ -4,7 +4,7 @@ import random
 import hashlib
 import unicodedata
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Callable
 from os import environ
 from math import log
 from datetime import datetime, timedelta
@@ -611,20 +611,8 @@ def admin_report(token: str, msg: str):
     send_msg(token, environ.get("ADMIN_CHAT_ID"), msg)
 
 
-def handle_msg(token: str, message: Dict) -> str:
-    msg_text = str(message["text"]) if "text" in message else ""
-    msg_id = str(message["message_id"]) if "message_id" in message else ""
-    chat_id = str(message["chat"]["id"])
-    chat_type = str(message["chat"]["type"])
-    first_name = str(message["from"]["first_name"])
-
-    msg_to_send = ""
-    split_msg = msg_text.strip().split(" ")
-    lower_cmd = split_msg[0].lower()
-    sanitized_msg_text = msg_text.replace(split_msg[0], "").strip()
-
-    # Map commands to functions
-    commands = {
+def initialize_commands() -> Dict[str, Callable]:
+    return {
         "/convertbase": convert_base,
         "/random": select_random,
         "/prices": get_prices,
@@ -633,34 +621,49 @@ def handle_msg(token: str, message: Dict) -> str:
         "/rainbow": rainbow,
         "/time": get_timestamp,
         "/comando": convert_to_command,
-        "/help": get_help
+        "/help": get_help,
     }
 
-    # Check for the bot's name in the command, if applicable
+
+def handle_msg(token: str, message: Dict) -> str:
+    message_text = message.get("text", "")
+    message_id = message.get("message_id", "")
+    chat_id = str(message["chat"]["id"])
+    chat_type = str(message["chat"]["type"])
+    first_name = str(message["from"]["first_name"])
+
+    response_msg = ""
+    split_message = message_text.strip().split(" ")
+    command = split_message[0].lower()
+    sanitized_message_text = message_text.replace(split_message[0], "").strip()
+
+    commands = initialize_commands()
+
     bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-    if bot_name in lower_cmd:
-        lower_cmd = lower_cmd.replace(bot_name, "")
+    if bot_name in command:
+        command = command.replace(bot_name, "")
 
-    if lower_cmd == "/comando" and not sanitized_msg_text:
+    if command == "/comando" and not sanitized_message_text:
         if "reply_to_message" in message and "text" in message["reply_to_message"]:
-            sanitized_msg_text = message["reply_to_message"]["text"]
+            sanitized_message_text = message["reply_to_message"]["text"]
 
-    if lower_cmd in commands:
+    if command in commands:
         send_typing(token, chat_id)
-        msg_to_send = commands[lower_cmd](sanitized_msg_text)
-    elif not lower_cmd.startswith("/") or lower_cmd == "/ask":
+        response_msg = commands[command](sanitized_message_text)
+    elif not command.startswith("/") or command == "/ask":
         try:
             reply_to = str(message["reply_to_message"]["from"]["username"])
-            if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
+            if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text and not command.startswith("/ask"):
                 return "ignored request"
         except KeyError:
-            if chat_type != "private" and bot_name not in msg_text and not lower_cmd.startswith("/ask"):
+            if chat_type != "private" and bot_name not in message_text and not command.startswith("/ask"):
                 return "ignored request"
 
         send_typing(token, chat_id)
-        msg_to_send = gen_random(first_name)
+        response_msg = gen_random(first_name)
 
-    send_msg(token, chat_id, msg_to_send, msg_id)
+    send_msg(token, chat_id, response_msg, message_id)
+    return "ok"
 
 
 def decrypt_token(key: str, encrypted_token: str) -> str:
