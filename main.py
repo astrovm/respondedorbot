@@ -731,7 +731,8 @@ def process_request_parameters(request: Request, decrypted_token: str, encrypted
 
     request_json = request.get_json()
     if "message" not in request_json:
-        return "not message", 400
+        print(f"not message: {request_json}""")
+        return "not message", 200
 
     handle_msg(decrypted_token, request_json["message"])
     return "ok", 200
