@@ -576,23 +576,30 @@ def get_help(msg_text: str) -> str:
     return """
 Available commands:
 
-- /ask question: returns the answer to the question
+- /ask question: Returns the answer to the question
 
-- /random pizza, meat, sushi: chooses between the options
-- /random 1-10: returns a random number between 1 and 10
+- /comando something: Convert the input to a command
 
-- /prices: prices of the top 10 cryptos in usd
-- /prices in btc: prices of the top 10 cryptos in btc
-- /prices 20: prices of the top 20 cryptos in usd
-- /prices 100 in eur: prices of the top 100 cryptos in eur
-- /prices btc: price of bitcoin in usd
-- /prices btc, eth, xmr: prices of bitcoin, ethereum and monero in usd
-- /prices dai in sats: price of dai in satoshis
-- /prices btc, eth, xmr in sats: price of bitcoin, ethereum and monero in satoshis
+- /convertbase 101, 2, 10: Convert a number from one base to another (e.g., binary 101 to decimal)
 
-- /dolar: dollar prices in argentina
+- /dolar: Dollar prices in Argentina
 
-- /time: returns the current unix timestamp
+- /instance: Returns the name of the instance where the bot is running
+
+- /prices: Prices of the top 10 cryptos in USD
+- /prices in btc: Prices of the top 10 cryptos in BTC
+- /prices 20: Prices of the top 20 cryptos in USD
+- /prices 100 in eur: Prices of the top 100 cryptos in EUR
+- /prices btc, eth, xmr: Prices of Bitcoin, Ethereum, and Monero in USD
+- /prices dai in sats: Price of DAI in Satoshis
+- /prices stables: Prices of stablecoins in USD
+
+- /random pizza, meat, sushi: Chooses between the options
+- /random 1-10: Returns a random number between 1 and 10
+
+- /rainbow: Get the theoretical value of Bitcoin and its overvaluation or undervaluation percentage
+
+- /time: Returns the current Unix timestamp
     """
 
 
