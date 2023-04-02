@@ -597,13 +597,13 @@ def get_instance_name(msg_text: str) -> str:
     return environ.get("FRIENDLY_INSTANCE_NAME")
 
 
-def send_typing(token: str, chat_id: str):
+def send_typing(token: str, chat_id: str) -> None:
     parameters = {"chat_id": chat_id, "action": "typing"}
     url = f"https://api.telegram.org/bot{token}/sendChatAction"
     requests.get(url, params=parameters, timeout=5)
 
 
-def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
+def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     parameters = {"chat_id": chat_id, "text": msg}
     if msg_id != "":
         parameters["reply_to_message_id"] = msg_id
@@ -611,9 +611,11 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = ""):
     requests.get(url, params=parameters, timeout=5)
 
 
-def admin_report(token: str, msg: str):
-    msg = f"Admin report from {environ.get('FRIENDLY_INSTANCE_NAME')}: {msg}"
-    send_msg(token, environ.get("ADMIN_CHAT_ID"), msg)
+def admin_report(token: str, message: str) -> None:
+    instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
+    formatted_message = f"Admin report from {instance_name}: {message}"
+    admin_chat_id = environ.get("ADMIN_CHAT_ID")
+    send_msg(token, admin_chat_id, formatted_message)
 
 
 def initialize_commands() -> Dict[str, Callable]:
