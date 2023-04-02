@@ -611,25 +611,17 @@ def admin_report(token: str, msg: str):
     send_msg(token, environ.get("ADMIN_CHAT_ID"), msg)
 
 
-def handle_msg(token: str, start_time: float, message: Dict) -> str:
-    """Handle incoming messages and return a response."""
+def handle_msg(token: str, message: Dict) -> str:
     msg_text = str(message["text"]) if "text" in message else ""
-    sanitized_msg_text = msg_text
     msg_id = str(message["message_id"]) if "message_id" in message else ""
     chat_id = str(message["chat"]["id"])
     chat_type = str(message["chat"]["type"])
     first_name = str(message["from"]["first_name"])
+
     msg_to_send = ""
-
-    if sanitized_msg_text.startswith("/exectime"):
-        sanitized_msg_text = sanitized_msg_text.replace(
-            "/exectime", "").strip()
-    else:
-        start_time = False
-
-    split_msg = sanitized_msg_text.strip().split(" ")
+    split_msg = msg_text.strip().split(" ")
     lower_cmd = split_msg[0].lower()
-    sanitized_msg_text = sanitized_msg_text.replace(split_msg[0], "").strip()
+    sanitized_msg_text = msg_text.replace(split_msg[0], "").strip()
 
     # Map commands to functions
     commands = {
@@ -668,10 +660,6 @@ def handle_msg(token: str, start_time: float, message: Dict) -> str:
         send_typing(token, chat_id)
         msg_to_send = gen_random(first_name)
 
-    if start_time:
-        exec_time = round(time.time() - start_time, 4)
-        msg_to_send = f"{msg_to_send}\n\nExecution time: {exec_time:.4f} secs"
-
     send_msg(token, chat_id, msg_to_send, msg_id)
 
 
@@ -680,58 +668,76 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
     return fernet.decrypt(encrypted_token.encode()).decode()
 
 
-def set_webhook(decrypted_token: str, function_url: str, encrypted_token: str) -> bool:
+def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token: str) -> bool:
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
-    parameters = {"url": f"{function_url}?token={encrypted_token}",
-                  "allowed_updates": ["message"],
-                  "secret_token": secret_token,
-                  "max_connections": 100}
+    parameters = {
+        "url": f"{webhook_url}?token={encrypted_token}",
+        "allowed_updates": ["message"],
+        "secret_token": secret_token,
+        "max_connections": 100
+    }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
     telegram_response = requests.get(request_url, params=parameters, timeout=5)
     if telegram_response.status_code == 200:
         redis_client = _config_redis()
         redis_response = redis_client.set(
             "X-Telegram-Bot-Api-Secret-Token", secret_token)
-        if redis_response:
-            return True
-        else:
-            return False
+        return bool(redis_response)
     else:
         return False
 
 
-def webhook_check(decrypted_token: str, encrypted_token: str) -> bool:
+def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     main_function_url = environ.get("MAIN_FUNCTION_URL")
-    parameters = {"update_webhook": "true",
-                  "token": encrypted_token}
+    parameters = {"update_webhook": "true", "token": encrypted_token}
     function_response = requests.get(
         main_function_url, params=parameters, timeout=5)
     if function_response.status_code == 200:
         return True
     else:
         current_function_url = environ.get("CURRENT_FUNCTION_URL")
-        webhook_result = set_webhook(
+        webhook_result = set_telegram_webhook(
             decrypted_token, current_function_url, encrypted_token)
         return webhook_result
 
 
-def check_secret_token(request: Request) -> bool:
+def is_secret_token_valid(request: Request) -> bool:
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     redis_client = _config_redis()
     redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
-    if redis_secret_token == secret_token:
-        return True
-    else:
-        return False
+    return redis_secret_token == secret_token
+
+
+def process_request_parameters(request: Request, decrypted_token: str, encrypted_token: str) -> Tuple[str, int]:
+    if request.args.get("check_webhook") == "true":
+        if verify_webhook(decrypted_token, encrypted_token):
+            return "webhook checked", 200
+        else:
+            return "webhook check error", 400
+
+    if request.args.get("update_webhook") == "true":
+        function_url = environ.get("CURRENT_FUNCTION_URL")
+        if set_telegram_webhook(decrypted_token, function_url, encrypted_token):
+            return "webhook updated", 200
+        else:
+            return "webhook update error", 400
+
+    if not is_secret_token_valid(request):
+        admin_report(decrypted_token, "wrong secret token")
+        return "wrong secret token", 400
+
+    request_json = request.get_json()
+    if "message" not in request_json:
+        return "not message", 400
+
+    handle_msg(decrypted_token, request_json["message"])
+    return "ok", 200
 
 
 @functions_framework.http
 def responder(request: Request) -> Tuple[str, int]:
     try:
-        start_time = time.time()
-
-        update_dollars = request.args.get("update_dollars")
-        if update_dollars == "true":
+        if request.args.get("update_dollars") == "true":
             get_dollar_rates("")
             return "dollars updated", 200
 
@@ -742,35 +748,9 @@ def responder(request: Request) -> Tuple[str, int]:
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
             return "wrong token", 400
 
-        check_webhook = request.args.get("check_webhook")
-        if check_webhook == "true":
-            webhook_result = webhook_check(decrypted_token, encrypted_token)
-            if webhook_result:
-                return "webhook checked", 200
-            else:
-                return "webhook check error", 400
-
-        update_webhook = request.args.get("update_webhook")
-        if update_webhook == "true":
-            function_url = environ.get("CURRENT_FUNCTION_URL")
-            webhook_result = set_webhook(
-                decrypted_token, function_url, encrypted_token)
-            if webhook_result:
-                return "webhook updated", 200
-            else:
-                return "webhook update error", 400
-
-        secret_token_check = check_secret_token(request)
-        if secret_token_check is False:
-            admin_report(decrypted_token, "wrong secret token")
-            return "wrong secret token", 400
-
-        request_json = request.get_json()
-        if "message" not in request_json:
-            return "not message", 400
-
-        handle_msg(decrypted_token, start_time, request_json["message"])
-        return "ok", 200
+        response_message, status_code = process_request_parameters(
+            request, decrypted_token, encrypted_token)
+        return response_message, status_code
     except BaseException as error:
         print(f"error: {error}")
         return "error", 500
