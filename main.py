@@ -4,7 +4,7 @@ import random
 import hashlib
 import unicodedata
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from os import environ
 from math import log
 from datetime import datetime, timedelta
@@ -679,50 +679,97 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
     return fernet.decrypt(encrypted_token.encode()).decode()
 
 
-def set_webhook(decrypted_token: str, function_url: str, encrypted_token: str):
-    parameters = {"url": f"{function_url}?token={encrypted_token}"}
-    url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
-    requests.get(url, params=parameters, timeout=5)
-
-
-def webhook_check(decrypted_token: str, encrypted_token: str):
-    function_url = environ.get("FUNCTION_URL")
-    response = requests.get(function_url, timeout=5)
-    if response.status_code == 200:
-        set_webhook(decrypted_token, function_url, encrypted_token)
+def set_webhook(decrypted_token: str, function_url: str, encrypted_token: str) -> bool:
+    secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
+    parameters = {"url": f"{function_url}?token={encrypted_token}",
+                  "allowed_updates": ["message"],
+                  "secret_token": secret_token,
+                  "max_connections": 100}
+    request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
+    telegram_response = requests.get(request_url, params=parameters, timeout=5)
+    if telegram_response.status_code == 200:
+        redis_client = _config_redis()
+        redis_response = redis_client.set(
+            "X-Telegram-Bot-Api-Secret-Token", secret_token)
+        if redis_response:
+            return True
+        else:
+            return False
     else:
-        function_url = environ.get("FUNCTION_URL_BACKUP")
-        set_webhook(decrypted_token, function_url, encrypted_token)
+        return False
+
+
+def webhook_check(decrypted_token: str, encrypted_token: str) -> bool:
+    main_function_url = environ.get("MAIN_FUNCTION_URL")
+    parameters = {"update_webhook": "true",
+                  "token": encrypted_token}
+    function_response = requests.get(
+        main_function_url, params=parameters, timeout=5)
+    if function_response.status_code == 200:
+        return True
+    else:
+        current_function_url = environ.get("CURRENT_FUNCTION_URL")
+        webhook_result = set_webhook(
+            decrypted_token, current_function_url, encrypted_token)
+        return webhook_result
+
+
+def check_secret_token(request: Request) -> bool:
+    secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    redis_client = _config_redis()
+    redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
+    if redis_secret_token == secret_token:
+        return True
+    else:
+        return False
 
 
 @functions_framework.http
-def responder(request: Request) -> str:
+def responder(request: Request) -> Tuple[str, int]:
     try:
         start_time = time.time()
 
         update_dollars = request.args.get("update_dollars")
         if update_dollars == "true":
             get_dollar_rates("")
-            return "dollars updated"
+            return "dollars updated", 200
 
         encrypted_token = str(request.args.get("token"))
         key = environ.get("TELEGRAM_TOKEN_KEY")
         decrypted_token = decrypt_token(key, encrypted_token)
         token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
-            return "wrong token"
+            return "wrong token", 400
 
         check_webhook = request.args.get("check_webhook")
         if check_webhook == "true":
-            webhook_check(decrypted_token, encrypted_token)
-            return "webhook checked"
+            webhook_result = webhook_check(decrypted_token, encrypted_token)
+            if webhook_result:
+                return "webhook checked", 200
+            else:
+                return "webhook check error", 400
+
+        update_webhook = request.args.get("update_webhook")
+        if update_webhook == "true":
+            function_url = environ.get("CURRENT_FUNCTION_URL")
+            webhook_result = set_webhook(
+                decrypted_token, function_url, encrypted_token)
+            if webhook_result:
+                return "webhook updated", 200
+            else:
+                return "webhook update error", 400
+
+        secret_token_check = check_secret_token(request)
+        if secret_token_check is False:
+            admin_report(decrypted_token, "wrong secret token")
+            return "wrong secret token", 400
 
         request_json = request.get_json()
         if "message" not in request_json:
-            return "not message"
+            return "not message", 400
 
         handle_msg(decrypted_token, start_time, request_json["message"])
-        return "ok"
+        return "ok", 200
     except BaseException as error:
         print(f"error: {error}")
-        return "error"
+        return "error", 500
