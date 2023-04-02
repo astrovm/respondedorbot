@@ -23,7 +23,8 @@ def _config_redis(host=None, port=None, password=None):
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
-    redis_client = redis.Redis(host=host, port=port, password=password)
+    redis_client = redis.Redis(
+        host=host, port=port, password=password, decode_responses=True)
     return redis_client
 
 
