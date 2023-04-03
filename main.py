@@ -784,6 +784,9 @@ def responder(request: Request) -> Tuple[str, int]:
             get_dollar_rates("")
             return "Dollars updated", 200
 
+        if "token" not in request.args:
+            return "No token", 200
+
         encrypted_token = str(request.args.get("token"))
         key = environ.get("TELEGRAM_TOKEN_KEY")
         decrypted_token = decrypt_token(key, encrypted_token)
