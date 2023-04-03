@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from math import log
 from os import environ
-from typing import Dict, List, Tuple, Callable
+from typing import Dict, List, Tuple, Callable, Union
 
 import redis
 import requests
@@ -693,14 +693,13 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
     return fernet.decrypt(encrypted_token.encode()).decode()
 
 
-def get_telegram_webhook_info(decrypted_token: str) -> Dict:
+def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
     request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
     try:
         telegram_response = requests.get(request_url, timeout=5)
         telegram_response.raise_for_status()
     except RequestException as request_error:
-        error_message = f"Telegram webhook info failed with error: {str(request_error)}"
-        return {"error": error_message}
+        return {"error": str(request_error)}
     return telegram_response.json()["result"]
 
 
@@ -727,6 +726,8 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
 
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     webhook_info = get_telegram_webhook_info(decrypted_token)
+    if "error" in webhook_info:
+        return False
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
     main_webhook_url = f"{main_function_url}?token={encrypted_token}"
