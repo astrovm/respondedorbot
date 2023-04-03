@@ -693,11 +693,22 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
     return fernet.decrypt(encrypted_token.encode()).decode()
 
 
+def get_telegram_webhook_info(decrypted_token: str) -> Dict:
+    request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
+    try:
+        telegram_response = requests.get(request_url, timeout=5)
+        telegram_response.raise_for_status()
+    except RequestException as request_error:
+        error_message = f"telegram webhook info failed with error: {str(request_error)}"
+        return {"error": error_message}
+    return telegram_response.json()
+
+
 def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token: str) -> bool:
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
         "url": f"{webhook_url}?token={encrypted_token}",
-        "allowed_updates": ["message"],
+        "allowed_updates": '["message"]',
         "secret_token": secret_token,
         "max_connections": 100
     }
