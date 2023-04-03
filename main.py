@@ -729,11 +729,9 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     webhook_info = get_telegram_webhook_info(decrypted_token)
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
+    webhook_url = f"{main_function_url}?token={encrypted_token}"
     if main_function_url == current_function_url:
-        if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
-            return True
-        else:
-            return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
+        return webhook_info.get("url", "") == webhook_url or set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
     try:
         function_response = requests.get(main_function_url, timeout=5)
         function_response.raise_for_status()
@@ -743,9 +741,7 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
             admin_report(decrypted_token, error_message)
             return set_telegram_webhook(decrypted_token, current_function_url, encrypted_token)
         return True
-    if webhook_info.get("url", "") != f"{main_function_url}?token={encrypted_token}":
-        return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
-    return True
+    return webhook_info.get("url", "") == webhook_url or set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
 
 
 def is_secret_token_valid(request: Request) -> bool:
