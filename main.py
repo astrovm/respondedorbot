@@ -702,14 +702,16 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
         "max_connections": 100
     }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
-    telegram_response = requests.get(request_url, params=parameters, timeout=5)
-    if telegram_response.status_code == 200:
-        redis_client = _config_redis()
-        redis_response = redis_client.set(
-            "X-Telegram-Bot-Api-Secret-Token", secret_token)
-        return bool(redis_response)
-    else:
+    try:
+        telegram_response = requests.get(
+            request_url, params=parameters, timeout=5)
+        telegram_response.raise_for_status()
+    except RequestException:
         return False
+    redis_client = _config_redis()
+    redis_response = redis_client.set(
+        "X-Telegram-Bot-Api-Secret-Token", secret_token)
+    return bool(redis_response)
 
 
 def handle_webhook_failure(decrypted_token: str, encrypted_token: str, error_message: str) -> bool:
