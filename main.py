@@ -563,11 +563,15 @@ def convert_to_command(msg_text: str) -> str:
         ' ': '_',
         '?': '_SIGNODEPREGUNTA',
         '!': '_SIGNODEEXCLAMACION',
+        '\n': '_',
     })
     translated_text = normalized_text.translate(punct_replacements)
 
+    # Remove all characters except letters, numbers, and underscores
+    alphanumeric_underscore = re.sub(r'[^A-Za-z0-9_]', '', translated_text)
+
     # Add a forward slash at the beginning
-    command = '/' + translated_text
+    command = '/' + alphanumeric_underscore
 
     return command
 
