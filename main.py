@@ -701,7 +701,7 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict:
     except RequestException as request_error:
         error_message = f"telegram webhook info failed with error: {str(request_error)}"
         return {"error": error_message}
-    return telegram_response.json()
+    return telegram_response.json()["result"]
 
 
 def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token: str) -> bool:
@@ -771,7 +771,7 @@ def process_request_parameters(request: Request, decrypted_token: str, encrypted
         admin_report(decrypted_token, "wrong secret token")
         return "wrong secret token", 400
 
-    request_json = request.get_json()
+    request_json = request.get_json(silent=True)
     if "message" not in request_json:
         return "not message", 200
 
