@@ -699,7 +699,7 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict:
         telegram_response = requests.get(request_url, timeout=5)
         telegram_response.raise_for_status()
     except RequestException as request_error:
-        error_message = f"telegram webhook info failed with error: {str(request_error)}"
+        error_message = f"Telegram webhook info failed with error: {str(request_error)}"
         return {"error": error_message}
     return telegram_response.json()["result"]
 
@@ -725,25 +725,32 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
     return bool(redis_response)
 
 
-def handle_webhook_failure(decrypted_token: str, encrypted_token: str, error_message: str) -> bool:
-    admin_report(decrypted_token, error_message)
-    current_function_url = environ.get("CURRENT_FUNCTION_URL")
-    webhook_result = set_telegram_webhook(
-        decrypted_token, current_function_url, encrypted_token)
-    return webhook_result
-
-
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
+    webhook_info = get_telegram_webhook_info(decrypted_token)
     main_function_url = environ.get("MAIN_FUNCTION_URL")
-    parameters = {"update_webhook": "true", "token": encrypted_token}
+    current_function_url = environ.get("CURRENT_FUNCTION_URL")
     try:
-        function_response = requests.get(
-            main_function_url, params=parameters, timeout=5)
+        function_response = requests.get(main_function_url, timeout=5)
         function_response.raise_for_status()
     except RequestException as request_error:
-        error_message = f"main webhook failed with error: {str(request_error)}"
-        return handle_webhook_failure(decrypted_token, encrypted_token, error_message)
-    return True
+        if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
+            error_message = f"main webhook failed with error: {str(request_error)}"
+            admin_report(decrypted_token, error_message)
+            webhook_result = set_telegram_webhook(
+                decrypted_token, current_function_url, encrypted_token)
+            return webhook_result
+        elif webhook_info.get("url", "") == f"{current_function_url}?token={encrypted_token}":
+            return True
+        else:
+            webhook_result = set_telegram_webhook(
+                decrypted_token, current_function_url, encrypted_token)
+            return webhook_result
+    if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
+        return True
+    else:
+        webhook_result = set_telegram_webhook(
+            decrypted_token, main_function_url, encrypted_token)
+        return webhook_result
 
 
 def is_secret_token_valid(request: Request) -> bool:
@@ -756,27 +763,27 @@ def is_secret_token_valid(request: Request) -> bool:
 def process_request_parameters(request: Request, decrypted_token: str, encrypted_token: str) -> Tuple[str, int]:
     if request.args.get("check_webhook") == "true":
         if verify_webhook(decrypted_token, encrypted_token):
-            return "webhook checked", 200
+            return "Webhook checked", 200
         else:
-            return "webhook check error", 400
+            return "Webhook check error", 400
 
     if request.args.get("update_webhook") == "true":
         function_url = environ.get("CURRENT_FUNCTION_URL")
         if set_telegram_webhook(decrypted_token, function_url, encrypted_token):
-            return "webhook updated", 200
+            return "Webhook updated", 200
         else:
-            return "webhook update error", 400
+            return "Webhook update error", 400
 
     if not is_secret_token_valid(request):
-        admin_report(decrypted_token, "wrong secret token")
-        return "wrong secret token", 400
+        admin_report(decrypted_token, "Wrong secret token")
+        return "Wrong secret token", 400
 
     request_json = request.get_json(silent=True)
     if "message" not in request_json:
-        return "not message", 200
+        return "Not message", 200
 
     handle_msg(decrypted_token, request_json["message"])
-    return "ok", 200
+    return "Ok", 200
 
 
 @functions_framework.http
@@ -784,18 +791,18 @@ def responder(request: Request) -> Tuple[str, int]:
     try:
         if request.args.get("update_dollars") == "true":
             get_dollar_rates("")
-            return "dollars updated", 200
+            return "Dollars updated", 200
 
         encrypted_token = str(request.args.get("token"))
         key = environ.get("TELEGRAM_TOKEN_KEY")
         decrypted_token = decrypt_token(key, encrypted_token)
         token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
-            return "wrong token", 400
+            return "Wrong token", 400
 
         response_message, status_code = process_request_parameters(
             request, decrypted_token, encrypted_token)
         return response_message, status_code
     except BaseException as error:
-        print(f"error: {error}")
-        return "error", 500
+        print(f"Error: {error}")
+        return "Error", 500
