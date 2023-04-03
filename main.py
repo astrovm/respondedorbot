@@ -752,28 +752,27 @@ def is_secret_token_valid(request: Request) -> bool:
 
 
 def process_request_parameters(request: Request, decrypted_token: str, encrypted_token: str) -> Tuple[str, int]:
-    if request.args.get("check_webhook") == "true":
-        if verify_webhook(decrypted_token, encrypted_token):
-            return "Webhook checked", 200
-        else:
-            return "Webhook check error", 400
+    check_webhook = request.args.get("check_webhook") == "true"
+    update_webhook = request.args.get("update_webhook") == "true"
 
-    if request.args.get("update_webhook") == "true":
+    if check_webhook:
+        return ("Webhook checked", 200) if verify_webhook(decrypted_token, encrypted_token) else ("Webhook check error", 400)
+
+    if update_webhook:
         function_url = environ.get("CURRENT_FUNCTION_URL")
-        if set_telegram_webhook(decrypted_token, function_url, encrypted_token):
-            return "Webhook updated", 200
-        else:
-            return "Webhook update error", 400
+        return ("Webhook updated", 200) if set_telegram_webhook(decrypted_token, function_url, encrypted_token) else ("Webhook update error", 400)
 
     if not is_secret_token_valid(request):
         admin_report(decrypted_token, "Wrong secret token")
         return "Wrong secret token", 400
 
     request_json = request.get_json(silent=True)
-    if "message" not in request_json:
-        return "Not message", 200
+    message = request_json.get("message")
 
-    handle_msg(decrypted_token, request_json["message"])
+    if not message:
+        return "No message", 200
+
+    handle_msg(decrypted_token, message)
     return "Ok", 200
 
 
@@ -784,13 +783,15 @@ def responder(request: Request) -> Tuple[str, int]:
             get_dollar_rates("")
             return "Dollars updated", 200
 
-        if "token" not in request.args:
+        token = request.args.get("token")
+        if not token:
             return "No token", 200
 
-        encrypted_token = str(request.args.get("token"))
+        encrypted_token = str(token)
         key = environ.get("TELEGRAM_TOKEN_KEY")
         decrypted_token = decrypt_token(key, encrypted_token)
         token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
+
         if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
             return "Wrong token", 400
 
