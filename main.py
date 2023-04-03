@@ -729,28 +729,23 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     webhook_info = get_telegram_webhook_info(decrypted_token)
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
+    if main_function_url == current_function_url:
+        if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
+            return True
+        else:
+            return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
     try:
         function_response = requests.get(main_function_url, timeout=5)
         function_response.raise_for_status()
     except RequestException as request_error:
-        if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
-            error_message = f"main webhook failed with error: {str(request_error)}"
+        if webhook_info.get("url", "") != f"{current_function_url}?token={encrypted_token}":
+            error_message = f"Main webhook failed with error: {str(request_error)}"
             admin_report(decrypted_token, error_message)
-            webhook_result = set_telegram_webhook(
-                decrypted_token, current_function_url, encrypted_token)
-            return webhook_result
-        elif webhook_info.get("url", "") == f"{current_function_url}?token={encrypted_token}":
-            return True
-        else:
-            webhook_result = set_telegram_webhook(
-                decrypted_token, current_function_url, encrypted_token)
-            return webhook_result
-    if webhook_info.get("url", "") == f"{main_function_url}?token={encrypted_token}":
+            return set_telegram_webhook(decrypted_token, current_function_url, encrypted_token)
         return True
-    else:
-        webhook_result = set_telegram_webhook(
-            decrypted_token, main_function_url, encrypted_token)
-        return webhook_result
+    if webhook_info.get("url", "") != f"{main_function_url}?token={encrypted_token}":
+        return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
+    return True
 
 
 def is_secret_token_valid(request: Request) -> bool:
