@@ -358,13 +358,13 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
                     rate_type[1]["history"]["data"])
 
     rate_names = [
-        "oficial", "solidario", "tarjeta", "qatar", "mepgd30",
-        "cclgd30", "ccb", "blue", "usdc", "dai", "usdt"
+        "oficial", "solidario", "tarjeta", "qatar", "mep",
+        "ccl", "ccb", "blue", "usdc", "dai", "usdt"
     ]
 
     rate_display_names = {
         "oficial": "Oficial", "solidario": "Solidario", "tarjeta": "Tarjeta", "qatar": "Qatar",
-        "mepgd30": "MEP", "cclgd30": "CCL", "ccb": "Bitcoin", "blue": "Blue",
+        "mep": "MEP", "ccl": "CCL", "ccb": "Bitcoin", "blue": "Blue",
         "usdc": "USDC", "dai": "DAI", "usdt": "USDT"
     }
 
