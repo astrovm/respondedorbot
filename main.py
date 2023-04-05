@@ -725,37 +725,36 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
 
 
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
+    def set_main_webhook() -> bool:
+        return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
+
     webhook_info = get_telegram_webhook_info(decrypted_token)
     if "error" in webhook_info:
         return False
+
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
     main_webhook_url = f"{main_function_url}?token={encrypted_token}"
     current_webhook_url = f"{current_function_url}?token={encrypted_token}"
 
-    def set_main_webhook() -> bool:
-        return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
-
-    if main_function_url == current_function_url:
-        return webhook_info.get("url") == main_webhook_url or set_main_webhook()
-
-    try:
-        function_response = requests.get(main_function_url, timeout=5)
-        function_response.raise_for_status()
-    except RequestException as request_error:
-        if webhook_info.get("url") != current_webhook_url:
-            error_message = f"Main webhook failed with error: {str(request_error)}"
-            admin_report(decrypted_token, error_message)
-            return set_telegram_webhook(decrypted_token, current_function_url, encrypted_token)
-        return True
-
-    if webhook_info.get("url") != main_webhook_url:
+    if main_function_url != current_function_url:
+        try:
+            function_response = requests.get(main_function_url, timeout=5)
+            function_response.raise_for_status()
+        except RequestException as request_error:
+            if webhook_info.get("url") != current_webhook_url:
+                error_message = f"Main webhook failed with error: {str(request_error)}"
+                admin_report(decrypted_token, error_message)
+                return set_main_webhook()
+            return True
+    elif webhook_info.get("url") != main_webhook_url:
         set_main_webhook_success = set_main_webhook()
         if set_main_webhook_success:
             admin_report(decrypted_token, "Main webhook is up again")
         else:
             admin_report(decrypted_token, "Failed to set main webhook")
         return set_main_webhook_success
+
     return True
 
 
