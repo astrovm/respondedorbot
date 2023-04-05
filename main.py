@@ -562,11 +562,16 @@ def convert_to_command(msg_text: str) -> str:
         '?': '_SIGNODEPREGUNTA',
         '!': '_SIGNODEEXCLAMACION',
         '\n': '_',
+        '.': '_PUNTO',  # Add this line for replacing the dot
     })
     translated_text = normalized_text.translate(punct_replacements)
 
     # Remove all characters except letters, numbers, and underscores
     alphanumeric_underscore = re.sub(r'[^A-Za-z0-9_]', '', translated_text)
+
+    # Remove underscores before punctuation words and replace multiple consecutive _PUNTO occurrences with _PUNTOSSUSPENSIVOS
+    alphanumeric_underscore = re.sub(r'_(?=(_SIGNODEPREGUNTA|_SIGNODEEXCLAMACION|_PUNTO))|(_PUNTO){3,}', lambda match: '_PUNTOSSUSPENSIVOS' if match.group(
+        0).startswith('_PUNTO') else '', alphanumeric_underscore)
 
     # Add a forward slash at the beginning
     command = '/' + alphanumeric_underscore
