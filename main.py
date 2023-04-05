@@ -745,8 +745,7 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
                 admin_report(decrypted_token, error_message)
                 return set_telegram_webhook(decrypted_token, current_function_url, encrypted_token)
             return True
-
-    if webhook_info.get("url") != main_webhook_url:
+    elif webhook_info.get("url") != main_webhook_url:
         set_main_webhook_success = set_main_webhook()
         if set_main_webhook_success:
             admin_report(decrypted_token, "Main webhook is up again")
