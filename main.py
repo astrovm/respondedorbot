@@ -546,8 +546,9 @@ def get_timestamp(msg_text: str) -> str:
 
 
 def convert_to_command(msg_text: str) -> str:
-    # Convert emojis to their textual representation
-    msg_text = emoji.demojize(msg_text, language='es')
+    # Add a space before each emoji and convert it to its textual representation
+    msg_text = emoji.replace_emoji(
+        msg_text, replace=lambda chars, data_dict: ' ' + data_dict['es'])
 
     # Convert to uppercase
     upper_text = msg_text.upper()
