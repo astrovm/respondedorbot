@@ -9,13 +9,11 @@ from datetime import datetime, timedelta
 from math import log
 from os import environ
 from typing import Dict, List, Tuple, Callable, Union
-
 import redis
 import requests
 from cryptography.fernet import Fernet
 from flask import Request
 from requests.exceptions import RequestException
-
 import functions_framework
 
 
