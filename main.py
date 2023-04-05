@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 from flask import Request
 from requests.exceptions import RequestException
 import functions_framework
+import emoji
 
 
 def _config_redis(host=None, port=None, password=None):
@@ -545,6 +546,9 @@ def get_timestamp(msg_text: str) -> str:
 
 
 def convert_to_command(msg_text: str) -> str:
+    # Convert emojis to their textual representation
+    msg_text = emoji.demojize(msg_text, language='es')
+
     # Convert to uppercase
     upper_text = msg_text.upper()
 
