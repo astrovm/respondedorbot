@@ -549,9 +549,12 @@ def convert_to_command(msg_text: str) -> str:
     if not msg_text.strip():
         return "Invalid input. Usage: /comando <text>"
 
-    # Add a space before each emoji and convert it to its textual representation
+    # Add spaces surrounding each emoji and convert it to its textual representation
     msg_text = emoji.replace_emoji(
-        msg_text, replace=lambda chars, data_dict: ' ' + data_dict['es'])
+        msg_text, replace=lambda chars, data_dict: ' ' + data_dict['es'] + ' ')
+
+    # Remove consecutive spaces
+    msg_text = re.sub(r'\s+', ' ', msg_text)
 
     # Convert to uppercase
     upper_text = msg_text.upper()
