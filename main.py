@@ -584,6 +584,9 @@ def convert_to_command(msg_text: str) -> str:
     alphanumeric_underscore = re.sub(r'(?<=\w)_(?=(_SIGNODEPREGUNTA|_SIGNODEEXCLAMACION|_PUNTO))|(_PUNTO){3,}|^_', lambda match: '_PUNTOSSUSPENSIVOS' if match.group(
         0).startswith('_PUNTO') else '', alphanumeric_underscore, flags=re.UNICODE)
 
+    # Remove trailing underscores
+    alphanumeric_underscore = re.sub(r'_+$', '', alphanumeric_underscore)
+
     # Add a forward slash at the beginning
     command = '/' + alphanumeric_underscore
 
