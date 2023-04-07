@@ -546,49 +546,52 @@ def get_timestamp(msg_text: str) -> str:
 
 
 def convert_to_command(msg_text: str) -> str:
-    if not msg_text.strip():
-        return "Invalid input. Usage: /comando <text>"
-
     # Add spaces surrounding each emoji and convert it to its textual representation
-    msg_text = emoji.replace_emoji(
-        msg_text, replace=lambda chars, data_dict: ' ' + data_dict['es'] + ' ')
+    emoji_text = emoji.replace_emoji(
+        msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} ")
 
     # Remove consecutive spaces
-    msg_text = re.sub(r'\s+', ' ', msg_text)
+    single_spaced_text = re.sub(r'\s+', ' ', emoji_text)
 
     # Convert to uppercase
-    upper_text = msg_text.upper()
+    uppercase_text = single_spaced_text.upper()
 
     # Replace standalone Ñ with ENIE, otherwise replace with NI
-    replaced_text = re.sub(r'\bÑ\b', 'ENIE', upper_text)
-    replaced_text = replaced_text.replace('Ñ', 'NI')
+    replaced_enie_text = re.sub(r'\bÑ\b', 'ENIE', uppercase_text)
+    replaced_ni_text = replaced_enie_text.replace('Ñ', 'NI')
 
     # Normalize the text by removing accents and converting to ASCII
     normalized_text = unicodedata.normalize(
-        'NFD', replaced_text).encode('ascii', 'ignore').decode('utf-8')
+        'NFD', replaced_ni_text).encode('ascii', 'ignore').decode('utf-8')
 
     # Replace specific punctuation marks with their respective words using str.translate
-    punct_replacements = str.maketrans({
+    punctuation_replacements = str.maketrans({
         ' ': '_',
         '?': '_SIGNODEPREGUNTA',
         '!': '_SIGNODEEXCLAMACION',
         '\n': '_',
         '.': '_PUNTO',
     })
-    translated_text = normalized_text.translate(punct_replacements)
+    translated_punctuation = normalized_text.translate(
+        punctuation_replacements)
 
     # Remove all characters except letters, numbers, and underscores
-    alphanumeric_underscore = re.sub(r'[^A-Za-z0-9_]', '', translated_text)
+    alphanumeric_underscore = re.sub(
+        r'[^A-Za-z0-9_]', '', translated_punctuation)
 
     # Replace multiple consecutive _PUNTO occurrences with _PUNTOSSUSPENSIVOS and remove underscores before punctuation words
-    alphanumeric_underscore = re.sub(r'(?<=\w)_(?=(_SIGNODEPREGUNTA|_SIGNODEEXCLAMACION|_PUNTO))|(_PUNTO){3,}|^_', lambda match: '_PUNTOSSUSPENSIVOS' if match.group(
+    cleaned_text = re.sub(r'(?<=\w)_(?=(_SIGNODEPREGUNTA|_SIGNODEEXCLAMACION|_PUNTO))|(_PUNTO){3,}|^_', lambda match: '_PUNTOSSUSPENSIVOS' if match.group(
         0).startswith('_PUNTO') else '', alphanumeric_underscore, flags=re.UNICODE)
 
     # Remove trailing underscores
-    alphanumeric_underscore = re.sub(r'_+$', '', alphanumeric_underscore)
+    final_text = re.sub(r'_+$', '', cleaned_text)
+
+    # If there are no remaining characters after processing, return an error
+    if not final_text:
+        return "Invalid input. Usage: /comando <text>"
 
     # Add a forward slash at the beginning
-    command = '/' + alphanumeric_underscore
+    command = f"/{final_text}"
 
     return command
 
