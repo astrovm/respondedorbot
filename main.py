@@ -550,41 +550,41 @@ def convert_to_command(msg_text: str) -> str:
     emoji_text = emoji.replace_emoji(
         msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} ")
 
-    # Remove consecutive spaces
-    single_spaced_text = re.sub(r'\s+', ' ', emoji_text)
+    # Convert to uppercase and normalize the text by removing accents and converting to ASCII
+    normalized_text = unicodedata.normalize(
+        'NFD', emoji_text.upper()).encode('ascii', 'ignore').decode('utf-8')
 
-    # Convert to uppercase
-    uppercase_text = single_spaced_text.upper()
+    # Remove consecutive spaces
+    single_spaced_text = re.sub(r'\s+', ' ', normalized_text)
 
     # Replace standalone Ñ with ENIE, otherwise replace with NI
-    replaced_enie_text = re.sub(r'\bÑ\b', 'ENIE', uppercase_text)
+    replaced_enie_text = re.sub(r'\bÑ\b', 'ENIE', single_spaced_text)
     replaced_ni_text = replaced_enie_text.replace('Ñ', 'NI')
 
-    # Normalize the text by removing accents and converting to ASCII
-    normalized_text = unicodedata.normalize(
-        'NFD', replaced_ni_text).encode('ascii', 'ignore').decode('utf-8')
+    # Replace consecutive dots with _PUNTOSSUSPENSIVOS_
+    replaced_ellipsis_text = re.sub(
+        r'\.{3}', '_PUNTOSSUSPENSIVOS_', replaced_ni_text)
 
     # Replace specific punctuation marks with their respective words using str.translate
     punctuation_replacements = str.maketrans({
         ' ': '_',
-        '?': '_SIGNODEPREGUNTA',
-        '!': '_SIGNODEEXCLAMACION',
         '\n': '_',
-        '.': '_PUNTO',
+        '?': '_SIGNODEPREGUNTA_',
+        '!': '_SIGNODEEXCLAMACION_',
+        '.': '_PUNTO_'
     })
-    translated_punctuation = normalized_text.translate(
+    translated_punctuation = replaced_ellipsis_text.translate(
         punctuation_replacements)
+
+    # Remove consecutive underscores
+    single_underscore_text = re.sub(r'_+', '_', translated_punctuation)
 
     # Remove all characters except letters, numbers, and underscores
     alphanumeric_underscore = re.sub(
-        r'[^A-Za-z0-9_]', '', translated_punctuation)
-
-    # Replace multiple consecutive _PUNTO occurrences with _PUNTOSSUSPENSIVOS and remove underscores before punctuation words
-    cleaned_text = re.sub(r'(?<=\w)_(?=(_SIGNODEPREGUNTA|_SIGNODEEXCLAMACION|_PUNTO))|(_PUNTO){3,}|^_', lambda match: '_PUNTOSSUSPENSIVOS' if match.group(
-        0).startswith('_PUNTO') else '', alphanumeric_underscore, flags=re.UNICODE)
+        r'[^A-Za-z0-9_]', '', single_underscore_text)
 
     # Remove trailing underscores
-    final_text = re.sub(r'_+$', '', cleaned_text)
+    final_text = re.sub(r'_+$', '', alphanumeric_underscore)
 
     # If there are no remaining characters after processing, return an error
     if not final_text:
@@ -592,7 +592,6 @@ def convert_to_command(msg_text: str) -> str:
 
     # Add a forward slash at the beginning
     command = f"/{final_text}"
-
     return command
 
 
