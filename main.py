@@ -18,7 +18,7 @@ import functions_framework
 import emoji
 
 
-def _config_redis(host=None, port=None, password=None):
+def config_redis(host=None, port=None, password=None):
     """
     Configure a Redis client with the provided or default values and return it.
     """
@@ -31,7 +31,7 @@ def _config_redis(host=None, port=None, password=None):
 
 
 # request new data and save it in redis
-def _set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
+def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
@@ -56,7 +56,7 @@ def _set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
 
 
 # get cached data from previous hour
-def _get_cache_history(hours_ago, request_hash, redis_client):
+def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
     timestamp = (datetime.now() - timedelta(hours=hours_ago)
                  ).strftime("%Y-%m-%d-%H")
@@ -73,7 +73,7 @@ def _get_cache_history(hours_ago, request_hash, redis_client):
 
 
 # generic proxy for caching any request
-def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False):
+def cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False):
     # create unique hash for the request
     arguments_dict = {"api_url": api_url,
                       "parameters": parameters,
@@ -82,7 +82,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     request_hash = hashlib.md5(arguments_str).hexdigest()
 
     # redis config
-    redis_client = _config_redis()
+    redis_client = config_redis()
 
     # check if environment variables for connecting to the redis backup are present
     if (
@@ -90,7 +90,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
         and "REDIS_PORT_BACKUP" in environ
         and "REDIS_PASSWORD_BACKUP" in environ
     ):
-        redis_client_backup = _config_redis(
+        redis_client_backup = config_redis(
             environ.get("REDIS_HOST_BACKUP"),
             environ.get("REDIS_PORT_BACKUP"),
             environ.get("REDIS_PASSWORD_BACKUP"),
@@ -102,10 +102,10 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
-        cache_history = _get_cache_history(
+        cache_history = get_cache_history(
             get_history, request_hash, redis_client)
         if cache_history is None and redis_client_backup is not None:
-            cache_history = _get_cache_history(
+            cache_history = get_cache_history(
                 get_history, request_hash, redis_client_backup)
     else:
         cache_history = None
@@ -115,7 +115,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
 
     # if there's no cached data request it
     if redis_response is None:
-        new_data = _set_new_data(
+        new_data = set_new_data(
             arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
 
         if cache_history is not None:
@@ -132,7 +132,7 @@ def _cached_requests(api_url, parameters, headers, expiration_time, hourly_cache
 
         # get new data if cache is older than expiration_time
         if timestamp - cached_data_timestamp > expiration_time:
-            new_data = _set_new_data(
+            new_data = set_new_data(
                 arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
 
             if cache_history is not None:
@@ -198,7 +198,7 @@ def select_random(msg_text: str) -> str:
 
 
 # check if prices are cached before request to api
-def _get_api_or_cache_prices(convert_to):
+def get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {'start': '1', 'limit': '100', 'convert': convert_to}
@@ -206,7 +206,7 @@ def _get_api_or_cache_prices(convert_to):
                'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY")}
 
     cache_expiration_time = 300
-    response = _cached_requests(
+    response = cached_requests(
         api_url, parameters, headers, cache_expiration_time)
 
     return response["data"]
@@ -237,7 +237,7 @@ def get_prices(msg_text: str) -> str:
             return f"{convert_to} is not allowed"
 
     # get prices from api or cache
-    prices = _get_api_or_cache_prices(convert_to_parameter)
+    prices = get_api_or_cache_prices(convert_to_parameter)
 
     # check if the user requested a custom number of prices
     if msg_text != "":
@@ -307,7 +307,7 @@ def get_prices(msg_text: str) -> str:
     return msg
 
 
-def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
+def get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     lowest_price = float('inf')
 
     for exchange in prices:
@@ -322,38 +322,38 @@ def _get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
     return lowest_price
 
 
-def _to_float(data):
+def to_float(data):
     return {key: float(value) for key, value in data.items()}
 
 
-def _add_derived_rates(data, base_key, multipliers):
+def add_derived_rates(data, base_key, multipliers):
     for name, multiplier in multipliers.items():
         data[name] = data[base_key] * multiplier
     return data
 
 
-def _get_rate_history(data, key):
+def get_rate_history(data, key):
     return data.get(key) if key in data else None
 
 
-def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
-    dollars = _to_float(dollar_rates["data"])
+def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
+    dollars = to_float(dollar_rates["data"])
     derived_rates = {"solidario": 1.65, "tarjeta": 1.75, "qatar": 2}
-    dollars = _add_derived_rates(dollars, "oficial", derived_rates)
+    dollars = add_derived_rates(dollars, "oficial", derived_rates)
 
-    dollars["usdc"] = _get_lowest(usdc_rates["data"])
-    dollars["dai"] = _get_lowest(dai_rates["data"])
-    dollars["usdt"] = _get_lowest(usdt_rates["data"])
+    dollars["usdc"] = get_lowest(usdc_rates["data"])
+    dollars["dai"] = get_lowest(dai_rates["data"])
+    dollars["usdt"] = get_lowest(usdt_rates["data"])
 
     dollars_history = {}
     if "history" in dollar_rates:
-        dollars_history = _to_float(dollar_rates["history"]["data"])
-        dollars_history = _add_derived_rates(
+        dollars_history = to_float(dollar_rates["history"]["data"])
+        dollars_history = add_derived_rates(
             dollars_history, "oficial", derived_rates)
 
         for rate_type in [("usdc", usdc_rates), ("dai", dai_rates), ("usdt", usdt_rates)]:
             if "history" in rate_type[1]:
-                dollars_history[rate_type[0]] = _get_lowest(
+                dollars_history[rate_type[0]] = get_lowest(
                     rate_type[1]["history"]["data"])
 
     rate_names = [
@@ -369,7 +369,7 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
 
     sorted_dollar_rates = [
         {"name": rate_display_names[name], "price": dollars[name],
-         "history": _get_rate_history(dollars_history, name)}
+         "history": get_rate_history(dollars_history, name)}
         for name in rate_names
     ]
 
@@ -378,7 +378,7 @@ def _sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     return sorted_dollar_rates
 
 
-def _format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
+def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
         price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
@@ -405,12 +405,12 @@ def get_dollar_rates(msg_text: str) -> str:
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         api_results = [executor.submit(
-            _cached_requests, url, None, None, cache_expiration_time, True, hours_ago) for url in api_urls]
+            cached_requests, url, None, None, cache_expiration_time, True, hours_ago) for url in api_urls]
         dollars, usdc, dai, usdt = [result.result() for result in api_results]
 
-    sorted_dollar_rates = _sort_dollar_rates(dollars, usdc, dai, usdt)
+    sorted_dollar_rates = sort_dollar_rates(dollars, usdc, dai, usdt)
 
-    return _format_dollar_rates(sorted_dollar_rates, hours_ago)
+    return format_dollar_rates(sorted_dollar_rates, hours_ago)
 
 
 def get_devo(msg_text: str) -> str:
@@ -437,11 +437,11 @@ def get_devo(msg_text: str) -> str:
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             api_results = [executor.submit(
-                _cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
+                cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
             dollars, usdt = [result.result() for result in api_results]
 
-        dollars = _to_float(dollars["data"])
-        dollars["usdt"] = _get_lowest(usdt["data"])
+        dollars = to_float(dollars["data"])
+        dollars["usdt"] = get_lowest(usdt["data"])
 
         qatar_tax = 2
 
@@ -478,7 +478,7 @@ def rainbow(msg_text: str) -> str:
     value = 10 ** (2.66167155005961 *
                    log(days_since) - 17.9183761889864)
 
-    api_response = _get_api_or_cache_prices("USD")
+    api_response = get_api_or_cache_prices("USD")
     price = api_response["data"][0]["quote"]["USD"]["price"]
 
     percentage = ((price - value) / value)*100
@@ -723,7 +723,7 @@ def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token
         telegram_response.raise_for_status()
     except RequestException:
         return False
-    redis_client = _config_redis()
+    redis_client = config_redis()
     redis_response = redis_client.set(
         "X-Telegram-Bot-Api-Secret-Token", secret_token)
     return bool(redis_response)
@@ -765,7 +765,7 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
 
 def is_secret_token_valid(request: Request) -> bool:
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    redis_client = _config_redis()
+    redis_client = config_redis()
     redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
     return redis_secret_token == secret_token
 
