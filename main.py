@@ -568,7 +568,7 @@ def convert_to_command(msg_text: str) -> str:
             '.': '_PUNTO_'
         }))
 
-    # Remove consecutive underscores, non-alphanumeric characters, trailing and leading underscores
+    # Remove non-alphanumeric characters and consecutive, trailing and leading underscores
     cleaned_text = re.sub(r'^_+|_+$', '', re.sub(
         r'[^A-Za-z0-9_]', '', re.sub(r'_+', '_', translated_punctuation)))
 
