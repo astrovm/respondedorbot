@@ -586,6 +586,9 @@ def convert_to_command(msg_text: str) -> str:
     # Remove trailing underscores
     final_text = re.sub(r'_+$', '', alphanumeric_underscore)
 
+    # Remove leading underscores
+    final_text = re.sub(r'^_+', '', final_text)
+
     # If there are no remaining characters after processing, return an error
     if not final_text:
         return "Invalid input. Usage: /comando <text>"
