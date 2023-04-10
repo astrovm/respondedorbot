@@ -550,17 +550,17 @@ def convert_to_command(msg_text: str) -> str:
     emoji_text = emoji.replace_emoji(
         msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} ")
 
-    # Convert to uppercase, normalize the text, and remove consecutive spaces in one line
-    single_spaced_text = re.sub(r'\s+', ' ', unicodedata.normalize(
-        'NFD', emoji_text.upper()).encode('ascii', 'ignore').decode('utf-8'))
-
-    # Replace Ñ in one line
+    # Convert to uppercase and replace Ñ
     replaced_ni_text = re.sub(
-        r'\bÑ\b', 'ENIE', single_spaced_text).replace('Ñ', 'NI')
+        r'\bÑ\b', 'ENIE', emoji_text.upper()).replace('Ñ', 'NI')
 
-    # Replace consecutive dots and specific punctuation marks in one line
+    # Normalize the text and remove consecutive spaces
+    single_spaced_text = re.sub(r'\s+', ' ', unicodedata.normalize(
+        'NFD', replaced_ni_text).encode('ascii', 'ignore').decode('utf-8'))
+
+    # Replace consecutive dots and specific punctuation marks
     translated_punctuation = re.sub(
-        r'\.{3}', '_PUNTOSSUSPENSIVOS_', replaced_ni_text).translate(str.maketrans({
+        r'\.{3}', '_PUNTOSSUSPENSIVOS_', single_spaced_text).translate(str.maketrans({
             ' ': '_',
             '\n': '_',
             '?': '_SIGNODEPREGUNTA_',
@@ -568,7 +568,7 @@ def convert_to_command(msg_text: str) -> str:
             '.': '_PUNTO_'
         }))
 
-    # Remove consecutive underscores, non-alphanumeric characters, trailing and leading underscores in one line
+    # Remove consecutive underscores, non-alphanumeric characters, trailing and leading underscores
     cleaned_text = re.sub(r'^_+|_+$', '', re.sub(
         r'[^A-Za-z0-9_]', '', re.sub(r'_+', '_', translated_punctuation)))
 
