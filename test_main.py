@@ -20,11 +20,7 @@ def test_responder_dollars_updated():
         args = {"update_dollars": "true"}
         environ = create_environ(query_string=args)
         request = Request(environ)
-
-        response, status = responder(request)
-
-        assert response == "Dollars updated"
-        assert status == 200
+        assert responder(request) == ("Dollars updated", 200)
 
 
 def test_convert_to_command():
