@@ -1,4 +1,30 @@
-from main import convert_to_command
+from flask import Request
+from werkzeug.test import create_environ
+from unittest.mock import patch
+from main import responder, convert_to_command
+
+
+def test_responder_no_args():
+    # Test no arguments
+    args = {}
+    environ = create_environ(query_string=args)
+    request = Request(environ)
+    assert responder(request) == ("No token", 200)
+
+
+def test_responder_dollars_updated():
+    # Test update_dollars = true
+    with patch('main.get_dollar_rates') as mock_get_dollar_rates:
+        mock_get_dollar_rates.return_value = None
+
+        args = {"update_dollars": "true"}
+        environ = create_environ(query_string=args)
+        request = Request(environ)
+
+        response, status = responder(request)
+
+        assert response == "Dollars updated"
+        assert status == 200
 
 
 def test_convert_to_command():
