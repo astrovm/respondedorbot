@@ -1,6 +1,6 @@
+from unittest.mock import patch
 from flask import Request
 from werkzeug.test import create_environ
-from unittest.mock import patch
 from main import responder, convert_to_command
 
 
