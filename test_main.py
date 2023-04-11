@@ -1,4 +1,3 @@
-import pytest
 from main import convert_to_command
 
 
