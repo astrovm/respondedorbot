@@ -625,15 +625,15 @@ def donation(msg_text: str) -> str:
     else:
         return "Invalid input format. Please use either 'amount' in satoshis or 'amount fiat_currency'."
 
-    # Check if amount is a valid integer
+    # Check if amount is a valid number
     try:
-        amount = int(amount)
+        amount = float(amount) if currency else int(amount)
     except ValueError:
-        return "Invalid amount. Please enter a valid integer."
+        return "Invalid amount. Please enter a valid number."
 
     # Reject negative amounts and zero
     if amount <= 0:
-        return "Invalid amount. Please enter a positive integer greater than zero."
+        return "Invalid amount. Please enter a positive number greater than zero."
 
     # Check if currency is a valid 3-letter code
     if currency is not None and len(currency) != 3:
