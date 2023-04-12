@@ -653,7 +653,7 @@ def initialize_commands() -> Dict[str, Callable]:
 
 
 def handle_msg(token: str, message: Dict) -> str:
-    message_text = message.get("text", "")
+    message_text = message.get("text") or message.get("caption") or ""
     message_id = message.get("message_id", "")
     chat_id = str(message["chat"]["id"])
     chat_type = str(message["chat"]["type"])
