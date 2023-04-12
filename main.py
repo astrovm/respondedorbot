@@ -612,6 +612,48 @@ Available commands:
     """
 
 
+def donation(msg_text: str) -> str:
+    # Split the input string
+    amount_currency = msg_text.split()
+
+    # Check if the input has both amount and currency or just the amount
+    if len(amount_currency) == 2:
+        amount, currency = amount_currency
+        currency = currency.upper()  # Convert currency to uppercase
+    elif len(amount_currency) == 1:
+        amount, currency = amount_currency[0], None  # Set currency to None
+    else:
+        return "Invalid input format. Please use either 'amount' or 'amount currency'."
+
+    # Check if amount is a valid integer
+    try:
+        amount = int(amount)
+    except ValueError:
+        return "Invalid amount. Please enter a valid integer."
+
+    # Check if currency is a valid 3-letter code
+    if currency is not None and len(currency) != 3:
+        return "Invalid currency. Please enter a valid 3-letter currency code."
+
+    url = "https://api.opennode.com/v1/charges"
+    payload = {
+        "amount": amount,
+        "description": f"Donation to @{environ.get('TELEGRAM_USERNAME')}"
+    }
+
+    # Include currency in the payload if provided
+    if currency is not None:
+        payload["currency"] = currency
+
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": environ.get("OPENNODE_INVOICE_KEY")
+    }
+    response = requests.post(url, json=payload, headers=headers, timeout=5)
+    return response.json()["data"]["lightning_invoice"]["payreq"]
+
+
 def get_instance_name(msg_text: str) -> str:
     return environ.get("FRIENDLY_INSTANCE_NAME")
 
@@ -648,6 +690,7 @@ def initialize_commands() -> Dict[str, Callable]:
         "/time": get_timestamp,
         "/comando": convert_to_command,
         "/instance": get_instance_name,
+        "/donate": donation,
         "/help": get_help,
     }
 
