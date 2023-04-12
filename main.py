@@ -623,13 +623,17 @@ def donation(msg_text: str) -> str:
     elif len(amount_currency) == 1:
         amount, currency = amount_currency[0], None  # Set currency to None
     else:
-        return "Invalid input format. Please use either 'amount' or 'amount currency'."
+        return "Invalid input format. Please use either 'amount' in satoshis or 'amount fiat_currency'."
 
     # Check if amount is a valid integer
     try:
         amount = int(amount)
     except ValueError:
         return "Invalid amount. Please enter a valid integer."
+
+    # Reject negative amounts and zero
+    if amount <= 0:
+        return "Invalid amount. Please enter a positive integer greater than zero."
 
     # Check if currency is a valid 3-letter code
     if currency is not None and len(currency) != 3:
