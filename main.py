@@ -719,49 +719,53 @@ def initialize_commands() -> Dict[str, Callable]:
 
 
 def handle_msg(token: str, message: Dict) -> str:
-    message_text = (
-        message.get("text")
-        or message.get("caption")
-        or message.get("poll", {}).get("question")
-        or ""
-    )
-    message_id = message.get("message_id", "")
-    chat_id = str(message["chat"]["id"])
-    chat_type = str(message["chat"]["type"])
-    first_name = str(message["from"]["first_name"])
+    try:
+        message_text = (
+            message.get("text")
+            or message.get("caption")
+            or message.get("poll", {}).get("question")
+            or ""
+        )
+        message_id = message.get("message_id", "")
+        chat_id = str(message["chat"]["id"])
+        chat_type = str(message["chat"]["type"])
+        first_name = str(message["from"]["first_name"])
 
-    response_msg = ""
-    split_message = message_text.strip().split(" ")
-    command = split_message[0].lower()
-    sanitized_message_text = message_text.replace(split_message[0], "").strip()
+        response_msg = ""
+        split_message = message_text.strip().split(" ")
+        command = split_message[0].lower()
+        sanitized_message_text = message_text.replace(split_message[0], "").strip()
 
-    commands = initialize_commands()
+        commands = initialize_commands()
 
-    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-    if bot_name in command:
-        command = command.replace(bot_name, "")
+        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+        if bot_name in command:
+            command = command.replace(bot_name, "")
 
-    if command == "/comando" and not sanitized_message_text:
-        if "reply_to_message" in message and "text" in message["reply_to_message"]:
-            sanitized_message_text = message["reply_to_message"]["text"]
+        if command == "/comando" and not sanitized_message_text:
+            if "reply_to_message" in message and "text" in message["reply_to_message"]:
+                sanitized_message_text = message["reply_to_message"]["text"]
 
-    if command in commands:
-        send_typing(token, chat_id)
-        response_msg = commands[command](sanitized_message_text)
-    elif not command.startswith("/") or command == "/ask":
-        try:
-            reply_to = str(message["reply_to_message"]["from"]["username"])
-            if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text and not command.startswith("/ask"):
-                return "ignored request"
-        except KeyError:
-            if chat_type != "private" and bot_name not in message_text and not command.startswith("/ask"):
-                return "ignored request"
+        if command in commands:
+            send_typing(token, chat_id)
+            response_msg = commands[command](sanitized_message_text)
+        elif not command.startswith("/") or command == "/ask":
+            try:
+                reply_to = str(message["reply_to_message"]["from"]["username"])
+                if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text and not command.startswith("/ask"):
+                    return "ignored request"
+            except KeyError:
+                if chat_type != "private" and bot_name not in message_text and not command.startswith("/ask"):
+                    return "ignored request"
 
-        send_typing(token, chat_id)
-        response_msg = gen_random(first_name)
+            send_typing(token, chat_id)
+            response_msg = gen_random(first_name)
 
-    send_msg(token, chat_id, response_msg, message_id)
-    return "ok"
+        send_msg(token, chat_id, response_msg, message_id)
+        return "ok"
+    except BaseException as error:
+        print(f"Error from handle_msg: {error}")
+        return "Error from handle_msg", 500
 
 
 def decrypt_token(key: str, encrypted_token: str) -> str:
@@ -842,28 +846,32 @@ def is_secret_token_valid(request: Request) -> bool:
 
 
 def process_request_parameters(request: Request, decrypted_token: str, encrypted_token: str) -> Tuple[str, int]:
-    check_webhook = request.args.get("check_webhook") == "true"
-    update_webhook = request.args.get("update_webhook") == "true"
+    try:
+        check_webhook = request.args.get("check_webhook") == "true"
+        update_webhook = request.args.get("update_webhook") == "true"
 
-    if check_webhook:
-        return ("Webhook checked", 200) if verify_webhook(decrypted_token, encrypted_token) else ("Webhook check error", 400)
+        if check_webhook:
+            return ("Webhook checked", 200) if verify_webhook(decrypted_token, encrypted_token) else ("Webhook check error", 400)
 
-    if update_webhook:
-        function_url = environ.get("CURRENT_FUNCTION_URL")
-        return ("Webhook updated", 200) if set_telegram_webhook(decrypted_token, function_url, encrypted_token) else ("Webhook update error", 400)
+        if update_webhook:
+            function_url = environ.get("CURRENT_FUNCTION_URL")
+            return ("Webhook updated", 200) if set_telegram_webhook(decrypted_token, function_url, encrypted_token) else ("Webhook update error", 400)
 
-    if not is_secret_token_valid(request):
-        admin_report(decrypted_token, "Wrong secret token")
-        return "Wrong secret token", 400
+        if not is_secret_token_valid(request):
+            admin_report(decrypted_token, "Wrong secret token")
+            return "Wrong secret token", 400
 
-    request_json = request.get_json(silent=True)
-    message = request_json.get("message")
+        request_json = request.get_json(silent=True)
+        message = request_json.get("message")
 
-    if not message:
-        return "No message", 200
+        if not message:
+            return "No message", 200
 
-    handle_msg(decrypted_token, message)
-    return "Ok", 200
+        handle_msg(decrypted_token, message)
+        return "Ok", 200
+    except BaseException as error:
+        print(f"Error from process_request_parameters: {error}")
+        return "Error from process_request_parameters", 500
 
 
 @functions_framework.http
@@ -889,5 +897,5 @@ def responder(request: Request) -> Tuple[str, int]:
             request, decrypted_token, encrypted_token)
         return response_message, status_code
     except BaseException as error:
-        print(f"Error: {error}")
-        return "Error", 500
+        print(f"Error from responder: {error}")
+        return "Error from responder", 500
