@@ -1,5 +1,5 @@
 cryptography==40.0.2
-emoji==2.2.0
+emoji==2.7.0
 redis==4.5.4
 requests==2.29.0
 functions-framework==3.3.0
