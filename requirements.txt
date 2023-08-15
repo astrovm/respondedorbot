@@ -1,6 +1,6 @@
 cryptography==41.0.3
-emoji==2.2.0
-redis==4.5.4
-requests==2.29.0
-functions-framework==3.3.0
+emoji==2.7.0
+redis==4.6.0
+requests==2.31.0
+functions-framework==3.4.0
 Flask==2.3.2
