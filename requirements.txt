@@ -3,4 +3,4 @@ emoji==2.7.0
 redis==5.0.0
 requests==2.31.0
 functions-framework==3.4.0
-Flask==2.3.2
+Flask==2.3.3
