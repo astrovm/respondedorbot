@@ -3,6 +3,7 @@ import json
 import random
 import re
 import time
+import traceback
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -897,5 +898,7 @@ def responder(request: Request) -> Tuple[str, int]:
             request, decrypted_token, encrypted_token)
         return response_message, status_code
     except BaseException as error:
+        traceback_info = traceback.format_exc()
         print(f"Error from responder: {error}")
+        print(traceback_info)
         return "Error from responder", 500
