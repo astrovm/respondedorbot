@@ -339,7 +339,7 @@ def get_rate_history(data, key):
 
 def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     dollars = to_float(dollar_rates["data"])
-    derived_rates = {"solidario": 1.65, "tarjeta": 1.75, "qatar": 1.8}
+    derived_rates = {"tarjeta": 2}
     dollars = add_derived_rates(dollars, "oficial", derived_rates)
 
     dollars["usdc"] = get_lowest(usdc_rates["data"])
@@ -358,12 +358,12 @@ def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
                     rate_type[1]["history"]["data"])
 
     rate_names = [
-        "oficial", "solidario", "tarjeta", "qatar", "mep",
+        "oficial", "tarjeta", "mep",
         "ccl", "ccb", "blue", "usdc", "dai", "usdt"
     ]
 
     rate_display_names = {
-        "oficial": "Oficial", "solidario": "Solidario", "tarjeta": "Tarjeta", "qatar": "Qatar",
+        "oficial": "Oficial", "tarjeta": "Tarjeta",
         "mep": "MEP", "ccl": "CCL", "ccb": "Bitcoin", "blue": "Blue",
         "usdc": "USDC", "dai": "DAI", "usdt": "USDT"
     }
@@ -444,24 +444,24 @@ def get_devo(msg_text: str) -> str:
         dollars = to_float(dollars["data"])
         dollars["usdt"] = get_lowest(usdt["data"])
 
-        qatar_tax = 1.8
+        tarjeta_tax = 2
 
         profit = -(fee * dollars["usdt"] + dollars["oficial"] -
-                   dollars["usdt"]) / (dollars["oficial"] * qatar_tax)
+                   dollars["usdt"]) / (dollars["oficial"] * tarjeta_tax)
 
         msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
 
 Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
 Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
 USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
-Qatar: {f"{dollars['oficial'] * qatar_tax:.2f}".rstrip("0").rstrip(".")}"""
+Tarjeta: {f"{dollars['oficial'] * tarjeta_tax:.2f}".rstrip("0").rstrip(".")}"""
 
         if compra > 0:
-            compra_ars = compra * (dollars["oficial"] * qatar_tax)
+            compra_ars = compra * (dollars["oficial"] * tarjeta_tax)
             compra_usdt = compra_ars / dollars["usdt"]
             ganancia_ars = compra_ars * profit
             ganancia_usdt = ganancia_ars / dollars["usdt"]
-            msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Qatar = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+            msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Tarjeta = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 
