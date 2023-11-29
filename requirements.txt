@@ -1,4 +1,4 @@
-cryptography==41.0.5
+cryptography==41.0.6
 emoji==2.8.0
 redis==5.0.1
 requests==2.31.0
