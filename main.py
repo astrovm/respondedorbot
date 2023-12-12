@@ -339,16 +339,17 @@ def get_rate_history(data, key):
 
 def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     dollars = to_float(dollar_rates["data"])
+
+    # tmp fix
+    if dollars["oficial"] < 800:
+        dollars["oficial"] = 800
+
     derived_rates = {"tarjeta": 1.3}
     dollars = add_derived_rates(dollars, "oficial", derived_rates)
 
     dollars["usdc"] = get_lowest(usdc_rates["data"])
     dollars["dai"] = get_lowest(dai_rates["data"])
     dollars["usdt"] = get_lowest(usdt_rates["data"])
-
-    # tmp fix
-    if dollars["oficial"] < 800:
-        dollars["oficial"] = 800
 
     dollars_history = {}
     if "history" in dollar_rates:
