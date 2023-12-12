@@ -339,12 +339,16 @@ def get_rate_history(data, key):
 
 def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     dollars = to_float(dollar_rates["data"])
-    derived_rates = {"tarjeta": 2.55}
+    derived_rates = {"tarjeta": 1.3}
     dollars = add_derived_rates(dollars, "oficial", derived_rates)
 
     dollars["usdc"] = get_lowest(usdc_rates["data"])
     dollars["dai"] = get_lowest(dai_rates["data"])
     dollars["usdt"] = get_lowest(usdt_rates["data"])
+
+    # tmp fix
+    if dollars["oficial"] < 800:
+        dollars["oficial"] = 800
 
     dollars_history = {}
     if "history" in dollar_rates:
@@ -444,7 +448,11 @@ def get_devo(msg_text: str) -> str:
         dollars = to_float(dollars["data"])
         dollars["usdt"] = get_lowest(usdt["data"])
 
-        tarjeta_tax = 2.55
+        # tmp fix
+        if dollars["oficial"] < 800:
+            dollars["oficial"] = 800
+
+        tarjeta_tax = 1.3
 
         profit = -(fee * dollars["usdt"] + dollars["oficial"] -
                    dollars["usdt"]) / (dollars["oficial"] * tarjeta_tax)
