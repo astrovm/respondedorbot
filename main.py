@@ -344,7 +344,7 @@ def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     if dollars["oficial"] < 800:
         dollars["oficial"] = 800
 
-    derived_rates = {"tarjeta": 1.3}
+    derived_rates = {"tarjeta": 2.55}
     dollars = add_derived_rates(dollars, "oficial", derived_rates)
 
     dollars["usdc"] = get_lowest(usdc_rates["data"])
@@ -453,7 +453,7 @@ def get_devo(msg_text: str) -> str:
         if dollars["oficial"] < 800:
             dollars["oficial"] = 800
 
-        tarjeta_tax = 1.3
+        tarjeta_tax = 2.55
 
         profit = -(fee * dollars["usdt"] + dollars["oficial"] -
                    dollars["usdt"]) / (dollars["oficial"] * tarjeta_tax)
