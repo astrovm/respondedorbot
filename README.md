@@ -1,6 +1,6 @@
 # respondedorbot
 
-Telegram bot running on a Raspberry Pi that answers questions and provides useful information. In case the Raspberry Pi goes down, the bot automatically switches to an instance in Google Cloud.
+Telegram bot running on a Raspberry Pi that answers questions and provides useful information. In case the Raspberry Pi goes down, the bot automatically switches to an instance in Vercel.
 
 <https://t.me/respondedorbot>
 
