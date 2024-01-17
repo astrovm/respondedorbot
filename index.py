@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Callable, Union
 import redis
 import requests
 from cryptography.fernet import Fernet
-from flask import Flask, Request
+from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
 
@@ -1108,7 +1108,7 @@ app = Flask(__name__)
 
 
 @app.route("/")
-def responder(request: Request) -> Tuple[str, int]:
+def responder() -> Tuple[str, int]:
     try:
         if request.args.get("update_dollars") == "true":
             get_dollar_rates("")
