@@ -20,9 +20,6 @@ import emoji
 
 
 def config_redis(host=None, port=None, password=None):
-    """
-    Configure a Redis client with the provided or default values and return it.
-    """
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
@@ -169,15 +166,6 @@ def gen_random(name: str) -> str:
 
 
 def select_random(msg_text: str) -> str:
-    """
-    Given a message text, selects a random value or number based on the format.
-
-    Args:
-        msg_text (str): the input message text
-
-    Returns:
-        str: a random value or number, or an error message if the input is invalid
-    """
     try:
         # Check if the input is a comma-separated list of values
         values = [v.strip() for v in msg_text.split(",")]
@@ -575,14 +563,6 @@ def rainbow(msg_text: str) -> str:
 
 
 def convert_base(msg_text: str) -> str:
-    """
-    Convert a number from one base to another.
-
-    Usage: /convertbase <number>, <base_from>, <base_to>
-
-    Returns a string in the format "<number> in base <base_from> equals to <result> in base <base_to>",
-    or an error message if the input is invalid.
-    """
     try:
         # Parse input
         input_parts = msg_text.split(",")
