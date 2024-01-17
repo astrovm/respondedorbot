@@ -27,7 +27,8 @@ def config_redis(host=None, port=None, password=None):
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
     redis_client = redis.Redis(
-        host=host, port=port, password=password, decode_responses=True)
+        host=host, port=port, password=password, decode_responses=True
+    )
     return redis_client
 
 
@@ -36,8 +37,7 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
-    response = requests.get(api_url, params=parameters,
-                            headers=headers, timeout=5)
+    response = requests.get(api_url, params=parameters, headers=headers, timeout=5)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
@@ -48,8 +48,7 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
         if hourly_cache:
             # get current date with hour
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + request_hash,
-                             json.dumps(redis_value))
+            redis_client.set(current_hour + request_hash, json.dumps(redis_value))
 
         return redis_value
     else:
@@ -59,8 +58,7 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
-    timestamp = (datetime.now() - timedelta(hours=hours_ago)
-                 ).strftime("%Y-%m-%d-%H")
+    timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
     # get previous api data from redis cache
     cached_data = redis_client.get(timestamp + request_hash)
 
@@ -74,11 +72,11 @@ def get_cache_history(hours_ago, request_hash, redis_client):
 
 
 # generic proxy for caching any request
-def cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False):
+def cached_requests(
+    api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False
+):
     # create unique hash for the request
-    arguments_dict = {"api_url": api_url,
-                      "parameters": parameters,
-                      "headers": headers}
+    arguments_dict = {"api_url": api_url, "parameters": parameters, "headers": headers}
     arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
     request_hash = hashlib.md5(arguments_str).hexdigest()
 
@@ -103,11 +101,11 @@ def cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
-        cache_history = get_cache_history(
-            get_history, request_hash, redis_client)
+        cache_history = get_cache_history(get_history, request_hash, redis_client)
         if cache_history is None and redis_client_backup is not None:
             cache_history = get_cache_history(
-                get_history, request_hash, redis_client_backup)
+                get_history, request_hash, redis_client_backup
+            )
     else:
         cache_history = None
 
@@ -117,7 +115,8 @@ def cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=
     # if there's no cached data request it
     if redis_response is None:
         new_data = set_new_data(
-            arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
+            arguments_dict, timestamp, redis_client, request_hash, hourly_cache
+        )
 
         if cache_history is not None:
             new_data["history"] = cache_history
@@ -134,7 +133,8 @@ def cached_requests(api_url, parameters, headers, expiration_time, hourly_cache=
         # get new data if cache is older than expiration_time
         if timestamp - cached_data_timestamp > expiration_time:
             new_data = set_new_data(
-                arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
+                arguments_dict, timestamp, redis_client, request_hash, hourly_cache
+            )
 
             if cache_history is not None:
                 new_data["history"] = cache_history
@@ -202,13 +202,14 @@ def select_random(msg_text: str) -> str:
 def get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    parameters = {'start': '1', 'limit': '100', 'convert': convert_to}
-    headers = {'Accepts': 'application/json',
-               'X-CMC_PRO_API_KEY': environ.get("COINMARKETCAP_KEY")}
+    parameters = {"start": "1", "limit": "100", "convert": convert_to}
+    headers = {
+        "Accepts": "application/json",
+        "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
+    }
 
     cache_expiration_time = 300
-    response = cached_requests(
-        api_url, parameters, headers, cache_expiration_time)
+    response = cached_requests(api_url, parameters, headers, cache_expiration_time)
 
     return response["data"]
 
@@ -224,16 +225,49 @@ def get_prices(msg_text: str) -> str:
     # check if the user wants to convert the prices
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
-        coins = ["XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY", "COP", "CZK", "DKK", "HKD", "ISK", "INR", "ILS",
-                 "JPY", "MXN", "TWD", "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR", "USDC", "USDT", "DAI", "BUSD"]
+        coins = [
+            "XAU",
+            "USD",
+            "EUR",
+            "KRW",
+            "GBP",
+            "AUD",
+            "BRL",
+            "CAD",
+            "CLP",
+            "CNY",
+            "COP",
+            "CZK",
+            "DKK",
+            "HKD",
+            "ISK",
+            "INR",
+            "ILS",
+            "JPY",
+            "MXN",
+            "TWD",
+            "NZD",
+            "PEN",
+            "SGD",
+            "SEK",
+            "CHF",
+            "UYU",
+            "BTC",
+            "SATS",
+            "ETH",
+            "XMR",
+            "USDC",
+            "USDT",
+            "DAI",
+            "BUSD",
+        ]
         convert_to = words[-1]
         if convert_to in coins:
             if convert_to == "SATS":
                 convert_to_parameter = "BTC"
             else:
                 convert_to_parameter = convert_to
-            msg_text = msg_text.upper().replace(
-                f"IN {convert_to}", "").strip()
+            msg_text = msg_text.upper().replace(f"IN {convert_to}", "").strip()
         else:
             return f"{convert_to} is not allowed"
 
@@ -259,8 +293,25 @@ def get_prices(msg_text: str) -> str:
         coins = msg_text.upper().replace(" ", "").split(",")
 
         if "STABLES" in coins or "STABLECOINS" in coins:
-            coins.extend(["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "USDD",
-                         "GUSD", "DOC", "FRAX", "LUSD", "SUSD", "MIMATIC", "MIM", "MAI"])
+            coins.extend(
+                [
+                    "USDT",
+                    "USDC",
+                    "BUSD",
+                    "DAI",
+                    "TUSD",
+                    "USDP",
+                    "USDD",
+                    "GUSD",
+                    "DOC",
+                    "FRAX",
+                    "LUSD",
+                    "SUSD",
+                    "MIMATIC",
+                    "MIM",
+                    "MAI",
+                ]
+            )
 
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
@@ -285,18 +336,22 @@ def get_prices(msg_text: str) -> str:
     msg = ""
     for coin in prices["data"][:prices_number]:
         if convert_to == "SATS":
-            coin["quote"][convert_to_parameter
-                          ]["price"] = coin["quote"][convert_to_parameter]["price"] * 100000000
+            coin["quote"][convert_to_parameter]["price"] = (
+                coin["quote"][convert_to_parameter]["price"] * 100000000
+            )
 
-        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(
-            ".")[-1]
+        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
         price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip(
-            "0").rstrip(".")
-        percentage = f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
-            "0").rstrip(".")
+            "0"
+        ).rstrip(".")
+        percentage = (
+            f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
+                "0"
+            ).rstrip(".")
+        )
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
@@ -309,7 +364,7 @@ def get_prices(msg_text: str) -> str:
 
 
 def get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
-    lowest_price = float('inf')
+    lowest_price = float("inf")
 
     for exchange in prices:
         ask = float(prices[exchange]["totalAsk"])
@@ -349,28 +404,48 @@ def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
     dollars_history = {}
     if "history" in dollar_rates:
         dollars_history = to_float(dollar_rates["history"]["data"])
-        dollars_history = add_derived_rates(
-            dollars_history, "oficial", derived_rates)
+        dollars_history = add_derived_rates(dollars_history, "oficial", derived_rates)
 
-        for rate_type in [("usdc", usdc_rates), ("dai", dai_rates), ("usdt", usdt_rates)]:
+        for rate_type in [
+            ("usdc", usdc_rates),
+            ("dai", dai_rates),
+            ("usdt", usdt_rates),
+        ]:
             if "history" in rate_type[1]:
                 dollars_history[rate_type[0]] = get_lowest(
-                    rate_type[1]["history"]["data"])
+                    rate_type[1]["history"]["data"]
+                )
 
     rate_names = [
-        "oficial", "tarjeta", "mep",
-        "ccl", "ccb", "blue", "usdc", "dai", "usdt"
+        "oficial",
+        "tarjeta",
+        "mep",
+        "ccl",
+        "ccb",
+        "blue",
+        "usdc",
+        "dai",
+        "usdt",
     ]
 
     rate_display_names = {
-        "oficial": "Oficial", "tarjeta": "Tarjeta",
-        "mep": "MEP", "ccl": "CCL", "ccb": "Bitcoin", "blue": "Blue",
-        "usdc": "USDC", "dai": "DAI", "usdt": "USDT"
+        "oficial": "Oficial",
+        "tarjeta": "Tarjeta",
+        "mep": "MEP",
+        "ccl": "CCL",
+        "ccb": "Bitcoin",
+        "blue": "Blue",
+        "usdc": "USDC",
+        "dai": "DAI",
+        "usdt": "USDT",
     }
 
     sorted_dollar_rates = [
-        {"name": rate_display_names[name], "price": dollars[name],
-         "history": get_rate_history(dollars_history, name)}
+        {
+            "name": rate_display_names[name],
+            "price": dollars[name],
+            "history": get_rate_history(dollars_history, name),
+        }
         for name in rate_names
     ]
 
@@ -382,11 +457,11 @@ def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
 def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
-        price_formatted = f"{dollar['price']:.2f}".rstrip('0').rstrip('.')
+        price_formatted = f"{dollar['price']:.2f}".rstrip("0").rstrip(".")
         line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
-            percentage = (dollar['price'] / dollar["history"] - 1) * 100
-            formatted_percentage = f"{percentage:+.2f}".rstrip('0').rstrip('.')
+            percentage = (dollar["price"] / dollar["history"] - 1) * 100
+            formatted_percentage = f"{percentage:+.2f}".rstrip("0").rstrip(".")
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
 
@@ -395,18 +470,21 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
 
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
-    hours_ago = int(msg_text) if msg_text.isdecimal() and int(
-        msg_text) >= 0 else 24
+    hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
     api_urls = [
         "https://criptoya.com/api/dolar",
         "https://criptoya.com/api/usdc/ars/1000",
         "https://criptoya.com/api/dai/ars/1000",
-        "https://criptoya.com/api/usdt/ars/1000"
+        "https://criptoya.com/api/usdt/ars/1000",
     ]
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        api_results = [executor.submit(
-            cached_requests, url, None, None, cache_expiration_time, True, hours_ago) for url in api_urls]
+        api_results = [
+            executor.submit(
+                cached_requests, url, None, None, cache_expiration_time, True, hours_ago
+            )
+            for url in api_urls
+        ]
         dollars, usdc, dai, usdt = [result.result() for result in api_results]
 
     sorted_dollar_rates = sort_dollar_rates(dollars, usdc, dai, usdt)
@@ -433,12 +511,16 @@ def get_devo(msg_text: str) -> str:
         cache_expiration_time = 300
         api_urls = [
             "https://criptoya.com/api/dolar",
-            "https://criptoya.com/api/usdt/ars/1000"
+            "https://criptoya.com/api/usdt/ars/1000",
         ]
 
         with ThreadPoolExecutor(max_workers=5) as executor:
-            api_results = [executor.submit(
-                cached_requests, url, None, None, cache_expiration_time, True) for url in api_urls]
+            api_results = [
+                executor.submit(
+                    cached_requests, url, None, None, cache_expiration_time, True
+                )
+                for url in api_urls
+            ]
             dollars, usdt = [result.result() for result in api_results]
 
         dollars = to_float(dollars["data"])
@@ -446,8 +528,9 @@ def get_devo(msg_text: str) -> str:
 
         tarjeta_tax = 1.6
 
-        profit = -(fee * dollars["usdt"] + dollars["oficial"] -
-                   dollars["usdt"]) / (dollars["oficial"] * tarjeta_tax)
+        profit = -(fee * dollars["usdt"] + dollars["oficial"] - dollars["usdt"]) / (
+            dollars["oficial"] * tarjeta_tax
+        )
 
         msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
 
@@ -476,13 +559,12 @@ def rainbow(msg_text: str) -> str:
     today = datetime.now()
     since = datetime(day=9, month=1, year=2009)
     days_since = (today - since).days
-    value = 10 ** (2.66167155005961 *
-                   log(days_since) - 17.9183761889864)
+    value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
 
     api_response = get_api_or_cache_prices("USD")
     price = api_response["data"][0]["quote"]["USD"]["price"]
 
-    percentage = ((price - value) / value)*100
+    percentage = ((price - value) / value) * 100
     if percentage > 0:
         percentage_txt = f"{percentage:.2f}% overvalued"
     else:
@@ -513,7 +595,9 @@ def convert_base(msg_text: str) -> str:
         if not all(c.isalnum() for c in number_str):
             return "Invalid input. Number must be alphanumeric."
         if not 2 <= base_from <= 36:
-            return f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
+            return (
+                f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
+            )
         if not 2 <= base_to <= 36:
             return f"Invalid input. Base to '{base_to_str}' must be between 2 and 36."
 
@@ -524,17 +608,17 @@ def convert_base(msg_text: str) -> str:
             if digit.isdigit():
                 digit_value = int(digit)
             else:
-                digit_value = ord(digit.upper()) - ord('A') + 10
+                digit_value = ord(digit.upper()) - ord("A") + 10
             value = value * base_from + digit_value
         while value > 0:
             digit_value = value % base_to
             if digit_value >= 10:
-                digit = chr(digit_value - 10 + ord('A'))
+                digit = chr(digit_value - 10 + ord("A"))
             else:
                 digit = str(digit_value)
             digits.append(digit)
             value //= base_to
-        result = ''.join(reversed(digits))
+        result = "".join(reversed(digits))
 
         # Format output string
         return f"{number_str} in base {base_from} equals to {result} in base {base_to}"
@@ -549,29 +633,42 @@ def get_timestamp(msg_text: str) -> str:
 def convert_to_command(msg_text: str) -> str:
     # Add spaces surrounding each emoji and convert it to its textual representation
     emoji_text = emoji.replace_emoji(
-        msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} ")
+        msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} "
+    )
 
     # Convert to uppercase and replace Ñ
-    replaced_ni_text = re.sub(
-        r'\bÑ\b', 'ENIE', emoji_text.upper()).replace('Ñ', 'NI')
+    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
 
     # Normalize the text and remove consecutive spaces
-    single_spaced_text = re.sub(r'\s+', ' ', unicodedata.normalize(
-        'NFD', replaced_ni_text).encode('ascii', 'ignore').decode('utf-8'))
+    single_spaced_text = re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFD", replaced_ni_text)
+        .encode("ascii", "ignore")
+        .decode("utf-8"),
+    )
 
     # Replace consecutive dots and specific punctuation marks
     translated_punctuation = re.sub(
-        r'\.{3}', '_PUNTOSSUSPENSIVOS_', single_spaced_text).translate(str.maketrans({
-            ' ': '_',
-            '\n': '_',
-            '?': '_SIGNODEPREGUNTA_',
-            '!': '_SIGNODEEXCLAMACION_',
-            '.': '_PUNTO_'
-        }))
+        r"\.{3}", "_PUNTOSSUSPENSIVOS_", single_spaced_text
+    ).translate(
+        str.maketrans(
+            {
+                " ": "_",
+                "\n": "_",
+                "?": "_SIGNODEPREGUNTA_",
+                "!": "_SIGNODEEXCLAMACION_",
+                ".": "_PUNTO_",
+            }
+        )
+    )
 
     # Remove non-alphanumeric characters and consecutive, trailing and leading underscores
-    cleaned_text = re.sub(r'^_+|_+$', '', re.sub(
-        r'[^A-Za-z0-9_]', '', re.sub(r'_+', '_', translated_punctuation)))
+    cleaned_text = re.sub(
+        r"^_+|_+$",
+        "",
+        re.sub(r"[^A-Za-z0-9_]", "", re.sub(r"_+", "_", translated_punctuation)),
+    )
 
     # If there are no remaining characters after processing, return an error
     if not cleaned_text:
@@ -637,22 +734,173 @@ def donation(msg_text: str) -> str:
         return "Invalid amount. Please enter a positive number greater than zero."
 
     valid_fiat_currencies = [
-        "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM",
-        "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL", "BSD", "BTN",
-        "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLF", "CLP", "CNH", "CNY", "COP",
-        "CRC", "CUC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN",
-        "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GGP", "GHS", "GIP", "GMD", "GNF",
-        "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "IMP", "INR",
-        "IQD", "IRR", "ISK", "JEP", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF",
-        "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LSL", "LYD",
-        "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRO", "MUR", "MVR", "MWK",
-        "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB",
-        "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF",
-        "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLL", "SOS", "SRD", "SSP",
-        "STD", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD",
-        "TWD", "TZS", "UAH", "UGX", "USD", "UYU", "UZS", "VES", "VND", "VUV", "WST",
-        "XAF", "XAG", "XAU", "XCD", "XDR", "XOF", "XPD", "XPF", "XPT", "YER", "ZAR",
-        "ZMW", "ZWL"
+        "AED",
+        "AFN",
+        "ALL",
+        "AMD",
+        "ANG",
+        "AOA",
+        "ARS",
+        "AUD",
+        "AWG",
+        "AZN",
+        "BAM",
+        "BBD",
+        "BDT",
+        "BGN",
+        "BHD",
+        "BIF",
+        "BMD",
+        "BND",
+        "BOB",
+        "BRL",
+        "BSD",
+        "BTN",
+        "BWP",
+        "BYN",
+        "BZD",
+        "CAD",
+        "CDF",
+        "CHF",
+        "CLF",
+        "CLP",
+        "CNH",
+        "CNY",
+        "COP",
+        "CRC",
+        "CUC",
+        "CUP",
+        "CVE",
+        "CZK",
+        "DJF",
+        "DKK",
+        "DOP",
+        "DZD",
+        "EGP",
+        "ERN",
+        "ETB",
+        "EUR",
+        "FJD",
+        "FKP",
+        "GBP",
+        "GEL",
+        "GGP",
+        "GHS",
+        "GIP",
+        "GMD",
+        "GNF",
+        "GTQ",
+        "GYD",
+        "HKD",
+        "HNL",
+        "HRK",
+        "HTG",
+        "HUF",
+        "IDR",
+        "ILS",
+        "IMP",
+        "INR",
+        "IQD",
+        "IRR",
+        "ISK",
+        "JEP",
+        "JMD",
+        "JOD",
+        "JPY",
+        "KES",
+        "KGS",
+        "KHR",
+        "KMF",
+        "KPW",
+        "KRW",
+        "KWD",
+        "KYD",
+        "KZT",
+        "LAK",
+        "LBP",
+        "LKR",
+        "LRD",
+        "LSL",
+        "LYD",
+        "MAD",
+        "MDL",
+        "MGA",
+        "MKD",
+        "MMK",
+        "MNT",
+        "MOP",
+        "MRO",
+        "MUR",
+        "MVR",
+        "MWK",
+        "MXN",
+        "MYR",
+        "MZN",
+        "NAD",
+        "NGN",
+        "NIO",
+        "NOK",
+        "NPR",
+        "NZD",
+        "OMR",
+        "PAB",
+        "PEN",
+        "PGK",
+        "PHP",
+        "PKR",
+        "PLN",
+        "PYG",
+        "QAR",
+        "RON",
+        "RSD",
+        "RUB",
+        "RWF",
+        "SAR",
+        "SBD",
+        "SCR",
+        "SDG",
+        "SEK",
+        "SGD",
+        "SHP",
+        "SLL",
+        "SOS",
+        "SRD",
+        "SSP",
+        "STD",
+        "SVC",
+        "SYP",
+        "SZL",
+        "THB",
+        "TJS",
+        "TMT",
+        "TND",
+        "TOP",
+        "TRY",
+        "TTD",
+        "TWD",
+        "TZS",
+        "UAH",
+        "UGX",
+        "USD",
+        "UYU",
+        "UZS",
+        "VES",
+        "VND",
+        "VUV",
+        "WST",
+        "XAF",
+        "XAG",
+        "XAU",
+        "XCD",
+        "XDR",
+        "XOF",
+        "XPD",
+        "XPF",
+        "XPT",
+        "YER",
+        "ZAR",
+        "ZMW",
+        "ZWL",
     ]
 
     # Check if currency is in the valid fiat currencies list
@@ -662,7 +910,7 @@ def donation(msg_text: str) -> str:
     url = "https://api.opennode.com/v1/charges"
     payload = {
         "amount": amount,
-        "description": f"Donation to @{environ.get('TELEGRAM_USERNAME')}"
+        "description": f"Donation to @{environ.get('TELEGRAM_USERNAME')}",
     }
 
     # Include currency in the payload if provided
@@ -672,7 +920,7 @@ def donation(msg_text: str) -> str:
     headers = {
         "accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": environ.get("OPENNODE_INVOICE_KEY")
+        "Authorization": environ.get("OPENNODE_INVOICE_KEY"),
     }
     response = requests.post(url, json=payload, headers=headers, timeout=5)
     return response.json()["data"]["lightning_invoice"]["payreq"]
@@ -753,10 +1001,18 @@ def handle_msg(token: str, message: Dict) -> str:
         elif not command.startswith("/") or command == "/ask":
             try:
                 reply_to = str(message["reply_to_message"]["from"]["username"])
-                if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text and not command.startswith("/ask"):
+                if (
+                    reply_to != environ.get("TELEGRAM_USERNAME")
+                    and bot_name not in message_text
+                    and not command.startswith("/ask")
+                ):
                     return "ignored request"
             except KeyError:
-                if chat_type != "private" and bot_name not in message_text and not command.startswith("/ask"):
+                if (
+                    chat_type != "private"
+                    and bot_name not in message_text
+                    and not command.startswith("/ask")
+                ):
                     return "ignored request"
 
             send_typing(token, chat_id)
@@ -784,24 +1040,24 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict
     return telegram_response.json()["result"]
 
 
-def set_telegram_webhook(decrypted_token: str, webhook_url: str, encrypted_token: str) -> bool:
+def set_telegram_webhook(
+    decrypted_token: str, webhook_url: str, encrypted_token: str
+) -> bool:
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
         "url": f"{webhook_url}?token={encrypted_token}",
         "allowed_updates": '["message"]',
         "secret_token": secret_token,
-        "max_connections": 100
+        "max_connections": 100,
     }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
     try:
-        telegram_response = requests.get(
-            request_url, params=parameters, timeout=5)
+        telegram_response = requests.get(request_url, params=parameters, timeout=5)
         telegram_response.raise_for_status()
     except RequestException:
         return False
     redis_client = config_redis()
-    redis_response = redis_client.set(
-        "X-Telegram-Bot-Api-Secret-Token", secret_token)
+    redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
     return bool(redis_response)
 
 
@@ -826,7 +1082,9 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
             if webhook_info.get("url") != current_webhook_url:
                 error_message = f"Main webhook failed with error: {str(request_error)}"
                 admin_report(decrypted_token, error_message)
-                return set_telegram_webhook(decrypted_token, current_function_url, encrypted_token)
+                return set_telegram_webhook(
+                    decrypted_token, current_function_url, encrypted_token
+                )
             return True
     elif webhook_info.get("url") != main_webhook_url:
         set_main_webhook_success = set_main_webhook()
@@ -846,17 +1104,27 @@ def is_secret_token_valid(request: Request) -> bool:
     return redis_secret_token == secret_token
 
 
-def process_request_parameters(request: Request, decrypted_token: str, encrypted_token: str) -> Tuple[str, int]:
+def process_request_parameters(
+    request: Request, decrypted_token: str, encrypted_token: str
+) -> Tuple[str, int]:
     try:
         check_webhook = request.args.get("check_webhook") == "true"
         update_webhook = request.args.get("update_webhook") == "true"
 
         if check_webhook:
-            return ("Webhook checked", 200) if verify_webhook(decrypted_token, encrypted_token) else ("Webhook check error", 400)
+            return (
+                ("Webhook checked", 200)
+                if verify_webhook(decrypted_token, encrypted_token)
+                else ("Webhook check error", 400)
+            )
 
         if update_webhook:
             function_url = environ.get("CURRENT_FUNCTION_URL")
-            return ("Webhook updated", 200) if set_telegram_webhook(decrypted_token, function_url, encrypted_token) else ("Webhook update error", 400)
+            return (
+                ("Webhook updated", 200)
+                if set_telegram_webhook(decrypted_token, function_url, encrypted_token)
+                else ("Webhook update error", 400)
+            )
 
         if not is_secret_token_valid(request):
             admin_report(decrypted_token, "Wrong secret token")
@@ -895,7 +1163,8 @@ def responder(request: Request) -> Tuple[str, int]:
             return "Wrong token", 400
 
         response_message, status_code = process_request_parameters(
-            request, decrypted_token, encrypted_token)
+            request, decrypted_token, encrypted_token
+        )
         return response_message, status_code
     except BaseException as error:
         traceback_info = traceback.format_exc()
