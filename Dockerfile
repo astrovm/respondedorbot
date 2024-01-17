@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy the index.py and requirements.txt files into the container
-COPY api/index.py requirements.txt ./
+COPY index.py requirements.txt ./
 
 # Install any required packages specified in requirements.txt
 RUN pip install -r requirements.txt

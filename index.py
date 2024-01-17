@@ -79,29 +79,11 @@ def cached_requests(
     # redis config
     redis_client = config_redis()
 
-    # check if environment variables for connecting to the redis backup are present
-    if (
-        "REDIS_HOST_BACKUP" in environ
-        and "REDIS_PORT_BACKUP" in environ
-        and "REDIS_PASSWORD_BACKUP" in environ
-    ):
-        redis_client_backup = config_redis(
-            environ.get("REDIS_HOST_BACKUP"),
-            environ.get("REDIS_PORT_BACKUP"),
-            environ.get("REDIS_PASSWORD_BACKUP"),
-        )
-    else:
-        redis_client_backup = None
-
     # get previous api data from redis cache
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
         cache_history = get_cache_history(get_history, request_hash, redis_client)
-        if cache_history is None and redis_client_backup is not None:
-            cache_history = get_cache_history(
-                get_history, request_hash, redis_client_backup
-            )
     else:
         cache_history = None
 
