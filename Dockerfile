@@ -14,4 +14,4 @@ RUN pip install -r requirements.txt
 EXPOSE 8080
 
 # Define the command to run the app
-CMD ["flask", "--app", "index", "run", "-p", "8080"]
+CMD ["flask", "--app", "index", "run", "--host", "0.0.0.0", "--port", "8080"]
