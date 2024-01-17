@@ -13,9 +13,8 @@ from typing import Dict, List, Tuple, Callable, Union
 import redis
 import requests
 from cryptography.fernet import Fernet
-from flask import Request
+from flask import Flask, Request
 from requests.exceptions import RequestException
-import functions_framework
 import emoji
 
 
@@ -1123,7 +1122,10 @@ def process_request_parameters(
         return "Error from process_request_parameters", 500
 
 
-@functions_framework.http
+app = Flask(__name__)
+
+
+@app.route("/")
 def responder(request: Request) -> Tuple[str, int]:
     try:
         if request.args.get("update_dollars") == "true":
