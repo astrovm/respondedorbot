@@ -1107,7 +1107,7 @@ def process_request_parameters(
 app = Flask(__name__)
 
 
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def responder() -> Tuple[str, int]:
     try:
         if request.args.get("update_dollars") == "true":
