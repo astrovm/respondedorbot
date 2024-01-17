@@ -14,7 +14,7 @@ def test_responder_no_args():
 
 def test_responder_dollars_updated():
     # Test update_dollars = true
-    with patch('main.get_dollar_rates') as mock_get_dollar_rates:
+    with patch("main.get_dollar_rates") as mock_get_dollar_rates:
         mock_get_dollar_rates.return_value = None
 
         args = {"update_dollars": "true"}
