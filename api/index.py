@@ -332,90 +332,20 @@ def get_prices(msg_text: str) -> str:
     return msg
 
 
-def get_lowest(prices: Dict[str, Dict[str, float]]) -> float:
-    lowest_price = float("inf")
-
-    for exchange in prices:
-        ask = float(prices[exchange]["totalAsk"])
-
-        if ask == 0:
-            continue
-
-        if ask < lowest_price:
-            lowest_price = ask
-
-    return lowest_price
-
-
-def to_float(data):
-    return {key: float(value) for key, value in data.items()}
-
-
-def add_derived_rates(data, base_key, multipliers):
-    for name, multiplier in multipliers.items():
-        data[name] = data[base_key] * multiplier
-    return data
-
-
-def get_rate_history(data, key):
-    return data.get(key) if key in data else None
-
-
-def sort_dollar_rates(dollar_rates, usdc_rates, dai_rates, usdt_rates):
-    dollars = to_float(dollar_rates["data"])
-    derived_rates = {"tarjeta": 1.6}
-    dollars = add_derived_rates(dollars, "oficial", derived_rates)
-
-    dollars["usdc"] = get_lowest(usdc_rates["data"])
-    dollars["dai"] = get_lowest(dai_rates["data"])
-    dollars["usdt"] = get_lowest(usdt_rates["data"])
-
-    dollars_history = {}
-    if "history" in dollar_rates:
-        dollars_history = to_float(dollar_rates["history"]["data"])
-        dollars_history = add_derived_rates(dollars_history, "oficial", derived_rates)
-
-        for rate_type in [
-            ("usdc", usdc_rates),
-            ("dai", dai_rates),
-            ("usdt", usdt_rates),
-        ]:
-            if "history" in rate_type[1]:
-                dollars_history[rate_type[0]] = get_lowest(
-                    rate_type[1]["history"]["data"]
-                )
-
-    rate_names = [
-        "oficial",
-        "tarjeta",
-        "mep",
-        "ccl",
-        "ccb",
-        "blue",
-        "usdc",
-        "dai",
-        "usdt",
-    ]
-
-    rate_display_names = {
-        "oficial": "Oficial",
-        "tarjeta": "Tarjeta",
-        "mep": "MEP",
-        "ccl": "CCL",
-        "ccb": "Bitcoin",
-        "blue": "Blue",
-        "usdc": "USDC",
-        "dai": "DAI",
-        "usdt": "USDT",
-    }
+def sort_dollar_rates(dollar_rates):
+    dollars = dollar_rates["data"]
 
     sorted_dollar_rates = [
         {
-            "name": rate_display_names[name],
-            "price": dollars[name],
-            "history": get_rate_history(dollars_history, name),
-        }
-        for name in rate_names
+            "name": "Oficial",
+            "price": dollars["oficial"]["price"],
+            "history": dollars["oficial"]["variation"],
+        },
+        {
+            "name": "Tarjeta",
+            "price": dollars["tarjeta"]["price"],
+            "history": dollars["tarjeta"]["variation"],
+        },
     ]
 
     sorted_dollar_rates.sort(key=lambda x: x["price"])
@@ -429,7 +359,7 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
         price_formatted = f"{dollar['price']:.2f}".rstrip("0").rstrip(".")
         line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
-            percentage = (dollar["price"] / dollar["history"] - 1) * 100
+            percentage = float(dollar["variation"])
             formatted_percentage = f"{percentage:+.2f}".rstrip("0").rstrip(".")
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
@@ -439,26 +369,14 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
 
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
-    hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
-    api_urls = [
-        "https://criptoya.com/api/dolar",
-        "https://criptoya.com/api/usdc/ars/1000",
-        "https://criptoya.com/api/dai/ars/1000",
-        "https://criptoya.com/api/usdt/ars/1000",
-    ]
+    # hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
+    api_url = "https://criptoya.com/api/dolar"
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        api_results = [
-            executor.submit(
-                cached_requests, url, None, None, cache_expiration_time, True, hours_ago
-            )
-            for url in api_urls
-        ]
-        dollars, usdc, dai, usdt = [result.result() for result in api_results]
+    dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
-    sorted_dollar_rates = sort_dollar_rates(dollars, usdc, dai, usdt)
+    sorted_dollar_rates = sort_dollar_rates(dollars)
 
-    return format_dollar_rates(sorted_dollar_rates, hours_ago)
+    return format_dollar_rates(sorted_dollar_rates, 24)
 
 
 def get_devo(msg_text: str) -> str:
@@ -661,222 +579,6 @@ Available commands:
     """
 
 
-def donation(msg_text: str) -> str:
-    # Split the input string
-    amount_currency = msg_text.split()
-
-    # Check if the input has both amount and currency or just the amount
-    if len(amount_currency) == 2:
-        amount, currency = amount_currency
-        currency = currency.upper()  # Convert currency to uppercase
-    elif len(amount_currency) == 1:
-        amount, currency = amount_currency[0], None  # Set currency to None
-    else:
-        return "Invalid input format. Please use either 'amount' in satoshis or 'amount fiat_currency'."
-
-    # Check if amount is a valid number
-    try:
-        amount = float(amount) if currency else int(amount)
-    except ValueError:
-        return "Invalid amount. Please enter a valid number."
-
-    # Reject negative amounts and zero
-    if amount <= 0:
-        return "Invalid amount. Please enter a positive number greater than zero."
-
-    valid_fiat_currencies = [
-        "AED",
-        "AFN",
-        "ALL",
-        "AMD",
-        "ANG",
-        "AOA",
-        "ARS",
-        "AUD",
-        "AWG",
-        "AZN",
-        "BAM",
-        "BBD",
-        "BDT",
-        "BGN",
-        "BHD",
-        "BIF",
-        "BMD",
-        "BND",
-        "BOB",
-        "BRL",
-        "BSD",
-        "BTN",
-        "BWP",
-        "BYN",
-        "BZD",
-        "CAD",
-        "CDF",
-        "CHF",
-        "CLF",
-        "CLP",
-        "CNH",
-        "CNY",
-        "COP",
-        "CRC",
-        "CUC",
-        "CUP",
-        "CVE",
-        "CZK",
-        "DJF",
-        "DKK",
-        "DOP",
-        "DZD",
-        "EGP",
-        "ERN",
-        "ETB",
-        "EUR",
-        "FJD",
-        "FKP",
-        "GBP",
-        "GEL",
-        "GGP",
-        "GHS",
-        "GIP",
-        "GMD",
-        "GNF",
-        "GTQ",
-        "GYD",
-        "HKD",
-        "HNL",
-        "HRK",
-        "HTG",
-        "HUF",
-        "IDR",
-        "ILS",
-        "IMP",
-        "INR",
-        "IQD",
-        "IRR",
-        "ISK",
-        "JEP",
-        "JMD",
-        "JOD",
-        "JPY",
-        "KES",
-        "KGS",
-        "KHR",
-        "KMF",
-        "KPW",
-        "KRW",
-        "KWD",
-        "KYD",
-        "KZT",
-        "LAK",
-        "LBP",
-        "LKR",
-        "LRD",
-        "LSL",
-        "LYD",
-        "MAD",
-        "MDL",
-        "MGA",
-        "MKD",
-        "MMK",
-        "MNT",
-        "MOP",
-        "MRO",
-        "MUR",
-        "MVR",
-        "MWK",
-        "MXN",
-        "MYR",
-        "MZN",
-        "NAD",
-        "NGN",
-        "NIO",
-        "NOK",
-        "NPR",
-        "NZD",
-        "OMR",
-        "PAB",
-        "PEN",
-        "PGK",
-        "PHP",
-        "PKR",
-        "PLN",
-        "PYG",
-        "QAR",
-        "RON",
-        "RSD",
-        "RUB",
-        "RWF",
-        "SAR",
-        "SBD",
-        "SCR",
-        "SDG",
-        "SEK",
-        "SGD",
-        "SHP",
-        "SLL",
-        "SOS",
-        "SRD",
-        "SSP",
-        "STD",
-        "SVC",
-        "SYP",
-        "SZL",
-        "THB",
-        "TJS",
-        "TMT",
-        "TND",
-        "TOP",
-        "TRY",
-        "TTD",
-        "TWD",
-        "TZS",
-        "UAH",
-        "UGX",
-        "USD",
-        "UYU",
-        "UZS",
-        "VES",
-        "VND",
-        "VUV",
-        "WST",
-        "XAF",
-        "XAG",
-        "XAU",
-        "XCD",
-        "XDR",
-        "XOF",
-        "XPD",
-        "XPF",
-        "XPT",
-        "YER",
-        "ZAR",
-        "ZMW",
-        "ZWL",
-    ]
-
-    # Check if currency is in the valid fiat currencies list
-    if currency is not None and currency not in valid_fiat_currencies:
-        return "Invalid currency. Please enter a valid 3-letter fiat currency code."
-
-    url = "https://api.opennode.com/v1/charges"
-    payload = {
-        "amount": amount,
-        "description": f"Donation to @{environ.get('TELEGRAM_USERNAME')}",
-    }
-
-    # Include currency in the payload if provided
-    if currency is not None:
-        payload["currency"] = currency
-
-    headers = {
-        "accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": environ.get("OPENNODE_INVOICE_KEY"),
-    }
-    response = requests.post(url, json=payload, headers=headers, timeout=5)
-    return response.json()["data"]["lightning_invoice"]["payreq"]
-
-
 def get_instance_name(msg_text: str) -> str:
     return environ.get("FRIENDLY_INSTANCE_NAME")
 
@@ -913,7 +615,6 @@ def initialize_commands() -> Dict[str, Callable]:
         "/time": get_timestamp,
         "/comando": convert_to_command,
         "/instance": get_instance_name,
-        "/donate": donation,
         "/help": get_help,
     }
 
