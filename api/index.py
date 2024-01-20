@@ -483,7 +483,7 @@ def get_devo(msg_text: str) -> str:
 
         dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
-        usdt = float(dollars["data"]["usdt"]["bid"])
+        usdt = float(dollars["data"]["cripto"]["usdt"]["bid"])
         oficial = float(dollars["data"]["oficial"]["price"])
         tarjeta = oficial * 1.6
 
