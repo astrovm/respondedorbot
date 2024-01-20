@@ -359,7 +359,7 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
         price_formatted = f"{dollar['price']:.2f}".rstrip("0").rstrip(".")
         line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
-            percentage = float(dollar["variation"])
+            percentage = dollar["history"]
             formatted_percentage = f"{percentage:+.2f}".rstrip("0").rstrip(".")
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
