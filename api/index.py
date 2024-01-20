@@ -478,41 +478,29 @@ def get_devo(msg_text: str) -> str:
             return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a positive number."
 
         cache_expiration_time = 300
-        api_urls = [
-            "https://criptoya.com/api/dolar",
-            "https://criptoya.com/api/usdt/ars/1000",
-        ]
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            api_results = [
-                executor.submit(
-                    cached_requests, url, None, None, cache_expiration_time, True
-                )
-                for url in api_urls
-            ]
-            dollars, usdt = [result.result() for result in api_results]
+        api_url = "https://criptoya.com/api/dolar"
 
-        dollars = to_float(dollars["data"])
-        dollars["usdt"] = get_lowest(usdt["data"])
+        dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
-        tarjeta_tax = 1.6
+        usdt = float(dollars["data"]["usdt"]["bid"])
+        oficial = float(dollars["data"]["oficial"]["price"])
+        tarjeta = oficial * 1.6
 
-        profit = -(fee * dollars["usdt"] + dollars["oficial"] - dollars["usdt"]) / (
-            dollars["oficial"] * tarjeta_tax
-        )
+        profit = -(fee * usdt + oficial - usdt) / tarjeta
 
         msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
 
 Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
-Oficial: {f"{dollars['oficial']:.2f}".rstrip("0").rstrip(".")}
-USDT: {f"{dollars['usdt']:.2f}".rstrip("0").rstrip(".")}
-Tarjeta: {f"{dollars['oficial'] * tarjeta_tax:.2f}".rstrip("0").rstrip(".")}"""
+Oficial: {f"{oficial:.2f}".rstrip("0").rstrip(".")}
+USDT: {f"{usdt:.2f}".rstrip("0").rstrip(".")}
+Tarjeta: {f"{tarjeta:.2f}".rstrip("0").rstrip(".")}"""
 
         if compra > 0:
-            compra_ars = compra * (dollars["oficial"] * tarjeta_tax)
-            compra_usdt = compra_ars / dollars["usdt"]
+            compra_ars = compra * tarjeta
+            compra_usdt = compra_ars / usdt
             ganancia_ars = compra_ars * profit
-            ganancia_usdt = ganancia_ars / dollars["usdt"]
+            ganancia_usdt = ganancia_ars / usdt
             msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Tarjeta = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
 Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
