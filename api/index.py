@@ -346,6 +346,56 @@ def sort_dollar_rates(dollar_rates):
             "price": dollars["tarjeta"]["price"],
             "history": dollars["tarjeta"]["variation"],
         },
+        {
+            "name": "MEP",
+            "price": dollars["mep"]["al30"]["ci"]["price"],
+            "history": dollars["mep"]["al30"]["ci"]["variation"],
+        },
+        {
+            "name": "CCL",
+            "price": dollars["ccl"]["al30"]["ci"]["price"],
+            "history": dollars["ccl"]["al30"]["ci"]["variation"],
+        },
+        {
+            "name": "Blue (Ask)",
+            "price": dollars["blue"]["ask"],
+            "history": dollars["blue"]["variation"],
+        },
+        {
+            "name": "Blue (Bid)",
+            "price": dollars["blue"]["bid"],
+            "history": dollars["blue"]["variation"],
+        },
+        {
+            "name": "Bitcoin (Ask)",
+            "price": dollars["cripto"]["ccb"]["ask"],
+            "history": dollars["cripto"]["ccb"]["variation"],
+        },
+        {
+            "name": "Bitcoin (Bid)",
+            "price": dollars["cripto"]["ccb"]["bid"],
+            "history": dollars["cripto"]["ccb"]["variation"],
+        },
+        {
+            "name": "USDC (Ask)",
+            "price": dollars["cripto"]["usdc"]["ask"],
+            "history": dollars["cripto"]["usdc"]["variation"],
+        },
+        {
+            "name": "USDC (Bid)",
+            "price": dollars["cripto"]["usdc"]["bid"],
+            "history": dollars["cripto"]["usdc"]["variation"],
+        },
+        {
+            "name": "USDT (Ask)",
+            "price": dollars["cripto"]["usdt"]["ask"],
+            "history": dollars["cripto"]["usdt"]["variation"],
+        },
+        {
+            "name": "USDT (Bid)",
+            "price": dollars["cripto"]["usdt"]["bid"],
+            "history": dollars["cripto"]["usdt"]["variation"],
+        },
     ]
 
     sorted_dollar_rates.sort(key=lambda x: x["price"])
