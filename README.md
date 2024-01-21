@@ -27,7 +27,3 @@ CURRENT_FUNCTION_URL: The URL of the current instance.
 MAIN_FUNCTION_URL: The URL of the primary instance that should be used if it's not down.
 FRIENDLY_INSTANCE_NAME: A human-readable name for the current instance, used in admin reports and notifications to identify the source of the message.
 ```
-
-## License
-
-[MIT License](/LICENSE)
