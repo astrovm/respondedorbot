@@ -1,26 +1,24 @@
 from unittest.mock import patch
-from flask import Request
+from flask import Flask
 from werkzeug.test import create_environ
-from index import responder, convert_to_command
+from api.index import responder, convert_to_command
+
+app = Flask(__name__)
 
 
 def test_responder_no_args():
-    # Test no arguments
-    args = {}
-    environ = create_environ(query_string=args)
-    request = Request(environ)
-    assert responder(request) == ("No token", 200)
+    with app.test_request_context("/?"):
+        response = responder()
+        assert response == ("No token", 200)
 
 
 def test_responder_dollars_updated():
-    # Test update_dollars = true
-    with patch("index.get_dollar_rates") as mock_get_dollar_rates:
+    with patch("api.index.get_dollar_rates") as mock_get_dollar_rates:
         mock_get_dollar_rates.return_value = None
 
-        args = {"update_dollars": "true"}
-        environ = create_environ(query_string=args)
-        request = Request(environ)
-        assert responder(request) == ("Dollars updated", 200)
+        with app.test_request_context("/?update_dollars=true"):
+            response = responder()
+            assert response == ("Dollars updated", 200)
 
 
 def test_convert_to_command():
