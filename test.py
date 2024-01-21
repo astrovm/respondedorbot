@@ -1,6 +1,5 @@
 from unittest.mock import patch
 from flask import Flask
-from werkzeug.test import create_environ
 from api.index import responder, convert_to_command
 
 app = Flask(__name__)
