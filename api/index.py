@@ -266,6 +266,7 @@ def get_prices(msg_text: str) -> str:
                 [
                     "USDT",
                     "USDC",
+                    "FDUSD",
                     "BUSD",
                     "DAI",
                     "TUSD",
