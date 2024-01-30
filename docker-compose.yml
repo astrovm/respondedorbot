@@ -17,4 +17,4 @@ services:
             - CURRENT_FUNCTION_URL=
             - MAIN_FUNCTION_URL=
             - FRIENDLY_INSTANCE_NAME=
-        image: ghcr.io/astrolince/respondedorbot:master
+        image: ghcr.io/astrovm/respondedorbot:master
