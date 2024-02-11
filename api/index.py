@@ -6,7 +6,7 @@ import time
 import traceback
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import log
 from os import environ
 from typing import Dict, List, Tuple, Callable, Union
@@ -472,9 +472,26 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
     except ValueError:
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
+def powerlaw(msg_text: str) -> str:
+    today = datetime.now(timezone.utc)
+    since = datetime(day=4, month=1, year=2009)
+    days_since = (today - since).days
+    value = 10 ** (-17) * days_since ** 5.82
+
+    api_response = get_api_or_cache_prices("USD")
+    price = api_response["data"][0]["quote"]["USD"]["price"]
+
+    percentage = ((price - value) / value) * 100
+    if percentage > 0:
+        percentage_txt = f"{percentage:.2f}% overvalued"
+    else:
+        percentage_txt = f"{abs(percentage):.2f}% undervalued"
+
+    msg = f"Today's Bitcoin Power Law theoretical value is {value:.2f} USD ({percentage_txt})"
+    return msg
 
 def rainbow(msg_text: str) -> str:
-    today = datetime.now()
+    today = datetime.now(timezone.utc)
     since = datetime(day=9, month=1, year=2009)
     days_since = (today - since).days
     value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
@@ -488,9 +505,8 @@ def rainbow(msg_text: str) -> str:
     else:
         percentage_txt = f"{abs(percentage):.2f}% undervalued"
 
-    msg = f"Today's Bitcoin theoretical value is {value:.2f} USD ({percentage_txt})"
+    msg = f"Today's Bitcoin Rainbow theoretical value is {value:.2f} USD ({percentage_txt})"
     return msg
-
 
 def convert_base(msg_text: str) -> str:
     try:
@@ -614,7 +630,8 @@ Available commands:
 - /random pizza, meat, sushi: Chooses between the options
 - /random 1-10: Returns a random number between 1 and 10
 
-- /rainbow: Get the theoretical value of Bitcoin and its overvaluation or undervaluation percentage
+- /powerlaw: Get the theoretical value of Bitcoin Power Law and its overvaluation or undervaluation percentage
+- /rainbow: Get the theoretical value of Bitcoin Rainbow and its overvaluation or undervaluation percentage
 
 - /time: Returns the current Unix timestamp
     """
@@ -652,6 +669,7 @@ def initialize_commands() -> Dict[str, Callable]:
         "/prices": get_prices,
         "/dolar": get_dollar_rates,
         "/devo": get_devo,
+        "/powerlaw": powerlaw,
         "/rainbow": rainbow,
         "/time": get_timestamp,
         "/comando": convert_to_command,
