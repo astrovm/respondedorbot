@@ -474,7 +474,7 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
 
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
-    since = datetime(day=3, month=1, year=2009).replace(tzinfo=timezone.utc)
+    since = datetime(day=5, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
     value = 10 ** (-17) * days_since ** 5.82
 
