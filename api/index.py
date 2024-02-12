@@ -474,7 +474,7 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
 
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
-    since = datetime(day=4, month=1, year=2009)
+    since = datetime(day=5, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
     value = 10 ** (-17) * days_since ** 5.82
 
@@ -492,7 +492,7 @@ def powerlaw(msg_text: str) -> str:
 
 def rainbow(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
-    since = datetime(day=9, month=1, year=2009)
+    since = datetime(day=9, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
     value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
 
