@@ -713,7 +713,7 @@ def handle_msg(token: str, message: Dict) -> str:
                 sanitized_message_text = message["reply_to_message"]["text"]
 
         if command in commands:
-            send_typing(token, chat_id)
+            # send_typing(token, chat_id)
             response_msg = commands[command](sanitized_message_text)
         elif not command.startswith("/") or command == "/ask":
             try:
