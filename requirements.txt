@@ -2,4 +2,4 @@ cryptography==42.0.5
 emoji==2.11.0
 redis==5.0.4
 requests==2.31.0
-Flask==3.0.2
+Flask==3.0.3
