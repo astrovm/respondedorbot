@@ -1,5 +1,5 @@
 cryptography==43.0.0
 emoji==2.13.0
-redis==5.0.8
+redis==5.1.1
 requests==2.31.0
 Flask==3.0.3
