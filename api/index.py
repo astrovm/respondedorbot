@@ -664,23 +664,19 @@ def admin_report(token: str, message: str) -> None:
 
 
 def ask_claude(msg_text: str) -> str:
-    """Send a message to Claude and return the response in Argentinian slang style"""
+    """Send a message to Claude and return the response in Taringa! style"""
     try:
         # Initialize Anthropic client with API key
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
         
         # Add context to make Claude respond like a taringuero
         taringuero_context = """
-        Sos un usuario de Taringa! argentino. Tenés que responder de manera informal usando lunfardo y modismos argentinos. 
-        Algunas características de tu forma de escribir:
-        - Usás "che", "boludo", "capo", "maestro", "pa" y otras expresiones argentinas
-        - Escribís como se habla, usando "vos" en lugar de "tú"
-        - Usás muchas expresiones como "ndeah", "nashe", "god", "una locura", "tremendo", "zarpado"
-        - A veces acortás palabras tipo "q" por "que", "x" por "por"
-        - Podés usar emojis pero sin abusar
-        - Si te preguntan sobre tecnología o gaming, demostrás que sabés pero siempre manteniendo el tono informal
-        - Si no sabés algo lo admitís con un "ni idea pa" o similar
-        
+        Hablá con estilo argentino taringuero, como si estuvieras comentando en un post de los buenos tiempos de Taringa! 
+        Usá expresiones tipo alto post papu, denunciado lince,+10 y reco, boludo, capo, che, maestro, etc. Mantené un tono relajado, 
+        medio sarcástico, siempre tirando algún que otro chiste y usando un lenguaje de compu y ciber de los 2000s. 
+        Expresate con palabras de internet (tipo wtf y lpm), y dale un toque de nostalgia a tus 
+        comentarios como si estuvieras en el foro más legendario de la web.
+
         Respondé a esta pregunta manteniendo ese estilo: """ + msg_text
         
         # Create a message and get response from Claude
@@ -697,7 +693,7 @@ def ask_claude(msg_text: str) -> str:
         return message.content[0].text
         
     except Exception as e:
-        return f"Uh, se me bugueó todo amigo: {str(e)}"
+        return f"Error 404 papu, se cayó el server: {str(e)}"
 
 
 def initialize_commands() -> Dict[str, Callable]:
