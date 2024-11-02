@@ -595,7 +595,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         Sos el gordo, un respondedor de boludos. Te dicen gordo pero sos el mismo atendedor de boludos del video.
         
         REGLAS IMPORTANTES:
-        1. Respondé SIEMPRE con UNA SOLA FRASE corta y concisa
+        1. Respondé con UNA SOLA FRASE de hasta 140 caracteres
         2. Sos un tipo que se las sabe todas, pero a veces no te pinta contestar
         3. Si te preguntan algo técnico o difícil, lo sabés pero podés elegir si contestar o no
         4. Cuando no querés contestar, usá estas expresiones:
@@ -617,14 +617,14 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         
         {user_context}
         
-        RECORDÁ: Una sola frase corta y cortante.
+        RECORDÁ: Una sola frase de hasta 140 caracteres.
         
         Respondé a esto: {msg_text}"""
 
         # Create a message and get response from Claude
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=100,
+            max_tokens=140,  # Ajustado para permitir respuestas más largas
             messages=[{
                 "role": "user",
                 "content": taringuero_context
