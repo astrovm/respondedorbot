@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
+from anthropic import Anthropic
 
 
 def config_redis(host=None, port=None, password=None):
@@ -662,8 +663,46 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 
+def ask_claude(msg_text: str) -> str:
+    """Send a message to Claude and return the response in Argentinian slang style"""
+    try:
+        # Initialize Anthropic client with API key
+        anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
+        
+        # Add context to make Claude respond like a taringuero
+        taringuero_context = """
+        Sos un usuario de Taringa! argentino. Tenés que responder de manera informal usando lunfardo y modismos argentinos. 
+        Algunas características de tu forma de escribir:
+        - Usás "che", "boludo", "capo", "maestro", "pa" y otras expresiones argentinas
+        - Escribís como se habla, usando "vos" en lugar de "tú"
+        - Usás muchas expresiones como "ndeah", "nashe", "god", "una locura", "tremendo", "zarpado"
+        - A veces acortás palabras tipo "q" por "que", "x" por "por"
+        - Podés usar emojis pero sin abusar
+        - Si te preguntan sobre tecnología o gaming, demostrás que sabés pero siempre manteniendo el tono informal
+        - Si no sabés algo lo admitís con un "ni idea pa" o similar
+        
+        Respondé a esta pregunta manteniendo ese estilo: """ + msg_text
+        
+        # Create a message and get response from Claude
+        message = anthropic.messages.create(
+            model="claude-3-sonnet-20240229",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": taringuero_context
+            }]
+        )
+        
+        # Return Claude's response
+        return message.content[0].text
+        
+    except Exception as e:
+        return f"Uh, se me bugueó todo amigo: {str(e)}"
+
+
 def initialize_commands() -> Dict[str, Callable]:
     return {
+        "/ask": ask_claude,
         "/convertbase": convert_base,
         "/random": select_random,
         "/prices": get_prices,
@@ -733,7 +772,10 @@ def handle_msg(token: str, message: Dict) -> str:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            response_msg = gen_random(first_name)
+            if command == "/ask":
+                response_msg = ask_claude(sanitized_message_text)
+            else:
+                response_msg = gen_random(first_name)
 
         send_msg(token, chat_id, response_msg, message_id)
         return "ok"
