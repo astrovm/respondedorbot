@@ -202,40 +202,10 @@ def get_prices(msg_text: str) -> str:
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
         coins = [
-            "XAU",
-            "USD",
-            "EUR",
-            "KRW",
-            "GBP",
-            "AUD",
-            "BRL",
-            "CAD",
-            "CLP",
-            "CNY",
-            "COP",
-            "CZK",
-            "DKK",
-            "HKD",
-            "ISK",
-            "INR",
-            "ILS",
-            "JPY",
-            "MXN",
-            "TWD",
-            "NZD",
-            "PEN",
-            "SGD",
-            "SEK",
-            "CHF",
-            "UYU",
-            "BTC",
-            "SATS",
-            "ETH",
-            "XMR",
-            "USDC",
-            "USDT",
-            "DAI",
-            "BUSD",
+            "XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY",
+            "COP", "CZK", "DKK", "HKD", "ISK", "INR", "ILS", "JPY", "MXN", "TWD",
+            "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR",
+            "USDC", "USDT", "DAI", "BUSD",
         ]
         convert_to = words[-1]
         if convert_to in coins:
@@ -269,36 +239,12 @@ def get_prices(msg_text: str) -> str:
         coins = msg_text.upper().replace(" ", "").split(",")
 
         if "STABLES" in coins or "STABLECOINS" in coins:
-            coins.extend(
-                [
-                    "BUSD",
-                    "DAI",
-                    "DOC",
-                    "EURT",
-                    "FDUSD",
-                    "FRAX",
-                    "GHO",
-                    "GUSD",
-                    "LUSD",
-                    "MAI",
-                    "MIM",
-                    "MIMATIC",
-                    "NUARS",
-                    "PAXG",
-                    "PYUSD",
-                    "RAI",
-                    "SUSD",
-                    "TUSD",
-                    "USDC",
-                    "USDD",
-                    "USDM",
-                    "USDP",
-                    "USDT",
-                    "UXD",
-                    "XAUT",
-                    "XSGD",
-                ]
-            )
+            coins.extend([
+                "BUSD", "DAI", "DOC", "EURT", "FDUSD", "FRAX", "GHO", "GUSD",
+                "LUSD", "MAI", "MIM", "MIMATIC", "NUARS", "PAXG", "PYUSD", "RAI",
+                "SUSD", "TUSD", "USDC", "USDD", "USDM", "USDP", "USDT", "UXD",
+                "XAUT", "XSGD",
+            ])
 
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
@@ -327,26 +273,18 @@ def get_prices(msg_text: str) -> str:
                 coin["quote"][convert_to_parameter]["price"] * 100000000
             )
 
-        decimals = f"{coin['quote'][convert_to_parameter]
-                      ['price']:.12f}".split(".")[-1]
+        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
-        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip(
-            "0"
-        ).rstrip(".")
-        percentage = (
-            f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
-                "0"
-            ).rstrip(".")
-        )
+        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip("0").rstrip(".")
+        percentage = f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip("0").rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
             msg = line
         else:
-            msg = f"""{msg}
-{line}"""
+            msg = f"{msg}\n{line}"
 
     return msg
 
