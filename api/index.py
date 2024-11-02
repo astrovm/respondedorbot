@@ -17,25 +17,19 @@ from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
 from anthropic import Anthropic
-
-
 def config_redis(host=None, port=None, password=None):
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
-    redis_client = redis.Redis(
-        host=host, port=port, password=password, decode_responses=True
-    )
+    redis_client = redis.Redis(host=host, port=port, password=password, decode_responses=True)
     return redis_client
-
 
 # request new data and save it in redis
 def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
-    response = requests.get(api_url, params=parameters,
-                            headers=headers, timeout=5)
+    response = requests.get(api_url, params=parameters,headers=headers, timeout=5)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
@@ -46,19 +40,16 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
         if hourly_cache:
             # get current date with hour
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + request_hash,
-                             json.dumps(redis_value))
+            redis_client.set(current_hour + request_hash, json.dumps(redis_value))
 
         return redis_value
     else:
         return None
 
-
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
-    timestamp = (datetime.now() - timedelta(hours=hours_ago)
-                 ).strftime("%Y-%m-%d-%H")
+    timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
     # get previous api data from redis cache
     cached_data = redis_client.get(timestamp + request_hash)
 
@@ -66,18 +57,15 @@ def get_cache_history(hours_ago, request_hash, redis_client):
         return None
     else:
         cache_history = json.loads(cached_data)
-        if cache_history is not None and "timestamp" not in cache_history:
-            cache_history = None
+        if cache_history is not None and "timestamp" not in cache_history: cache_history = None
         return cache_history
-
 
 # generic proxy for caching any request
 def cached_requests(
     api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False
 ):
     # create unique hash for the request
-    arguments_dict = {"api_url": api_url,
-                      "parameters": parameters, "headers": headers}
+    arguments_dict = {"api_url": api_url, "parameters": parameters, "headers": headers}
     arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
     request_hash = hashlib.md5(arguments_str).hexdigest()
 
@@ -88,8 +76,7 @@ def cached_requests(
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
-        cache_history = get_cache_history(
-            get_history, request_hash, redis_client)
+        cache_history = get_cache_history(get_history, request_hash, redis_client)
     else:
         cache_history = None
 
@@ -98,9 +85,7 @@ def cached_requests(
 
     # if there's no cached data request it
     if redis_response is None:
-        new_data = set_new_data(
-            arguments_dict, timestamp, redis_client, request_hash, hourly_cache
-        )
+        new_data = set_new_data(arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
 
         if cache_history is not None:
             new_data["history"] = cache_history
@@ -130,7 +115,6 @@ def cached_requests(
         else:
             return cached_data
 
-
 def gen_random(name: str) -> str:
     time.sleep(random.uniform(0, 1))
 
@@ -150,7 +134,6 @@ def gen_random(name: str) -> str:
         time.sleep(random.uniform(0, 1))
 
     return msg
-
 
 def select_random(msg_text: str) -> str:
     try:
@@ -288,7 +271,6 @@ def get_prices(msg_text: str) -> str:
 
     return msg
 
-
 def sort_dollar_rates(dollar_rates):
     dollars = dollar_rates["data"]
 
@@ -339,7 +321,6 @@ def sort_dollar_rates(dollar_rates):
 
     return sorted_dollar_rates
 
-
 def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
@@ -352,8 +333,6 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
         msg_lines.append(line)
 
     return "\n".join(msg_lines)
-
-
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
     # hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
@@ -364,8 +343,6 @@ def get_dollar_rates(msg_text: str) -> str:
     sorted_dollar_rates = sort_dollar_rates(dollars)
 
     return format_dollar_rates(sorted_dollar_rates, 24)
-
-
 def get_devo(msg_text: str) -> str:
     try:
         fee = 0
@@ -419,7 +396,6 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
     except ValueError:
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
-
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
@@ -438,7 +414,6 @@ def powerlaw(msg_text: str) -> str:
     msg = f"Today's Bitcoin Power Law theoretical value is {value:.2f} USD ({percentage_txt})"
     return msg
 
-
 def rainbow(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=9, month=1, year=2009).replace(tzinfo=timezone.utc)
@@ -456,8 +431,6 @@ def rainbow(msg_text: str) -> str:
 
     msg = f"Today's Bitcoin Rainbow theoretical value is {value:.2f} USD ({percentage_txt})"
     return msg
-
-
 def convert_base(msg_text: str) -> str:
     try:
         # Parse input
@@ -471,10 +444,7 @@ def convert_base(msg_text: str) -> str:
         if not all(c.isalnum() for c in number_str):
             return "Invalid input. Number must be alphanumeric."
         if not 2 <= base_from <= 36:
-            return (
-                f"Invalid input. Base from '{
-                    base_from_str}' must be between 2 and 36."
-            )
+            return f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
         if not 2 <= base_to <= 36:
             return f"Invalid input. Base to '{base_to_str}' must be between 2 and 36."
 
@@ -502,11 +472,8 @@ def convert_base(msg_text: str) -> str:
     except ValueError:
         return "Invalid input. Base and number must be integers."
 
-
 def get_timestamp(msg_text: str) -> str:
     return f"{int(time.time())}"
-
-
 def convert_to_command(msg_text: str) -> str:
     # Add spaces surrounding each emoji and convert it to its textual representation
     emoji_text = emoji.replace_emoji(
@@ -557,7 +524,6 @@ def convert_to_command(msg_text: str) -> str:
     command = f"/{cleaned_text}"
     return command
 
-
 def get_help(msg_text: str) -> str:
     return """
 Available commands:
@@ -587,18 +553,15 @@ Available commands:
 - /rainbow: Get the theoretical value of Bitcoin Rainbow and its overvaluation or undervaluation percentage
 
 - /time: Returns the current Unix timestamp
-    """
-
+"""
 
 def get_instance_name(msg_text: str) -> str:
     return environ.get("FRIENDLY_INSTANCE_NAME")
-
 
 def send_typing(token: str, chat_id: str) -> None:
     parameters = {"chat_id": chat_id, "action": "typing"}
     url = f"https://api.telegram.org/bot{token}/sendChatAction"
     requests.get(url, params=parameters, timeout=5)
-
 
 def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     parameters = {"chat_id": chat_id, "text": msg}
@@ -607,13 +570,11 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.get(url, params=parameters, timeout=5)
 
-
 def admin_report(token: str, message: str) -> None:
     instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
     formatted_message = f"Admin report from {instance_name}: {message}"
     admin_chat_id = environ.get("ADMIN_CHAT_ID")
     send_msg(token, admin_chat_id, formatted_message)
-
 
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
     """Send a message to Claude and return the response in Taringa! style"""
@@ -676,7 +637,6 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
     except Exception as e:
         return f"Error 404 maestro, se cayo el sistema: {str(e)}"
 
-
 def initialize_commands() -> Dict[str, Callable]:
     return {
         "/ask": ask_claude,
@@ -698,7 +658,6 @@ def initialize_commands() -> Dict[str, Callable]:
         "/instance": get_instance_name,
         "/help": get_help,
     }
-
 
 def handle_msg(token: str, message: Dict) -> str:
     try:
@@ -755,11 +714,9 @@ def handle_msg(token: str, message: Dict) -> str:
         print(f"Error from handle_msg: {error}")
         return "Error from handle_msg", 500
 
-
 def decrypt_token(key: str, encrypted_token: str) -> str:
     fernet = Fernet(key.encode())
     return fernet.decrypt(encrypted_token.encode()).decode()
-
 
 def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
     request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
@@ -769,7 +726,6 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict
     except RequestException as request_error:
         return {"error": str(request_error)}
     return telegram_response.json()["result"]
-
 
 def set_telegram_webhook(
     decrypted_token: str, webhook_url: str, encrypted_token: str
@@ -792,7 +748,6 @@ def set_telegram_webhook(
     redis_response = redis_client.set(
         "X-Telegram-Bot-Api-Secret-Token", secret_token)
     return bool(redis_response)
-
 
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     def set_main_webhook() -> bool:
@@ -829,13 +784,11 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
 
     return True
 
-
 def is_secret_token_valid(request: Request) -> bool:
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     redis_client = config_redis()
     redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
     return redis_secret_token == secret_token
-
 
 def process_request_parameters(
     request: Request, decrypted_token: str, encrypted_token: str
