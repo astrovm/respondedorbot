@@ -435,8 +435,7 @@ def powerlaw(msg_text: str) -> str:
     else:
         percentage_txt = f"{abs(percentage):.2f}% undervalued"
 
-    msg = f"Today's Bitcoin Power Law theoretical value is {
-        value:.2f} USD ({percentage_txt})"
+    msg = f"Today's Bitcoin Power Law theoretical value is {value:.2f} USD ({percentage_txt})"
     return msg
 
 
@@ -455,8 +454,7 @@ def rainbow(msg_text: str) -> str:
     else:
         percentage_txt = f"{abs(percentage):.2f}% undervalued"
 
-    msg = f"Today's Bitcoin Rainbow theoretical value is {
-        value:.2f} USD ({percentage_txt})"
+    msg = f"Today's Bitcoin Rainbow theoretical value is {value:.2f} USD ({percentage_txt})"
     return msg
 
 
@@ -764,8 +762,7 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
 
 
 def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
-    request_url = f"https://api.telegram.org/bot{
-        decrypted_token}/getWebhookInfo"
+    request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
     try:
         telegram_response = requests.get(request_url, timeout=5)
         telegram_response.raise_for_status()
@@ -816,8 +813,7 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
             function_response.raise_for_status()
         except RequestException as request_error:
             if webhook_info.get("url") != current_webhook_url:
-                error_message = f"Main webhook failed with error: {
-                    str(request_error)}"
+                error_message = f"Main webhook failed with error: {str(request_error)}"
                 admin_report(decrypted_token, error_message)
                 return set_telegram_webhook(
                     decrypted_token, current_function_url, encrypted_token
