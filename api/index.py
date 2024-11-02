@@ -686,10 +686,7 @@ def handle_msg(token: str, message: Dict) -> str:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            if bot_name in message_text or reply_to == environ.get("TELEGRAM_USERNAME"):
-                response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
-            else:
-                response_msg = gen_random(first_name)
+            response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
 
         send_msg(token, chat_id, response_msg, message_id)
         return "ok"
