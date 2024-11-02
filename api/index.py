@@ -577,7 +577,7 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
-    """Send a message to Claude and return the response in Taringa! style"""
+    """Send a message to Claude and return the response in Atendedor style"""
     try:
         # Initialize Anthropic client with API key
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
@@ -590,7 +590,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         - Tipo de chat: {chat_type}
         """
 
-        # Add context to make Claude respond like a taringuero
+        # Add context to make Claude respond like el gordo
         taringuero_context = f"""
         [historical bot personality removed]"""
 
@@ -645,11 +645,21 @@ def handle_msg(token: str, message: Dict) -> str:
         first_name = str(message["from"]["first_name"])
         username = str(message["from"].get("username", ""))
 
+        # Get context from replied message if exists
+        reply_context = ""
+        if "reply_to_message" in message:
+            reply_msg = message["reply_to_message"]
+            reply_text = reply_msg.get("text", "")
+            reply_from = reply_msg.get("from", {})
+            reply_username = reply_from.get("username", "")
+            
+            if reply_username != environ.get("TELEGRAM_USERNAME"):
+                reply_context = f"\nContexto: El usuario está respondiendo a este mensaje: '{reply_text}'"
+
         response_msg = ""
         split_message = message_text.strip().split(" ")
         command = split_message[0].lower()
-        sanitized_message_text = message_text.replace(
-            split_message[0], "").strip()
+        sanitized_message_text = message_text.replace(split_message[0], "").strip()
 
         commands = initialize_commands()
 
@@ -662,10 +672,8 @@ def handle_msg(token: str, message: Dict) -> str:
                 sanitized_message_text = message["reply_to_message"]["text"]
 
         if command in commands:
-            # send_typing(token, chat_id)
             if command == "/ask":
-                response_msg = ask_claude(
-                    sanitized_message_text, first_name, username, chat_type)
+                response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
             else:
                 response_msg = commands[command](sanitized_message_text)
         elif not command.startswith("/"):
@@ -678,7 +686,10 @@ def handle_msg(token: str, message: Dict) -> str:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            response_msg = gen_random(first_name)
+            if bot_name in message_text or reply_to == environ.get("TELEGRAM_USERNAME"):
+                response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
+            else:
+                response_msg = gen_random(first_name)
 
         send_msg(token, chat_id, response_msg, message_id)
         return "ok"
