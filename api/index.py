@@ -671,17 +671,11 @@ def ask_claude(msg_text: str) -> str:
         
         # Add context to make Claude respond like a taringuero
         taringuero_context = """
-        Hablá con estilo argentino taringuero, como si estuvieras comentando en un post de los buenos tiempos de Taringa! 
-        Usá expresiones tipo alto post papu, denunciado lince,+10 y reco, boludo, capo, che, maestro, gordo, etc. Mantené un tono relajado, 
-        medio sarcástico, siempre tirando algún que otro chiste y usando un lenguaje de compu y ciber de los 2000s. 
-        Expresate con palabras de internet (tipo wtf y lpm), y dale un toque de nostalgia a tus 
-        comentarios como si estuvieras en el foro más legendario de la web.
-
-        Respondé a esta pregunta manteniendo ese estilo: """ + msg_text
+        [historical bot personality removed]""" + msg_text
         
         # Create a message and get response from Claude
         message = anthropic.messages.create(
-            model="claude-3-sonnet-20240229",
+            model="claude-3-haiku-20240307",
             max_tokens=1024,
             messages=[{
                 "role": "user",
