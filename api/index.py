@@ -623,7 +623,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         # Create a message and get response from Claude
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=1024,
+            max_tokens=100,
             messages=[{
                 "role": "user",
                 "content": taringuero_context
