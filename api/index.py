@@ -34,7 +34,8 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
-    response = requests.get(api_url, params=parameters, headers=headers, timeout=5)
+    response = requests.get(api_url, params=parameters,
+                            headers=headers, timeout=5)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
@@ -45,7 +46,8 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
         if hourly_cache:
             # get current date with hour
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + request_hash, json.dumps(redis_value))
+            redis_client.set(current_hour + request_hash,
+                             json.dumps(redis_value))
 
         return redis_value
     else:
@@ -55,7 +57,8 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
-    timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
+    timestamp = (datetime.now() - timedelta(hours=hours_ago)
+                 ).strftime("%Y-%m-%d-%H")
     # get previous api data from redis cache
     cached_data = redis_client.get(timestamp + request_hash)
 
@@ -73,7 +76,8 @@ def cached_requests(
     api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False
 ):
     # create unique hash for the request
-    arguments_dict = {"api_url": api_url, "parameters": parameters, "headers": headers}
+    arguments_dict = {"api_url": api_url,
+                      "parameters": parameters, "headers": headers}
     arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
     request_hash = hashlib.md5(arguments_str).hexdigest()
 
@@ -84,7 +88,8 @@ def cached_requests(
     redis_response = redis_client.get(request_hash)
 
     if get_history is not False:
-        cache_history = get_cache_history(get_history, request_hash, redis_client)
+        cache_history = get_cache_history(
+            get_history, request_hash, redis_client)
     else:
         cache_history = None
 
@@ -179,7 +184,8 @@ def get_api_or_cache_prices(convert_to):
     }
 
     cache_expiration_time = 300
-    response = cached_requests(api_url, parameters, headers, cache_expiration_time)
+    response = cached_requests(
+        api_url, parameters, headers, cache_expiration_time)
 
     return response["data"]
 
@@ -321,7 +327,8 @@ def get_prices(msg_text: str) -> str:
                 coin["quote"][convert_to_parameter]["price"] * 100000000
             )
 
-        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(".")[-1]
+        decimals = f"{coin['quote'][convert_to_parameter]
+                      ['price']:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
@@ -441,7 +448,8 @@ def get_devo(msg_text: str) -> str:
 
         api_url = "https://criptoya.com/api/dolar"
 
-        dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+        dollars = cached_requests(
+            api_url, None, None, cache_expiration_time, True)
 
         usdt_ask = float(dollars["data"]["cripto"]["usdt"]["ask"])
         usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
@@ -473,6 +481,7 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
     except ValueError:
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
+
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
@@ -488,8 +497,10 @@ def powerlaw(msg_text: str) -> str:
     else:
         percentage_txt = f"{abs(percentage):.2f}% undervalued"
 
-    msg = f"Today's Bitcoin Power Law theoretical value is {value:.2f} USD ({percentage_txt})"
+    msg = f"Today's Bitcoin Power Law theoretical value is {
+        value:.2f} USD ({percentage_txt})"
     return msg
+
 
 def rainbow(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
@@ -506,8 +517,10 @@ def rainbow(msg_text: str) -> str:
     else:
         percentage_txt = f"{abs(percentage):.2f}% undervalued"
 
-    msg = f"Today's Bitcoin Rainbow theoretical value is {value:.2f} USD ({percentage_txt})"
+    msg = f"Today's Bitcoin Rainbow theoretical value is {
+        value:.2f} USD ({percentage_txt})"
     return msg
+
 
 def convert_base(msg_text: str) -> str:
     try:
@@ -523,7 +536,8 @@ def convert_base(msg_text: str) -> str:
             return "Invalid input. Number must be alphanumeric."
         if not 2 <= base_from <= 36:
             return (
-                f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
+                f"Invalid input. Base from '{
+                    base_from_str}' must be between 2 and 36."
             )
         if not 2 <= base_to <= 36:
             return f"Invalid input. Base to '{base_to_str}' must be between 2 and 36."
@@ -564,7 +578,8 @@ def convert_to_command(msg_text: str) -> str:
     )
 
     # Convert to uppercase and replace Ñ
-    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
+    replaced_ni_text = re.sub(
+        r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
 
     # Normalize the text and remove consecutive spaces
     single_spaced_text = re.sub(
@@ -594,7 +609,8 @@ def convert_to_command(msg_text: str) -> str:
     cleaned_text = re.sub(
         r"^_+|_+$",
         "",
-        re.sub(r"[^A-Za-z0-9_]", "", re.sub(r"_+", "_", translated_punctuation)),
+        re.sub(r"[^A-Za-z0-9_]", "",
+               re.sub(r"_+", "_", translated_punctuation)),
     )
 
     # If there are no remaining characters after processing, return an error
@@ -663,16 +679,24 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 
-def ask_claude(msg_text: str) -> str:
+def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
     """Send a message to Claude and return the response in Taringa! style"""
     try:
         # Initialize Anthropic client with API key
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
-        
+
+        # Add context about the user and chat
+        user_context = f"""
+        Contexto del mensaje:
+        - Nombre del usuario: {first_name}
+        - Username: {username}
+        - Tipo de chat: {chat_type}
+        """
+
         # Add context to make Claude respond like a taringuero
-        taringuero_context = """
-        [historical bot personality removed]""" + msg_text
-        
+        taringuero_context = f"""
+        [historical bot personality removed]"""
+
         # Create a message and get response from Claude
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
@@ -682,12 +706,11 @@ def ask_claude(msg_text: str) -> str:
                 "content": taringuero_context
             }]
         )
-        
-        # Return Claude's response
-        return message.content[0].text
-        
+
+        return message.content[0].text.strip()
+
     except Exception as e:
-        return f"Error 404 papu, se cayó el server: {str(e)}"
+        return f"Error 404 maestro, se cayo el sistema: {str(e)}"
 
 
 def initialize_commands() -> Dict[str, Callable]:
@@ -725,11 +748,13 @@ def handle_msg(token: str, message: Dict) -> str:
         chat_id = str(message["chat"]["id"])
         chat_type = str(message["chat"]["type"])
         first_name = str(message["from"]["first_name"])
+        username = str(message["from"].get("username", ""))
 
         response_msg = ""
         split_message = message_text.strip().split(" ")
         command = split_message[0].lower()
-        sanitized_message_text = message_text.replace(split_message[0], "").strip()
+        sanitized_message_text = message_text.replace(
+            split_message[0], "").strip()
 
         commands = initialize_commands()
 
@@ -743,29 +768,22 @@ def handle_msg(token: str, message: Dict) -> str:
 
         if command in commands:
             # send_typing(token, chat_id)
-            response_msg = commands[command](sanitized_message_text)
-        elif not command.startswith("/") or command == "/ask":
+            if command == "/ask":
+                response_msg = ask_claude(
+                    sanitized_message_text, first_name, username, chat_type)
+            else:
+                response_msg = commands[command](sanitized_message_text)
+        elif not command.startswith("/"):
             try:
                 reply_to = str(message["reply_to_message"]["from"]["username"])
-                if (
-                    reply_to != environ.get("TELEGRAM_USERNAME")
-                    and bot_name not in message_text
-                    and not command.startswith("/ask")
-                ):
+                if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text:
                     return "ignored request"
             except KeyError:
-                if (
-                    chat_type != "private"
-                    and bot_name not in message_text
-                    and not command.startswith("/ask")
-                ):
+                if chat_type != "private" and bot_name not in message_text:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            if command == "/ask":
-                response_msg = ask_claude(sanitized_message_text)
-            else:
-                response_msg = gen_random(first_name)
+            response_msg = gen_random(first_name)
 
         send_msg(token, chat_id, response_msg, message_id)
         return "ok"
@@ -780,7 +798,8 @@ def decrypt_token(key: str, encrypted_token: str) -> str:
 
 
 def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
-    request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
+    request_url = f"https://api.telegram.org/bot{
+        decrypted_token}/getWebhookInfo"
     try:
         telegram_response = requests.get(request_url, timeout=5)
         telegram_response.raise_for_status()
@@ -801,12 +820,14 @@ def set_telegram_webhook(
     }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
     try:
-        telegram_response = requests.get(request_url, params=parameters, timeout=5)
+        telegram_response = requests.get(
+            request_url, params=parameters, timeout=5)
         telegram_response.raise_for_status()
     except RequestException:
         return False
     redis_client = config_redis()
-    redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
+    redis_response = redis_client.set(
+        "X-Telegram-Bot-Api-Secret-Token", secret_token)
     return bool(redis_response)
 
 
@@ -829,7 +850,8 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
             function_response.raise_for_status()
         except RequestException as request_error:
             if webhook_info.get("url") != current_webhook_url:
-                error_message = f"Main webhook failed with error: {str(request_error)}"
+                error_message = f"Main webhook failed with error: {
+                    str(request_error)}"
                 admin_report(decrypted_token, error_message)
                 return set_telegram_webhook(
                     decrypted_token, current_function_url, encrypted_token
