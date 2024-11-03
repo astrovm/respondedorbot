@@ -604,7 +604,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             }]
         )
 
-        return message.content[0].text.strip()
+        return message.content[0].text.strip().strip('"').strip('.')
 
     except Exception as e:
         return f"Error master, se cayo el sistema: {str(e)}"
