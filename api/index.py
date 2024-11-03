@@ -581,14 +581,14 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
     try:
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
 
-        # Improved personality context
+        # Raw personality context
         personality_context = f"""
         [historical bot personality removed]"""
 
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=280,
-            temperature=0.7,  # Add some randomness
+            temperature=0.9,  # Even more randomness
             messages=[{
                 "role": "user", 
                 "content": personality_context
