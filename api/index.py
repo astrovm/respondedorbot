@@ -664,8 +664,6 @@ def ask_claude(
         # Get market and time context
         buenos_aires_tz = timezone(timedelta(hours=-3))
         current_time = datetime.now(buenos_aires_tz)
-        # Solo incluir la fecha en el contexto
-        time_context = f"Fecha actual Argentina: {current_time.strftime('%A %d/%m/%Y')}"
 
         market_context = []
         try:
@@ -706,11 +704,6 @@ def ask_claude(
         personality_context = {
             "type": "text",
             "text": f"""
-            {time_context}
-            
-            CONTEXTO DEL MERCADO:
-            {market_info}
-            
             Sos el gordo, un bot de Telegram creado por astro con las siguientes características:
             
             PERSONALIDAD:
@@ -755,13 +748,25 @@ def ask_claude(
             "cache_control": {"type": "ephemeral"},
         }
 
+        market_context = {
+            "type": "text",
+            "text": f"""
+            FECHA:
+            {current_time.strftime('%A %d/%m/%Y')}
+            
+            CONTEXTO DEL MERCADO:
+            {market_info}
+            """,
+            "cache_control": {"type": "ephemeral"},
+        }
+
         user_message = {
             "role": "user",
             "content": f"""
             CONTEXTO:
             - Usuario: {first_name} ({username or 'sin username'})
             - Chat: {chat_type}
-            - Hora actual: {current_time.strftime('%H:%M')}
+            - Hora: {current_time.strftime('%H:%M')}
             
             PREGUNTA: {msg_text}
             """,
@@ -770,7 +775,7 @@ def ask_claude(
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
-            system=[personality_context],
+            system=[personality_context, market_context],
             messages=[user_message],
         )
 
