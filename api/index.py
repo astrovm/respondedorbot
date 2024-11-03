@@ -643,7 +643,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         return message.content[0].text
 
     except Exception as e:
-        return f"Error master, se cayo el sistema: {str(e)}"
+        return f"Se cayo el sistema: {str(e)}"
 
 def initialize_commands() -> Dict[str, Callable]:
     return {
