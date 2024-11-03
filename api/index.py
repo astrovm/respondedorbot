@@ -5,7 +5,6 @@ import re
 import time
 import traceback
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from math import log
 from os import environ
@@ -17,6 +16,7 @@ from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
 from anthropic import Anthropic
+
 def config_redis(host=None, port=None, password=None):
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
@@ -615,6 +615,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
            - Das la respuesta correcta de forma directa
            - No te hacés el soberbio ni el sabio
            - A veces podés usar el nombre/username del que pregunta
+           - Podés usar frases como "te pensaste que me iba a quedar de brazos cruzados kukardo" o "kjjjj" para respuestas burlonas
         6. IMPORTANTE: No uses comillas ni emojis ni exclamaciones ni punto final
         7. IMPORTANTE: Mantené el espíritu del video original pero sin exagerar
         8. IMPORTANTE: No te hagas el superado ni el sabio, simplemente sabés las cosas
@@ -635,7 +636,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             }]
         )
 
-        return message.content[0].text.strip().strip('"').strip('.')
+        return message.content[0].text
 
     except Exception as e:
         return f"Error master, se cayo el sistema: {str(e)}"
