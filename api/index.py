@@ -896,29 +896,35 @@ def ask_claude(messages: List[Dict]) -> str:
         return f"Se cayo el sistema: {str(e)}"
 
 
-def initialize_commands() -> Dict[str, Callable]:
+def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
+    """
+    Initialize command handlers with metadata.
+    Returns dict of command name -> (handler_function, uses_claude)
+    """
     return {
-        "/ask": ask_claude,
-        "/pregunta": ask_claude,
-        "/che": ask_claude,
-        "/gordo": ask_claude,
-        "/convertbase": convert_base,
-        "/random": select_random,
-        "/prices": get_prices,
-        "/precios": get_prices,
-        "/precio": get_prices,
-        "/presios": get_prices,
-        "/presio": get_prices,
-        "/dolar": get_dollar_rates,
-        "/dollar": get_dollar_rates,
-        "/devo": get_devo,
-        "/powerlaw": powerlaw,
-        "/rainbow": rainbow,
-        "/time": get_timestamp,
-        "/comando": convert_to_command,
-        "/command": convert_to_command,
-        "/instance": get_instance_name,
-        "/help": get_help,
+        # Claude-based commands
+        "/ask": (ask_claude, True),
+        "/pregunta": (ask_claude, True),
+        "/che": (ask_claude, True),
+        "/gordo": (ask_claude, True),
+        # Regular commands
+        "/convertbase": (convert_base, False),
+        "/random": (select_random, False),
+        "/prices": (get_prices, False),
+        "/precios": (get_prices, False),
+        "/precio": (get_prices, False),
+        "/presios": (get_prices, False),
+        "/presio": (get_prices, False),
+        "/dolar": (get_dollar_rates, False),
+        "/dollar": (get_dollar_rates, False),
+        "/devo": (get_devo, False),
+        "/powerlaw": (powerlaw, False),
+        "/rainbow": (rainbow, False),
+        "/time": (get_timestamp, False),
+        "/comando": (convert_to_command, False),
+        "/command": (convert_to_command, False),
+        "/instance": (get_instance_name, False),
+        "/help": (get_help, False),
     }
 
 
@@ -1039,10 +1045,10 @@ def build_claude_messages(
 
 def should_gordo_respond(message_text: str) -> bool:
     """Decide if the bot should respond to a gordo mention"""
-    gordo_mentions = ["el gordo", "gordo", "gordito"]
+    gordo_mentions = ["gordo", "gordito"]
     if any(mention in message_text.lower() for mention in gordo_mentions):
-        # 30% chance to respond to mentions
-        return random.random() < 0.3
+        # 50% chance to respond to mentions
+        return random.random() < 0.5
     return False
 
 
@@ -1069,6 +1075,7 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
 
 def handle_msg(token: str, message: Dict) -> str:
     try:
+        # Extract message data
         message_text = (
             message.get("text")
             or message.get("caption")
@@ -1078,14 +1085,12 @@ def handle_msg(token: str, message: Dict) -> str:
         message_id = message.get("message_id", "")
         chat_id = str(message["chat"]["id"])
         chat_type = str(message["chat"]["type"])
-        first_name = str(message["from"]["first_name"])
-        username = str(message["from"].get("username", ""))
 
-        # Initialize Redis client
+        # Initialize Redis and save message
         redis_client = config_redis()
-
-        # Save ALL messages to Redis, including commands
         if message_text:
+            username = message["from"].get("username", "")
+            first_name = message["from"]["first_name"]
             formatted_message = f"{username or first_name}: {message_text}"
             save_message_to_redis(
                 chat_id, str(message_id), formatted_message, redis_client
@@ -1094,28 +1099,30 @@ def handle_msg(token: str, message: Dict) -> str:
         # Get chat history
         chat_history = get_chat_history(chat_id, redis_client)
 
-        response_msg = ""
-        split_message = message_text.strip().split(" ")
+        # Parse command and message
+        split_message = message_text.strip().split(" ", 1)
         command = split_message[0].lower()
-        sanitized_message_text = message_text.replace(split_message[0], "").strip()
+        sanitized_message_text = split_message[1] if len(split_message) > 1 else ""
 
-        commands = initialize_commands()
-
+        # Handle @bot_name mentions
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
         if bot_name in command:
             command = command.replace(bot_name, "")
 
+        # Special case for /comando with reply
         if command == "/comando" and not sanitized_message_text:
             if "reply_to_message" in message and "text" in message["reply_to_message"]:
                 sanitized_message_text = message["reply_to_message"]["text"]
 
-        # Check if bot should respond to gordo mention
-        should_respond = should_gordo_respond(message_text)
+        # Initialize commands
+        commands = initialize_commands()
 
-        if command in commands or (
-            not command.startswith("/")
+        # Check if we should respond
+        should_respond = (
+            command in commands
+            or not command.startswith("/")
             and (
-                should_respond
+                should_gordo_respond(message_text)
                 or chat_type == "private"
                 or bot_name in message_text
                 or (
@@ -1124,41 +1131,37 @@ def handle_msg(token: str, message: Dict) -> str:
                     == environ.get("TELEGRAM_USERNAME")
                 )
             )
-        ):
-            # Check rate limit only if we're going to respond
+        )
+
+        if should_respond:
+            # Check rate limit
             if not check_rate_limit(chat_id, redis_client):
                 send_msg(
                     token, chat_id, "pará un poco boludo, espera un minuto", message_id
                 )
                 return "rate limited"
 
-            # Send typing indicator if we're going to use Claude
-            will_use_claude = command in [
-                "/ask",
-                "/pregunta",
-                "/che",
-                "/gordo",
-            ] or not command.startswith("/")
-            if will_use_claude:
-                send_typing(token, chat_id)
-
+            # Handle command or conversation
             if command in commands:
-                if command == "/ask":
+                handler_func, uses_claude = commands[command]
+                if uses_claude:
+                    send_typing(token, chat_id)
                     messages = build_claude_messages(
                         message, chat_history, sanitized_message_text
                     )
-                    response_msg = ask_claude(messages)
+                    response_msg = handler_func(messages)
                 else:
-                    response_msg = commands[command](sanitized_message_text)
+                    response_msg = handler_func(sanitized_message_text)
             else:
+                # Handle as conversation with Claude
+                send_typing(token, chat_id)
                 messages = build_claude_messages(message, chat_history, message_text)
                 response_msg = ask_claude(messages)
 
-            # Save bot's response to Redis
+            # Save and send response
             if response_msg:
-                formatted_response = f"{response_msg}"
                 save_message_to_redis(
-                    chat_id, "bot_" + str(message_id), formatted_response, redis_client
+                    chat_id, f"bot_{message_id}", response_msg, redis_client
                 )
                 send_msg(token, chat_id, response_msg, message_id)
 
