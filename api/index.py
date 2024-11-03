@@ -757,7 +757,7 @@ def ask_claude(messages: List[Dict]) -> str:
 
             if weather_response and "data" in weather_response:
                 market_context.append("Clima en Buenos Aires:")
-                market_context.append(json.dumps(weather_response["data"], indent=2))
+                market_context.append(json.dumps(weather_response["data"]))
         except:
             pass
 
@@ -773,13 +773,12 @@ def ask_claude(messages: List[Dict]) -> str:
 
             if bcra_response and "data" in bcra_response:
                 market_context.append("Variables BCRA:")
-                market_context.append(json.dumps(bcra_response["data"], indent=2))
+                market_context.append(json.dumps(bcra_response["data"]))
         except:
             pass
 
         # Add crypto data
         try:
-            # Modificado para usar cached_requests con 12 horas de cache
             crypto_response = cached_requests(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
                 {"start": "1", "limit": "5", "convert": "USD"},
@@ -791,8 +790,56 @@ def ask_claude(messages: List[Dict]) -> str:
             )
 
             if crypto_response and "data" in crypto_response:
+                # Clean and format crypto data
+                cleaned_cryptos = []
+                for crypto in crypto_response["data"]["data"]:
+                    cleaned_crypto = {
+                        "name": crypto["name"],
+                        "symbol": crypto["symbol"],
+                        "slug": crypto["slug"],
+                        "max_supply": crypto["max_supply"],
+                        "circulating_supply": crypto["circulating_supply"],
+                        "total_supply": crypto["total_supply"],
+                        "infinite_supply": crypto["infinite_supply"],
+                        "quote": {
+                            "USD": {
+                                "price": crypto["quote"]["USD"]["price"],
+                                "volume_24h": crypto["quote"]["USD"]["volume_24h"],
+                                "volume_change_24h": crypto["quote"]["USD"][
+                                    "volume_change_24h"
+                                ],
+                                "percent_change_1h": crypto["quote"]["USD"][
+                                    "percent_change_1h"
+                                ],
+                                "percent_change_24h": crypto["quote"]["USD"][
+                                    "percent_change_24h"
+                                ],
+                                "percent_change_7d": crypto["quote"]["USD"][
+                                    "percent_change_7d"
+                                ],
+                                "percent_change_30d": crypto["quote"]["USD"][
+                                    "percent_change_30d"
+                                ],
+                                "percent_change_60d": crypto["quote"]["USD"][
+                                    "percent_change_60d"
+                                ],
+                                "percent_change_90d": crypto["quote"]["USD"][
+                                    "percent_change_90d"
+                                ],
+                                "market_cap": crypto["quote"]["USD"]["market_cap"],
+                                "market_cap_dominance": crypto["quote"]["USD"][
+                                    "market_cap_dominance"
+                                ],
+                                "fully_diluted_market_cap": crypto["quote"]["USD"][
+                                    "fully_diluted_market_cap"
+                                ],
+                            }
+                        },
+                    }
+                    cleaned_cryptos.append(cleaned_crypto)
+
                 market_context.append("Precios de criptos:")
-                market_context.append(json.dumps(crypto_response["data"], indent=2))
+                market_context.append(json.dumps(cleaned_cryptos))
         except:
             pass
 
@@ -807,7 +854,7 @@ def ask_claude(messages: List[Dict]) -> str:
 
             if dollar_response and "data" in dollar_response:
                 market_context.append("Dolares:")
-                market_context.append(json.dumps(dollar_response["data"], indent=2))
+                market_context.append(json.dumps(dollar_response["data"]))
         except:
             pass
 
