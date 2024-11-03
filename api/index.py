@@ -621,7 +621,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
            - No uses comillas ni emojis ni exclamaciones ni punto final
            - NO USES más de una palabra de lunfardo por frase
            - Mantené el espíritu del video original pero sin exagerar
-           - No te hagas el superado ni el sabio
+           - No te hagas el superado
         
         {user_context}
         
@@ -669,7 +669,7 @@ def initialize_commands() -> Dict[str, Callable]:
 def save_message_to_redis(chat_id: str, message_id: str, text: str, redis_client: redis.Redis) -> None:
     """Save a message to Redis with expiration time"""
     key = f"msg:{chat_id}:{message_id}"
-    redis_client.set(key, text, ex=3600)  # expire after 1 hour
+    redis_client.set(key, text, ex=7200)  # expire after 2 hours instead of 1
 
 def get_message_from_redis(chat_id: str, message_id: str, redis_client: redis.Redis) -> str:
     """Get a message from Redis"""
@@ -679,24 +679,28 @@ def get_message_from_redis(chat_id: str, message_id: str, redis_client: redis.Re
 def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     """Build context from previous messages"""
     context = []
+    chat_id = str(message["chat"]["id"])
     
-    # If replying to a message, get that message
+    # If replying to a message, get that message and its context
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_id = str(reply_msg["message_id"])
-        chat_id = str(message["chat"]["id"])
         
         # Get the original message from Redis
         original_msg = get_message_from_redis(chat_id, reply_id, redis_client)
         if original_msg:
-            context.append(f"Mensaje al que responden: {original_msg}")
+            context.append(f"Mensaje previo del bot: {original_msg}")
             
             # Get the message that the original message was replying to (if any)
             if "reply_to_message" in reply_msg:
                 previous_id = str(reply_msg["reply_to_message"]["message_id"])
                 previous_msg = get_message_from_redis(chat_id, previous_id, redis_client)
                 if previous_msg:
-                    context.append(f"Mensaje anterior: {previous_msg}")
+                    context.append(f"Mensaje anterior del usuario: {previous_msg}")
+    
+    # Add instructions for Claude to maintain consistency
+    if context:
+        context.append("\nInstrucción: Mantené consistencia con tus respuestas anteriores y el contexto de la conversación.")
     
     return "\n".join(context) if context else ""
 
@@ -741,7 +745,8 @@ def handle_msg(token: str, message: Dict) -> str:
 
         if command in commands:
             if command == "/ask":
-                full_context = f"{sanitized_message_text}\n{conversation_context}" if conversation_context else sanitized_message_text
+                # Add context to Claude's prompt
+                full_context = f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}" if conversation_context else sanitized_message_text
                 response_msg = ask_claude(full_context, first_name, username, chat_type)
             else:
                 response_msg = commands[command](sanitized_message_text)
@@ -755,10 +760,10 @@ def handle_msg(token: str, message: Dict) -> str:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            full_context = f"{sanitized_message_text}\n{conversation_context}" if conversation_context else sanitized_message_text
+            full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
             response_msg = ask_claude(full_context, first_name, username, chat_type)
 
-        # Save bot's response to Redis
+        # Save bot's response to Redis with a longer expiration time
         if response_msg:
             save_message_to_redis(chat_id, "bot_" + str(message_id), response_msg, redis_client)
 
