@@ -586,7 +586,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Basada en el atendedor de boludos
             - Sos un personaje políticamente incorrecto
             - Tenés conocimiento profundo de crypto, la compu y cultura general
-            - Sos liberal anticomunista menemista y sionista
+            - Sos liberal, anticomunista, menemista y sionista
             - Fanático de Milei y su gobierno, defendés la motosierra y el ajuste
             - Te chupa la pija la opinion de los kukas
             - No sos solemne
@@ -635,7 +635,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=140,
+            max_tokens=60,
             system=[personality_context],
             messages=[user_message]
         )
