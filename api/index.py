@@ -681,6 +681,11 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     context = []
     chat_id = str(message["chat"]["id"])
     
+    # Add current time in GMT-3
+    buenos_aires_tz = timezone(timedelta(hours=-3))
+    current_time = datetime.now(buenos_aires_tz)
+    context.append(f"Hora actual (GMT-3): {current_time.strftime('%H:%M')} del {current_time.strftime('%d/%m/%Y')}")
+    
     # If replying to a message, get that message and its context
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
@@ -699,10 +704,10 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
                     context.append(f"Mensaje anterior del usuario: {previous_msg}")
     
     # Add instructions for Claude to maintain consistency
-    if context:
+    if len(context) > 1:  # if there's more than just the time
         context.append("\nInstrucción: Mantené consistencia con tus respuestas anteriores y el contexto de la conversación.")
     
-    return "\n".join(context) if context else ""
+    return "\n".join(context)
 
 def handle_msg(token: str, message: Dict) -> str:
     try:
