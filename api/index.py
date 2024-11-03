@@ -662,6 +662,40 @@ def initialize_commands() -> Dict[str, Callable]:
         "/help": get_help,
     }
 
+def save_message_to_redis(chat_id: str, message_id: str, text: str, redis_client: redis.Redis) -> None:
+    """Save a message to Redis with expiration time"""
+    key = f"msg:{chat_id}:{message_id}"
+    redis_client.set(key, text, ex=3600)  # expire after 1 hour
+
+def get_message_from_redis(chat_id: str, message_id: str, redis_client: redis.Redis) -> str:
+    """Get a message from Redis"""
+    key = f"msg:{chat_id}:{message_id}"
+    return redis_client.get(key)
+
+def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
+    """Build context from previous messages"""
+    context = []
+    
+    # If replying to a message, get that message
+    if "reply_to_message" in message:
+        reply_msg = message["reply_to_message"]
+        reply_id = str(reply_msg["message_id"])
+        chat_id = str(message["chat"]["id"])
+        
+        # Get the original message from Redis
+        original_msg = get_message_from_redis(chat_id, reply_id, redis_client)
+        if original_msg:
+            context.append(f"Mensaje al que responden: {original_msg}")
+            
+            # Get the message that the original message was replying to (if any)
+            if "reply_to_message" in reply_msg:
+                previous_id = str(reply_msg["reply_to_message"]["message_id"])
+                previous_msg = get_message_from_redis(chat_id, previous_id, redis_client)
+                if previous_msg:
+                    context.append(f"Mensaje anterior: {previous_msg}")
+    
+    return "\n".join(context) if context else ""
+
 def handle_msg(token: str, message: Dict) -> str:
     try:
         message_text = (
@@ -676,16 +710,15 @@ def handle_msg(token: str, message: Dict) -> str:
         first_name = str(message["from"]["first_name"])
         username = str(message["from"].get("username", ""))
 
-        # Get context from replied message if exists
-        reply_context = ""
-        if "reply_to_message" in message:
-            reply_msg = message["reply_to_message"]
-            reply_text = reply_msg.get("text", "")
-            reply_from = reply_msg.get("from", {})
-            reply_username = reply_from.get("username", "")
-            
-            if reply_username != environ.get("TELEGRAM_USERNAME"):
-                reply_context = f"\nContexto: El usuario está respondiendo a este mensaje: '{reply_text}'"
+        # Initialize Redis client
+        redis_client = config_redis()
+        
+        # Save current message to Redis
+        if message_text:
+            save_message_to_redis(chat_id, str(message_id), message_text, redis_client)
+
+        # Get conversation context
+        conversation_context = get_conversation_context(message, redis_client)
 
         response_msg = ""
         split_message = message_text.strip().split(" ")
@@ -704,7 +737,8 @@ def handle_msg(token: str, message: Dict) -> str:
 
         if command in commands:
             if command == "/ask":
-                response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
+                full_context = f"{sanitized_message_text}\n{conversation_context}" if conversation_context else sanitized_message_text
+                response_msg = ask_claude(full_context, first_name, username, chat_type)
             else:
                 response_msg = commands[command](sanitized_message_text)
         elif not command.startswith("/"):
@@ -717,7 +751,12 @@ def handle_msg(token: str, message: Dict) -> str:
                     return "ignored request"
 
             send_typing(token, chat_id)
-            response_msg = ask_claude(sanitized_message_text + reply_context, first_name, username, chat_type)
+            full_context = f"{sanitized_message_text}\n{conversation_context}" if conversation_context else sanitized_message_text
+            response_msg = ask_claude(full_context, first_name, username, chat_type)
+
+        # Save bot's response to Redis
+        if response_msg:
+            save_message_to_redis(chat_id, "bot_" + str(message_id), response_msg, redis_client)
 
         send_msg(token, chat_id, response_msg, message_id)
         return "ok"
