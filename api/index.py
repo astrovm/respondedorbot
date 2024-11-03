@@ -688,7 +688,22 @@ def ask_claude(
         except:
             pass
 
-        # Add prices data
+        # Add BCRA data
+        try:
+            bcra_response = cached_requests(
+                "https://api.bcra.gob.ar/estadisticas/v2.0/PrincipalesVariables",
+                None,
+                None,
+                43200,  # 12 hours cache
+            )
+
+            if bcra_response and "data" in bcra_response:
+                market_context.append("Variables BCRA:")
+                market_context.append(json.dumps(bcra_response["data"], indent=2))
+        except:
+            pass
+
+        # Add crypto and dollar data
         try:
             crypto_response = get_api_or_cache_prices("USD")
             crypto_data = crypto_response["data"]
