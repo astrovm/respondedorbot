@@ -637,7 +637,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=100,
+            max_tokens=140,
             system=[personality_context],
             messages=[user_message]
         )
@@ -753,10 +753,7 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
         if reply_text:
             user_context.append(f"Respondiendo a: {reply_text}")
-    
-    if message.get("from", {}).get("language_code"):
-        user_context.append(f"Idioma del usuario: {message['from']['language_code']}")
-        
+            
     if user_context:
         context.append("\nSobre el usuario:")
         context.extend(user_context)
