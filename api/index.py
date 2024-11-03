@@ -597,7 +597,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=140,
+            max_tokens=60,
             system=[personality_context],
             messages=[user_message]
         )
