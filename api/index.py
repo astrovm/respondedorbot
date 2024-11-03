@@ -592,14 +592,12 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Chat: {chat_type}
             
             PREGUNTA: {msg_text}
-
-            RECORDA: Tu respuesta debe ser UNA SOLA FRASE de MÁXIMO 140 CARACTERES.
             """
         }
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=60,
+            max_tokens=80,
             system=[personality_context],
             messages=[user_message]
         )
