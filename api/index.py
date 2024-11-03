@@ -729,9 +729,7 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 
-def ask_claude(
-    messages: List[Dict], first_name: str = "", username: str = "", chat_type: str = ""
-) -> str:
+def ask_claude(messages: List[Dict]) -> str:
     try:
         # Get market and time context
         buenos_aires_tz = timezone(timedelta(hours=-3))
