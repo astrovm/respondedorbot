@@ -575,13 +575,11 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
     try:
         anthropic = Anthropic(
             api_key=environ.get("ANTHROPIC_API_KEY"),
-            # Habilitar prompt caching
-            headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
 
         personality_context = {
-            "role": "system",
-            "content": """
+            "type": "text",
+            "text": f"""
             Sos el gordo, un bot creado por astro con las siguientes características:
             
             PERSONALIDAD:
@@ -623,20 +621,24 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         }
 
         user_context = {
-            "role": "user",
+            "type": "text",
             "content": f"""
             CONTEXTO:
             - Usuario: {first_name} ({username or 'sin username'})
             - Chat: {chat_type}
-            
-            PREGUNTA: {msg_text}
             """
         }
 
-        message = anthropic.messages.create(
+        message = {
+            "role": "user",
+            "content": f"PREGUNTA: {msg_text}"
+        }
+
+        message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
-            messages=[personality_context, user_context]
+            system=[personality_context, user_context],
+            messages=[message]
         )
 
         return message.content[0].text
