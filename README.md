@@ -1,29 +1,53 @@
 # respondedorbot
 
-Telegram bot running on a Raspberry Pi that answers questions and provides useful information. In case the Raspberry Pi goes down, the bot automatically switches to an instance in Vercel.
+soy el gordo, un bot basado en el atendedor de boludos que labura 24/7 respondiendo boludeces en telegram
 
-<https://t.me/respondedorbot>
+## che gordo como te agrego?
 
-## Set webhook
+mandate aca capo [@respondedorbot](https://t.me/respondedorbot)
 
-To set the webhook, use this URL:
+## que onda, que sabes hacer?
+
+- te contesto cualquier gilada que me preguntes con /ask, /pregunta, /che o /gordo
+- te tiro la posta de los precios crypto con /prices
+- te digo como esta el dolar blue y toda la movida con /dolar  
+- te calculo si conviene el curro de la tarjeta con /devo
+- te tiro el precio justo de btc segun powerlaw y rainbow con /powerlaw y /rainbow
+- te elijo random entre pizza o hamburguesa con /random
+- te convierto texto a comando telegram con /comando
+- te paso numeros entre bases con /convertbase
+- te tiro la hora unix con /time
+- y bocha de giladas mas, mandate /help y te cuento todo
+
+## como te deployas?
+
+necesitas estas variables de entorno:
+
+```
+TELEGRAM_TOKEN_HASH: el hash sha256 del token descifrado, para checkear que sea posta
+TELEGRAM_TOKEN_KEY: la key para descifrar el token fernet encriptado
+TELEGRAM_USERNAME: mi nombre de usuario para saber cuando me hablan
+ADMIN_CHAT_ID: el chat id del admin para mandarle reports
+COINMARKETCAP_KEY: key de la api de coinmarketcap para los precios crypto
+REDIS_HOST: el host de redis
+REDIS_PORT: el puerto de redis
+REDIS_PASSWORD: el password de redis si tenes
+CURRENT_FUNCTION_URL: la url donde estoy corriendo
+MAIN_FUNCTION_URL: la url principal donde deberia estar
+FRIENDLY_INSTANCE_NAME: un nombre piola para identificarme en los reports
+ANTHROPIC_API_KEY: la key de claude para que te pueda bardear como corresponde
+```
+
+## como seteas el webhook?
+
+mandate esta url master:
 
 `{function_url}/?update_webhook=true&token={encrypted_token}`
 
-## Environment variables
+## licencia
 
-The bot requires several environment variables to function properly:
+hace lo que se te cante el orto, total es todo codigo choreado de stackoverflow
 
-```
-TELEGRAM_TOKEN_HASH: The SHA256 hash of the decrypted Telegram token, used for verifying the authenticity of the token.
-TELEGRAM_TOKEN_KEY: The key used to decrypt the Fernet encrypted Telegram token.
-TELEGRAM_USERNAME: The username of the bot, used to identify if a command is directed at the bot.
-ADMIN_CHAT_ID: The chat ID of the bot administrator to receive any admin reports or notifications.
-COINMARKETCAP_KEY: The API key for accessing CoinMarketCap's API for cryptocurrency data.
-REDIS_HOST: The hostname or IP address of the Redis server.
-REDIS_PORT: The port number on which the Redis server is running.
-REDIS_PASSWORD: The password for authenticating with the Redis server (if required).
-CURRENT_FUNCTION_URL: The URL of the current instance.
-MAIN_FUNCTION_URL: The URL of the primary instance that should be used if it's not down.
-FRIENDLY_INSTANCE_NAME: A human-readable name for the current instance, used in admin reports and notifications to identify the source of the message.
-```
+## creditos
+
+creditos al gordo astro que me programo mientras se bajaba una birra y puteaba a javascript
