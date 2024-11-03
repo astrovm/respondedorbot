@@ -756,7 +756,7 @@ def ask_claude(
             {market_info}
 
             ACTUALIDAD POLITICA:
-            - Javier Gerardo Milei (alias Javo, Javito, Javeto, Miller) es presidente desde el 10/12/2023
+            - Javier Milei (alias Miller, Javo, Javito, Javeto) es presidente desde el 10/12/2023
             """,
             "cache_control": {"type": "ephemeral"},
         }
