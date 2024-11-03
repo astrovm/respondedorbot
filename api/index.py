@@ -137,7 +137,6 @@ def gen_random(name: str) -> str:
 
 def select_random(msg_text: str) -> str:
     try:
-        # Check if the input is a comma-separated list of values
         values = [v.strip() for v in msg_text.split(",")]
         if len(values) >= 2:
             return random.choice(values)
@@ -145,15 +144,13 @@ def select_random(msg_text: str) -> str:
         pass
 
     try:
-        # Check if the input is a range of numbers
         start, end = [int(v.strip()) for v in msg_text.split("-")]
         if start < end:
             return str(random.randint(start, end))
     except ValueError:
         pass
 
-    # Return an error message for invalid inputs
-    return "Please enter a valid input. Use ',' to separate values or '-' to specify a range."
+    return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo"
 
 
 # check if prices are cached before request to api
@@ -198,7 +195,7 @@ def get_prices(msg_text: str) -> str:
                 convert_to_parameter = convert_to
             msg_text = msg_text.upper().replace(f"IN {convert_to}", "").strip()
         else:
-            return f"{convert_to} is not allowed"
+            return f"no laburo con {convert_to} gordo"
 
     # get prices from api or cache
     prices = get_api_or_cache_prices(convert_to_parameter)
@@ -239,7 +236,7 @@ def get_prices(msg_text: str) -> str:
                 new_prices.append(coin)
 
         if not new_prices:
-            return "ponzis no laburo"
+            return "no laburo con esos ponzis boludo"
 
         prices_number = len(new_prices)
         prices["data"] = new_prices
@@ -407,11 +404,11 @@ def powerlaw(msg_text: str) -> str:
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
-        percentage_txt = f"{percentage:.2f}% overvalued"
+        percentage_txt = f"{percentage:.2f}% caro boludo"
     else:
-        percentage_txt = f"{abs(percentage):.2f}% undervalued"
+        percentage_txt = f"{abs(percentage):.2f}% regalado gordo"
 
-    msg = f"Today's Bitcoin Power Law theoretical value is {value:.2f} USD ({percentage_txt})"
+    msg = f"segun power law btc deberia estar en {value:.2f} usd ({percentage_txt})"
     return msg
 
 def rainbow(msg_text: str) -> str:
@@ -425,28 +422,26 @@ def rainbow(msg_text: str) -> str:
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
-        percentage_txt = f"{percentage:.2f}% overvalued"
+        percentage_txt = f"{percentage:.2f}% caro boludo"
     else:
-        percentage_txt = f"{abs(percentage):.2f}% undervalued"
+        percentage_txt = f"{abs(percentage):.2f}% regalado gordo"
 
-    msg = f"Today's Bitcoin Rainbow theoretical value is {value:.2f} USD ({percentage_txt})"
+    msg = f"segun rainbow chart btc deberia estar en {value:.2f} usd ({percentage_txt})"
     return msg
 def convert_base(msg_text: str) -> str:
     try:
-        # Parse input
         input_parts = msg_text.split(",")
         if len(input_parts) != 3:
-            return "Invalid input. Usage: /convertbase <number>, <base_from>, <base_to>"
+            return "mal ahi gordo, usa /convertbase <numero>, <base_origen>, <base_destino>"
         number_str, base_from_str, base_to_str = map(str.strip, input_parts)
         base_from, base_to = map(int, (base_from_str, base_to_str))
 
-        # Validate input
         if not all(c.isalnum() for c in number_str):
-            return "Invalid input. Number must be alphanumeric."
+            return "el numero tiene que ser alfanumerico boludo"
         if not 2 <= base_from <= 36:
-            return f"Invalid input. Base from '{base_from_str}' must be between 2 and 36."
+            return f"base origen '{base_from_str}' tiene que ser entre 2 y 36 gordo"
         if not 2 <= base_to <= 36:
-            return f"Invalid input. Base to '{base_to_str}' must be between 2 and 36."
+            return f"base destino '{base_to_str}' tiene que ser entre 2 y 36 boludo"
 
         # Convert input to output base
         digits = []
@@ -470,7 +465,7 @@ def convert_base(msg_text: str) -> str:
         # Format output string
         return f"{number_str} in base {base_from} equals to {result} in base {base_to}"
     except ValueError:
-        return "Invalid input. Base and number must be integers."
+        return "mandaste cualquiera boludo, la base y el numero tienen que ser enteros"
 
 def get_timestamp(msg_text: str) -> str:
     return f"{int(time.time())}"
@@ -526,33 +521,33 @@ def convert_to_command(msg_text: str) -> str:
 
 def get_help(msg_text: str) -> str:
     return """
-Available commands:
+comandos disponibles boludo:
 
-- /ask question: Returns the answer to the question
+- /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
-- /comando something: Convert the input to a command
+- /comando algo: te lo convierto en comando de telegram
 
-- /convertbase 101, 2, 10: Convert a number from one base to another (e.g., binary 101 to decimal)
+- /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
 
-- /dolar: Dollar prices in Argentina
+- /dolar: te tiro la posta del blue y todos los dolares
 
-- /instance: Returns the name of the instance where the bot is running
+- /instance: te digo donde estoy corriendo
 
-- /prices: Prices of the top 10 cryptos in USD
-- /prices in btc: Prices of the top 10 cryptos in BTC
-- /prices 20: Prices of the top 20 cryptos in USD
-- /prices 100 in eur: Prices of the top 100 cryptos in EUR
-- /prices btc, eth, xmr: Prices of Bitcoin, Ethereum, and Monero in USD
-- /prices dai in sats: Price of DAI in Satoshis
-- /prices stables: Prices of stablecoins in USD
+- /prices: top 10 cryptos en usd
+- /prices in btc: top 10 en btc
+- /prices 20: top 20 en usd
+- /prices 100 in eur: top 100 en eur
+- /prices btc, eth, xmr: bitcoin, ethereum y monero en usd
+- /prices dai in sats: dai en satoshis
+- /prices stables: stablecoins en usd
 
-- /random pizza, meat, sushi: Chooses between the options
-- /random 1-10: Returns a random number between 1 and 10
+- /random pizza, carne, sushi: elijo por vos
+- /random 1-10: numero random del 1 al 10
 
-- /powerlaw: Get the theoretical value of Bitcoin Power Law and its overvaluation or undervaluation percentage
-- /rainbow: Get the theoretical value of Bitcoin Rainbow and its overvaluation or undervaluation percentage
+- /powerlaw: te tiro el precio justo de btc segun power law y si esta caro o barato
+- /rainbow: idem pero con el rainbow chart
 
-- /time: Returns the current Unix timestamp
+- /time: timestamp unix actual
 """
 
 def get_instance_name(msg_text: str) -> str:
@@ -642,6 +637,9 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 def initialize_commands() -> Dict[str, Callable]:
     return {
         "/ask": ask_claude,
+        "/pregunta": ask_claude,
+        "/che": ask_claude,
+        "/gordo": ask_claude,
         "/convertbase": convert_base,
         "/random": select_random,
         "/prices": get_prices,

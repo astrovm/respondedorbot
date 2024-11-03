@@ -17,4 +17,5 @@ services:
             - CURRENT_FUNCTION_URL=
             - MAIN_FUNCTION_URL=
             - FRIENDLY_INSTANCE_NAME=
+            - ANTHROPIC_API_KEY=
         image: ghcr.io/astrovm/respondedorbot:master
