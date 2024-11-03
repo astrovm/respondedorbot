@@ -69,13 +69,13 @@ def get_cache_history(hours_ago, request_hash, redis_client):
 
 # generic proxy for caching any request
 def cached_requests(
-    api_url, 
-    parameters, 
-    headers, 
-    expiration_time, 
-    hourly_cache=False, 
+    api_url,
+    parameters,
+    headers,
+    expiration_time,
+    hourly_cache=False,
     get_history=False,
-    verify_ssl=True
+    verify_ssl=True,
 ):
     """Generic proxy for caching any request"""
     try:
@@ -117,11 +117,11 @@ def cached_requests(
             print(f"[CACHE] Requesting new data from {api_url}")
             try:
                 response = requests.get(
-                    api_url, 
-                    params=parameters, 
-                    headers=headers, 
+                    api_url,
+                    params=parameters,
+                    headers=headers,
                     timeout=5,
-                    verify=verify_ssl
+                    verify=verify_ssl,
                 )
                 response.raise_for_status()
                 response_json = json.loads(response.text)
@@ -130,13 +130,15 @@ def cached_requests(
 
                 if hourly_cache:
                     current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                    redis_client.set(current_hour + request_hash, json.dumps(redis_value))
+                    redis_client.set(
+                        current_hour + request_hash, json.dumps(redis_value)
+                    )
 
                 print(f"[CACHE] Successfully got new data from {api_url}")
-                
+
                 if cache_history is not None:
                     redis_value["history"] = cache_history
-                    
+
                 return redis_value
             except Exception as e:
                 print(f"[CACHE] Error requesting {api_url}: {str(e)}")
@@ -158,11 +160,11 @@ def cached_requests(
                 print(f"[CACHE] Cache expired, requesting new data from {api_url}")
                 try:
                     response = requests.get(
-                        api_url, 
-                        params=parameters, 
-                        headers=headers, 
+                        api_url,
+                        params=parameters,
+                        headers=headers,
                         timeout=5,
-                        verify=verify_ssl
+                        verify=verify_ssl,
                     )
                     response.raise_for_status()
                     response_json = json.loads(response.text)
@@ -171,13 +173,15 @@ def cached_requests(
 
                     if hourly_cache:
                         current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                        redis_client.set(current_hour + request_hash, json.dumps(new_data))
+                        redis_client.set(
+                            current_hour + request_hash, json.dumps(new_data)
+                        )
 
                     print(f"[CACHE] Successfully updated cache for {api_url}")
-                    
+
                     if cache_history is not None:
                         new_data["history"] = cache_history
-                        
+
                     return new_data
                 except Exception as e:
                     print(f"[CACHE] Error updating cache for {api_url}: {str(e)}")
@@ -763,7 +767,7 @@ def ask_claude(
                 None,
                 None,
                 43200,  # 12 hours cache
-                verify_ssl=False  # Disable SSL verification for BCRA API
+                verify_ssl=False,  # Disable SSL verification for BCRA API
             )
 
             if bcra_response and "data" in bcra_response:
@@ -919,15 +923,24 @@ def initialize_commands() -> Dict[str, Callable]:
 def save_message_to_redis(
     chat_id: str, message_id: str, text: str, redis_client: redis.Redis
 ) -> None:
-    """Save a message to Redis with expiration time"""
+    """Save a message to Redis with expiration time and character limit"""
+    # Truncate text to 256 characters if longer
+    truncated_text = text[:256] if len(text) > 256 else text
+
+    # Add indicator if text was truncated
+    if len(text) > 256:
+        truncated_text = truncated_text[:-3] + "..."
+
+    print(f"[REDIS] Saving message: {truncated_text}")
+
     # Save individual message
     msg_key = f"msg:{chat_id}:{message_id}"
-    redis_client.set(msg_key, text, ex=7200)  # expire after 2 hours
+    redis_client.set(msg_key, truncated_text, ex=7200)  # expire after 2 hours
 
     # Save to chat history (keep last 10 messages)
     chat_history_key = f"chat_history:{chat_id}"
     history_entry = json.dumps(
-        {"id": message_id, "text": text, "timestamp": int(time.time())}
+        {"id": message_id, "text": truncated_text, "timestamp": int(time.time())}
     )
     redis_client.lpush(chat_history_key, history_entry)
     redis_client.ltrim(chat_history_key, 0, 9)  # Keep only last 10 messages
