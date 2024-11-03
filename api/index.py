@@ -71,58 +71,96 @@ def get_cache_history(hours_ago, request_hash, redis_client):
 def cached_requests(
     api_url, parameters, headers, expiration_time, hourly_cache=False, get_history=False
 ):
-    # create unique hash for the request
-    arguments_dict = {"api_url": api_url, "parameters": parameters, "headers": headers}
-    arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
-    request_hash = hashlib.md5(arguments_str).hexdigest()
+    """Generic proxy for caching any request"""
+    try:
+        # create unique hash for the request
+        arguments_dict = {
+            "api_url": api_url,
+            "parameters": parameters,
+            "headers": headers,
+        }
+        arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
+        request_hash = hashlib.md5(arguments_str).hexdigest()
 
-    # redis config
-    redis_client = config_redis()
+        print(f"[CACHE] Request for {api_url}")
+        print(f"[CACHE] Hash: {request_hash}")
 
-    # get previous api data from redis cache
-    redis_response = redis_client.get(request_hash)
+        # redis config
+        redis_client = config_redis()
 
-    if get_history is not False:
-        cache_history = get_cache_history(get_history, request_hash, redis_client)
-    else:
-        cache_history = None
+        # get previous api data from redis cache
+        redis_response = redis_client.get(request_hash)
 
-    # set current timestamp
-    timestamp = int(time.time())
+        if redis_response:
+            print(f"[CACHE] Found cached data for {api_url}")
+        else:
+            print(f"[CACHE] No cached data found for {api_url}")
 
-    # if there's no cached data request it
-    if redis_response is None:
-        new_data = set_new_data(
-            arguments_dict, timestamp, redis_client, request_hash, hourly_cache
-        )
+        if get_history is not False:
+            cache_history = get_cache_history(get_history, request_hash, redis_client)
+            print(f"[CACHE] History data found: {bool(cache_history)}")
+        else:
+            cache_history = None
 
-        if cache_history is not None:
-            new_data["history"] = cache_history
+        # set current timestamp
+        timestamp = int(time.time())
 
-        return new_data
-    else:
-        # loads cached data
-        cached_data = json.loads(redis_response)
-        cached_data_timestamp = int(cached_data["timestamp"])
-
-        if cache_history is not None:
-            cached_data["history"] = cache_history
-
-        # get new data if cache is older than expiration_time
-        if timestamp - cached_data_timestamp > expiration_time:
+        # if there's no cached data request it
+        if redis_response is None:
+            print(f"[CACHE] Requesting new data from {api_url}")
             new_data = set_new_data(
                 arguments_dict, timestamp, redis_client, request_hash, hourly_cache
             )
 
+            if new_data:
+                print(f"[CACHE] Successfully got new data from {api_url}")
+            else:
+                print(f"[CACHE] Failed to get new data from {api_url}")
+
             if cache_history is not None:
                 new_data["history"] = cache_history
 
-            if "timestamp" in new_data:
-                return new_data
-            else:
-                return cached_data
+            return new_data
         else:
-            return cached_data
+            # loads cached data
+            cached_data = json.loads(redis_response)
+            cached_data_timestamp = int(cached_data["timestamp"])
+            cache_age = timestamp - cached_data_timestamp
+
+            print(f"[CACHE] Cache age: {cache_age}s (expiration: {expiration_time}s)")
+
+            if cache_history is not None:
+                cached_data["history"] = cache_history
+
+            # get new data if cache is older than expiration_time
+            if cache_age > expiration_time:
+                print(f"[CACHE] Cache expired, requesting new data from {api_url}")
+                new_data = set_new_data(
+                    arguments_dict, timestamp, redis_client, request_hash, hourly_cache
+                )
+
+                if new_data:
+                    print(f"[CACHE] Successfully updated cache for {api_url}")
+                else:
+                    print(
+                        f"[CACHE] Failed to update cache for {api_url}, using old data"
+                    )
+
+                if cache_history is not None:
+                    new_data["history"] = cache_history
+
+                if "timestamp" in new_data:
+                    return new_data
+                else:
+                    return cached_data
+            else:
+                print(f"[CACHE] Using cached data for {api_url}")
+                return cached_data
+
+    except Exception as e:
+        print(f"[CACHE] Error in cached_requests: {str(e)}")
+        traceback.print_exc()
+        return None
 
 
 def gen_random(name: str) -> str:
