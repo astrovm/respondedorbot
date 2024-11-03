@@ -233,7 +233,7 @@ def select_random(msg_text: str) -> str:
     except ValueError:
         pass
 
-    return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo"
+    return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
 
 # check if prices are cached before request to api
@@ -583,7 +583,7 @@ def convert_base(msg_text: str) -> str:
     try:
         input_parts = msg_text.split(",")
         if len(input_parts) != 3:
-            return "mal ahi gordo, usa /convertbase <numero>, <base_origen>, <base_destino>"
+            return "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
         number_str, base_from_str, base_to_str = map(str.strip, input_parts)
         base_from, base_to = map(int, (base_from_str, base_to_str))
 
@@ -613,10 +613,9 @@ def convert_base(msg_text: str) -> str:
             value //= base_to
         result = "".join(reversed(digits))
 
-        # Format output string
-        return f"{number_str} in base {base_from} equals to {result} in base {base_to}"
+        return f"ahi tenes boludo, {number_str} en base {base_from} es {result} en base {base_to}"
     except ValueError:
-        return "mandaste cualquiera boludo, la base y el numero tienen que ser enteros"
+        return "mandate numeros posta gordo, no me hagas perder el tiempo"
 
 
 def get_timestamp(msg_text: str) -> str:
@@ -624,6 +623,9 @@ def get_timestamp(msg_text: str) -> str:
 
 
 def convert_to_command(msg_text: str) -> str:
+    if not msg_text:
+        return "y que queres que convierta boludo? mandate texto"
+
     # Add spaces surrounding each emoji and convert it to its textual representation
     emoji_text = emoji.replace_emoji(
         msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} "
@@ -665,7 +667,7 @@ def convert_to_command(msg_text: str) -> str:
 
     # If there are no remaining characters after processing, return an error
     if not cleaned_text:
-        return "Invalid input. Usage: /comando <text>"
+        return "no me mandes giladas boludo, tiene que tener letras o numeros"
 
     # Add a forward slash at the beginning
     command = f"/{cleaned_text}"
@@ -705,7 +707,8 @@ comandos disponibles boludo:
 
 
 def get_instance_name(msg_text: str) -> str:
-    return environ.get("FRIENDLY_INSTANCE_NAME")
+    instance = environ.get("FRIENDLY_INSTANCE_NAME")
+    return f"estoy corriendo en {instance} boludo"
 
 
 def send_typing(token: str, chat_id: str) -> None:
@@ -938,8 +941,6 @@ def save_message_to_redis(
     # Add indicator if text was truncated
     if len(text) > 256:
         truncated_text = truncated_text[:-3] + "..."
-
-    print(f"[REDIS] Saving message: {truncated_text}")
 
     # Save individual message
     msg_key = f"msg:{chat_id}:{message_id}"
