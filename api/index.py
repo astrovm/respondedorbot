@@ -580,7 +580,6 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
     try:
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
 
-        # Raw personality context
         personality_context = f"""
         [historical bot personality removed]"""
 
