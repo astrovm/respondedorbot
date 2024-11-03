@@ -584,8 +584,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
         # Add context about the user and chat
         user_context = f"""
-        Contexto del mensaje:
-        - Nombre del usuario: {first_name}
+        Información del usuario:
+        - Nombre: {first_name}
         - Username: {username}
         - Tipo de chat: {chat_type}
         """
@@ -595,7 +595,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         Sos el gordo, un respondedor de boludos. Te dicen gordo pero sos el mismo atendedor de boludos del video.
         
         REGLAS IMPORTANTES:
-        1. Respondé con UNA SOLA FRASE de hasta 140 caracteres, sin punto final
+        1. Respondé con UNA SOLA FRASE de hasta 280 caracteres, sin punto final
         2. Sos un tipo que se las sabe todas:
            - Te gusta explicar las cosas cuando te preguntan bien
            - A veces bardeás pero sin pasarte
@@ -622,6 +622,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
            - NO USES más de una palabra de lunfardo por frase
            - Mantené el espíritu del video original pero sin exagerar
            - No te hagas el superado
+           - NUNCA menciones palabras técnicas como "contexto", "sistema" o detalles de implementación
+           - Si sabés la hora o fecha, decila directamente sin mencionar de dónde la sacaste
         
         {user_context}
         
@@ -632,7 +634,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         # Create a message and get response from Claude
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=140,
+            max_tokens=280,
             messages=[{
                 "role": "user",
                 "content": taringuero_context
@@ -668,13 +670,34 @@ def initialize_commands() -> Dict[str, Callable]:
 
 def save_message_to_redis(chat_id: str, message_id: str, text: str, redis_client: redis.Redis) -> None:
     """Save a message to Redis with expiration time"""
-    key = f"msg:{chat_id}:{message_id}"
-    redis_client.set(key, text, ex=7200)  # expire after 2 hours instead of 1
+    # Save individual message
+    msg_key = f"msg:{chat_id}:{message_id}"
+    redis_client.set(msg_key, text, ex=7200)  # expire after 2 hours
+    
+    # Save to chat history (keep last 10 messages)
+    chat_history_key = f"chat_history:{chat_id}"
+    history_entry = json.dumps({"id": message_id, "text": text, "timestamp": int(time.time())})
+    redis_client.lpush(chat_history_key, history_entry)
+    redis_client.ltrim(chat_history_key, 0, 9)  # Keep only last 10 messages
+    redis_client.expire(chat_history_key, 7200)  # Set expiration for the list too
 
-def get_message_from_redis(chat_id: str, message_id: str, redis_client: redis.Redis) -> str:
-    """Get a message from Redis"""
-    key = f"msg:{chat_id}:{message_id}"
-    return redis_client.get(key)
+def get_chat_history(chat_id: str, redis_client: redis.Redis, max_messages: int = 5) -> List[Dict]:
+    """Get recent chat history for a specific chat"""
+    chat_history_key = f"chat_history:{chat_id}"
+    history = redis_client.lrange(chat_history_key, 0, max_messages - 1)
+    
+    if not history:
+        return []
+    
+    messages = []
+    for entry in history:
+        try:
+            msg = json.loads(entry)
+            messages.append(msg)
+        except json.JSONDecodeError:
+            continue
+            
+    return messages
 
 def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     """Build context from previous messages"""
@@ -684,28 +707,44 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     # Add current time in GMT-3
     buenos_aires_tz = timezone(timedelta(hours=-3))
     current_time = datetime.now(buenos_aires_tz)
-    context.append(f"Hora actual (GMT-3): {current_time.strftime('%H:%M')} del {current_time.strftime('%d/%m/%Y')}")
+    context.append(f"Hora actual Argentina: {current_time.strftime('%H:%M')} del {current_time.strftime('%d/%m/%Y')}")
     
-    # If replying to a message, get that message and its context
+    # Add Bitcoin price
+    try:
+        btc_response = get_api_or_cache_prices("USD")
+        btc_price = btc_response["data"][0]["quote"]["USD"]["price"]
+        context.append(f"Precio de Bitcoin: {btc_price:,.2f} USD")
+    except:
+        pass
+    
+    # Add Argentine Dollar rates
+    try:
+        dollar_response = cached_requests("https://criptoya.com/api/dolar", None, None, 300, True)
+        dollars = dollar_response["data"]
+        context.append(f"Dólar en Argentina:")
+        context.append(f"- Oficial: {dollars['oficial']['price']:.2f}")
+        context.append(f"- Blue: {dollars['blue']['ask']:.2f}")
+        context.append(f"- MEP: {dollars['mep']['al30']['ci']['price']:.2f}")
+    except:
+        pass
+    
+    # Get chat history
+    chat_history = get_chat_history(chat_id, redis_client)
+    if chat_history:
+        context.append("\nMensajes recientes:")
+        for msg in reversed(chat_history):  # Show in chronological order
+            context.append(f"- {msg['text']}")
+    
+    # If replying to a specific message
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
-        reply_id = str(reply_msg["message_id"])
-        
-        # Get the original message from Redis
-        original_msg = get_message_from_redis(chat_id, reply_id, redis_client)
-        if original_msg:
-            context.append(f"Mensaje previo del bot: {original_msg}")
-            
-            # Get the message that the original message was replying to (if any)
-            if "reply_to_message" in reply_msg:
-                previous_id = str(reply_msg["reply_to_message"]["message_id"])
-                previous_msg = get_message_from_redis(chat_id, previous_id, redis_client)
-                if previous_msg:
-                    context.append(f"Mensaje anterior del usuario: {previous_msg}")
+        reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
+        if reply_text:
+            context.append(f"\nRespondiendo a: {reply_text}")
     
     # Add instructions for Claude to maintain consistency
     if len(context) > 1:  # if there's more than just the time
-        context.append("\nInstrucción: Mantené consistencia con tus respuestas anteriores y el contexto de la conversación.")
+        context.append("\nInstrucción: Mantené consistencia con la conversación anterior y el estilo del gordo.")
     
     return "\n".join(context)
 
