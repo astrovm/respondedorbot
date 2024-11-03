@@ -808,25 +808,6 @@ def ask_claude(
             "cache_control": {"type": "ephemeral"},
         }
 
-        user_message = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"""
-                    CONTEXTO:
-                    - Usuario: {first_name} ({username or 'sin username'})
-                    - Chat: {chat_type}
-                    - Hora: {current_time.strftime('%H:%M')}
-                    
-                    PREGUNTA: {messages[-1]['content'][0]['text']}
-                    """,
-                }
-            ],
-        }
-
-        messages.append(user_message)
-
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
@@ -923,6 +904,15 @@ def build_claude_messages(
             }
         )
 
+    # Get user info
+    first_name = message["from"]["first_name"]
+    username = message["from"].get("username", "")
+    chat_type = message["chat"]["type"]
+
+    # Get current time in Buenos Aires
+    buenos_aires_tz = timezone(timedelta(hours=-3))
+    current_time = datetime.now(buenos_aires_tz)
+
     # Add current message context
     context_parts = []
 
@@ -934,13 +924,9 @@ def build_claude_messages(
             context_parts.append(f"Respondiendo a: {reply_text}")
 
     # Add user info
-    context_parts.append(
-        f"Usuario: {message['from'].get('username') or message['from']['first_name']}"
-    )
-    context_parts.append(f"Chat: {message['chat']['type']}")
-    context_parts.append(
-        f"Hora: {datetime.now(timezone(timedelta(hours=-3))).strftime('%H:%M')}"
-    )
+    context_parts.append(f"Usuario: {first_name} ({username or 'sin username'})")
+    context_parts.append(f"Chat: {chat_type}")
+    context_parts.append(f"Hora: {current_time.strftime('%H:%M')}")
 
     # Add the current message
     context_parts.append(f"Mensaje: {message_text}")
