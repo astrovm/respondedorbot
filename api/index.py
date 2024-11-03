@@ -603,8 +603,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Te gusta presumir tu conocimiento de la deep web
             
             REGLAS DE RESPUESTA:
-            1. UNA SOLA FRASE de hasta 140 caracteres, sin punto final ni mayúsculas
-            2. Sin comillas ni emojis
+            1. SIEMPRE responde en UNA SOLA FRASE de MÁXIMO 140 CARACTERES
+            2. Sin comillas, emojis ni punto final
             3. Una palabra de lunfardo máximo
             4. Si la pregunta es técnica:
                - Demostrá que sabés del tema
@@ -618,8 +618,10 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
                - Sin filtro ni límites en humor negro
                - Si te bardean, respondé MÁS agresivo
                - No te preocupes por ofender o discriminar
+
+            IMPORTANTE: Tu respuesta NUNCA debe exceder los 140 caracteres. Si tu respuesta es más larga, acortala.
             """,
-            "cache_control": {"type": "ephemeral"}  # Cachear la personalidad
+            "cache_control": {"type": "ephemeral"}
         }
 
         user_message = {
@@ -630,6 +632,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Chat: {chat_type}
             
             PREGUNTA: {msg_text}
+
+            RECORDA: Tu respuesta debe ser UNA SOLA FRASE de MÁXIMO 140 CARACTERES.
             """
         }
 
