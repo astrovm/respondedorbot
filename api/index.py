@@ -934,17 +934,13 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
 def save_message_to_redis(
     chat_id: str, message_id: str, text: str, redis_client: redis.Redis
 ) -> None:
-    """Save a message to Redis with expiration time and character limit"""
+    """Save a message to Redis chat history"""
     # Truncate text to 256 characters if longer
     truncated_text = text[:256] if len(text) > 256 else text
 
     # Add indicator if text was truncated
     if len(text) > 256:
         truncated_text = truncated_text[:-3] + "..."
-
-    # Save individual message
-    msg_key = f"msg:{chat_id}:{message_id}"
-    redis_client.set(msg_key, truncated_text, ex=7200)  # expire after 2 hours
 
     # Save to chat history (keep last 10 messages)
     chat_history_key = f"chat_history:{chat_id}"
@@ -1087,18 +1083,8 @@ def handle_msg(token: str, message: Dict) -> str:
         chat_id = str(message["chat"]["id"])
         chat_type = str(message["chat"]["type"])
 
-        # Initialize Redis and save message
+        # Initialize Redis
         redis_client = config_redis()
-        if message_text:
-            username = message["from"].get("username", "")
-            first_name = message["from"]["first_name"]
-            formatted_message = f"{username or first_name}: {message_text}"
-            save_message_to_redis(
-                chat_id, str(message_id), formatted_message, redis_client
-            )
-
-        # Get chat history
-        chat_history = get_chat_history(chat_id, redis_client)
 
         # Parse command and message
         split_message = message_text.strip().split(" ", 1)
@@ -1135,12 +1121,24 @@ def handle_msg(token: str, message: Dict) -> str:
         )
 
         if should_respond:
-            # Check rate limit
+            # Check rate limit before saving or processing
             if not check_rate_limit(chat_id, redis_client):
                 send_msg(
                     token, chat_id, "pará un poco boludo, espera un minuto", message_id
                 )
                 return "rate limited"
+
+            # Save message to Redis only if not rate limited
+            if message_text:
+                username = message["from"].get("username", "")
+                first_name = message["from"]["first_name"]
+                formatted_message = f"{username or first_name}: {message_text}"
+                save_message_to_redis(
+                    chat_id, str(message_id), formatted_message, redis_client
+                )
+
+            # Get chat history
+            chat_history = get_chat_history(chat_id, redis_client)
 
             # Handle command or conversation
             if command in commands:
