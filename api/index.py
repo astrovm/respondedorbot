@@ -697,9 +697,9 @@ def ask_claude(
                 43200,  # 12 hours cache
             )
 
-            if bcra_response and "data" in bcra_response:
+            if bcra_response and "results" in bcra_response:
                 market_context.append("Variables BCRA:")
-                market_context.append(json.dumps(bcra_response["data"], indent=2))
+                market_context.append(json.dumps(bcra_response["results"], indent=2))
         except:
             pass
 
