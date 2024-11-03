@@ -758,6 +758,26 @@ def should_gordo_respond(message_text: str) -> bool:
         return random.random() < 0.3
     return False
 
+def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
+    """
+    Checkea si un chat_id superó el rate limit
+    Returns True si puede hacer requests, False si está limitado
+    """
+    rate_key = f"rate_limit:{chat_id}"
+    current_count = redis_client.get(rate_key)
+    
+    if current_count is None:
+        # Primera request del minuto
+        redis_client.setex(rate_key, 60, 1)
+        return True
+    
+    count = int(current_count)
+    if count >= 10:  # Máximo 10 mensajes por minuto
+        return False
+        
+    redis_client.incr(rate_key)
+    return True
+
 def handle_msg(token: str, message: Dict) -> str:
     try:
         message_text = (
@@ -776,7 +796,7 @@ def handle_msg(token: str, message: Dict) -> str:
         redis_client = config_redis()
         
         # Save ALL messages to Redis, including commands
-        if message_text:  # Removed the condition that excluded commands
+        if message_text:
             formatted_message = f"{username or first_name}: {message_text}"
             save_message_to_redis(chat_id, str(message_id), formatted_message, redis_client)
 
@@ -801,13 +821,7 @@ def handle_msg(token: str, message: Dict) -> str:
         # Check if bot should respond to gordo mention
         should_respond = should_gordo_respond(message_text)
 
-        if command in commands:
-            if command == "/ask":
-                full_context = f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}" if conversation_context else sanitized_message_text
-                response_msg = ask_claude(full_context, first_name, username, chat_type)
-            else:
-                response_msg = commands[command](sanitized_message_text)
-        elif not command.startswith("/") and (
+        if command in commands or (not command.startswith("/") and (
             should_respond
             or chat_type == "private" 
             or bot_name in message_text 
@@ -815,16 +829,32 @@ def handle_msg(token: str, message: Dict) -> str:
                 "reply_to_message" in message 
                 and message["reply_to_message"]["from"]["username"] == environ.get("TELEGRAM_USERNAME")
             )
-        ):
-            send_typing(token, chat_id)
-            full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
-            response_msg = ask_claude(full_context, first_name, username, chat_type)
+        )):
+            # Check rate limit only if we're going to respond
+            if not check_rate_limit(chat_id, redis_client):
+                send_msg(token, chat_id, "pará un poco boludo, espera un minuto", message_id)
+                return "rate limited"
 
-        # Save bot's response to Redis
-        if response_msg:
-            formatted_response = f"gordo: {response_msg}"
-            save_message_to_redis(chat_id, "bot_" + str(message_id), formatted_response, redis_client)
-            send_msg(token, chat_id, response_msg, message_id)
+            # Send typing indicator if we're going to use Claude
+            will_use_claude = command in ["/ask", "/pregunta", "/che", "/gordo"] or not command.startswith("/")
+            if will_use_claude:
+                send_typing(token, chat_id)
+
+            if command in commands:
+                if command == "/ask":
+                    full_context = f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}" if conversation_context else sanitized_message_text
+                    response_msg = ask_claude(full_context, first_name, username, chat_type)
+                else:
+                    response_msg = commands[command](sanitized_message_text)
+            else:
+                full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
+                response_msg = ask_claude(full_context, first_name, username, chat_type)
+
+            # Save bot's response to Redis
+            if response_msg:
+                formatted_response = f"gordo: {response_msg}"
+                save_message_to_redis(chat_id, "bot_" + str(message_id), formatted_response, redis_client)
+                send_msg(token, chat_id, response_msg, message_id)
             
         return "ok"
     except BaseException as error:
