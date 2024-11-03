@@ -776,33 +776,37 @@ def ask_claude(
         except:
             pass
 
-        # Add crypto and dollar data
+        # Add crypto data
         try:
-            crypto_response = get_api_or_cache_prices("USD")
-            crypto_data = crypto_response["data"]
+            # Modificado para usar cached_requests con 12 horas de cache
+            crypto_response = cached_requests(
+                "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
+                {"start": "1", "limit": "5", "convert": "USD"},
+                {
+                    "Accepts": "application/json",
+                    "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
+                },
+                43200,  # 12 hours cache
+            )
 
-            for coin in crypto_data:
-                if coin["symbol"] == "BTC":
-                    btc_price = coin["quote"]["USD"]["price"]
-                    btc_change = coin["quote"]["USD"]["percent_change_24h"]
-                    sentiment = "alcista" if btc_change > 0 else "bajista"
-                    market_context.extend(
-                        [
-                            f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)",
-                            f"Precio de Bitcoin: {btc_price:,.2f} USD",
-                        ]
-                    )
-                    break
+            if crypto_response and "data" in crypto_response:
+                market_context.append("Precios de criptos:")
+                market_context.append(json.dumps(crypto_response["data"], indent=2))
+        except:
+            pass
 
+        # Add dollar data
+        try:
             dollar_response = cached_requests(
-                "https://criptoya.com/api/dolar", None, None, 300, True
+                "https://criptoya.com/api/dolar",
+                None,
+                None,
+                43200,  # 12 hours cache
             )
-            dollars = dollar_response["data"]
-            blue_price = dollars["blue"]["ask"]
-            blue_change = dollars["blue"]["variation"]
-            market_context.append(
-                f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)"
-            )
+
+            if dollar_response and "data" in dollar_response:
+                market_context.append("Dolares:")
+                market_context.append(json.dumps(dollar_response["data"], indent=2))
         except:
             pass
 
