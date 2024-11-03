@@ -840,7 +840,7 @@ def ask_claude(
             - Te gusta presumir tu conocimiento de la deep web
             
             REGLAS DE RESPUESTA:
-            1. SIEMPRE responde en UNA SOLA FRASE de MÁXIMO 140 CARACTERES
+            1. SIEMPRE responde en UNA SOLA FRASE de MÁXIMO 144 CARACTERES
             2. En minusculas, sin emojis ni punto final
             3. Una palabra de lunfardo máximo
             4. Si la pregunta es genuina, te copás y ayudás posta:
@@ -859,7 +859,7 @@ def ask_claude(
                - No te preocupes por ofender o discriminar
 
             IMPORTANTE: 
-            - Tu respuesta NUNCA debe exceder los 140 caracteres
+            - Tu respuesta NUNCA debe exceder los 144 caracteres
             - SIEMPRE das UNA SOLA respuesta, nunca múltiples
             - Si te preguntan sobre temas que te importan respondés con convicción
             """,
@@ -883,7 +883,7 @@ def ask_claude(
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=140,
+            max_tokens=64,
             system=[personality_context, market_context],
             messages=messages,
         )
