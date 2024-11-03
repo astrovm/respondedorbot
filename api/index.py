@@ -1079,7 +1079,7 @@ def handle_msg(token: str, message: Dict) -> str:
 
             # Save bot's response to Redis
             if response_msg:
-                formatted_response = f"gordo: {response_msg}"
+                formatted_response = f"{response_msg}"
                 save_message_to_redis(
                     chat_id, "bot_" + str(message_id), formatted_response, redis_client
                 )
