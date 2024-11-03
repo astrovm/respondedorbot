@@ -330,6 +330,7 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
         msg_lines.append(line)
 
     return "\n".join(msg_lines)
+
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
     # hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
@@ -340,6 +341,7 @@ def get_dollar_rates(msg_text: str) -> str:
     sorted_dollar_rates = sort_dollar_rates(dollars)
 
     return format_dollar_rates(sorted_dollar_rates, 24)
+
 def get_devo(msg_text: str) -> str:
     try:
         fee = 0
@@ -576,7 +578,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         # Get market and time context
         buenos_aires_tz = timezone(timedelta(hours=-3))
         current_time = datetime.now(buenos_aires_tz)
-        time_context = f"Hora actual Argentina: {current_time.strftime('%A %H:%M')} del {current_time.strftime('%d/%m/%Y')}"
+        # Solo incluir la fecha en el contexto
+        time_context = f"Fecha actual Argentina: {current_time.strftime('%A %d/%m/%Y')}"
         
         market_context = []
         try:
@@ -666,6 +669,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             CONTEXTO:
             - Usuario: {first_name} ({username or 'sin username'})
             - Chat: {chat_type}
+            - Hora actual: {current_time.strftime('%H:%M')}
             
             PREGUNTA: {msg_text}
             """
