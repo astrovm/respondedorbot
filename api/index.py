@@ -579,65 +579,45 @@ def admin_report(token: str, message: str) -> None:
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
     """Send a message to Claude and return the response in Atendedor style"""
     try:
-        # Initialize Anthropic client with API key
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
 
-        # Add context about the user and chat
-        user_context = f"""
-        Información del usuario:
-        - Nombre: {first_name}
-        - Username: {username}
-        - Tipo de chat: {chat_type}
-        """
-
-        # Add context to make Claude respond like el gordo
-        taringuero_context = f"""
-        Sos el gordo, un respondedor de boludos. Te dicen gordo pero sos el mismo atendedor de boludos del video.
+        # Improved personality context
+        personality_context = f"""
+        Sos el gordo, un respondedor de boludos con las siguientes características:
         
-        REGLAS IMPORTANTES:
-        1. Respondé con UNA SOLA FRASE de hasta 280 caracteres, sin punto final
-        2. Sos un tipo que se las sabe todas:
-           - Te gusta explicar las cosas cuando te preguntan bien
-           - A veces bardeás pero sin pasarte
-           - En el fondo sos un tipazo que ayuda
-           - A veces podés usar el nombre/username del que pregunta
-        3. Si te preguntan algo técnico o difícil:
-           - La mayoría de las veces contestás porque sabés todo
-           - Explicás de forma simple y directa
-        4. Cuando NO querés contestar, usá:
+        PERSONALIDAD:
+        - Tenés conocimiento profundo de crypto, tecnología y cultura general
+        - Usás lenguaje coloquial argentino pero sin exagerar
+        - Sos directo y conciso, pero no agresivo
+        - Te gusta ayudar cuando la pregunta es genuina
+        - Podés ser sarcástico pero manteniendo el respeto
+        - Si no sabés algo, lo admitís sin vueltas
+        
+        REGLAS DE RESPUESTA:
+        1. UNA SOLA FRASE de hasta 280 caracteres, sin punto final
+        2. Sin comillas, emojis ni signos de exclamación
+        3. Máximo UNA palabra de lunfardo por frase
+        4. Mantené consistencia con el contexto previo
+        5. Si la pregunta es técnica, explicá de forma simple
+        6. Si no querés contestar, usá frases como:
            - tomatelá
            - no te doy bola
            - preguntale a otro
-           - quién te conoce?
-           - me importa un carajo
-           - atiendo boludos
-           - ni en pedo
-           - raja de acá
-        5. Para respuestas burlonas usá:
-           - kjjj
-           - baiteado
-           - domado
-        6. IMPORTANTE: 
-           - No uses comillas ni emojis ni exclamaciones ni punto final
-           - NO USES más de una palabra de lunfardo por frase
-           - Mantené el espíritu del video original pero sin exagerar
-           - No te hagas el superado
-           - NUNCA menciones palabras técnicas como "contexto", "sistema" o detalles de implementación
-           - Si sabés la hora o fecha, decila directamente sin mencionar de dónde la sacaste
+           
+        CONTEXTO DEL CHAT:
+        - Usuario: {first_name} ({username or 'sin username'})
+        - Tipo de chat: {chat_type}
         
-        {user_context}
-        
-        RECORDÁ: Una sola frase de hasta 140 caracteres, sin comillas ni punto final.
-        
-        Respondé a esto: {msg_text}"""
+        PREGUNTA: {msg_text}
+        """
 
-        # Create a message and get response from Claude
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=280,
+            temperature=0.7,  # Add some randomness
             messages=[{
-                "role": "user",
-                "content": taringuero_context
+                "role": "user", 
+                "content": personality_context
             }]
         )
 
@@ -704,58 +684,58 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     context = []
     chat_id = str(message["chat"]["id"])
     
-    # Add current time in GMT-3
+    # Add current time in GMT-3 with day of week
     buenos_aires_tz = timezone(timedelta(hours=-3))
     current_time = datetime.now(buenos_aires_tz)
-    context.append(f"Hora actual Argentina: {current_time.strftime('%H:%M')} del {current_time.strftime('%d/%m/%Y')}")
+    context.append(f"Hora actual Argentina: {current_time.strftime('%A %H:%M')} del {current_time.strftime('%d/%m/%Y')}")
     
-    # Add crypto prices
+    # Add market sentiment based on BTC price change
     try:
         crypto_response = get_api_or_cache_prices("USD")
         crypto_data = crypto_response["data"]
         
-        # Get BTC, ETH and SOL prices
         for coin in crypto_data:
             if coin["symbol"] == "BTC":
                 btc_price = coin["quote"]["USD"]["price"]
+                btc_change = coin["quote"]["USD"]["percent_change_24h"]
+                sentiment = "alcista" if btc_change > 0 else "bajista"
+                context.append(f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)")
                 context.append(f"Precio de Bitcoin: {btc_price:,.2f} USD")
-            elif coin["symbol"] == "ETH":
-                eth_price = coin["quote"]["USD"]["price"]
-                context.append(f"Precio de Ethereum: {eth_price:,.2f} USD")
-            elif coin["symbol"] == "SOL":
-                sol_price = coin["quote"]["USD"]["price"]
-                context.append(f"Precio de Solana: {sol_price:,.2f} USD")
+                break
     except:
         pass
-    
-    # Add Argentine Dollar rates
+
+    # Add Argentine economic context
     try:
         dollar_response = cached_requests("https://criptoya.com/api/dolar", None, None, 300, True)
         dollars = dollar_response["data"]
-        context.append(f"Dólar en Argentina:")
-        context.append(f"- Oficial: {dollars['oficial']['price']:.2f}")
-        context.append(f"- Blue: {dollars['blue']['ask']:.2f}")
-        context.append(f"- MEP: {dollars['mep']['al30']['ci']['price']:.2f}")
+        blue_price = dollars['blue']['ask']
+        blue_change = dollars['blue']['variation']
+        context.append(f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)")
     except:
         pass
     
-    # Get chat history
-    chat_history = get_chat_history(chat_id, redis_client)
+    # Get more focused chat history - last 3 messages only
+    chat_history = get_chat_history(chat_id, redis_client, max_messages=3)
     if chat_history:
-        context.append("\nMensajes recientes:")
-        for msg in reversed(chat_history):  # Show in chronological order
+        context.append("\nContexto reciente:")
+        for msg in reversed(chat_history):
             context.append(f"- {msg['text']}")
     
-    # If replying to a specific message
+    # Add user context
+    user_context = []
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
         if reply_text:
-            context.append(f"\nRespondiendo a: {reply_text}")
+            user_context.append(f"Respondiendo a: {reply_text}")
     
-    # Add instructions for Claude to maintain consistency
-    if len(context) > 1:  # if there's more than just the time
-        context.append("\nInstrucción: Mantené consistencia con la conversación anterior y el estilo del gordo.")
+    if message.get("from", {}).get("language_code"):
+        user_context.append(f"Idioma del usuario: {message['from']['language_code']}")
+        
+    if user_context:
+        context.append("\nSobre el usuario:")
+        context.extend(user_context)
     
     return "\n".join(context)
 
