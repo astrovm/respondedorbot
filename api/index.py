@@ -658,7 +658,7 @@ def admin_report(token: str, message: str) -> None:
 
 
 def ask_claude(
-    msg_text: str, first_name: str = "", username: str = "", chat_type: str = ""
+    messages: List[Dict], first_name: str = "", username: str = "", chat_type: str = ""
 ) -> str:
     try:
         # Get market and time context
@@ -810,21 +810,28 @@ def ask_claude(
 
         user_message = {
             "role": "user",
-            "content": f"""
-            CONTEXTO:
-            - Usuario: {first_name} ({username or 'sin username'})
-            - Chat: {chat_type}
-            - Hora: {current_time.strftime('%H:%M')}
-            
-            PREGUNTA: {msg_text}
-            """,
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"""
+                    CONTEXTO:
+                    - Usuario: {first_name} ({username or 'sin username'})
+                    - Chat: {chat_type}
+                    - Hora: {current_time.strftime('%H:%M')}
+                    
+                    PREGUNTA: {messages[-1]['content'][0]['text']}
+                    """,
+                }
+            ],
         }
+
+        messages.append(user_message)
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
             system=[personality_context, market_context],
-            messages=[user_message],
+            messages=messages,
         )
 
         return message.content[0].text
@@ -891,6 +898,9 @@ def get_chat_history(
     for entry in history:
         try:
             msg = json.loads(entry)
+            # Add role based on if it's from the bot or user
+            is_bot = msg["id"].startswith("bot_")
+            msg["role"] = "assistant" if is_bot else "user"
             messages.append(msg)
         except json.JSONDecodeError:
             continue
@@ -898,31 +908,56 @@ def get_chat_history(
     return messages
 
 
-def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
-    """Build context from previous messages"""
-    context = []
-    chat_id = str(message["chat"]["id"])
+def build_claude_messages(
+    message: Dict, chat_history: List[Dict], message_text: str
+) -> List[Dict]:
+    """Build properly formatted messages list for Claude API"""
+    messages = []
 
-    # Get chat history - last 3 messages only
-    chat_history = get_chat_history(chat_id, redis_client, max_messages=3)
-    if chat_history:
-        context.append("\nContexto reciente:")
-        for msg in reversed(chat_history):
-            context.append(f"- {msg['text']}")
+    # Add chat history messages in chronological order
+    for msg in reversed(chat_history):
+        messages.append(
+            {
+                "role": msg["role"],
+                "content": [{"type": "text", "text": msg["text"]}],
+            }
+        )
 
-    # Add user context
-    user_context = []
+    # Add current message context
+    context_parts = []
+
+    # Add reply context if present
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
         if reply_text:
-            user_context.append(f"Respondiendo a: {reply_text}")
+            context_parts.append(f"Respondiendo a: {reply_text}")
 
-    if user_context:
-        context.append("\nSobre el usuario:")
-        context.extend(user_context)
+    # Add user info
+    context_parts.append(
+        f"Usuario: {message['from'].get('username') or message['from']['first_name']}"
+    )
+    context_parts.append(f"Chat: {message['chat']['type']}")
+    context_parts.append(
+        f"Hora: {datetime.now(timezone(timedelta(hours=-3))).strftime('%H:%M')}"
+    )
 
-    return "\n".join(context)
+    # Add the current message
+    context_parts.append(f"Mensaje: {message_text}")
+
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "\n".join(context_parts),
+                }
+            ],
+        }
+    )
+
+    return messages
 
 
 def should_gordo_respond(message_text: str) -> bool:
@@ -979,8 +1014,8 @@ def handle_msg(token: str, message: Dict) -> str:
                 chat_id, str(message_id), formatted_message, redis_client
             )
 
-        # Get conversation context
-        conversation_context = get_conversation_context(message, redis_client)
+        # Get chat history
+        chat_history = get_chat_history(chat_id, redis_client)
 
         response_msg = ""
         split_message = message_text.strip().split(" ")
@@ -1032,23 +1067,15 @@ def handle_msg(token: str, message: Dict) -> str:
 
             if command in commands:
                 if command == "/ask":
-                    full_context = (
-                        f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}"
-                        if conversation_context
-                        else sanitized_message_text
+                    messages = build_claude_messages(
+                        message, chat_history, sanitized_message_text
                     )
-                    response_msg = ask_claude(
-                        full_context, first_name, username, chat_type
-                    )
+                    response_msg = ask_claude(messages, first_name, username, chat_type)
                 else:
                     response_msg = commands[command](sanitized_message_text)
             else:
-                full_context = (
-                    f"{conversation_context}\n\nPregunta actual: {message_text}"
-                    if conversation_context
-                    else message_text
-                )
-                response_msg = ask_claude(full_context, first_name, username, chat_type)
+                messages = build_claude_messages(message, chat_history, message_text)
+                response_msg = ask_claude(messages, first_name, username, chat_type)
 
             # Save bot's response to Redis
             if response_msg:
