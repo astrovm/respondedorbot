@@ -1147,12 +1147,12 @@ def handle_msg(token: str, message: Dict) -> str:
                     messages = build_claude_messages(
                         message, chat_history, sanitized_message_text
                     )
-                    response_msg = ask_claude(messages, first_name, username, chat_type)
+                    response_msg = ask_claude(messages)
                 else:
                     response_msg = commands[command](sanitized_message_text)
             else:
                 messages = build_claude_messages(message, chat_history, message_text)
-                response_msg = ask_claude(messages, first_name, username, chat_type)
+                response_msg = ask_claude(messages)
 
             # Save bot's response to Redis
             if response_msg:
