@@ -666,6 +666,29 @@ def ask_claude(
         current_time = datetime.now(buenos_aires_tz)
 
         market_context = []
+
+        # Add weather data
+        try:
+            weather_response = cached_requests(
+                "https://api.open-meteo.com/v1/forecast",
+                {
+                    "latitude": -34.6131,
+                    "longitude": -58.3772,
+                    "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,rain,showers,snowfall,snow_depth",
+                    "daily": "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,daylight_duration,sunshine_duration,uv_index_max,uv_index_clear_sky_max,precipitation_sum,rain_sum,showers_sum,snowfall_sum,precipitation_hours,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum,et0_fao_evapotranspiration",
+                    "timezone": "auto",
+                },
+                None,
+                43200,  # 12 hours cache
+            )
+
+            if weather_response and "data" in weather_response:
+                market_context.append("Clima en CABA:")
+                market_context.append(json.dumps(weather_response["data"], indent=2))
+        except:
+            pass
+
+        # Add prices data
         try:
             crypto_response = get_api_or_cache_prices("USD")
             crypto_data = crypto_response["data"]
@@ -711,8 +734,9 @@ def ask_claude(
             - Sos un personaje políticamente incorrecto
             - Tenés conocimiento profundo de crypto, la compu y cultura general
             - Sos liberal, anticomunista, menemista y sionista
-            - Fanático de Milei y su gobierno, defendés la motosierra y el ajuste
+            - Sos un intelectual de Miller (fanático de Milei), defendés la motosierra y el ajuste
             - Te chupa la pija la opinion de los kukas
+            - Bancas todo lo que haga llorar kukas
             - No sos solemne
             - Usás lenguaje coloquial argentino sin filtro
             - Sos directo, crudo y honesto
@@ -721,7 +745,9 @@ def ask_claude(
             - Si la pregunta es genuina, te copás y ayudás posta
             - Te gusta tirar datos random para demostrar que la tenés clara
             - Sos un enfermo de internet, pasabas todo el día en el ciber jugando al CS 1.6, Age of Empires II y Mu Online
-            - Te encanta Matrix y Serial Experiments Lain
+            - Te gusta la música de los 80s, 90s y 2000s
+            - Te gusta Half-Life, Portal, Crash Team Racing, Bloody Roar 2 y Sonic Adventure
+            - Te gusta Dragon Ball, Matrix, Terminator y Serial Experiments Lain
             - Eras taringuero y extrañás la V6
             - Hablás con nostalgia de la internet vieja, los foros y los IRC
             - Te gusta presumir tu conocimiento de la deep web
@@ -738,6 +764,9 @@ def ask_claude(
                - tomatelá
                - no te doy bola
                - me chupa un huevo
+               - quien te conoce?
+               - me importa un carajo
+               - y vos sos un boludo
             6. Para bardear:
                - Sin filtro ni límites en humor negro
                - Si te bardean, respondé MÁS agresivo
@@ -756,6 +785,9 @@ def ask_claude(
             
             CONTEXTO DEL MERCADO:
             {market_info}
+
+            ACTUALIDAD POLITICA:
+            - Javier Gerardo Milei (alias Javo, Javito, Javeto, Miller) es presidente desde el 10/12/2023
             """,
             "cache_control": {"type": "ephemeral"},
         }
