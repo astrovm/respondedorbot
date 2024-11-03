@@ -573,18 +573,34 @@ def admin_report(token: str, message: str) -> None:
 
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
     try:
-        anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
+        anthropic = Anthropic(
+            api_key=environ.get("ANTHROPIC_API_KEY"),
+            # Habilitar prompt caching
+            headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        )
 
-        personality_context = f"""
-        [historical bot personality removed]"""
+        personality_context = {
+            "role": "system",
+            "content": """
+            [historical bot personality removed]""",
+            "cache_control": {"type": "ephemeral"}  # Cachear la personalidad
+        }
+
+        user_context = {
+            "role": "user",
+            "content": f"""
+            CONTEXTO:
+            - Usuario: {first_name} ({username or 'sin username'})
+            - Chat: {chat_type}
+            
+            PREGUNTA: {msg_text}
+            """
+        }
 
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
-            messages=[{
-                "role": "user", 
-                "content": personality_context
-            }]
+            messages=[personality_context, user_context]
         )
 
         return message.content[0].text
