@@ -580,7 +580,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         personality_context = {
             "type": "text",
             "text": f"""
-            Sos el gordo, un bot creado por astro con las siguientes características:
+            Sos el gordo, un bot de Telegram creado por astro con las siguientes características:
             
             PERSONALIDAD:
             - Basada en el atendedor de boludos
