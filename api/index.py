@@ -743,27 +743,32 @@ def handle_msg(token: str, message: Dict) -> str:
             if "reply_to_message" in message and "text" in message["reply_to_message"]:
                 sanitized_message_text = message["reply_to_message"]["text"]
 
+        # Check if message mentions "el gordo" or variations
+        gordo_mentions = ["el gordo", "gordo", "gordito"]
+        should_respond = any(mention in message_text.lower() for mention in gordo_mentions)
+
         if command in commands:
             if command == "/ask":
-                # Add context to Claude's prompt
                 full_context = f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}" if conversation_context else sanitized_message_text
                 response_msg = ask_claude(full_context, first_name, username, chat_type)
             else:
                 response_msg = commands[command](sanitized_message_text)
-        elif not command.startswith("/"):
-            try:
-                reply_to = str(message["reply_to_message"]["from"]["username"])
-                if reply_to != environ.get("TELEGRAM_USERNAME") and bot_name not in message_text:
-                    return "ignored request"
-            except KeyError:
-                if chat_type != "private" and bot_name not in message_text:
-                    return "ignored request"
-
+        elif not command.startswith("/") and (
+            should_respond 
+            or chat_type == "private" 
+            or bot_name in message_text 
+            or (
+                "reply_to_message" in message 
+                and message["reply_to_message"]["from"]["username"] == environ.get("TELEGRAM_USERNAME")
+            )
+        ):
             send_typing(token, chat_id)
             full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
             response_msg = ask_claude(full_context, first_name, username, chat_type)
+        else:
+            return "ignored request"
 
-        # Save bot's response to Redis with a longer expiration time
+        # Save bot's response to Redis
         if response_msg:
             save_message_to_redis(chat_id, "bot_" + str(message_id), response_msg, redis_client)
 
