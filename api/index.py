@@ -588,7 +588,6 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=200,
-            temperature=0.9,
             messages=[{
                 "role": "user", 
                 "content": personality_context
