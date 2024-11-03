@@ -709,6 +709,14 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     
     return "\n".join(context)
 
+def should_gordo_respond(message_text: str) -> bool:
+    """Decide if the bot should respond to a gordo mention"""
+    gordo_mentions = ["el gordo", "gordo", "gordito"]
+    if any(mention in message_text.lower() for mention in gordo_mentions):
+        # 30% chance to respond to mentions
+        return random.random() < 0.3
+    return False
+
 def handle_msg(token: str, message: Dict) -> str:
     try:
         message_text = (
@@ -748,9 +756,8 @@ def handle_msg(token: str, message: Dict) -> str:
             if "reply_to_message" in message and "text" in message["reply_to_message"]:
                 sanitized_message_text = message["reply_to_message"]["text"]
 
-        # Check if message mentions "el gordo" or variations
-        gordo_mentions = ["el gordo", "gordo", "gordito"]
-        should_respond = any(mention in message_text.lower() for mention in gordo_mentions)
+        # Check if bot should respond to gordo mention
+        should_respond = should_gordo_respond(message_text)
 
         if command in commands:
             if command == "/ask":
@@ -759,7 +766,7 @@ def handle_msg(token: str, message: Dict) -> str:
             else:
                 response_msg = commands[command](sanitized_message_text)
         elif not command.startswith("/") and (
-            should_respond 
+            should_respond
             or chat_type == "private" 
             or bot_name in message_text 
             or (
