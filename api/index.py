@@ -666,6 +666,29 @@ def ask_claude(
         current_time = datetime.now(buenos_aires_tz)
 
         market_context = []
+
+        # Add weather data
+        try:
+            weather_response = cached_requests(
+                "https://api.open-meteo.com/v1/forecast",
+                {
+                    "latitude": -34.6131,
+                    "longitude": -58.3772,
+                    "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,rain,showers,snowfall,snow_depth",
+                    "daily": "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,daylight_duration,sunshine_duration,uv_index_max,uv_index_clear_sky_max,precipitation_sum,rain_sum,showers_sum,snowfall_sum,precipitation_hours,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum,et0_fao_evapotranspiration",
+                    "timezone": "auto",
+                },
+                None,
+                43200,  # 12 hours cache
+            )
+
+            if weather_response and "data" in weather_response:
+                market_context.append("Clima en CABA:")
+                market_context.append(json.dumps(weather_response["data"], indent=2))
+        except:
+            pass
+
+        # Add prices data
         try:
             crypto_response = get_api_or_cache_prices("USD")
             crypto_data = crypto_response["data"]
@@ -716,6 +739,9 @@ def ask_claude(
             
             CONTEXTO DEL MERCADO:
             {market_info}
+
+            ACTUALIDAD POLITICA:
+            - Javier Gerardo Milei (alias Javo, Javito, Javeto, Miller) es presidente desde el 10/12/2023
             """,
             "cache_control": {"type": "ephemeral"},
         }
