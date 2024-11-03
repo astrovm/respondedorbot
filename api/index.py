@@ -977,7 +977,7 @@ def build_claude_messages(
     """Build properly formatted messages list for Claude API"""
     messages = []
 
-    # Add chat history messages in chronological order
+    # Add chat history messages in chronological order (already truncated from Redis)
     for msg in reversed(chat_history):
         messages.append(
             {
@@ -1003,6 +1003,10 @@ def build_claude_messages(
         reply_msg = message["reply_to_message"]
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
         if reply_text:
+            # Truncate reply text if needed
+            reply_text = reply_text[:256] if len(reply_text) > 256 else reply_text
+            if len(reply_text) > 256:
+                reply_text = reply_text[:-3] + "..."
             context_parts.append(f"Respondiendo a: {reply_text}")
 
     # Add user info
@@ -1010,7 +1014,10 @@ def build_claude_messages(
     context_parts.append(f"Chat: {chat_type}")
     context_parts.append(f"Hora: {current_time.strftime('%H:%M')}")
 
-    # Add the current message
+    # Add the current message (truncate if needed)
+    message_text = message_text[:256] if len(message_text) > 256 else message_text
+    if len(message_text) > 256:
+        message_text = message_text[:-3] + "..."
     context_parts.append(f"Mensaje: {message_text}")
 
     messages.append(
