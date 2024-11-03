@@ -17,19 +17,23 @@ from requests.exceptions import RequestException
 import emoji
 from anthropic import Anthropic
 
+
 def config_redis(host=None, port=None, password=None):
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
     password = password or environ.get("REDIS_PASSWORD", None)
-    redis_client = redis.Redis(host=host, port=port, password=password, decode_responses=True)
+    redis_client = redis.Redis(
+        host=host, port=port, password=password, decode_responses=True
+    )
     return redis_client
+
 
 # request new data and save it in redis
 def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     api_url = request["api_url"]
     parameters = request["parameters"]
     headers = request["headers"]
-    response = requests.get(api_url, params=parameters,headers=headers, timeout=5)
+    response = requests.get(api_url, params=parameters, headers=headers, timeout=5)
 
     if response.status_code == 200:
         response_json = json.loads(response.text)
@@ -46,6 +50,7 @@ def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
     else:
         return None
 
+
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
@@ -57,8 +62,10 @@ def get_cache_history(hours_ago, request_hash, redis_client):
         return None
     else:
         cache_history = json.loads(cached_data)
-        if cache_history is not None and "timestamp" not in cache_history: cache_history = None
+        if cache_history is not None and "timestamp" not in cache_history:
+            cache_history = None
         return cache_history
+
 
 # generic proxy for caching any request
 def cached_requests(
@@ -85,7 +92,9 @@ def cached_requests(
 
     # if there's no cached data request it
     if redis_response is None:
-        new_data = set_new_data(arguments_dict, timestamp, redis_client, request_hash, hourly_cache)
+        new_data = set_new_data(
+            arguments_dict, timestamp, redis_client, request_hash, hourly_cache
+        )
 
         if cache_history is not None:
             new_data["history"] = cache_history
@@ -115,6 +124,7 @@ def cached_requests(
         else:
             return cached_data
 
+
 def gen_random(name: str) -> str:
     time.sleep(random.uniform(0, 1))
 
@@ -134,6 +144,7 @@ def gen_random(name: str) -> str:
         time.sleep(random.uniform(0, 1))
 
     return msg
+
 
 def select_random(msg_text: str) -> str:
     try:
@@ -164,8 +175,7 @@ def get_api_or_cache_prices(convert_to):
     }
 
     cache_expiration_time = 300
-    response = cached_requests(
-        api_url, parameters, headers, cache_expiration_time)
+    response = cached_requests(api_url, parameters, headers, cache_expiration_time)
 
     return response["data"]
 
@@ -182,10 +192,40 @@ def get_prices(msg_text: str) -> str:
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
         coins = [
-            "XAU", "USD", "EUR", "KRW", "GBP", "AUD", "BRL", "CAD", "CLP", "CNY",
-            "COP", "CZK", "DKK", "HKD", "ISK", "INR", "ILS", "JPY", "MXN", "TWD",
-            "NZD", "PEN", "SGD", "SEK", "CHF", "UYU", "BTC", "SATS", "ETH", "XMR",
-            "USDC", "USDT", "DAI", "BUSD",
+            "XAU",
+            "USD",
+            "EUR",
+            "KRW",
+            "GBP",
+            "AUD",
+            "BRL",
+            "CAD",
+            "CLP",
+            "CNY",
+            "COP",
+            "CZK",
+            "DKK",
+            "HKD",
+            "ISK",
+            "INR",
+            "ILS",
+            "JPY",
+            "MXN",
+            "TWD",
+            "NZD",
+            "PEN",
+            "SGD",
+            "SEK",
+            "CHF",
+            "UYU",
+            "BTC",
+            "SATS",
+            "ETH",
+            "XMR",
+            "USDC",
+            "USDT",
+            "DAI",
+            "BUSD",
         ]
         convert_to = words[-1]
         if convert_to in coins:
@@ -219,12 +259,36 @@ def get_prices(msg_text: str) -> str:
         coins = msg_text.upper().replace(" ", "").split(",")
 
         if "STABLES" in coins or "STABLECOINS" in coins:
-            coins.extend([
-                "BUSD", "DAI", "DOC", "EURT", "FDUSD", "FRAX", "GHO", "GUSD",
-                "LUSD", "MAI", "MIM", "MIMATIC", "NUARS", "PAXG", "PYUSD", "RAI",
-                "SUSD", "TUSD", "USDC", "USDD", "USDM", "USDP", "USDT", "UXD",
-                "XAUT", "XSGD",
-            ])
+            coins.extend(
+                [
+                    "BUSD",
+                    "DAI",
+                    "DOC",
+                    "EURT",
+                    "FDUSD",
+                    "FRAX",
+                    "GHO",
+                    "GUSD",
+                    "LUSD",
+                    "MAI",
+                    "MIM",
+                    "MIMATIC",
+                    "NUARS",
+                    "PAXG",
+                    "PYUSD",
+                    "RAI",
+                    "SUSD",
+                    "TUSD",
+                    "USDC",
+                    "USDD",
+                    "USDM",
+                    "USDP",
+                    "USDT",
+                    "UXD",
+                    "XAUT",
+                    "XSGD",
+                ]
+            )
 
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
@@ -257,8 +321,14 @@ def get_prices(msg_text: str) -> str:
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
-        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip("0").rstrip(".")
-        percentage = f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip("0").rstrip(".")
+        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip(
+            "0"
+        ).rstrip(".")
+        percentage = (
+            f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
+                "0"
+            ).rstrip(".")
+        )
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
         if prices["data"][0]["symbol"] == coin["symbol"]:
@@ -267,6 +337,7 @@ def get_prices(msg_text: str) -> str:
             msg = f"{msg}\n{line}"
 
     return msg
+
 
 def sort_dollar_rates(dollar_rates):
     dollars = dollar_rates["data"]
@@ -318,6 +389,7 @@ def sort_dollar_rates(dollar_rates):
 
     return sorted_dollar_rates
 
+
 def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
@@ -331,6 +403,7 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
 
     return "\n".join(msg_lines)
 
+
 def get_dollar_rates(msg_text: str) -> str:
     cache_expiration_time = 300
     # hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
@@ -341,6 +414,7 @@ def get_dollar_rates(msg_text: str) -> str:
     sorted_dollar_rates = sort_dollar_rates(dollars)
 
     return format_dollar_rates(sorted_dollar_rates, 24)
+
 
 def get_devo(msg_text: str) -> str:
     try:
@@ -362,8 +436,7 @@ def get_devo(msg_text: str) -> str:
 
         api_url = "https://criptoya.com/api/dolar"
 
-        dollars = cached_requests(
-            api_url, None, None, cache_expiration_time, True)
+        dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
         usdt_ask = float(dollars["data"]["cripto"]["usdt"]["ask"])
         usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
@@ -395,11 +468,12 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
     except ValueError:
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
+
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
-    value = 10 ** (-17) * days_since ** 5.82
+    value = 10 ** (-17) * days_since**5.82
 
     api_response = get_api_or_cache_prices("USD")
     price = api_response["data"][0]["quote"]["USD"]["price"]
@@ -412,6 +486,7 @@ def powerlaw(msg_text: str) -> str:
 
     msg = f"segun power law btc deberia estar en {value:.2f} usd ({percentage_txt})"
     return msg
+
 
 def rainbow(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
@@ -430,6 +505,8 @@ def rainbow(msg_text: str) -> str:
 
     msg = f"segun rainbow chart btc deberia estar en {value:.2f} usd ({percentage_txt})"
     return msg
+
+
 def convert_base(msg_text: str) -> str:
     try:
         input_parts = msg_text.split(",")
@@ -469,8 +546,11 @@ def convert_base(msg_text: str) -> str:
     except ValueError:
         return "mandaste cualquiera boludo, la base y el numero tienen que ser enteros"
 
+
 def get_timestamp(msg_text: str) -> str:
     return f"{int(time.time())}"
+
+
 def convert_to_command(msg_text: str) -> str:
     # Add spaces surrounding each emoji and convert it to its textual representation
     emoji_text = emoji.replace_emoji(
@@ -478,8 +558,7 @@ def convert_to_command(msg_text: str) -> str:
     )
 
     # Convert to uppercase and replace Ñ
-    replaced_ni_text = re.sub(
-        r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
+    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
 
     # Normalize the text and remove consecutive spaces
     single_spaced_text = re.sub(
@@ -509,8 +588,7 @@ def convert_to_command(msg_text: str) -> str:
     cleaned_text = re.sub(
         r"^_+|_+$",
         "",
-        re.sub(r"[^A-Za-z0-9_]", "",
-               re.sub(r"_+", "_", translated_punctuation)),
+        re.sub(r"[^A-Za-z0-9_]", "", re.sub(r"_+", "_", translated_punctuation)),
     )
 
     # If there are no remaining characters after processing, return an error
@@ -520,6 +598,7 @@ def convert_to_command(msg_text: str) -> str:
     # Add a forward slash at the beginning
     command = f"/{cleaned_text}"
     return command
+
 
 def get_help(msg_text: str) -> str:
     return """
@@ -552,13 +631,16 @@ comandos disponibles boludo:
 - /time: timestamp unix actual
 """
 
+
 def get_instance_name(msg_text: str) -> str:
     return environ.get("FRIENDLY_INSTANCE_NAME")
+
 
 def send_typing(token: str, chat_id: str) -> None:
     parameters = {"chat_id": chat_id, "action": "typing"}
     url = f"https://api.telegram.org/bot{token}/sendChatAction"
     requests.get(url, params=parameters, timeout=5)
+
 
 def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     parameters = {"chat_id": chat_id, "text": msg}
@@ -567,41 +649,51 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.get(url, params=parameters, timeout=5)
 
+
 def admin_report(token: str, message: str) -> None:
     instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
     formatted_message = f"Admin report from {instance_name}: {message}"
     admin_chat_id = environ.get("ADMIN_CHAT_ID")
     send_msg(token, admin_chat_id, formatted_message)
 
-def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
+
+def ask_claude(
+    msg_text: str, first_name: str = "", username: str = "", chat_type: str = ""
+) -> str:
     try:
         # Get market and time context
         buenos_aires_tz = timezone(timedelta(hours=-3))
         current_time = datetime.now(buenos_aires_tz)
         # Solo incluir la fecha en el contexto
         time_context = f"Fecha actual Argentina: {current_time.strftime('%A %d/%m/%Y')}"
-        
+
         market_context = []
         try:
             crypto_response = get_api_or_cache_prices("USD")
             crypto_data = crypto_response["data"]
-            
+
             for coin in crypto_data:
                 if coin["symbol"] == "BTC":
                     btc_price = coin["quote"]["USD"]["price"]
                     btc_change = coin["quote"]["USD"]["percent_change_24h"]
                     sentiment = "alcista" if btc_change > 0 else "bajista"
-                    market_context.extend([
-                        f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)",
-                        f"Precio de Bitcoin: {btc_price:,.2f} USD"
-                    ])
+                    market_context.extend(
+                        [
+                            f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)",
+                            f"Precio de Bitcoin: {btc_price:,.2f} USD",
+                        ]
+                    )
                     break
-                    
-            dollar_response = cached_requests("https://criptoya.com/api/dolar", None, None, 300, True)
+
+            dollar_response = cached_requests(
+                "https://criptoya.com/api/dolar", None, None, 300, True
+            )
             dollars = dollar_response["data"]
-            blue_price = dollars['blue']['ask']
-            blue_change = dollars['blue']['variation']
-            market_context.append(f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)")
+            blue_price = dollars["blue"]["ask"]
+            blue_change = dollars["blue"]["variation"]
+            market_context.append(
+                f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)"
+            )
         except:
             pass
 
@@ -660,7 +752,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
             IMPORTANTE: Tu respuesta NUNCA debe exceder los 140 caracteres. Si tu respuesta es más larga, acortala.
             """,
-            "cache_control": {"type": "ephemeral"}
+            "cache_control": {"type": "ephemeral"},
         }
 
         user_message = {
@@ -672,20 +764,21 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Hora actual: {current_time.strftime('%H:%M')}
             
             PREGUNTA: {msg_text}
-            """
+            """,
         }
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=140,
             system=[personality_context],
-            messages=[user_message]
+            messages=[user_message],
         )
 
         return message.content[0].text
 
     except Exception as e:
         return f"Se cayo el sistema: {str(e)}"
+
 
 def initialize_commands() -> Dict[str, Callable]:
     return {
@@ -712,27 +805,35 @@ def initialize_commands() -> Dict[str, Callable]:
         "/help": get_help,
     }
 
-def save_message_to_redis(chat_id: str, message_id: str, text: str, redis_client: redis.Redis) -> None:
+
+def save_message_to_redis(
+    chat_id: str, message_id: str, text: str, redis_client: redis.Redis
+) -> None:
     """Save a message to Redis with expiration time"""
     # Save individual message
     msg_key = f"msg:{chat_id}:{message_id}"
     redis_client.set(msg_key, text, ex=7200)  # expire after 2 hours
-    
+
     # Save to chat history (keep last 10 messages)
     chat_history_key = f"chat_history:{chat_id}"
-    history_entry = json.dumps({"id": message_id, "text": text, "timestamp": int(time.time())})
+    history_entry = json.dumps(
+        {"id": message_id, "text": text, "timestamp": int(time.time())}
+    )
     redis_client.lpush(chat_history_key, history_entry)
     redis_client.ltrim(chat_history_key, 0, 9)  # Keep only last 10 messages
     redis_client.expire(chat_history_key, 7200)  # Set expiration for the list too
 
-def get_chat_history(chat_id: str, redis_client: redis.Redis, max_messages: int = 5) -> List[Dict]:
+
+def get_chat_history(
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 5
+) -> List[Dict]:
     """Get recent chat history for a specific chat"""
     chat_history_key = f"chat_history:{chat_id}"
     history = redis_client.lrange(chat_history_key, 0, max_messages - 1)
-    
+
     if not history:
         return []
-    
+
     messages = []
     for entry in history:
         try:
@@ -740,21 +841,22 @@ def get_chat_history(chat_id: str, redis_client: redis.Redis, max_messages: int 
             messages.append(msg)
         except json.JSONDecodeError:
             continue
-            
+
     return messages
+
 
 def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     """Build context from previous messages"""
     context = []
     chat_id = str(message["chat"]["id"])
-    
+
     # Get chat history - last 3 messages only
     chat_history = get_chat_history(chat_id, redis_client, max_messages=3)
     if chat_history:
         context.append("\nContexto reciente:")
         for msg in reversed(chat_history):
             context.append(f"- {msg['text']}")
-    
+
     # Add user context
     user_context = []
     if "reply_to_message" in message:
@@ -762,12 +864,13 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
         if reply_text:
             user_context.append(f"Respondiendo a: {reply_text}")
-            
+
     if user_context:
         context.append("\nSobre el usuario:")
         context.extend(user_context)
-    
+
     return "\n".join(context)
+
 
 def should_gordo_respond(message_text: str) -> bool:
     """Decide if the bot should respond to a gordo mention"""
@@ -777,6 +880,7 @@ def should_gordo_respond(message_text: str) -> bool:
         return random.random() < 0.3
     return False
 
+
 def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     """
     Checkea si un chat_id superó el rate limit
@@ -784,18 +888,19 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     """
     rate_key = f"rate_limit:{chat_id}"
     current_count = redis_client.get(rate_key)
-    
+
     if current_count is None:
         # Primera request del minuto
         redis_client.setex(rate_key, 60, 1)
         return True
-    
+
     count = int(current_count)
     if count >= 10:  # Máximo 10 mensajes por minuto
         return False
-        
+
     redis_client.incr(rate_key)
     return True
+
 
 def handle_msg(token: str, message: Dict) -> str:
     try:
@@ -813,11 +918,13 @@ def handle_msg(token: str, message: Dict) -> str:
 
         # Initialize Redis client
         redis_client = config_redis()
-        
+
         # Save ALL messages to Redis, including commands
         if message_text:
             formatted_message = f"{username or first_name}: {message_text}"
-            save_message_to_redis(chat_id, str(message_id), formatted_message, redis_client)
+            save_message_to_redis(
+                chat_id, str(message_id), formatted_message, redis_client
+            )
 
         # Get conversation context
         conversation_context = get_conversation_context(message, redis_client)
@@ -840,49 +947,74 @@ def handle_msg(token: str, message: Dict) -> str:
         # Check if bot should respond to gordo mention
         should_respond = should_gordo_respond(message_text)
 
-        if command in commands or (not command.startswith("/") and (
-            should_respond
-            or chat_type == "private" 
-            or bot_name in message_text 
-            or (
-                "reply_to_message" in message 
-                and message["reply_to_message"]["from"]["username"] == environ.get("TELEGRAM_USERNAME")
+        if command in commands or (
+            not command.startswith("/")
+            and (
+                should_respond
+                or chat_type == "private"
+                or bot_name in message_text
+                or (
+                    "reply_to_message" in message
+                    and message["reply_to_message"]["from"]["username"]
+                    == environ.get("TELEGRAM_USERNAME")
+                )
             )
-        )):
+        ):
             # Check rate limit only if we're going to respond
             if not check_rate_limit(chat_id, redis_client):
-                send_msg(token, chat_id, "pará un poco boludo, espera un minuto", message_id)
+                send_msg(
+                    token, chat_id, "pará un poco boludo, espera un minuto", message_id
+                )
                 return "rate limited"
 
             # Send typing indicator if we're going to use Claude
-            will_use_claude = command in ["/ask", "/pregunta", "/che", "/gordo"] or not command.startswith("/")
+            will_use_claude = command in [
+                "/ask",
+                "/pregunta",
+                "/che",
+                "/gordo",
+            ] or not command.startswith("/")
             if will_use_claude:
                 send_typing(token, chat_id)
 
             if command in commands:
                 if command == "/ask":
-                    full_context = f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}" if conversation_context else sanitized_message_text
-                    response_msg = ask_claude(full_context, first_name, username, chat_type)
+                    full_context = (
+                        f"{conversation_context}\n\nPregunta actual: {sanitized_message_text}"
+                        if conversation_context
+                        else sanitized_message_text
+                    )
+                    response_msg = ask_claude(
+                        full_context, first_name, username, chat_type
+                    )
                 else:
                     response_msg = commands[command](sanitized_message_text)
             else:
-                full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
+                full_context = (
+                    f"{conversation_context}\n\nPregunta actual: {message_text}"
+                    if conversation_context
+                    else message_text
+                )
                 response_msg = ask_claude(full_context, first_name, username, chat_type)
 
             # Save bot's response to Redis
             if response_msg:
                 formatted_response = f"gordo: {response_msg}"
-                save_message_to_redis(chat_id, "bot_" + str(message_id), formatted_response, redis_client)
+                save_message_to_redis(
+                    chat_id, "bot_" + str(message_id), formatted_response, redis_client
+                )
                 send_msg(token, chat_id, response_msg, message_id)
-            
+
         return "ok"
     except BaseException as error:
         print(f"Error from handle_msg: {error}")
         return "Error from handle_msg", 500
 
+
 def decrypt_token(key: str, encrypted_token: str) -> str:
     fernet = Fernet(key.encode())
     return fernet.decrypt(encrypted_token.encode()).decode()
+
 
 def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
     request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
@@ -892,6 +1024,7 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict
     except RequestException as request_error:
         return {"error": str(request_error)}
     return telegram_response.json()["result"]
+
 
 def set_telegram_webhook(
     decrypted_token: str, webhook_url: str, encrypted_token: str
@@ -905,15 +1038,14 @@ def set_telegram_webhook(
     }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
     try:
-        telegram_response = requests.get(
-            request_url, params=parameters, timeout=5)
+        telegram_response = requests.get(request_url, params=parameters, timeout=5)
         telegram_response.raise_for_status()
     except RequestException:
         return False
     redis_client = config_redis()
-    redis_response = redis_client.set(
-        "X-Telegram-Bot-Api-Secret-Token", secret_token)
+    redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
     return bool(redis_response)
+
 
 def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
     def set_main_webhook() -> bool:
@@ -950,11 +1082,13 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
 
     return True
 
+
 def is_secret_token_valid(request: Request) -> bool:
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     redis_client = config_redis()
     redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
     return redis_secret_token == secret_token
+
 
 def process_request_parameters(
     request: Request, decrypted_token: str, encrypted_token: str
