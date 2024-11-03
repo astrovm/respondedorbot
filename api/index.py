@@ -709,11 +709,22 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     current_time = datetime.now(buenos_aires_tz)
     context.append(f"Hora actual Argentina: {current_time.strftime('%H:%M')} del {current_time.strftime('%d/%m/%Y')}")
     
-    # Add Bitcoin price
+    # Add crypto prices
     try:
-        btc_response = get_api_or_cache_prices("USD")
-        btc_price = btc_response["data"][0]["quote"]["USD"]["price"]
-        context.append(f"Precio de Bitcoin: {btc_price:,.2f} USD")
+        crypto_response = get_api_or_cache_prices("USD")
+        crypto_data = crypto_response["data"]
+        
+        # Get BTC, ETH and SOL prices
+        for coin in crypto_data:
+            if coin["symbol"] == "BTC":
+                btc_price = coin["quote"]["USD"]["price"]
+                context.append(f"Precio de Bitcoin: {btc_price:,.2f} USD")
+            elif coin["symbol"] == "ETH":
+                eth_price = coin["quote"]["USD"]["price"]
+                context.append(f"Precio de Ethereum: {eth_price:,.2f} USD")
+            elif coin["symbol"] == "SOL":
+                sol_price = coin["quote"]["USD"]["price"]
+                context.append(f"Precio de Solana: {sol_price:,.2f} USD")
     except:
         pass
     
@@ -773,9 +784,10 @@ def handle_msg(token: str, message: Dict) -> str:
         # Initialize Redis client
         redis_client = config_redis()
         
-        # Save current message to Redis
-        if message_text:
-            save_message_to_redis(chat_id, str(message_id), message_text, redis_client)
+        # Save ALL messages to Redis, including commands
+        if message_text:  # Removed the condition that excluded commands
+            formatted_message = f"{username or first_name}: {message_text}"
+            save_message_to_redis(chat_id, str(message_id), formatted_message, redis_client)
 
         # Get conversation context
         conversation_context = get_conversation_context(message, redis_client)
@@ -816,14 +828,13 @@ def handle_msg(token: str, message: Dict) -> str:
             send_typing(token, chat_id)
             full_context = f"{conversation_context}\n\nPregunta actual: {message_text}" if conversation_context else message_text
             response_msg = ask_claude(full_context, first_name, username, chat_type)
-        else:
-            return "ignored request"
 
         # Save bot's response to Redis
         if response_msg:
-            save_message_to_redis(chat_id, "bot_" + str(message_id), response_msg, redis_client)
-
-        send_msg(token, chat_id, response_msg, message_id)
+            formatted_response = f"gordo: {response_msg}"
+            save_message_to_redis(chat_id, "bot_" + str(message_id), formatted_response, redis_client)
+            send_msg(token, chat_id, response_msg, message_id)
+            
         return "ok"
     except BaseException as error:
         print(f"Error from handle_msg: {error}")
