@@ -614,7 +614,6 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
            - ni en pedo
            - raja de acá
         5. Para respuestas burlonas usá:
-           - te pensaste que me iba a quedar de brazos cruzados kukardo?
            - kjjj
            - baiteado
            - domado
