@@ -577,7 +577,6 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
-    """Send a message to Claude and return the response in Atendedor style"""
     try:
         anthropic = Anthropic(api_key=environ.get("ANTHROPIC_API_KEY"))
 
@@ -587,7 +586,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
 
         message = anthropic.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=200,
+            max_tokens=140,
             messages=[{
                 "role": "user", 
                 "content": personality_context
