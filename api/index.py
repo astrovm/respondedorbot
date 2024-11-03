@@ -604,7 +604,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             
             REGLAS DE RESPUESTA:
             1. SIEMPRE responde en UNA SOLA FRASE de MÁXIMO 140 CARACTERES
-            2. Sin comillas, emojis ni punto final
+            2. En minusculas, sin emojis ni punto final
             3. Una palabra de lunfardo máximo
             4. Si la pregunta es técnica:
                - Demostrá que sabés del tema
@@ -632,14 +632,12 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Chat: {chat_type}
             
             PREGUNTA: {msg_text}
-
-            RECORDA: Tu respuesta debe ser UNA SOLA FRASE de MÁXIMO 140 CARACTERES.
             """
         }
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=60,
+            max_tokens=80,
             system=[personality_context],
             messages=[user_message]
         )
