@@ -773,7 +773,7 @@ def ask_claude(messages: List[Dict]) -> str:
 
             if bcra_response and "data" in bcra_response:
                 market_context.append("Variables BCRA:")
-                market_context.append(json.dumps(bcra_response["data"]))
+                market_context.append(json.dumps(bcra_response["data"]["results"]))
         except:
             pass
 
