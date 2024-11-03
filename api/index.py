@@ -581,7 +581,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             "type": "text",
             "text": f"""
             [historical bot personality removed]""",
-            "cache_control": {"type": "ephemeral"}  # Cachear la personalidad
+            "cache_control": {"type": "ephemeral"}
         }
 
         user_message = {
@@ -592,6 +592,8 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             - Chat: {chat_type}
             
             PREGUNTA: {msg_text}
+
+            RECORDA: Tu respuesta debe ser UNA SOLA FRASE de MÁXIMO 140 CARACTERES.
             """
         }
 
