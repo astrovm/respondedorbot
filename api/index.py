@@ -5,7 +5,6 @@ import re
 import time
 import traceback
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from math import log
 from os import environ
@@ -17,6 +16,7 @@ from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
 from anthropic import Anthropic
+
 def config_redis(host=None, port=None, password=None):
     host = host or environ.get("REDIS_HOST", "localhost")
     port = port or environ.get("REDIS_PORT", 6379)
@@ -604,7 +604,7 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
             }]
         )
 
-        return message.content[0].text.strip().strip('"').strip('.')
+        return message.content[0].text
 
     except Exception as e:
         return f"Error master, se cayo el sistema: {str(e)}"
