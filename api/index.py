@@ -742,8 +742,8 @@ def ask_claude(messages: List[Dict]) -> str:
             weather_response = cached_requests(
                 "https://api.open-meteo.com/v1/forecast",
                 {
-                    "latitude": -34.6131,
-                    "longitude": -58.3772,
+                    "latitude": -34.5429,
+                    "longitude": -58.7119,
                     "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,rain,showers,snowfall,snow_depth",
                     "daily": "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,daylight_duration,sunshine_duration,uv_index_max,uv_index_clear_sky_max,precipitation_sum,rain_sum,showers_sum,snowfall_sum,precipitation_hours,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum,et0_fao_evapotranspiration",
                     "timezone": "auto",
@@ -753,7 +753,7 @@ def ask_claude(messages: List[Dict]) -> str:
             )
 
             if weather_response and "data" in weather_response:
-                market_context.append("Clima en CABA:")
+                market_context.append("Clima en Buenos Aires:")
                 market_context.append(json.dumps(weather_response["data"], indent=2))
         except:
             pass
