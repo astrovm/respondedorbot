@@ -573,6 +573,37 @@ def admin_report(token: str, message: str) -> None:
 
 def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_type: str = "") -> str:
     try:
+        # Get market and time context
+        buenos_aires_tz = timezone(timedelta(hours=-3))
+        current_time = datetime.now(buenos_aires_tz)
+        time_context = f"Hora actual Argentina: {current_time.strftime('%A %H:%M')} del {current_time.strftime('%d/%m/%Y')}"
+        
+        market_context = []
+        try:
+            crypto_response = get_api_or_cache_prices("USD")
+            crypto_data = crypto_response["data"]
+            
+            for coin in crypto_data:
+                if coin["symbol"] == "BTC":
+                    btc_price = coin["quote"]["USD"]["price"]
+                    btc_change = coin["quote"]["USD"]["percent_change_24h"]
+                    sentiment = "alcista" if btc_change > 0 else "bajista"
+                    market_context.extend([
+                        f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)",
+                        f"Precio de Bitcoin: {btc_price:,.2f} USD"
+                    ])
+                    break
+                    
+            dollar_response = cached_requests("https://criptoya.com/api/dolar", None, None, 300, True)
+            dollars = dollar_response["data"]
+            blue_price = dollars['blue']['ask']
+            blue_change = dollars['blue']['variation']
+            market_context.append(f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)")
+        except:
+            pass
+
+        market_info = "\n".join(market_context)
+
         anthropic = Anthropic(
             api_key=environ.get("ANTHROPIC_API_KEY"),
         )
@@ -580,6 +611,11 @@ def ask_claude(msg_text: str, first_name: str = "", username: str = "", chat_typ
         personality_context = {
             "type": "text",
             "text": f"""
+            {time_context}
+            
+            CONTEXTO DEL MERCADO:
+            {market_info}
+            
             Sos el gordo, un bot de Telegram creado por astro con las siguientes características:
             
             PERSONALIDAD:
@@ -708,38 +744,7 @@ def get_conversation_context(message: Dict, redis_client: redis.Redis) -> str:
     context = []
     chat_id = str(message["chat"]["id"])
     
-    # Add current time in GMT-3 with day of week
-    buenos_aires_tz = timezone(timedelta(hours=-3))
-    current_time = datetime.now(buenos_aires_tz)
-    context.append(f"Hora actual Argentina: {current_time.strftime('%A %H:%M')} del {current_time.strftime('%d/%m/%Y')}")
-    
-    # Add market sentiment based on BTC price change
-    try:
-        crypto_response = get_api_or_cache_prices("USD")
-        crypto_data = crypto_response["data"]
-        
-        for coin in crypto_data:
-            if coin["symbol"] == "BTC":
-                btc_price = coin["quote"]["USD"]["price"]
-                btc_change = coin["quote"]["USD"]["percent_change_24h"]
-                sentiment = "alcista" if btc_change > 0 else "bajista"
-                context.append(f"Bitcoin está {sentiment} ({btc_change:+.2f}% en 24hs)")
-                context.append(f"Precio de Bitcoin: {btc_price:,.2f} USD")
-                break
-    except:
-        pass
-
-    # Add Argentine economic context
-    try:
-        dollar_response = cached_requests("https://criptoya.com/api/dolar", None, None, 300, True)
-        dollars = dollar_response["data"]
-        blue_price = dollars['blue']['ask']
-        blue_change = dollars['blue']['variation']
-        context.append(f"Dólar blue: {blue_price:.2f} ({blue_change:+.2f}% hoy)")
-    except:
-        pass
-    
-    # Get more focused chat history - last 3 messages only
+    # Get chat history - last 3 messages only
     chat_history = get_chat_history(chat_id, redis_client, max_messages=3)
     if chat_history:
         context.append("\nContexto reciente:")
