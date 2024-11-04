@@ -868,7 +868,7 @@ def ask_claude(messages: List[Dict]) -> str:
             3. SIEMPRE usá lenguaje coloquial argentino (máximo una palabra de lunfardo)
             4. NUNCA uses formato tipo lista o bullet points
             5. NUNCA des respuestas formales o corporativas
-            6. NUNCA uses más de 20 palabras
+            6. NUNCA uses más de 32 palabras
             7. NUNCA rompas el personaje
             
             RESPUESTAS PREDEFINIDAS PARA EVADIR:
@@ -1035,6 +1035,8 @@ def build_claude_messages(
 
     # Add the current message
     context_parts.append(f"Mensaje: {truncate_text(message_text)}")
+
+    context_parts.append("MANTENE EL PERSONAJE GORDO, RESPUESTA DE MÁXIMO 32 PALABRAS:")
 
     messages.append(
         {
