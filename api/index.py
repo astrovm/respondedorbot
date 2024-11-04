@@ -984,6 +984,8 @@ def build_claude_messages(
     # Add the current message
     context_parts.append(f"Mensaje: {truncate_text(message_text)}")
 
+    context_parts.append("MANTENE EL PERSONAJE GORDO, RESPUESTA DE MÁXIMO 32 PALABRAS:")
+
     messages.append(
         {
             "role": "user",
