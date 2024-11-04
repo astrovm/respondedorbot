@@ -997,7 +997,6 @@ def get_chat_history(
 def build_claude_messages(
     message: Dict, chat_history: List[Dict], message_text: str
 ) -> List[Dict]:
-    """Build properly formatted messages list for Claude API"""
     messages = []
 
     # Add chat history messages in chronological order
@@ -1009,17 +1008,21 @@ def build_claude_messages(
             }
         )
 
-    # Get user info
+    # Get user info and context
     first_name = message["from"]["first_name"]
     username = message["from"].get("username", "")
     chat_type = message["chat"]["type"]
-
-    # Get current time in Buenos Aires
+    chat_title = message["chat"].get("title", "") if chat_type != "private" else ""
     buenos_aires_tz = timezone(timedelta(hours=-3))
     current_time = datetime.now(buenos_aires_tz)
 
-    # Add current message context
-    context_parts = []
+    # Build context sections
+    context_parts = [
+        "CONTEXTO:",
+        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
+        f"- Usuario: {first_name} ({username or 'sin username'})",
+        f"- Hora: {current_time.strftime('%H:%M')}",
+    ]
 
     # Add reply context if present
     if "reply_to_message" in message:
@@ -1030,19 +1033,20 @@ def build_claude_messages(
             or reply_msg.get("poll", {}).get("question")
             or ""
         )
-
         if reply_text:
-            context_parts.append(f"Respondiendo a: {truncate_text(reply_text)}")
+            context_parts.append(f"- Respondiendo a: {truncate_text(reply_text)}")
 
-    # Add user info
-    context_parts.append(f"Usuario: {first_name} ({username or 'sin username'})")
-    context_parts.append(f"Chat: {chat_type}")
-    context_parts.append(f"Hora: {current_time.strftime('%H:%M')}")
-
-    # Add the current message
-    context_parts.append(f"Mensaje: {truncate_text(message_text)}")
-
-    context_parts.append("MANTENE EL PERSONAJE GORDO, RESPUESTA DE MÁXIMO 32 PALABRAS:")
+    # Add message section
+    context_parts.extend(
+        [
+            "\nMENSAJE:",
+            truncate_text(message_text),
+            "\nINSTRUCCIONES:",
+            "- Mantené el personaje del gordo",
+            "- Respondé en una sola frase de máximo 32 palabras",
+            "- Usá lenguaje coloquial argentino",
+        ]
+    )
 
     messages.append(
         {
