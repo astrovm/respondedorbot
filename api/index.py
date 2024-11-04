@@ -965,7 +965,7 @@ def save_message_to_redis(
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 5
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 3
 ) -> List[Dict]:
     """Get recent chat history for a specific chat"""
     chat_history_key = f"chat_history:{chat_id}"
