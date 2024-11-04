@@ -737,27 +737,43 @@ def get_weather() -> dict:
             "longitude": -58.7119,
             "hourly": "apparent_temperature,precipitation_probability,weather_code,cloud_cover,visibility",
             "timezone": "auto",
-            "forecast_days": 1,
+            "forecast_days": 2,
         }
 
         response = cached_requests(
             weather_url, parameters, None, 7200
-        )  # Cache por 15 minutos
+        )  # Cache por 2 horas
         if response and "data" in response:
             hourly = response["data"]["hourly"]
 
-            # Get current hour index
-            current_hour = datetime.now(timezone(timedelta(hours=-3))).hour
+            # Get current time in Buenos Aires
+            current_time = datetime.now(timezone(timedelta(hours=-3)))
+
+            # Find the current hour index by matching with timestamps
+            current_index = None
+            for i, timestamp in enumerate(hourly["time"]):
+                forecast_time = datetime.fromisoformat(timestamp)
+                if (
+                    forecast_time.year == current_time.year
+                    and forecast_time.month == current_time.month
+                    and forecast_time.day == current_time.day
+                    and forecast_time.hour == current_time.hour
+                ):
+                    current_index = i
+                    break
+
+            if current_index is None:
+                return None
 
             # Get current values
             return {
-                "apparent_temperature": hourly["apparent_temperature"][current_hour],
+                "apparent_temperature": hourly["apparent_temperature"][current_index],
                 "precipitation_probability": hourly["precipitation_probability"][
-                    current_hour
+                    current_index
                 ],
-                "weather_code": hourly["weather_code"][current_hour],
-                "cloud_cover": hourly["cloud_cover"][current_hour],
-                "visibility": hourly["visibility"][current_hour],
+                "weather_code": hourly["weather_code"][current_index],
+                "cloud_cover": hourly["cloud_cover"][current_index],
+                "visibility": hourly["visibility"][current_index],
             }
         return None
     except Exception as e:
