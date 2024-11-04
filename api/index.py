@@ -1086,8 +1086,8 @@ def build_claude_messages(
 def should_gordo_respond(message_text: str) -> bool:
     """Decide if the bot should respond to a gordo mention"""
     if "gordo" in message_text.lower():
-        # 50% chance to respond to mentions
-        return random.random() < 0.5
+        # 5% chance to respond to mentions
+        return random.random() < 0.05
     return False
 
 
