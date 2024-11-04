@@ -740,43 +740,6 @@ def ask_claude(messages: List[Dict]) -> str:
 
         market_context = []
 
-        # Add weather data
-        try:
-            weather_response = cached_requests(
-                "https://api.open-meteo.com/v1/forecast",
-                {
-                    "latitude": -34.5429,
-                    "longitude": -58.7119,
-                    "hourly": "relative_humidity_2m,apparent_temperature,precipitation_probability,precipitation,rain,showers,weather_code,visibility",
-                    "timezone": "auto",
-                    "forecast_days": 3,
-                },
-                None,
-                43200,  # 12 hours cache
-            )
-
-            if weather_response and "data" in weather_response:
-                market_context.append("Clima en Buenos Aires:")
-                market_context.append(json.dumps(weather_response["data"]))
-        except:
-            pass
-
-        # Add BCRA data
-        try:
-            bcra_response = cached_requests(
-                "https://api.bcra.gob.ar/estadisticas/v2.0/PrincipalesVariables",
-                None,
-                None,
-                43200,  # 12 hours cache
-                verify_ssl=False,  # Disable SSL verification for BCRA API
-            )
-
-            if bcra_response and "data" in bcra_response:
-                market_context.append("Variables BCRA:")
-                market_context.append(json.dumps(bcra_response["data"]["results"]))
-        except:
-            pass
-
         # Add crypto data
         try:
             crypto_response = cached_requests(
@@ -888,7 +851,7 @@ def ask_claude(messages: List[Dict]) -> str:
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=128,
+            max_tokens=64,
             system=[personality_context, market_context],
             messages=messages,
         )
