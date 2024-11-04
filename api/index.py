@@ -874,14 +874,14 @@ def ask_claude(messages: List[Dict]) -> str:
         market_context = {
             "type": "text",
             "text": f"""
-            FECHA:
+            FECHA ACTUAL:
             {current_time.strftime('%A %d/%m/%Y')}
             
             CONTEXTO DEL MERCADO:
             {market_info}
 
-            ACTUALIDAD POLITICA:
-            - Javier Milei (alias Miller, Javo, Javito, Javeto) es presidente desde el 10/12/2023
+            CONTEXTO POLITICO:
+            - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
             """,
             "cache_control": {"type": "ephemeral"},
         }
