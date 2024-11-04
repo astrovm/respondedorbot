@@ -912,8 +912,9 @@ def ask_claude(messages: List[Dict]) -> str:
 
             IMPORTANTE: 
             - Tu respuesta NUNCA debe exceder los 64 tokens
+            - NUNCA dejes una frase sin terminar
+            - Si no llegás a decir todo, decí menos pero completo
             - SIEMPRE das UNA SOLA respuesta, nunca múltiples
-            - Si te preguntan sobre temas que te importan respondés con convicción
             """,
             "cache_control": {"type": "ephemeral"},
         }
