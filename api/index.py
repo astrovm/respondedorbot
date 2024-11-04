@@ -893,7 +893,7 @@ def ask_claude(messages: List[Dict]) -> str:
             3. SIEMPRE usá lenguaje coloquial argentino (máximo una palabra de lunfardo)
             4. NUNCA uses formato tipo lista o bullet points
             5. NUNCA des respuestas formales o corporativas
-            6. NUNCA uses más de 48 tokens
+            6. NUNCA uses más de 32 palabras
             7. NUNCA rompas el personaje
             
             RESPUESTAS PREDEFINIDAS PARA EVADIR:
@@ -928,7 +928,7 @@ def ask_claude(messages: List[Dict]) -> str:
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=96,
+            max_tokens=128,
             system=[personality_context, market_context],
             messages=messages,
         )
