@@ -1027,12 +1027,12 @@ def build_claude_messages(
     """Build properly formatted messages list for Claude API"""
     messages = []
 
-    # Add chat history messages in chronological order (already truncated from Redis)
+    # Add chat history messages in chronological order
     for msg in reversed(chat_history):
         messages.append(
             {
                 "role": msg["role"],
-                "content": [{"type": "text", "text": msg["text"]}],
+                "content": msg["text"],
             }
         )
 
@@ -1052,24 +1052,6 @@ def build_claude_messages(
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
-
-        # Si el mensaje es un reply pero no tiene texto (probablemente porque es viejo)
-        # buscamos en el historial usando el message_id
-        if not reply_text and "message_id" in reply_msg:
-            redis_client = config_redis()
-            chat_id = str(message["chat"]["id"])
-            reply_id = f"bot_{reply_msg['message_id']}"
-
-            # Buscar en todo el historial (no solo los últimos 10)
-            full_history = redis_client.lrange(f"chat_history:{chat_id}", 0, -1)
-            for entry in full_history:
-                try:
-                    msg = json.loads(entry)
-                    if msg["id"] == reply_id:
-                        reply_text = msg["text"]
-                        break
-                except json.JSONDecodeError:
-                    continue
 
         if reply_text:
             # Truncate reply text if needed
@@ -1092,7 +1074,7 @@ def build_claude_messages(
     messages.append(
         {
             "role": "user",
-            "content": [{"type": "text", "text": "\n".join(context_parts)}],
+            "content": "\n".join(context_parts),
         }
     )
 
@@ -1157,7 +1139,7 @@ def handle_msg(token: str, message: Dict) -> str:
         # Special case for /comando with reply
         if command == "/comando" and not sanitized_message_text:
             if "reply_to_message" in message and "text" in message["reply_to_message"]:
-                sanitized_message_text = message["reply_to_message"]["text"]
+                sanitized_message_text = message["reply_to_message"].get("text", "")
 
         # Initialize commands
         commands = initialize_commands()
