@@ -1051,7 +1051,12 @@ def build_claude_messages(
     # Add reply context if present
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
-        reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
+        reply_text = (
+            reply_msg.get("text")
+            or reply_msg.get("caption")
+            or reply_msg.get("poll", {}).get("question")
+            or ""
+        )
 
         if reply_text:
             # Truncate reply text if needed
@@ -1138,8 +1143,14 @@ def handle_msg(token: str, message: Dict) -> str:
 
         # Special case for /comando with reply
         if command == "/comando" and not sanitized_message_text:
-            if "reply_to_message" in message and "text" in message["reply_to_message"]:
-                sanitized_message_text = message["reply_to_message"].get("text", "")
+            if "reply_to_message" in message:
+                reply_msg = message["reply_to_message"]
+                sanitized_message_text = (
+                    reply_msg.get("text")
+                    or reply_msg.get("caption")
+                    or reply_msg.get("poll", {}).get("question")
+                    or ""
+                )
 
         # Initialize commands
         commands = initialize_commands()
