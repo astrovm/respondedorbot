@@ -978,21 +978,20 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
     }
 
 
+def truncate_text(text: str, max_length: int = 256) -> str:
+    """Truncate text to max_length and add ellipsis if needed"""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
 def save_message_to_redis(
     chat_id: str, message_id: str, text: str, redis_client: redis.Redis
 ) -> None:
     """Save a message to Redis chat history"""
-    # Truncate text to 256 characters if longer
-    truncated_text = text[:256] if len(text) > 256 else text
-
-    # Add indicator if text was truncated
-    if len(text) > 256:
-        truncated_text = truncated_text[:-3] + "..."
-
-    # Save to chat history
     chat_history_key = f"chat_history:{chat_id}"
     history_entry = json.dumps(
-        {"id": message_id, "text": truncated_text, "timestamp": int(time.time())}
+        {"id": message_id, "text": truncate_text(text), "timestamp": int(time.time())}
     )
     redis_client.lpush(chat_history_key, history_entry)
 
@@ -1059,11 +1058,7 @@ def build_claude_messages(
         )
 
         if reply_text:
-            # Truncate reply text if needed
-            reply_text = reply_text[:256] if len(reply_text) > 256 else reply_text
-            if len(reply_text) > 256:
-                reply_text = reply_text[:-3] + "..."
-            context_parts.append(f"Respondiendo a: {reply_text}")
+            context_parts.append(f"Respondiendo a: {truncate_text(reply_text)}")
 
     # Add user info
     context_parts.append(f"Usuario: {first_name} ({username or 'sin username'})")
@@ -1071,10 +1066,7 @@ def build_claude_messages(
     context_parts.append(f"Hora: {current_time.strftime('%H:%M')}")
 
     # Add the current message
-    message_text = message_text[:256] if len(message_text) > 256 else message_text
-    if len(message_text) > 256:
-        message_text = message_text[:-3] + "..."
-    context_parts.append(f"Mensaje: {message_text}")
+    context_parts.append(f"Mensaje: {truncate_text(message_text)}")
 
     messages.append(
         {
