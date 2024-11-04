@@ -943,7 +943,7 @@ def ask_claude(messages: List[Dict]) -> str:
         return message.content[0].text
 
     except Exception as e:
-        return f"Se cayo el sistema: {str(e)}"
+        return f"se cayo el sistema: {str(e)}"
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -989,14 +989,12 @@ def save_message_to_redis(
     if len(text) > 256:
         truncated_text = truncated_text[:-3] + "..."
 
-    # Save to chat history (keep last 10 messages)
+    # Save to chat history
     chat_history_key = f"chat_history:{chat_id}"
     history_entry = json.dumps(
         {"id": message_id, "text": truncated_text, "timestamp": int(time.time())}
     )
     redis_client.lpush(chat_history_key, history_entry)
-    redis_client.ltrim(chat_history_key, 0, 9)  # Keep only last 10 messages
-    redis_client.expire(chat_history_key, 7200)  # Set expiration for the list too
 
 
 def get_chat_history(
@@ -1054,6 +1052,25 @@ def build_claude_messages(
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_text = reply_msg.get("text", "") or reply_msg.get("caption", "")
+
+        # Si el mensaje es un reply pero no tiene texto (probablemente porque es viejo)
+        # buscamos en el historial usando el message_id
+        if not reply_text and "message_id" in reply_msg:
+            redis_client = config_redis()
+            chat_id = str(message["chat"]["id"])
+            reply_id = f"bot_{reply_msg['message_id']}"
+
+            # Buscar en todo el historial (no solo los últimos 10)
+            full_history = redis_client.lrange(f"chat_history:{chat_id}", 0, -1)
+            for entry in full_history:
+                try:
+                    msg = json.loads(entry)
+                    if msg["id"] == reply_id:
+                        reply_text = msg["text"]
+                        break
+                except json.JSONDecodeError:
+                    continue
+
         if reply_text:
             # Truncate reply text if needed
             reply_text = reply_text[:256] if len(reply_text) > 256 else reply_text
@@ -1066,7 +1083,7 @@ def build_claude_messages(
     context_parts.append(f"Chat: {chat_type}")
     context_parts.append(f"Hora: {current_time.strftime('%H:%M')}")
 
-    # Add the current message (truncate if needed)
+    # Add the current message
     message_text = message_text[:256] if len(message_text) > 256 else message_text
     if len(message_text) > 256:
         message_text = message_text[:-3] + "..."
@@ -1075,12 +1092,7 @@ def build_claude_messages(
     messages.append(
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "\n".join(context_parts),
-                }
-            ],
+            "content": [{"type": "text", "text": "\n".join(context_parts)}],
         }
     )
 
