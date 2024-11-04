@@ -728,6 +728,43 @@ def admin_report(token: str, message: str) -> None:
     send_msg(token, admin_chat_id, formatted_message)
 
 
+def get_weather() -> dict:
+    """Get current weather for Buenos Aires"""
+    try:
+        weather_url = "https://api.open-meteo.com/v1/forecast"
+        parameters = {
+            "latitude": -34.5429,
+            "longitude": -58.7119,
+            "hourly": "apparent_temperature,precipitation_probability,weather_code,cloud_cover,visibility",
+            "timezone": "auto",
+            "forecast_days": 1,
+        }
+
+        response = cached_requests(
+            weather_url, parameters, None, 7200
+        )  # Cache por 15 minutos
+        if response and "data" in response:
+            hourly = response["data"]["hourly"]
+
+            # Get current hour index
+            current_hour = datetime.now(timezone(timedelta(hours=-3))).hour
+
+            # Get current values
+            return {
+                "apparent_temperature": hourly["apparent_temperature"][current_hour],
+                "precipitation_probability": hourly["precipitation_probability"][
+                    current_hour
+                ],
+                "weather_code": hourly["weather_code"][current_hour],
+                "cloud_cover": hourly["cloud_cover"][current_hour],
+                "visibility": hourly["visibility"][current_hour],
+            }
+        return None
+    except Exception as e:
+        print(f"Error getting weather: {str(e)}")
+        return None
+
+
 def ask_claude(messages: List[Dict]) -> str:
     try:
         # Get market and time context
@@ -745,7 +782,7 @@ def ask_claude(messages: List[Dict]) -> str:
                     "Accepts": "application/json",
                     "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
                 },
-                43200,  # 12 hours cache
+                7200,
             )
 
             if crypto_response and "data" in crypto_response:
@@ -797,7 +834,7 @@ def ask_claude(messages: List[Dict]) -> str:
                     }
                     cleaned_cryptos.append(cleaned_crypto)
 
-                market_context.append("Precios de criptos:")
+                market_context.append("PRECIOS DE CRIPTOS:")
                 market_context.append(json.dumps(cleaned_cryptos))
         except:
             pass
@@ -808,12 +845,63 @@ def ask_claude(messages: List[Dict]) -> str:
                 "https://criptoya.com/api/dolar",
                 None,
                 None,
-                43200,  # 12 hours cache
+                7200,
             )
 
             if dollar_response and "data" in dollar_response:
-                market_context.append("Dolares:")
+                market_context.append("DOLARES:")
                 market_context.append(json.dumps(dollar_response["data"]))
+        except:
+            pass
+
+        # Add weather data
+        try:
+            weather = get_weather()
+            if weather:
+                # Complete WMO weather codes
+                weather_descriptions = {
+                    0: "despejado",
+                    1: "mayormente despejado",
+                    2: "parcialmente nublado",
+                    3: "nublado",
+                    45: "neblina",
+                    48: "niebla",
+                    51: "llovizna leve",
+                    53: "llovizna moderada",
+                    55: "llovizna intensa",
+                    56: "llovizna helada leve",
+                    57: "llovizna helada intensa",
+                    61: "lluvia leve",
+                    63: "lluvia moderada",
+                    65: "lluvia intensa",
+                    66: "lluvia helada leve",
+                    67: "lluvia helada intensa",
+                    71: "nevada leve",
+                    73: "nevada moderada",
+                    75: "nevada intensa",
+                    77: "granizo",
+                    80: "lluvia leve intermitente",
+                    81: "lluvia moderada intermitente",
+                    82: "lluvia fuerte intermitente",
+                    85: "nevada leve intermitente",
+                    86: "nevada intensa intermitente",
+                    95: "tormenta",
+                    96: "tormenta con granizo leve",
+                    99: "tormenta con granizo intenso",
+                }
+                weather_desc = weather_descriptions.get(
+                    weather["weather_code"], "clima raro"
+                )
+
+                weather_context = f"""
+                CLIMA EN BUENOS AIRES:
+                - Temperatura aparente: {weather['apparent_temperature']}°C
+                - Probabilidad de lluvia: {weather['precipitation_probability']}%
+                - Estado: {weather_desc}
+                - Nubosidad: {weather['cloud_cover']}%
+                - Visibilidad: {weather['visibility']/1000:.1f}km
+                """
+                market_context.append(weather_context)
         except:
             pass
 
