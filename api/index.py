@@ -1088,12 +1088,12 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     current_count = redis_client.get(rate_key)
 
     if current_count is None:
-        # Primera request del minuto
-        redis_client.setex(rate_key, 60, 1)
+        # Primera request del periodo de 5 minutos
+        redis_client.setex(rate_key, 300, 1)  # 300 segundos = 5 minutos
         return True
 
     count = int(current_count)
-    if count >= 10:  # Máximo 10 mensajes por minuto
+    if count >= 10:  # Máximo 10 mensajes cada 5 minutos
         return False
 
     redis_client.incr(rate_key)
