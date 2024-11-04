@@ -198,8 +198,6 @@ def cached_requests(
 
 
 def gen_random(name: str) -> str:
-    time.sleep(random.uniform(0, 1))
-
     rand_res = random.randint(0, 1)
     rand_name = random.randint(0, 2)
 
@@ -210,10 +208,8 @@ def gen_random(name: str) -> str:
 
     if rand_name == 1:
         msg = f"{msg} boludo"
-        time.sleep(random.uniform(0, 1))
     elif rand_name == 2:
         msg = f"{msg} {name}"
-        time.sleep(random.uniform(0, 1))
 
     return msg
 
@@ -1144,6 +1140,8 @@ def handle_msg(token: str, message: Dict) -> str:
             # Check rate limit before saving or processing
             if not check_rate_limit(chat_id, redis_client):
                 # Use gen_random instead of fixed message for rate limit
+                send_typing(token, chat_id)
+                time.sleep(random.uniform(0, 1))
                 response_msg = gen_random(message["from"]["first_name"])
                 send_msg(token, chat_id, response_msg, message_id)
                 return "rate limited"
@@ -1165,6 +1163,7 @@ def handle_msg(token: str, message: Dict) -> str:
                 handler_func, uses_claude = commands[command]
                 if uses_claude:
                     send_typing(token, chat_id)
+                    time.sleep(random.uniform(0, 1))
                     messages = build_claude_messages(
                         message, chat_history, sanitized_message_text
                     )
@@ -1174,6 +1173,7 @@ def handle_msg(token: str, message: Dict) -> str:
             else:
                 # Handle as conversation with Claude
                 send_typing(token, chat_id)
+                time.sleep(random.uniform(0, 1))
                 messages = build_claude_messages(message, chat_history, message_text)
                 response_msg = ask_claude(messages)
 
