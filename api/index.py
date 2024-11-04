@@ -911,7 +911,14 @@ def ask_claude(messages: List[Dict]) -> str:
         return message.content[0].text
 
     except Exception as e:
-        return f"se cayo el sistema: {str(e)}"
+        print(f"Error in ask_claude: {str(e)}")
+        # Get first name from last message in messages list
+        first_name = ""
+        if messages and len(messages) > 0:
+            last_message = messages[-1]["content"]
+            if "Usuario: " in last_message:
+                first_name = last_message.split("Usuario: ")[1].split(" ")[0]
+        return gen_random(first_name)
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -1136,9 +1143,9 @@ def handle_msg(token: str, message: Dict) -> str:
         if should_respond:
             # Check rate limit before saving or processing
             if not check_rate_limit(chat_id, redis_client):
-                send_msg(
-                    token, chat_id, "pará un poco boludo, espera un minuto", message_id
-                )
+                # Use gen_random instead of fixed message for rate limit
+                response_msg = gen_random(message["from"]["first_name"])
+                send_msg(token, chat_id, response_msg, message_id)
                 return "rate limited"
 
             # Save message to Redis only if not rate limited
