@@ -1005,7 +1005,7 @@ def ask_claude(messages: List[Dict]) -> str:
         }
 
         message = anthropic.beta.prompt_caching.messages.create(
-            model="claude-3-haiku-latest",
+            model="claude-3-haiku-20240307",
             max_tokens=64,
             system=[personality_context, market_context],
             messages=messages,
