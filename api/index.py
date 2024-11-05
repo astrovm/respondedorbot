@@ -798,7 +798,7 @@ def ask_claude(messages: List[Dict]) -> str:
                     "Accepts": "application/json",
                     "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
                 },
-                7200,
+                3600,
             )
 
             if crypto_response and "data" in crypto_response:
@@ -861,7 +861,7 @@ def ask_claude(messages: List[Dict]) -> str:
                 "https://criptoya.com/api/dolar",
                 None,
                 None,
-                7200,
+                3600,
             )
 
             if dollar_response and "data" in dollar_response:
@@ -1071,7 +1071,7 @@ def save_message_to_redis(
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 3
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 5
 ) -> List[Dict]:
     """Get recent chat history for a specific chat"""
     chat_history_key = f"chat_history:{chat_id}"
@@ -1212,12 +1212,12 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     current_count = redis_client.get(rate_key)
 
     if current_count is None:
-        # Primera request del periodo de 5 minutos
-        redis_client.setex(rate_key, 300, 1)  # 300 segundos = 5 minutos
+        # Primera request del periodo de 1 hora
+        redis_client.setex(rate_key, 3600, 1)
         return True
 
     count = int(current_count)
-    if count >= 10:  # Máximo 10 mensajes cada 5 minutos
+    if count >= 64:  # Máximo 64 mensajes por hora
         return False
 
     redis_client.incr(rate_key)
