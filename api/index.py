@@ -1069,7 +1069,11 @@ def save_message_to_redis(
     history_entry = json.dumps(
         {"id": message_id, "text": truncate_text(text), "timestamp": int(time.time())}
     )
-    redis_client.lpush(chat_history_key, history_entry)
+
+    pipe = redis_client.pipeline()
+    pipe.lpush(chat_history_key, history_entry)  # Add new message
+    pipe.ltrim(chat_history_key, 0, 19)  # Keep only last 20 messages
+    pipe.execute()
 
 
 def get_chat_history(
