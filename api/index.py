@@ -927,9 +927,10 @@ def ask_claude(messages: List[Dict]) -> str:
             api_key=environ.get("ANTHROPIC_API_KEY"),
         )
 
-        personality_context = {
-            "type": "text",
-            "text": f"""
+        personality_context = [
+            {
+                "type": "text",
+                "text": f"""
             Sos el gordo, un bot Argentino de Telegram creado por astro. Tu personalidad es:
 
             RASGOS PRINCIPALES:
@@ -985,13 +986,7 @@ def ask_claude(messages: List[Dict]) -> str:
             - Si no llegás a decir todo, decí menos pero mantené el mensaje completo
             - Priorizá ser conciso y mantener el personaje sobre dar información completa
             - Si te bardean, respondé más agresivo pero siempre en una frase
-            """,
-            "cache_control": {"type": "ephemeral"},
-        }
 
-        market_context = {
-            "type": "text",
-            "text": f"""
             FECHA ACTUAL:
             {current_time.strftime('%A %d/%m/%Y')}
             
@@ -1001,13 +996,14 @@ def ask_claude(messages: List[Dict]) -> str:
             CONTEXTO POLITICO:
             - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
             """,
-            "cache_control": {"type": "ephemeral"},
-        }
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
 
         message = anthropic.beta.prompt_caching.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=64,
-            system=[personality_context, market_context],
+            system=personality_context,
             messages=messages,
         )
 
@@ -1095,7 +1091,7 @@ def get_chat_history(
         except json.JSONDecodeError:
             continue
 
-    return messages
+    return reversed(messages)
 
 
 def build_claude_messages(
@@ -1103,14 +1099,57 @@ def build_claude_messages(
 ) -> List[Dict]:
     messages = []
 
-    # Add chat history messages in chronological order
-    for msg in reversed(chat_history):
+    # Add chat history messages
+    for msg in chat_history:
         messages.append(
             {
                 "role": msg["role"],
                 "content": msg["text"],
+                "cache_control": {"type": "ephemeral"},
             }
         )
+
+    # Add reply message to history if present
+    if "reply_to_message" in message:
+        reply_msg = message["reply_to_message"]
+        reply_text = (
+            reply_msg.get("text")
+            or reply_msg.get("caption")
+            or reply_msg.get("poll", {}).get("question")
+            or ""
+        )
+        if reply_text:
+            # Check if message is from the bot
+            is_bot = reply_msg["from"]["username"] == environ.get("TELEGRAM_USERNAME")
+
+            # Format message same way as it would be stored
+            if is_bot:
+                formatted_reply = reply_text
+                reply_role = "assistant"
+            else:
+                reply_username = reply_msg["from"].get("username", "")
+                reply_first_name = reply_msg["from"]["first_name"]
+                formatted_user = f"{reply_first_name}" + (
+                    f" ({reply_username})" if reply_username else ""
+                )
+                formatted_reply = f"{formatted_user}: {reply_text}"
+                reply_role = "user"
+
+            # Truncate reply text
+            truncated_reply = truncate_text(formatted_reply)
+
+            # Check if reply exists in history
+            for msg in chat_history:
+                if msg["text"] == truncated_reply:
+                    chat_history.remove(msg)
+
+            messages.append(
+                {
+                    "role": reply_role,
+                    "content": truncated_reply,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
 
     # Get user info and context
     first_name = message["from"]["first_name"]
@@ -1124,33 +1163,15 @@ def build_claude_messages(
     context_parts = [
         "CONTEXTO:",
         f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-        f"- Usuario: {first_name} ({username or 'sin username'})",
+        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
         f"- Hora: {current_time.strftime('%H:%M')}",
+        "\nMENSAJE:",
+        truncate_text(message_text),
+        "\nINSTRUCCIONES:",
+        "- Mantené el personaje del gordo",
+        "- Respondé en una sola frase de máximo 32 palabras",
+        "- Usá lenguaje coloquial argentino",
     ]
-
-    # Add reply context if present
-    if "reply_to_message" in message:
-        reply_msg = message["reply_to_message"]
-        reply_text = (
-            reply_msg.get("text")
-            or reply_msg.get("caption")
-            or reply_msg.get("poll", {}).get("question")
-            or ""
-        )
-        if reply_text:
-            context_parts.append(f"- Respondiendo a: {truncate_text(reply_text)}")
-
-    # Add message section
-    context_parts.extend(
-        [
-            "\nMENSAJE:",
-            truncate_text(message_text),
-            "\nINSTRUCCIONES:",
-            "- Mantené el personaje del gordo",
-            "- Respondé en una sola frase de máximo 32 palabras",
-            "- Usá lenguaje coloquial argentino",
-        ]
-    )
 
     messages.append(
         {
@@ -1159,7 +1180,7 @@ def build_claude_messages(
         }
     )
 
-    return messages
+    return messages[-4:]
 
 
 def should_gordo_respond(message_text: str) -> bool:
@@ -1202,7 +1223,7 @@ def handle_msg(token: str, message: Dict) -> str:
             or message.get("poll", {}).get("question")
             or ""
         )
-        message_id = message.get("message_id", "")
+        message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
         chat_type = str(message["chat"]["type"])
 
@@ -1263,9 +1284,12 @@ def handle_msg(token: str, message: Dict) -> str:
             if message_text:
                 username = message["from"].get("username", "")
                 first_name = message["from"]["first_name"]
-                formatted_message = f"{username or first_name}: {message_text}"
+                formatted_user = f"{first_name}" + (
+                    f" ({username})" if username else ""
+                )
+                formatted_message = f"{formatted_user}: {message_text}"
                 save_message_to_redis(
-                    chat_id, str(message_id), formatted_message, redis_client
+                    chat_id, message_id, formatted_message, redis_client
                 )
 
             # Get chat history
