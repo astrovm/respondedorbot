@@ -676,15 +676,17 @@ comandos disponibles boludo:
 
 - /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
-- /comando algo: te lo convierto en comando de telegram
+- /comando, /command algo: te lo convierto en comando de telegram
 
 - /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
 
-- /dolar: te tiro la posta del blue y todos los dolares
+- /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
+
+- /dolar, /dollar: te tiro la posta del blue y todos los dolares
 
 - /instance: te digo donde estoy corriendo
 
-- /prices: top 10 cryptos en usd
+- /prices, /precio, /precios, /presio, /presios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
 - /prices 20: top 20 en usd
 - /prices 100 in eur: top 100 en eur
