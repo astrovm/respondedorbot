@@ -1210,44 +1210,32 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     Checkea si un chat_id o el bot global superó el rate limit
     Returns True si puede hacer requests, False si está limitado
     """
-    # Check global minute rate limit
+    pipe = redis_client.pipeline()
+
+    # Check global minute rate limit (32 requests/minute)
     minute_key = "rate_limit:global:minute"
-    minute_count = redis_client.get(minute_key)
+    pipe.incr(minute_key)  # Increment (creates key with 1 if not exists)
+    pipe.expire(minute_key, 60, nx=True)  # Set expiry only if not exists
 
-    if minute_count is None:
-        redis_client.setex(minute_key, 60, 1)
-    else:
-        count = int(minute_count)
-        if count >= 32:  # Máximo 32 mensajes por minuto global
-            return False
-        redis_client.incr(minute_key)
-
-    # Check global hour rate limit
+    # Check global hour rate limit (256 requests/hour)
     hour_key = "rate_limit:global:hour"
-    hour_count = redis_client.get(hour_key)
+    pipe.incr(hour_key)
+    pipe.expire(hour_key, 3600, nx=True)
 
-    if hour_count is None:
-        redis_client.setex(hour_key, 3600, 1)
-    else:
-        count = int(hour_count)
-        if count >= 256:  # Máximo 256 mensajes por hora global
-            return False
-        redis_client.incr(hour_key)
-
-    # Check individual chat rate limit
+    # Check individual chat rate limit (64 requests/hour)
     chat_key = f"rate_limit:chat:{chat_id}"
-    chat_count = redis_client.get(chat_key)
+    pipe.incr(chat_key)
+    pipe.expire(chat_key, 3600, nx=True)
 
-    if chat_count is None:
-        redis_client.setex(chat_key, 3600, 1)
-        return True
+    # Execute all commands atomically
+    results = pipe.execute()
 
-    count = int(chat_count)
-    if count >= 64:  # Máximo 64 mensajes por hora por chat
-        return False
+    # Get the final counts (every 2nd index starting from 0)
+    minute_count = results[0]
+    hour_count = results[2]
+    chat_count = results[4]
 
-    redis_client.incr(chat_key)
-    return True
+    return minute_count <= 32 and hour_count <= 256 and chat_count <= 64
 
 
 def handle_msg(token: str, message: Dict) -> str:
