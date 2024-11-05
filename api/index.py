@@ -1124,10 +1124,13 @@ def build_claude_messages(
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
         reply_text = (
-            reply_msg.get("text")
-            or reply_msg.get("caption")
-            or reply_msg.get("poll", {}).get("question")
-            or ""
+            (reply_msg.get("text") + "\n" if reply_msg.get("text") else "")
+            + (reply_msg.get("caption") + "\n" if reply_msg.get("caption") else "")
+            + (
+                reply_msg.get("poll", {}).get("question") + "\n"
+                if reply_msg.get("poll", {}).get("question")
+                else ""
+            )
         )
         if reply_text:
             # Check if message is from the bot
@@ -1246,10 +1249,13 @@ def handle_msg(token: str, message: Dict) -> str:
     try:
         # Extract message data
         message_text = (
-            message.get("text")
-            or message.get("caption")
-            or message.get("poll", {}).get("question")
-            or ""
+            (message.get("text") + "\n" if message.get("text") else "")
+            + (message.get("caption") + "\n" if message.get("caption") else "")
+            + (
+                message.get("poll", {}).get("question") + "\n"
+                if message.get("poll", {}).get("question")
+                else ""
+            )
         )
         message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
@@ -1273,10 +1279,17 @@ def handle_msg(token: str, message: Dict) -> str:
             if "reply_to_message" in message:
                 reply_msg = message["reply_to_message"]
                 sanitized_message_text = (
-                    reply_msg.get("text")
-                    or reply_msg.get("caption")
-                    or reply_msg.get("poll", {}).get("question")
-                    or ""
+                    (reply_msg.get("text") + "\n" if reply_msg.get("text") else "")
+                    + (
+                        reply_msg.get("caption") + "\n"
+                        if reply_msg.get("caption")
+                        else ""
+                    )
+                    + (
+                        reply_msg.get("poll", {}).get("question") + "\n"
+                        if reply_msg.get("poll", {}).get("question")
+                        else ""
+                    )
                 )
 
         # Initialize commands
