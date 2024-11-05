@@ -1200,29 +1200,53 @@ def should_gordo_respond(message_text: str) -> bool:
     message_lower = message_text.lower()
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
     if any(word in message_lower for word in trigger_words):
-        # 5% chance to respond to mentions
-        return random.random() < 0.05
+        # 10% chance to respond to mentions
+        return random.random() < 0.1
     return False
 
 
 def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     """
-    Checkea si un chat_id superó el rate limit
+    Checkea si un chat_id o el bot global superó el rate limit
     Returns True si puede hacer requests, False si está limitado
     """
-    rate_key = f"rate_limit:{chat_id}"
-    current_count = redis_client.get(rate_key)
+    # Check global minute rate limit
+    minute_key = "rate_limit:global:minute"
+    minute_count = redis_client.get(minute_key)
 
-    if current_count is None:
-        # Primera request del periodo de 1 hora
-        redis_client.setex(rate_key, 3600, 1)
+    if minute_count is None:
+        redis_client.setex(minute_key, 60, 1)
+    else:
+        count = int(minute_count)
+        if count >= 32:  # Máximo 32 mensajes por minuto global
+            return False
+        redis_client.incr(minute_key)
+
+    # Check global hour rate limit
+    hour_key = "rate_limit:global:hour"
+    hour_count = redis_client.get(hour_key)
+
+    if hour_count is None:
+        redis_client.setex(hour_key, 3600, 1)
+    else:
+        count = int(hour_count)
+        if count >= 256:  # Máximo 256 mensajes por hora global
+            return False
+        redis_client.incr(hour_key)
+
+    # Check individual chat rate limit
+    chat_key = f"rate_limit:chat:{chat_id}"
+    chat_count = redis_client.get(chat_key)
+
+    if chat_count is None:
+        redis_client.setex(chat_key, 3600, 1)
         return True
 
-    count = int(current_count)
-    if count >= 64:  # Máximo 64 mensajes por hora
+    count = int(chat_count)
+    if count >= 64:  # Máximo 64 mensajes por hora por chat
         return False
 
-    redis_client.incr(rate_key)
+    redis_client.incr(chat_key)
     return True
 
 
@@ -1362,7 +1386,7 @@ def set_telegram_webhook(
         "url": f"{webhook_url}?token={encrypted_token}",
         "allowed_updates": '["message"]',
         "secret_token": secret_token,
-        "max_connections": 100,
+        "max_connections": 8,
     }
     request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
     try:
