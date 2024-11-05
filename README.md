@@ -9,12 +9,12 @@ mandate aca capo [@respondedorbot](https://t.me/respondedorbot)
 ## que onda, que sabes hacer?
 
 - te contesto cualquier gilada que me preguntes con /ask, /pregunta, /che o /gordo
-- te tiro la posta de los precios crypto con /prices
-- te digo como esta el dolar blue y toda la movida con /dolar  
-- te calculo si conviene el curro de la tarjeta con /devo
+- te tiro la posta de los precios crypto con /prices (o /precio, /precios, /presio, /presios)
+- te digo como esta el dolar blue y toda la movida con /dolar o /dollar
+- te calculo el arbitraje entre tarjeta y crypto con /devo
 - te tiro el precio justo de btc segun powerlaw y rainbow con /powerlaw y /rainbow
 - te elijo random entre pizza o hamburguesa con /random
-- te convierto texto a comando telegram con /comando
+- te convierto texto a comando telegram con /comando o /command
 - te paso numeros entre bases con /convertbase
 - te tiro la hora unix con /time
 - y bocha de giladas mas, mandate /help y te cuento todo
