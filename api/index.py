@@ -1104,8 +1104,13 @@ def build_claude_messages(
         messages.append(
             {
                 "role": msg["role"],
-                "content": msg["text"],
-                "cache_control": {"type": "ephemeral"},
+                "content": [
+                    {
+                        "type": "text",
+                        "text": msg["text"],
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
             }
         )
 
@@ -1139,15 +1144,20 @@ def build_claude_messages(
             truncated_reply = truncate_text(formatted_reply)
 
             # Check if reply exists in history
-            for msg in chat_history:
-                if msg["text"] == truncated_reply:
-                    chat_history.remove(msg)
+            for msg in messages:
+                if msg["content"][0]["text"] == truncated_reply:
+                    messages.remove(msg)
 
             messages.append(
                 {
                     "role": reply_role,
-                    "content": truncated_reply,
-                    "cache_control": {"type": "ephemeral"},
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": truncated_reply,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
                 }
             )
 
