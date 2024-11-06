@@ -1202,14 +1202,37 @@ def build_claude_messages(
     return messages[-4:]
 
 
-def should_gordo_respond(message_text: str) -> bool:
-    """Decide if the bot should respond to a gordo mention"""
+def should_gordo_respond(message_text: str, message: dict) -> bool:
+    """Decide if the bot should respond to a message"""
+    # Get message context
     message_lower = message_text.lower()
+    chat_type = message["chat"]["type"]
+    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+
+    # Check command
+    split_message = message_text.strip().split(" ", 1)
+    command = split_message[0].lower()
+    commands = initialize_commands()
+
+    # Response conditions
+    is_command = command in commands
+    is_private = chat_type == "private"
+    is_mention = bot_name in message_text
+    is_reply = "reply_to_message" in message and message["reply_to_message"]["from"][
+        "username"
+    ] == environ.get("TELEGRAM_USERNAME")
+
+    # Check gordo keywords with 10% chance
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
-    if any(word in message_lower for word in trigger_words):
-        # 10% chance to respond to mentions
-        return random.random() < 0.1
-    return False
+    is_trigger = (
+        any(word in message_lower for word in trigger_words) and random.random() < 0.1
+    )
+
+    return (
+        is_command
+        or not command.startswith("/")
+        and (is_trigger or is_private or is_mention or is_reply)
+    )
 
 
 def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
@@ -1253,7 +1276,6 @@ def handle_msg(token: str, message: Dict) -> str:
         )
         message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
-        chat_type = str(message["chat"]["type"])
 
         # Initialize Redis
         redis_client = config_redis()
@@ -1290,32 +1312,10 @@ def handle_msg(token: str, message: Dict) -> str:
         commands = initialize_commands()
 
         # Check if we should respond
-        should_respond = (
-            command in commands
-            or not command.startswith("/")
-            and (
-                should_gordo_respond(message_text)
-                or chat_type == "private"
-                or bot_name in message_text
-                or (
-                    "reply_to_message" in message
-                    and message["reply_to_message"]["from"]["username"]
-                    == environ.get("TELEGRAM_USERNAME")
-                )
-            )
-        )
+        should_respond = should_gordo_respond(message_text, message)
 
         if should_respond:
-            # Check rate limit before saving or processing
-            if not check_rate_limit(chat_id, redis_client):
-                # Use gen_random instead of fixed message for rate limit
-                send_typing(token, chat_id)
-                time.sleep(random.uniform(0, 1))
-                response_msg = gen_random(message["from"]["first_name"])
-                send_msg(token, chat_id, response_msg, message_id)
-                return "rate limited"
-
-            # Save message to Redis only if not rate limited
+            # Save message to Redis
             if message_text:
                 username = message["from"].get("username", "")
                 first_name = message["from"]["first_name"]
@@ -1334,6 +1334,14 @@ def handle_msg(token: str, message: Dict) -> str:
             if command in commands:
                 handler_func, uses_claude = commands[command]
                 if uses_claude:
+                    # Check rate limit before using Claude
+                    if not check_rate_limit(chat_id, redis_client):
+                        send_typing(token, chat_id)
+                        time.sleep(random.uniform(0, 1))
+                        response_msg = gen_random(message["from"]["first_name"])
+                        send_msg(token, chat_id, response_msg, message_id)
+                        return "rate limited"
+
                     send_typing(token, chat_id)
                     time.sleep(random.uniform(0, 1))
                     messages = build_claude_messages(
@@ -1344,6 +1352,14 @@ def handle_msg(token: str, message: Dict) -> str:
                     response_msg = handler_func(sanitized_message_text)
             else:
                 # Handle as conversation with Claude
+                # Check rate limit before using Claude
+                if not check_rate_limit(chat_id, redis_client):
+                    send_typing(token, chat_id)
+                    time.sleep(random.uniform(0, 1))
+                    response_msg = gen_random(message["from"]["first_name"])
+                    send_msg(token, chat_id, response_msg, message_id)
+                    return "rate limited"
+
                 send_typing(token, chat_id)
                 time.sleep(random.uniform(0, 1))
                 messages = build_claude_messages(message, chat_history, message_text)
