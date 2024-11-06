@@ -1209,15 +1209,14 @@ def should_gordo_respond(message_text: str, message: dict) -> bool:
     chat_type = message["chat"]["type"]
     bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
-    # Check command
-    split_message = message_text.strip().split(" ", 1)
-    command = split_message[0].lower()
+    # Use parse_command to get command
+    command, _ = parse_command(message_text, bot_name)
     commands = initialize_commands()
 
     # Response conditions
     is_command = command in commands
     is_private = chat_type == "private"
-    is_mention = bot_name in message_text
+    is_mention = bot_name in message_lower
     is_reply = "reply_to_message" in message and message["reply_to_message"]["from"][
         "username"
     ] == environ.get("TELEGRAM_USERNAME")
