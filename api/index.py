@@ -1202,16 +1202,17 @@ def build_claude_messages(
     return messages[-4:]
 
 
-def should_gordo_respond(message_text: str, message: dict) -> bool:
+def should_gordo_respond(
+    commands: Dict[str, Tuple[Callable, bool]],
+    command: str,
+    message_text: str,
+    message: dict,
+) -> bool:
     """Decide if the bot should respond to a message"""
     # Get message context
     message_lower = message_text.lower()
     chat_type = message["chat"]["type"]
     bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-
-    # Use parse_command to get command
-    command, _ = parse_command(message_text, bot_name)
-    commands = initialize_commands()
 
     # Response conditions
     is_command = command in commands
@@ -1299,12 +1300,12 @@ def handle_msg(token: str, message: Dict) -> str:
         commands = initialize_commands()
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
-        # Check if we should respond
-        if not should_gordo_respond(message_text, message):
-            return "ok"
-
         # Get command and message text
         command, sanitized_message_text = parse_command(message_text, bot_name)
+
+        # Check if we should respond
+        if not should_gordo_respond(commands, command, sanitized_message_text, message):
+            return "ok"
 
         # Handle /comando and /command with reply special case
         if (
