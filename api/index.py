@@ -1262,120 +1262,122 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     return hour_count <= 256 and chat_count <= 16
 
 
+def extract_message_text(message: Dict) -> str:
+    """Extract text content from different message types"""
+    return (
+        (message.get("text", "") or "")
+        + (message.get("caption", "") or "")
+        + (message.get("poll", {}).get("question", "") or "")
+    ).strip()
+
+
+def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
+    """Parse command and message text from input"""
+    split_message = message_text.strip().split(" ", 1)
+    command = split_message[0].lower().replace(bot_name, "")
+    message_text = split_message[1] if len(split_message) > 1 else ""
+
+    return command, message_text
+
+
+def format_user_message(message: Dict, message_text: str) -> str:
+    """Format message with user info"""
+    username = message["from"].get("username", "")
+    first_name = message["from"]["first_name"]
+    formatted_user = f"{first_name}" + (f" ({username})" if username else "")
+    return f"{formatted_user}: {message_text}"
+
+
 def handle_msg(token: str, message: Dict) -> str:
     try:
-        # Extract message data
-        message_text = (
-            (message.get("text") + "\n" if message.get("text") else "")
-            + (message.get("caption") + "\n" if message.get("caption") else "")
-            + (
-                message.get("poll", {}).get("question") + "\n"
-                if message.get("poll", {}).get("question")
-                else ""
-            )
-        )
+        # Extract basic message info
+        message_text = extract_message_text(message)
         message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
 
-        # Initialize Redis
+        # Initialize Redis and commands
         redis_client = config_redis()
-
-        # Parse command and message
-        split_message = message_text.strip().split(" ", 1)
-        command = split_message[0].lower()
-        sanitized_message_text = split_message[1] if len(split_message) > 1 else ""
-
-        # Handle @bot_name mentions
-        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-        if bot_name in command:
-            command = command.replace(bot_name, "")
-
-        # Special case for /comando with reply
-        if command == "/comando" and not sanitized_message_text:
-            if "reply_to_message" in message:
-                reply_msg = message["reply_to_message"]
-                sanitized_message_text = (
-                    (reply_msg.get("text") + "\n" if reply_msg.get("text") else "")
-                    + (
-                        reply_msg.get("caption") + "\n"
-                        if reply_msg.get("caption")
-                        else ""
-                    )
-                    + (
-                        reply_msg.get("poll", {}).get("question") + "\n"
-                        if reply_msg.get("poll", {}).get("question")
-                        else ""
-                    )
-                )
-
-        # Initialize commands
         commands = initialize_commands()
+        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
         # Check if we should respond
-        should_respond = should_gordo_respond(message_text, message)
+        if not should_gordo_respond(message_text, message):
+            return "ok"
 
-        if should_respond:
-            # Save message to Redis
-            if message_text:
-                username = message["from"].get("username", "")
-                first_name = message["from"]["first_name"]
-                formatted_user = f"{first_name}" + (
-                    f" ({username})" if username else ""
+        # Get command and message text
+        command, sanitized_message_text = parse_command(message_text, bot_name)
+
+        # Handle /comando and /command with reply special case
+        if (
+            command in ["/comando", "/command"]
+            and not sanitized_message_text
+            and "reply_to_message" in message
+        ):
+            sanitized_message_text = extract_message_text(message["reply_to_message"])
+
+        # Process command or conversation
+        if command in commands:
+            handler_func, uses_claude = commands[command]
+
+            if uses_claude:
+                if not check_rate_limit(chat_id, redis_client):
+                    response_msg = handle_rate_limit(token, chat_id, message)
+                else:
+                    chat_history = get_chat_history(chat_id, redis_client)
+                    messages = build_claude_messages(
+                        message, chat_history, sanitized_message_text
+                    )
+                    response_msg = handle_claude_response(
+                        token, chat_id, handler_func, messages
+                    )
+            else:
+                response_msg = handler_func(sanitized_message_text)
+        else:
+            if not check_rate_limit(chat_id, redis_client):
+                response_msg = handle_rate_limit(token, chat_id, message)
+            else:
+                chat_history = get_chat_history(chat_id, redis_client)
+                messages = build_claude_messages(message, chat_history, message_text)
+                response_msg = handle_claude_response(
+                    token, chat_id, ask_claude, messages
                 )
-                formatted_message = f"{formatted_user}: {message_text}"
+
+        # Save and send response
+        if response_msg:
+            # Save user message to history
+            if message_text:
+                formatted_message = format_user_message(message, message_text)
                 save_message_to_redis(
                     chat_id, message_id, formatted_message, redis_client
                 )
 
-            # Get chat history
-            chat_history = get_chat_history(chat_id, redis_client)
-
-            # Handle command or conversation
-            if command in commands:
-                handler_func, uses_claude = commands[command]
-                if uses_claude:
-                    # Check rate limit before using Claude
-                    if not check_rate_limit(chat_id, redis_client):
-                        send_typing(token, chat_id)
-                        time.sleep(random.uniform(0, 1))
-                        response_msg = gen_random(message["from"]["first_name"])
-                        send_msg(token, chat_id, response_msg, message_id)
-                        return "rate limited"
-
-                    send_typing(token, chat_id)
-                    time.sleep(random.uniform(0, 1))
-                    messages = build_claude_messages(
-                        message, chat_history, sanitized_message_text
-                    )
-                    response_msg = handler_func(messages)
-                else:
-                    response_msg = handler_func(sanitized_message_text)
-            else:
-                # Handle as conversation with Claude
-                # Check rate limit before using Claude
-                if not check_rate_limit(chat_id, redis_client):
-                    send_typing(token, chat_id)
-                    time.sleep(random.uniform(0, 1))
-                    response_msg = gen_random(message["from"]["first_name"])
-                    send_msg(token, chat_id, response_msg, message_id)
-                    return "rate limited"
-
-                send_typing(token, chat_id)
-                time.sleep(random.uniform(0, 1))
-                messages = build_claude_messages(message, chat_history, message_text)
-                response_msg = ask_claude(messages)
-
-            # Save and send response
-            if response_msg:
-                save_message_to_redis(
-                    chat_id, f"bot_{message_id}", response_msg, redis_client
-                )
-                send_msg(token, chat_id, response_msg, message_id)
+            # Save bot response
+            save_message_to_redis(
+                chat_id, f"bot_{message_id}", response_msg, redis_client
+            )
+            send_msg(token, chat_id, response_msg, message_id)
 
         return "ok"
-    except BaseException as error:
-        print(f"Error from handle_msg: {error}")
-        return "Error from handle_msg", 500
+
+    except Exception as e:
+        print(f"Error from handle_msg: {str(e)}")
+        return "Error from handle_msg"
+
+
+def handle_rate_limit(token: str, chat_id: str, message: Dict) -> str:
+    """Handle rate limited responses"""
+    send_typing(token, chat_id)
+    time.sleep(random.uniform(0, 1))
+    return gen_random(message["from"]["first_name"])
+
+
+def handle_claude_response(
+    token: str, chat_id: str, handler_func: Callable, messages: List[Dict]
+) -> str:
+    """Handle Claude API responses"""
+    send_typing(token, chat_id)
+    time.sleep(random.uniform(0, 1))
+    return handler_func(messages)
 
 
 def decrypt_token(key: str, encrypted_token: str) -> str:
