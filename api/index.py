@@ -1219,30 +1219,24 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     """
     pipe = redis_client.pipeline()
 
-    # Check global minute rate limit (32 requests/minute)
-    minute_key = "rate_limit:global:minute"
-    pipe.incr(minute_key)  # Increment (creates key with 1 if not exists)
-    pipe.expire(minute_key, 60, nx=True)  # Set expiry only if not exists
-
-    # Check global hour rate limit (256 requests/hour)
+    # Check global rate limit (256 requests/hour)
     hour_key = "rate_limit:global:hour"
     pipe.incr(hour_key)
     pipe.expire(hour_key, 3600, nx=True)
 
-    # Check individual chat rate limit (64 requests/hour)
+    # Check individual chat rate limit (16 requests/10 minutes)
     chat_key = f"rate_limit:chat:{chat_id}"
     pipe.incr(chat_key)
-    pipe.expire(chat_key, 3600, nx=True)
+    pipe.expire(chat_key, 600, nx=True)
 
     # Execute all commands atomically
     results = pipe.execute()
 
     # Get the final counts (every 2nd index starting from 0)
-    minute_count = results[0]
-    hour_count = results[2]
-    chat_count = results[4]
+    hour_count = results[0]
+    chat_count = results[2]
 
-    return minute_count <= 32 and hour_count <= 256 and chat_count <= 64
+    return hour_count <= 256 and chat_count <= 16
 
 
 def handle_msg(token: str, message: Dict) -> str:
