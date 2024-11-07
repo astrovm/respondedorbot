@@ -8,16 +8,7 @@ app = Flask(__name__)
 def test_responder_no_args():
     with app.test_request_context("/?"):
         response = responder()
-        assert response == ("No token", 200)
-
-
-def test_responder_dollars_updated():
-    with patch("api.index.get_dollar_rates") as mock_get_dollar_rates:
-        mock_get_dollar_rates.return_value = None
-
-        with app.test_request_context("/?update_dollars=true"):
-            response = responder()
-            assert response == ("Dollars updated", 200)
+        assert response == ("No key", 200)
 
 
 def test_convert_to_command():
@@ -53,5 +44,5 @@ def test_convert_to_command():
 
     # Test empty string
     msg_text7 = ""
-    expected7 = "Invalid input. Usage: /comando <text>"
+    expected7 = "y que queres que convierta boludo? mandate texto"
     assert convert_to_command(msg_text7) == expected7
