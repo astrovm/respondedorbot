@@ -24,8 +24,7 @@ mandate aca capo [@respondedorbot](https://t.me/respondedorbot)
 necesitas estas variables de entorno:
 
 ```
-TELEGRAM_TOKEN_HASH: el hash sha256 del token descifrado, para checkear que sea posta
-TELEGRAM_TOKEN_KEY: la key para descifrar el token fernet encriptado
+TELEGRAM_TOKEN: el token del bot de telegram
 TELEGRAM_USERNAME: mi nombre de usuario para saber cuando me hablan
 ADMIN_CHAT_ID: el chat id del admin para mandarle reports
 COINMARKETCAP_KEY: key de la api de coinmarketcap para los precios crypto
@@ -36,13 +35,18 @@ CURRENT_FUNCTION_URL: la url donde estoy corriendo
 MAIN_FUNCTION_URL: la url principal donde deberia estar
 FRIENDLY_INSTANCE_NAME: un nombre piola para identificarme en los reports
 ANTHROPIC_API_KEY: la key de claude para que te pueda bardear como corresponde
+GORDO_KEY: key para autenticar los requests al webhook
 ```
 
 ## como seteas el webhook?
 
 mandate esta url master:
 
-`{function_url}/?update_webhook=true&token={encrypted_token}`
+`{function_url}/?update_webhook=true&key={gordo_key}`
+
+o si queres checkear que onda:
+
+`{function_url}/?check_webhook=true&key={gordo_key}`
 
 ## licencia
 
