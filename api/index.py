@@ -641,10 +641,8 @@ def convert_to_command(msg_text: str) -> str:
     if not msg_text:
         return "y que queres que convierta boludo? mandate texto"
 
-    # Add spaces surrounding each emoji and convert it to its textual representation
-    emoji_text = emoji.replace_emoji(
-        msg_text, replace=lambda chars, data_dict: f" {data_dict['es']} "
-    )
+    # Convert emojis to their textual representation in Spanish with underscore delimiters
+    emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
 
     # Convert to uppercase and replace Ñ
     replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
