@@ -1284,9 +1284,7 @@ def should_gordo_respond(
     is_command = command in commands
     is_private = chat_type == "private"
     is_mention = bot_name in message_lower
-    is_reply = "reply_to_message" in message and message["reply_to_message"]["from"][
-        "username"
-    ] == environ.get("TELEGRAM_USERNAME")
+    is_reply = message.get("reply_to_message", {}).get("from", {}).get("username", "") == environ.get("TELEGRAM_USERNAME")
 
     # Check gordo keywords with 10% chance
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
