@@ -3,12 +3,11 @@ import json
 import random
 import re
 import time
-import traceback
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from math import log
 from os import environ
-from typing import Dict, List, Tuple, Callable, Union
+from typing import Dict, List, Tuple, Callable, Union, Optional
 import redis
 import requests
 from cryptography.fernet import Fernet
@@ -19,13 +18,26 @@ from anthropic import Anthropic
 
 
 def config_redis(host=None, port=None, password=None):
-    host = host or environ.get("REDIS_HOST", "localhost")
-    port = port or environ.get("REDIS_PORT", 6379)
-    password = password or environ.get("REDIS_PASSWORD", None)
-    redis_client = redis.Redis(
-        host=host, port=port, password=password, decode_responses=True
-    )
-    return redis_client
+    try:
+        host = host or environ.get("REDIS_HOST", "localhost")
+        port = port or environ.get("REDIS_PORT", 6379)
+        password = password or environ.get("REDIS_PASSWORD", None)
+        redis_client = redis.Redis(
+            host=host, port=port, password=password, decode_responses=True
+        )
+        # Test connection
+        redis_client.ping()
+        return redis_client
+    except Exception as e:
+        error_context = {
+            "host": host,
+            "port": port,
+            "password": "***" if password else None,
+        }
+        error_msg = f"Redis connection error: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
+        raise  # Re-raise to prevent silent failure
 
 
 # request new data and save it in redis
@@ -192,8 +204,15 @@ def cached_requests(
                 return cached_data
 
     except Exception as e:
-        print(f"[CACHE] Error in cached_requests: {str(e)}")
-        traceback.print_exc()
+        error_context = {
+            "api_url": api_url,
+            "parameters": parameters,
+            "headers": headers,
+            "expiration_time": expiration_time,
+        }
+        error_msg = f"Error in cached_requests: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
         return None
 
 
@@ -715,7 +734,8 @@ def send_typing(token: str, chat_id: str) -> None:
     requests.get(url, params=parameters, timeout=5)
 
 
-def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
+def send_msg(chat_id: str, msg: str, msg_id: str = "") -> None:
+    token = environ.get("TELEGRAM_TOKEN")
     parameters = {"chat_id": chat_id, "text": msg}
     if msg_id != "":
         parameters["reply_to_message_id"] = msg_id
@@ -723,11 +743,38 @@ def send_msg(token: str, chat_id: str, msg: str, msg_id: str = "") -> None:
     requests.get(url, params=parameters, timeout=5)
 
 
-def admin_report(token: str, message: str) -> None:
-    instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
-    formatted_message = f"Admin report from {instance_name}: {message}"
+def admin_report(
+    message: str,
+    error: Optional[Exception] = None,
+    extra_context: Optional[Dict] = None,
+) -> None:
+    """Enhanced admin reporting with optional error details and extra context"""
     admin_chat_id = environ.get("ADMIN_CHAT_ID")
-    send_msg(token, admin_chat_id, formatted_message)
+    instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
+
+    # Basic error message
+    formatted_message = f"Admin report from {instance_name}: {message}"
+
+    # Add extra context if provided
+    if extra_context:
+        context_details = "\n\nAdditional Context:"
+        for key, value in extra_context.items():
+            context_details += f"\n{key}: {value}"
+        formatted_message += context_details
+
+    # Add error details if provided
+    if error:
+        error_details = f"\n\nError Type: {type(error).__name__}"
+        error_details += f"\nError Message: {str(error)}"
+
+        # Add traceback for more detailed debugging
+        import traceback
+
+        error_details += f"\n\nTraceback:\n{traceback.format_exc()}"
+
+        formatted_message += error_details
+
+    send_msg(admin_chat_id, formatted_message)
 
 
 def get_weather() -> dict:
@@ -1012,8 +1059,13 @@ def ask_claude(messages: List[Dict]) -> str:
         return message.content[0].text
 
     except Exception as e:
-        print(f"Error in ask_claude: {str(e)}")
-        # Get first name from last message in messages list
+        error_context = {
+            "messages_count": len(messages),
+            "messages_preview": [msg.get("content", "")[:100] for msg in messages],
+        }
+        error_msg = f"Error in ask_claude: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
         first_name = ""
         if messages and len(messages) > 0:
             last_message = messages[-1]["content"]
@@ -1064,40 +1116,63 @@ def truncate_text(text: str, max_length: int = 256) -> str:
 def save_message_to_redis(
     chat_id: str, message_id: str, text: str, redis_client: redis.Redis
 ) -> None:
-    """Save a message to Redis chat history"""
-    chat_history_key = f"chat_history:{chat_id}"
-    history_entry = json.dumps(
-        {"id": message_id, "text": truncate_text(text), "timestamp": int(time.time())}
-    )
+    try:
+        chat_history_key = f"chat_history:{chat_id}"
+        history_entry = json.dumps(
+            {
+                "id": message_id,
+                "text": truncate_text(text),
+                "timestamp": int(time.time()),
+            }
+        )
 
-    pipe = redis_client.pipeline()
-    pipe.lpush(chat_history_key, history_entry)  # Add new message
-    pipe.ltrim(chat_history_key, 0, 19)  # Keep only last 20 messages
-    pipe.execute()
+        pipe = redis_client.pipeline()
+        pipe.lpush(chat_history_key, history_entry)  # Add new message
+        pipe.ltrim(chat_history_key, 0, 19)  # Keep only last 20 messages
+        pipe.execute()
+    except Exception as e:
+        error_context = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text_length": len(text),
+        }
+        error_msg = f"Redis save message error: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
 
 
 def get_chat_history(
     chat_id: str, redis_client: redis.Redis, max_messages: int = 5
 ) -> List[Dict]:
-    """Get recent chat history for a specific chat"""
-    chat_history_key = f"chat_history:{chat_id}"
-    history = redis_client.lrange(chat_history_key, 0, max_messages - 1)
+    try:
+        chat_history_key = f"chat_history:{chat_id}"
+        history = redis_client.lrange(chat_history_key, 0, max_messages - 1)
 
-    if not history:
+        if not history:
+            return []
+
+        messages = []
+        for entry in history:
+            try:
+                msg = json.loads(entry)
+                # Add role based on if it's from the bot or user
+                is_bot = msg["id"].startswith("bot_")
+                msg["role"] = "assistant" if is_bot else "user"
+                messages.append(msg)
+            except json.JSONDecodeError as decode_error:
+                error_context = {"chat_id": chat_id, "entry": entry}
+                error_msg = f"JSON decode error in chat history: {str(decode_error)}"
+                print(error_msg)
+                admin_report(error_msg, decode_error, error_context)
+                continue
+
+        return reversed(messages)
+    except Exception as e:
+        error_context = {"chat_id": chat_id, "max_messages": max_messages}
+        error_msg = f"Error retrieving chat history: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
         return []
-
-    messages = []
-    for entry in history:
-        try:
-            msg = json.loads(entry)
-            # Add role based on if it's from the bot or user
-            is_bot = msg["id"].startswith("bot_")
-            msg["role"] = "assistant" if is_bot else "user"
-            messages.append(msg)
-        except json.JSONDecodeError:
-            continue
-
-    return reversed(messages)
 
 
 def build_claude_messages(
@@ -1123,15 +1198,8 @@ def build_claude_messages(
     # Add reply message to history if present
     if "reply_to_message" in message:
         reply_msg = message["reply_to_message"]
-        reply_text = (
-            (reply_msg.get("text") + "\n" if reply_msg.get("text") else "")
-            + (reply_msg.get("caption") + "\n" if reply_msg.get("caption") else "")
-            + (
-                reply_msg.get("poll", {}).get("question") + "\n"
-                if reply_msg.get("poll", {}).get("question")
-                else ""
-            )
-        )
+        reply_text = extract_message_text(reply_msg)
+
         if reply_text:
             # Check if message is from the bot
             is_bot = reply_msg["from"]["username"] == environ.get("TELEGRAM_USERNAME")
@@ -1288,7 +1356,7 @@ def format_user_message(message: Dict, message_text: str) -> str:
     return f"{formatted_user}: {message_text}"
 
 
-def handle_msg(token: str, message: Dict) -> str:
+def handle_msg(message: Dict) -> str:
     try:
         # Extract basic message info
         message_text = extract_message_text(message)
@@ -1321,26 +1389,24 @@ def handle_msg(token: str, message: Dict) -> str:
 
             if uses_claude:
                 if not check_rate_limit(chat_id, redis_client):
-                    response_msg = handle_rate_limit(token, chat_id, message)
+                    response_msg = handle_rate_limit(chat_id, message)
                 else:
                     chat_history = get_chat_history(chat_id, redis_client)
                     messages = build_claude_messages(
                         message, chat_history, sanitized_message_text
                     )
                     response_msg = handle_claude_response(
-                        token, chat_id, handler_func, messages
+                        chat_id, handler_func, messages
                     )
             else:
                 response_msg = handler_func(sanitized_message_text)
         else:
             if not check_rate_limit(chat_id, redis_client):
-                response_msg = handle_rate_limit(token, chat_id, message)
+                response_msg = handle_rate_limit(chat_id, message)
             else:
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_claude_messages(message, chat_history, message_text)
-                response_msg = handle_claude_response(
-                    token, chat_id, ask_claude, messages
-                )
+                response_msg = handle_claude_response(chat_id, ask_claude, messages)
 
         # Save and send response
         if response_msg:
@@ -1355,38 +1421,43 @@ def handle_msg(token: str, message: Dict) -> str:
             save_message_to_redis(
                 chat_id, f"bot_{message_id}", response_msg, redis_client
             )
-            send_msg(token, chat_id, response_msg, message_id)
+            send_msg(chat_id, response_msg, message_id)
 
         return "ok"
 
     except Exception as e:
-        print(f"Error from handle_msg: {str(e)}")
-        return "Error from handle_msg"
+        error_context = {
+            "message_id": message.get("message_id"),
+            "chat_id": message.get("chat", {}).get("id"),
+            "user": message.get("from", {}).get("username", "Unknown"),
+        }
+
+        error_msg = f"Message handling error: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
+        return "Error processing message"
 
 
-def handle_rate_limit(token: str, chat_id: str, message: Dict) -> str:
+def handle_rate_limit(chat_id: str, message: Dict) -> str:
     """Handle rate limited responses"""
+    token = environ.get("TELEGRAM_TOKEN")
     send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
     return gen_random(message["from"]["first_name"])
 
 
 def handle_claude_response(
-    token: str, chat_id: str, handler_func: Callable, messages: List[Dict]
+    chat_id: str, handler_func: Callable, messages: List[Dict]
 ) -> str:
     """Handle Claude API responses"""
+    token = environ.get("TELEGRAM_TOKEN")
     send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
     return handler_func(messages)
 
 
-def decrypt_token(key: str, encrypted_token: str) -> str:
-    fernet = Fernet(key.encode())
-    return fernet.decrypt(encrypted_token.encode()).decode()
-
-
-def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict]]:
-    request_url = f"https://api.telegram.org/bot{decrypted_token}/getWebhookInfo"
+def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
+    request_url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
     try:
         telegram_response = requests.get(request_url, timeout=5)
         telegram_response.raise_for_status()
@@ -1395,17 +1466,17 @@ def get_telegram_webhook_info(decrypted_token: str) -> Dict[str, Union[str, dict
     return telegram_response.json()["result"]
 
 
-def set_telegram_webhook(
-    decrypted_token: str, webhook_url: str, encrypted_token: str
-) -> bool:
+def set_telegram_webhook(webhook_url: str) -> bool:
+    gordo_key = environ.get("GORDO_KEY")
+    token = environ.get("TELEGRAM_TOKEN")
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
-        "url": f"{webhook_url}?token={encrypted_token}",
+        "url": f"{webhook_url}?key={gordo_key}",
         "allowed_updates": '["message"]',
         "secret_token": secret_token,
         "max_connections": 8,
     }
-    request_url = f"https://api.telegram.org/bot{decrypted_token}/setWebhook"
+    request_url = f"https://api.telegram.org/bot{token}/setWebhook"
     try:
         telegram_response = requests.get(request_url, params=parameters, timeout=5)
         telegram_response.raise_for_status()
@@ -1416,18 +1487,17 @@ def set_telegram_webhook(
     return bool(redis_response)
 
 
-def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
-    def set_main_webhook() -> bool:
-        return set_telegram_webhook(decrypted_token, main_function_url, encrypted_token)
-
-    webhook_info = get_telegram_webhook_info(decrypted_token)
+def verify_webhook() -> bool:
+    token = environ.get("TELEGRAM_TOKEN")
+    gordo_key = environ.get("GORDO_KEY")
+    webhook_info = get_telegram_webhook_info(token)
     if "error" in webhook_info:
         return False
 
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
-    main_webhook_url = f"{main_function_url}?token={encrypted_token}"
-    current_webhook_url = f"{current_function_url}?token={encrypted_token}"
+    main_webhook_url = f"{main_function_url}?key={gordo_key}"
+    current_webhook_url = f"{current_function_url}?key={gordo_key}"
 
     if main_function_url != current_function_url:
         try:
@@ -1436,17 +1506,15 @@ def verify_webhook(decrypted_token: str, encrypted_token: str) -> bool:
         except RequestException as request_error:
             if webhook_info.get("url") != current_webhook_url:
                 error_message = f"Main webhook failed with error: {str(request_error)}"
-                admin_report(decrypted_token, error_message)
-                return set_telegram_webhook(
-                    decrypted_token, current_function_url, encrypted_token
-                )
+                admin_report(error_message)
+                return set_telegram_webhook(current_function_url)
             return True
     elif webhook_info.get("url") != main_webhook_url:
-        set_main_webhook_success = set_main_webhook()
+        set_main_webhook_success = set_telegram_webhook(main_function_url)
         if set_main_webhook_success:
-            admin_report(decrypted_token, "Main webhook is up again")
+            admin_report("Main webhook is up again")
         else:
-            admin_report(decrypted_token, "Failed to set main webhook")
+            admin_report("Failed to set main webhook")
         return set_main_webhook_success
 
     return True
@@ -1459,43 +1527,59 @@ def is_secret_token_valid(request: Request) -> bool:
     return redis_secret_token == secret_token
 
 
-def process_request_parameters(
-    request: Request, decrypted_token: str, encrypted_token: str
-) -> Tuple[str, int]:
+def process_request_parameters(request: Request) -> Tuple[str, int]:
     try:
+        # Handle webhook checks
         check_webhook = request.args.get("check_webhook") == "true"
-        update_webhook = request.args.get("update_webhook") == "true"
-
         if check_webhook:
+            webhook_verified = verify_webhook()
             return (
                 ("Webhook checked", 200)
-                if verify_webhook(decrypted_token, encrypted_token)
+                if webhook_verified
                 else ("Webhook check error", 400)
             )
 
+        # Handle webhook updates
+        update_webhook = request.args.get("update_webhook") == "true"
         if update_webhook:
             function_url = environ.get("CURRENT_FUNCTION_URL")
             return (
                 ("Webhook updated", 200)
-                if set_telegram_webhook(decrypted_token, function_url, encrypted_token)
+                if set_telegram_webhook(function_url)
                 else ("Webhook update error", 400)
             )
 
+        # Handle dollar rates update
+        update_dollars = request.args.get("update_dollars") == "true"
+        if update_dollars:
+            get_dollar_rates("")
+            return "Dollars updated", 200
+
+        # Validate secret token
         if not is_secret_token_valid(request):
-            admin_report(decrypted_token, "Wrong secret token")
+            admin_report("Wrong secret token")
             return "Wrong secret token", 400
 
+        # Process message
         request_json = request.get_json(silent=True)
         message = request_json.get("message")
-
         if not message:
             return "No message", 200
 
-        handle_msg(decrypted_token, message)
+        handle_msg(message)
         return "Ok", 200
-    except BaseException as error:
-        print(f"Error from process_request_parameters: {error}")
-        return "Error from process_request_parameters", 500
+
+    except Exception as e:
+        error_context = {
+            "request_method": request.method,
+            "request_args": dict(request.args),
+            "request_path": request.path,
+        }
+
+        error_msg = f"Request processing error: {str(e)}"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
+        return "Error processing request", 500
 
 
 app = Flask(__name__)
@@ -1504,28 +1588,24 @@ app = Flask(__name__)
 @app.route("/", methods=["GET", "POST"])
 def responder() -> Tuple[str, int]:
     try:
-        if request.args.get("update_dollars") == "true":
-            get_dollar_rates("")
-            return "Dollars updated", 200
+        gordo_key = request.args.get("key")
+        if not gordo_key:
+            return "No key", 200
 
-        token = request.args.get("token")
-        if not token:
-            return "No token", 200
+        if gordo_key != environ.get("GORDO_KEY"):
+            admin_report("Wrong key attempt")
+            return "Wrong key", 400
 
-        encrypted_token = str(token)
-        key = environ.get("TELEGRAM_TOKEN_KEY")
-        decrypted_token = decrypt_token(key, encrypted_token)
-        token_hash = hashlib.sha256(decrypted_token.encode()).hexdigest()
-
-        if token_hash != environ.get("TELEGRAM_TOKEN_HASH"):
-            return "Wrong token", 400
-
-        response_message, status_code = process_request_parameters(
-            request, decrypted_token, encrypted_token
-        )
+        response_message, status_code = process_request_parameters(request)
         return response_message, status_code
-    except BaseException as error:
-        traceback_info = traceback.format_exc()
-        print(f"Error from responder: {error}")
-        print(traceback_info)
-        return "Error from responder", 500
+    except Exception as e:
+        error_context = {
+            "request_method": request.method,
+            "request_args": dict(request.args),
+            "request_path": request.path,
+        }
+
+        error_msg = "Critical error in responder"
+        print(error_msg)
+        admin_report(error_msg, e, error_context)
+        return "Critical error", 500
