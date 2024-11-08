@@ -1106,8 +1106,18 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
 
 def truncate_text(text: str, max_length: int = 256) -> str:
     """Truncate text to max_length and add ellipsis if needed"""
+    if text is None:
+        return ""
+
+    if max_length <= 0:
+        return ""
+
+    if max_length <= 3:
+        return "." * max_length
+
     if len(text) <= max_length:
         return text
+
     return text[: max_length - 3] + "..."
 
 
@@ -1308,42 +1318,59 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     Checkea si un chat_id o el bot global superó el rate limit
     Returns True si puede hacer requests, False si está limitado
     """
-    pipe = redis_client.pipeline()
+    try:
+        pipe = redis_client.pipeline()
 
-    # Check global rate limit (256 requests/hour)
-    hour_key = "rate_limit:global:hour"
-    pipe.incr(hour_key)
-    pipe.expire(hour_key, 3600, nx=True)
+        # Check global rate limit (256 requests/hour)
+        hour_key = "rate_limit:global:hour"
+        pipe.incr(hour_key)
+        pipe.expire(hour_key, 3600, nx=True)
 
-    # Check individual chat rate limit (16 requests/10 minutes)
-    chat_key = f"rate_limit:chat:{chat_id}"
-    pipe.incr(chat_key)
-    pipe.expire(chat_key, 600, nx=True)
+        # Check individual chat rate limit (16 requests/10 minutes)
+        chat_key = f"rate_limit:chat:{chat_id}"
+        pipe.incr(chat_key)
+        pipe.expire(chat_key, 600, nx=True)
 
-    # Execute all commands atomically
-    results = pipe.execute()
+        # Execute all commands atomically
+        results = pipe.execute()
 
-    # Get the final counts (every 2nd index starting from 0)
-    hour_count = results[0]
-    chat_count = results[2]
+        # Get the final counts (every 2nd index starting from 0)
+        hour_count = results[0] or 0  # Convert None to 0
+        chat_count = results[2] or 0  # Convert None to 0
 
-    return hour_count <= 256 and chat_count <= 16
+        return hour_count <= 256 and chat_count <= 16
+    except redis.RedisError:
+        return False
 
 
 def extract_message_text(message: Dict) -> str:
     """Extract text content from different message types"""
-    return (
-        (message.get("text", "") or "")
-        + (message.get("caption", "") or "")
-        + (message.get("poll", {}).get("question", "") or "")
-    ).strip()
+    # Prioritize text, then caption, then poll question
+    if "text" in message and message["text"]:
+        return str(message["text"]).strip()
+    if "caption" in message and message["caption"]:
+        return str(message["caption"]).strip()
+    if "poll" in message and isinstance(message["poll"], dict):
+        return str(message["poll"].get("question", "")).strip()
+    return ""
 
 
 def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     """Parse command and message text from input"""
-    split_message = message_text.strip().split(" ", 1)
+    # Handle empty or whitespace-only messages
+    message_text = message_text.strip()
+    if not message_text:
+        return "", ""
+
+    # Split into command and rest of message
+    split_message = message_text.split(" ", 1)
     command = split_message[0].lower().replace(bot_name, "")
-    message_text = split_message[1] if len(split_message) > 1 else ""
+
+    # Get message text and handle extra spaces
+    if len(split_message) > 1:
+        message_text = split_message[1].lstrip()  # Remove leading spaces only
+    else:
+        message_text = ""
 
     return command, message_text
 
@@ -1351,7 +1378,12 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
 def format_user_message(message: Dict, message_text: str) -> str:
     """Format message with user info"""
     username = message["from"].get("username", "")
-    first_name = message["from"]["first_name"]
+    first_name = message["from"].get("first_name", "")
+
+    # Handle None values
+    first_name = "" if first_name is None else first_name
+    username = "" if username is None else username
+
     formatted_user = f"{first_name}" + (f" ({username})" if username else "")
     return f"{formatted_user}: {message_text}"
 

@@ -9,10 +9,12 @@ from api.index import (
     parse_command,
     format_user_message,
     should_gordo_respond,
+    truncate_text,
 )
 from datetime import datetime, timezone, timedelta
 import json
 import requests
+import redis
 
 app = Flask(__name__)
 
@@ -565,3 +567,218 @@ def test_set_telegram_webhook():
         # Test failed webhook set
         mock_request.side_effect = requests.exceptions.RequestException
         assert set_telegram_webhook("https://test.url") == False
+
+
+def test_handle_msg_edge_cases():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.send_typing"
+    ) as mock_send_typing, patch(
+        "api.index.gen_random"
+    ) as mock_gen_random, patch(
+        "api.index.cached_requests"
+    ) as mock_cached_requests, patch(
+        "api.index.admin_report"
+    ) as mock_admin_report, patch(
+        "api.index.ask_claude"
+    ) as mock_ask_claude, patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should_respond, patch(
+        "time.sleep"
+    ) as mock_sleep:
+
+        # Set up mocks
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_gen_random.return_value = "no boludo"
+        mock_cached_requests.return_value = None  # Prevent API calls
+        mock_ask_claude.return_value = "test response"
+        mock_redis.get.return_value = json.dumps(
+            {"timestamp": 123, "data": {}}
+        )  # Valid JSON
+        mock_should_respond.return_value = False  # Don't respond by default
+
+        # Reset all mocks before starting tests
+        mock_send_msg.reset_mock()
+        mock_send_typing.reset_mock()
+        mock_ask_claude.reset_mock()
+        mock_admin_report.reset_mock()
+
+        # Test empty message
+        message = {
+            "message_id": "123",
+            "chat": {"id": "456", "type": "private"},
+            "from": {"first_name": "John", "username": "john123"},
+        }
+        assert handle_msg(message) == "ok"
+        mock_send_msg.assert_not_called()
+
+        # Test message with only whitespace
+        message["text"] = "   \n   \t   "
+        mock_send_msg.reset_mock()
+        assert handle_msg(message) == "ok"
+        mock_send_msg.assert_not_called()
+
+        # Test message that should get a response
+        mock_should_respond.return_value = True
+        message["text"] = "test"
+        mock_send_msg.reset_mock()
+        assert handle_msg(message) == "ok"
+        mock_send_msg.assert_called_once_with("456", "test response", "123")
+
+        # Test message with invalid JSON
+        mock_redis.get.return_value = "invalid json"
+        mock_send_msg.reset_mock()
+        assert handle_msg(message) == "ok"
+
+        # Test message with missing required fields
+        mock_admin_report.reset_mock()  # Reset admin report mock
+        message = {"message_id": "123"}  # Missing chat and from fields
+        mock_send_msg.reset_mock()
+        result = handle_msg(message)
+        assert result == "Error processing message"
+        mock_admin_report.assert_called_once()  # Should report error to admin
+
+        # Test message with None values
+        mock_admin_report.reset_mock()
+        message = {
+            "message_id": "123",
+            "chat": {"id": None},  # Changed to match error handling structure
+            "from": {"username": None},  # Changed to match error handling structure
+            "text": None,
+        }
+        mock_send_msg.reset_mock()
+        result = handle_msg(message)
+        assert result == "Error processing message"
+        mock_admin_report.assert_called_once()
+
+        # Test message with missing message_id
+        mock_admin_report.reset_mock()
+        message = {"chat": {"id": "456"}, "from": {"first_name": "John"}}
+        mock_send_msg.reset_mock()
+        result = handle_msg(message)
+        assert result == "Error processing message"
+        mock_admin_report.assert_called_once()
+
+
+def test_parse_command_edge_cases():
+    # Test empty string
+    assert parse_command("", "@bot") == ("", "")
+
+    # Test only spaces
+    assert parse_command("    ", "@bot") == ("", "")
+
+    # Test command with multiple spaces
+    assert parse_command("/start    hello    world", "@bot") == (
+        "/start",
+        "hello    world",
+    )
+
+    # Test command with special characters
+    assert parse_command("/start!@#$%^&*()", "@bot") == ("/start!@#$%^&*()", "")
+
+
+def test_extract_message_text_edge_cases():
+    # Test message with all types of text
+    msg = {
+        "text": "text message",
+        "caption": "photo caption",
+        "poll": {"question": "poll question"},
+    }
+    # Should prioritize text over caption and poll
+    assert extract_message_text(msg) == "text message"
+
+    # Test message with caption and poll
+    msg = {"caption": "photo caption", "poll": {"question": "poll question"}}
+    # Should prioritize caption over poll
+    assert extract_message_text(msg) == "photo caption"
+
+    # Test message with invalid poll structure
+    msg = {"poll": "invalid poll"}
+    assert extract_message_text(msg) == ""
+
+    # Test message with None values
+    msg = {"text": None, "caption": None, "poll": None}
+    assert extract_message_text(msg) == ""
+
+
+def test_format_user_message_edge_cases():
+    # Test with minimal user info
+    msg = {"from": {"first_name": ""}}
+    assert format_user_message(msg, "hello") == ": hello"
+
+    # Test with None values
+    msg = {"from": {"first_name": None, "username": None}}
+    assert format_user_message(msg, "hello") == ": hello"
+
+    # Test with special characters in names
+    msg = {"from": {"first_name": "John<>&", "username": "user!@#"}}
+    assert format_user_message(msg, "hello") == "John<>& (user!@#): hello"
+
+    # Test with very long names
+    long_name = "a" * 100
+    msg = {"from": {"first_name": long_name, "username": long_name}}
+    formatted = format_user_message(msg, "hello")
+    assert len(formatted) <= 256  # Should be truncated
+
+
+def test_check_rate_limit_edge_cases():
+    with patch("redis.Redis") as mock_redis:
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+
+        # Test with negative counts
+        mock_instance.pipeline.return_value.execute.return_value = [-1, True, -1, True]
+        assert check_rate_limit("test_chat", mock_instance) == True
+
+        # Test with None values
+        mock_instance.pipeline.return_value.execute.return_value = [
+            None,
+            True,
+            None,
+            True,
+        ]
+        assert check_rate_limit("test_chat", mock_instance) == True
+
+        # Test with exactly at limits
+        mock_instance.pipeline.return_value.execute.return_value = [256, True, 16, True]
+        assert check_rate_limit("test_chat", mock_instance) == True
+
+        # Test with Redis errors
+        mock_instance.pipeline.return_value.execute.side_effect = redis.RedisError
+        assert check_rate_limit("test_chat", mock_instance) == False
+
+
+def test_truncate_text_edge_cases():
+    # Test empty string
+    assert truncate_text("") == ""
+
+    # Test None input
+    assert truncate_text(None) == ""
+
+    # Test string with exactly max length
+    text = "a" * 256
+    assert truncate_text(text) == text
+
+    # Test string with max length minus one
+    text = "a" * 255
+    assert truncate_text(text) == text
+
+    # Test string with max length plus one
+    text = "a" * 257
+    truncated = truncate_text(text)
+    assert len(truncated) == 256
+    assert truncated.endswith("...")
+
+    # Test with very small max_length
+    assert truncate_text("hello", 1) == "."
+    assert truncate_text("hello", 2) == ".."
+    assert truncate_text("hello", 3) == "..."
+    assert truncate_text("hello", 4) == "h..."
