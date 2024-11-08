@@ -10,7 +10,7 @@ from api.index import (
     format_user_message,
     should_gordo_respond,
 )
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import requests
 
@@ -382,3 +382,186 @@ def test_verify_webhook():
         mock_admin_report.assert_called_once_with(
             "Main webhook failed with error: Test error"
         )
+
+
+def test_truncate_text():
+    from api.index import truncate_text
+
+    # Test text within limit
+    assert truncate_text("short text", 256) == "short text"
+
+    # Test text at limit
+    text_at_limit = "a" * 256
+    assert truncate_text(text_at_limit, 256) == text_at_limit
+
+    # Test text exceeding limit
+    long_text = "a" * 300
+    assert truncate_text(long_text, 256) == ("a" * 253) + "..."
+
+    # Test with default limit
+    assert len(truncate_text("a" * 1000)) <= 256
+
+
+def test_is_secret_token_valid():
+    from api.index import is_secret_token_valid
+
+    with patch("redis.Redis") as mock_redis, app.test_request_context() as ctx:
+
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+
+        # Test valid token
+        mock_instance.get.return_value = "valid_token"
+        ctx.request.headers = {"X-Telegram-Bot-Api-Secret-Token": "valid_token"}
+        assert is_secret_token_valid(ctx.request) == True
+
+        # Test invalid token
+        ctx.request.headers = {"X-Telegram-Bot-Api-Secret-Token": "invalid_token"}
+        assert is_secret_token_valid(ctx.request) == False
+
+        # Test missing token
+        ctx.request.headers = {}
+        assert is_secret_token_valid(ctx.request) == False
+
+
+def test_handle_msg():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.ask_claude"
+    ) as mock_ask_claude, patch(
+        "api.index.send_typing"
+    ) as mock_send_typing, patch(
+        "time.sleep"
+    ) as mock_sleep:  # Add sleep mock to avoid delays
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True  # Don't rate limit
+        mock_ask_claude.return_value = "test response"  # Mock Claude response
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.lrange.return_value = []  # Empty chat history
+
+        # Test basic message handling
+        message = {
+            "message_id": "123",
+            "chat": {"id": "456", "type": "private"},
+            "from": {"first_name": "John", "username": "john123"},
+            "text": "/help",
+        }
+
+        assert handle_msg(message) == "ok"
+        mock_send_msg.assert_called_once()
+
+        # Test message without command
+        message["text"] = "hello bot"
+        mock_send_msg.reset_mock()
+        mock_send_typing.reset_mock()
+        assert handle_msg(message) == "ok"
+        mock_send_msg.assert_called_once()
+        mock_send_typing.assert_called_once()
+        mock_ask_claude.assert_called_once()
+
+        # Test rate limited message
+        mock_rate_limit.return_value = False
+        mock_send_msg.reset_mock()
+        mock_send_typing.reset_mock()
+        mock_ask_claude.reset_mock()
+        assert handle_msg(message) == "ok"
+        mock_send_typing.assert_called_once()
+        mock_ask_claude.assert_not_called()
+
+
+def test_get_weather():
+    from api.index import get_weather
+
+    # Create a fixed datetime for testing
+    current_time = datetime(2024, 1, 1, 12, 0)  # Create naive datetime first
+
+    with patch("api.index.datetime") as mock_datetime, patch(
+        "api.index.cached_requests"
+    ) as mock_cached_requests:
+
+        # Set up datetime mock to handle timezone
+        class MockDatetime:
+            @classmethod
+            def now(cls, tz=None):
+                if tz:
+                    return current_time.replace(tzinfo=tz)
+                return current_time
+
+            @classmethod
+            def fromisoformat(cls, timestamp):
+                return datetime.fromisoformat(timestamp)
+
+        mock_datetime.now = MockDatetime.now
+        mock_datetime.fromisoformat = MockDatetime.fromisoformat
+        mock_datetime.datetime = datetime
+        mock_datetime.timezone = timezone
+        mock_datetime.timedelta = timedelta
+
+        # Test successful weather fetch
+        mock_cached_requests.return_value = {
+            "data": {
+                "hourly": {
+                    "time": [
+                        "2024-01-01T12:00",  # Current hour
+                        "2024-01-01T13:00",  # Next hour
+                        "2024-01-01T14:00",  # Future hours...
+                    ],
+                    "apparent_temperature": [25.5, 26.0, 26.5],
+                    "precipitation_probability": [30, 35, 40],
+                    "weather_code": [0, 1, 2],
+                    "cloud_cover": [50, 55, 60],
+                    "visibility": [10000, 9000, 8000],
+                }
+            }
+        }
+
+        weather = get_weather()
+        assert weather is not None
+        assert weather["apparent_temperature"] == 25.5
+        assert weather["precipitation_probability"] == 30
+        assert weather["weather_code"] == 0
+        assert weather["cloud_cover"] == 50
+        assert weather["visibility"] == 10000
+
+        # Test failed weather fetch
+        mock_cached_requests.return_value = None
+        assert get_weather() is None
+
+
+def test_set_telegram_webhook():
+    from api.index import set_telegram_webhook
+
+    with patch("requests.get") as mock_request, patch(
+        "redis.Redis"
+    ) as mock_redis, patch("os.environ.get") as mock_env:
+
+        # Fix: lambda to handle both arguments
+        mock_env.side_effect = lambda key, default=None: {
+            "GORDO_KEY": "test_key",
+            "TELEGRAM_TOKEN": "test_token",
+            "REDIS_HOST": "localhost",
+            "REDIS_PORT": "6379",
+            "REDIS_PASSWORD": None,
+        }.get(key, default)
+
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.set.return_value = True
+        mock_instance.ping.return_value = True  # Add ping success
+
+        # Test successful webhook set
+        mock_request.return_value.raise_for_status.return_value = None
+        assert set_telegram_webhook("https://test.url") == True
+
+        # Test failed webhook set
+        mock_request.side_effect = requests.exceptions.RequestException
+        assert set_telegram_webhook("https://test.url") == False
