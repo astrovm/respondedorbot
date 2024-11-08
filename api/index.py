@@ -1199,16 +1199,18 @@ def build_claude_messages(
         reply_text = extract_message_text(reply_msg)
 
         if reply_text:
-            # Check if message is from the bot
-            is_bot = reply_msg["from"]["username"] == environ.get("TELEGRAM_USERNAME")
+            # Check if message is from the bot by safely checking username
+            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
+                "TELEGRAM_USERNAME"
+            )
 
             # Format message same way as it would be stored
             if is_bot:
                 formatted_reply = reply_text
                 reply_role = "assistant"
             else:
-                reply_username = reply_msg["from"].get("username", "")
-                reply_first_name = reply_msg["from"]["first_name"]
+                reply_username = reply_msg.get("from", {}).get("username", "")
+                reply_first_name = reply_msg.get("from", {}).get("first_name", "")
                 formatted_user = f"{reply_first_name}" + (
                     f" ({reply_username})" if reply_username else ""
                 )
@@ -1284,7 +1286,9 @@ def should_gordo_respond(
     is_command = command in commands
     is_private = chat_type == "private"
     is_mention = bot_name in message_lower
-    is_reply = message.get("reply_to_message", {}).get("from", {}).get("username", "") == environ.get("TELEGRAM_USERNAME")
+    is_reply = message.get("reply_to_message", {}).get("from", {}).get(
+        "username", ""
+    ) == environ.get("TELEGRAM_USERNAME")
 
     # Check gordo keywords with 10% chance
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
