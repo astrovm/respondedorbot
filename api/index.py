@@ -1207,7 +1207,7 @@ def build_ai_messages(
         truncate_text(message_text),
         "\nINSTRUCCIONES:",
         "- Mantené el personaje del gordo",
-        "- Respondé en una sola frase de máximo 32 palabras",
+        "- Respondé en una sola frase de máximo 64 palabras",
         "- Usá lenguaje coloquial argentino",
     ]
 
