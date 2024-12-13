@@ -975,12 +975,13 @@ def ask_ai(messages: List[Dict]) -> str:
             api_key=environ.get("OPENROUTER_API_KEY"),
         )
 
-        personality_context = {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"""
+        personality_context = [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"""
             Sos el gordo, un bot Argentino de Telegram creado por astro. Tu personalidad es:
 
             RASGOS PRINCIPALES:
@@ -1046,10 +1047,11 @@ def ask_ai(messages: List[Dict]) -> str:
             CONTEXTO POLITICO:
             - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
             """,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        }
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ]
 
         response = openrouter.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
