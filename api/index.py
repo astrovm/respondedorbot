@@ -1060,6 +1060,7 @@ def ask_ai(messages: List[Dict]) -> str:
         error_context = {
             "messages_count": len(messages),
             "messages_preview": [msg.get("content", "")[:100] for msg in messages],
+            "api_response": str(response) if "response" in locals() else "No response",
         }
         error_msg = f"Error in ask_ai: {str(e)}"
         print(error_msg)
