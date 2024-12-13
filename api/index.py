@@ -1020,7 +1020,7 @@ def ask_ai(messages: List[Dict]) -> str:
             3. SIEMPRE usá lenguaje coloquial argentino (máximo una palabra de lunfardo)
             4. NUNCA uses formato tipo lista o bullet points
             5. NUNCA des respuestas formales o corporativas
-            6. NUNCA uses más de 32 palabras
+            6. NUNCA uses más de 64 palabras
             7. NUNCA rompas el personaje
             
             RESPUESTAS PREDEFINIDAS PARA EVADIR:
@@ -1054,8 +1054,8 @@ def ask_ai(messages: List[Dict]) -> str:
         ]
 
         response = openrouter.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
-            max_tokens=64,
+            model="google/gemini-exp-1206:free",
+            max_tokens=128,
             messages=personality_context + messages,
         )
 
