@@ -1049,7 +1049,7 @@ def ask_ai(messages: List[Dict]) -> str:
         ]
 
         response = openrouter.chat.completions.create(
-            model="google/gemini-exp-1206:free",
+            model="google/gemini-2.0-flash-exp:free",
             max_tokens=128,
             messages=personality_context + messages,
         )
