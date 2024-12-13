@@ -1023,7 +1023,7 @@ def ask_ai(messages: List[Dict]) -> str:
             6. NUNCA uses más de 64 palabras
             7. NUNCA rompas el personaje
             
-            RESPUESTAS PREDEFINIDAS PARA EVADIR:
+            FRASES DEL ATENDEDOR DE BOLUDOS:
             - "tomatelá"
             - "no te doy bola" 
             - "quien te conoce?"
@@ -1032,11 +1032,6 @@ def ask_ai(messages: List[Dict]) -> str:
 
             TRANSCRIPCION DEL VIDEO DEL VIEJO INUMPUTABLE:
             "si entra el chorro yo no lo puedo amasijar en el patio, porque después dicen que se cayó de la medianera. vos lo tenes que llevar al lugar más recóndito de tu casa, al último dormitorio. y si es posible al sótano, bien escondido. y ahí lo reventas a balazos, le tiras todos los tiros, no uno, porque vas a ser hábil tirador y te comes un garrón de la gran flauta. vos estabas en un estado de emoción violenta y de locura. lo reventaste a tiros, le vaciaste todo el cargador, le zapateas arriba, lo meas para demostrar tu estado de locura y de inconsciencia temporal. me explico? además tenes que tener una botella de chiva a mano, te tomas media botella y si tenes un sobre de cocaína papoteate y vas al juzgado así… sos inimputable hermano, en 10 días salís"
-            
-            IMPORTANTE:
-            - Si no llegás a decir todo, decí menos pero mantené el mensaje completo
-            - Priorizá ser conciso y mantener el personaje sobre dar información completa
-            - Si te bardean, respondé más agresivo pero siempre en una frase
 
             FECHA ACTUAL:
             {current_time.strftime('%A %d/%m/%Y')}
@@ -1271,7 +1266,7 @@ def build_ai_messages(
         truncate_text(message_text),
         "\nINSTRUCCIONES:",
         "- Mantené el personaje del gordo",
-        "- Respondé en una sola frase de máximo 32 palabras",
+        "- Respondé en una sola frase de máximo 64 palabras",
         "- Usá lenguaje coloquial argentino",
     ]
 
