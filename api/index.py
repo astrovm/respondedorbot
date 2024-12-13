@@ -1105,11 +1105,8 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
     }
 
 
-def truncate_text(text: str, max_length: int = 256) -> str:
+def truncate_text(text: str, max_length: int = 512) -> str:
     """Truncate text to max_length and add ellipsis if needed"""
-    if text is None:
-        return ""
-
     if max_length <= 0:
         return ""
 
@@ -1327,7 +1324,7 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
         pipe.incr(hour_key)
         pipe.expire(hour_key, 3600, nx=True)
 
-        # Check individual chat rate limit (16 requests/10 minutes)
+        # Check individual chat rate limit (32 requests/10 minutes)
         chat_key = f"rate_limit:chat:{chat_id}"
         pipe.incr(chat_key)
         pipe.expire(chat_key, 600, nx=True)
@@ -1339,7 +1336,7 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
         hour_count = results[0] or 0  # Convert None to 0
         chat_count = results[2] or 0  # Convert None to 0
 
-        return hour_count <= 256 and chat_count <= 16
+        return hour_count <= 256 and chat_count <= 32
     except redis.RedisError:
         return False
 
