@@ -828,7 +828,7 @@ def get_weather() -> dict:
         return None
 
 
-def ask_claude(messages: List[Dict]) -> str:
+def ask_ai(messages: List[Dict]) -> str:
     try:
         # Get market and time context
         buenos_aires_tz = timezone(timedelta(hours=-3))
@@ -1051,20 +1051,20 @@ def ask_claude(messages: List[Dict]) -> str:
             ],
         }
 
-        message = openrouter.chat.completions.create(
+        response = openrouter.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
             max_tokens=64,
             messages=personality_context + messages,
         )
 
-        return message.choices[0].message
+        return response.choices[0].message.content
 
     except Exception as e:
         error_context = {
             "messages_count": len(messages),
             "messages_preview": [msg.get("content", "")[:100] for msg in messages],
         }
-        error_msg = f"Error in ask_claude: {str(e)}"
+        error_msg = f"Error in ask_ai: {str(e)}"
         print(error_msg)
         admin_report(error_msg, e, error_context)
         first_name = ""
@@ -1081,11 +1081,11 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
     Returns dict of command name -> (handler_function, uses_claude)
     """
     return {
-        # Claude-based commands
-        "/ask": (ask_claude, True),
-        "/pregunta": (ask_claude, True),
-        "/che": (ask_claude, True),
-        "/gordo": (ask_claude, True),
+        # AI-based commands
+        "/ask": (ask_ai, True),
+        "/pregunta": (ask_ai, True),
+        "/che": (ask_ai, True),
+        "/gordo": (ask_ai, True),
         # Regular commands
         "/convertbase": (convert_base, False),
         "/random": (select_random, False),
@@ -1186,7 +1186,7 @@ def get_chat_history(
         return []
 
 
-def build_claude_messages(
+def build_ai_messages(
     message: Dict, chat_history: List[Dict], message_text: str
 ) -> List[Dict]:
     messages = []
@@ -1427,12 +1427,10 @@ def handle_msg(message: Dict) -> str:
                     response_msg = handle_rate_limit(chat_id, message)
                 else:
                     chat_history = get_chat_history(chat_id, redis_client)
-                    messages = build_claude_messages(
+                    messages = build_ai_messages(
                         message, chat_history, sanitized_message_text
                     )
-                    response_msg = handle_claude_response(
-                        chat_id, handler_func, messages
-                    )
+                    response_msg = handle_ai_response(chat_id, handler_func, messages)
             else:
                 response_msg = handler_func(sanitized_message_text)
         else:
@@ -1440,8 +1438,8 @@ def handle_msg(message: Dict) -> str:
                 response_msg = handle_rate_limit(chat_id, message)
             else:
                 chat_history = get_chat_history(chat_id, redis_client)
-                messages = build_claude_messages(message, chat_history, message_text)
-                response_msg = handle_claude_response(chat_id, ask_claude, messages)
+                messages = build_ai_messages(message, chat_history, message_text)
+                response_msg = handle_ai_response(chat_id, ask_ai, messages)
 
         # Save and send response
         if response_msg:
@@ -1481,10 +1479,10 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     return gen_random(message["from"]["first_name"])
 
 
-def handle_claude_response(
+def handle_ai_response(
     chat_id: str, handler_func: Callable, messages: List[Dict]
 ) -> str:
-    """Handle Claude API responses"""
+    """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
     send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
