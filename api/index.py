@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from flask import Flask, Request, request
 from requests.exceptions import RequestException
 import emoji
-from anthropic import Anthropic
+from openai import OpenAI
 
 
 def config_redis(host=None, port=None, password=None):
@@ -970,27 +970,30 @@ def ask_claude(messages: List[Dict]) -> str:
 
         market_info = "\n".join(market_context)
 
-        anthropic = Anthropic(
-            api_key=environ.get("ANTHROPIC_API_KEY"),
+        openrouter = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=environ.get("OPENROUTER_API_KEY"),
         )
 
-        personality_context = [
-            {
-                "type": "text",
-                "text": f"""
+        personality_context = {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"""
             [historical bot personality removed]""",
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
 
-        message = anthropic.beta.prompt_caching.messages.create(
-            model="claude-3-haiku-20240307",
+        message = openrouter.chat.completions.create(
+            model="google/gemini-2.0-flash-exp:free",
             max_tokens=64,
-            system=personality_context,
-            messages=messages,
+            messages=personality_context + messages,
         )
 
-        return message.content[0].text
+        return message.choices[0].message
 
     except Exception as e:
         error_context = {
