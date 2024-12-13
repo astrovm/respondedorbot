@@ -529,7 +529,7 @@ def get_devo(msg_text: str) -> str:
         usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
         usdt = (usdt_ask + usdt_bid) / 2
         oficial = float(dollars["data"]["oficial"]["price"])
-        tarjeta = oficial * 1.6
+        tarjeta = float(dollars["data"]["tarjeta"]["price"])
 
         profit = -(fee * usdt + oficial - usdt) / tarjeta
 
