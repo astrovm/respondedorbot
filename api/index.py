@@ -975,17 +975,19 @@ def ask_ai(messages: List[Dict]) -> str:
             api_key=environ.get("OPENROUTER_API_KEY"),
         )
 
-        personality_context = {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"""
+        personality_context = [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"""
             [historical bot personality removed]""",
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        }
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ]
 
         response = openrouter.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
