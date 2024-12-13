@@ -1020,8 +1020,7 @@ def ask_ai(messages: List[Dict]) -> str:
             3. SIEMPRE usá lenguaje coloquial argentino (máximo una palabra de lunfardo)
             4. NUNCA uses formato tipo lista o bullet points
             5. NUNCA des respuestas formales o corporativas
-            6. NUNCA uses más de 64 palabras
-            7. NUNCA rompas el personaje
+            6. NUNCA rompas el personaje
             
             FRASES DEL ATENDEDOR DE BOLUDOS:
             - "tomatelá"
@@ -1071,6 +1070,102 @@ def ask_ai(messages: List[Dict]) -> str:
             if "Usuario: " in last_message:
                 first_name = last_message.split("Usuario: ")[1].split(" ")[0]
         return gen_random(first_name)
+
+
+def build_ai_messages(
+    message: Dict, chat_history: List[Dict], message_text: str
+) -> List[Dict]:
+    messages = []
+
+    # Add chat history messages
+    for msg in chat_history:
+        messages.append(
+            {
+                "role": msg["role"],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": msg["text"],
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        )
+
+    # Add reply message to history if present
+    if "reply_to_message" in message:
+        reply_msg = message["reply_to_message"]
+        reply_text = extract_message_text(reply_msg)
+
+        if reply_text:
+            # Check if message is from the bot by safely checking username
+            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
+                "TELEGRAM_USERNAME"
+            )
+
+            # Format message same way as it would be stored
+            if is_bot:
+                formatted_reply = reply_text
+                reply_role = "assistant"
+            else:
+                reply_username = reply_msg.get("from", {}).get("username", "")
+                reply_first_name = reply_msg.get("from", {}).get("first_name", "")
+                formatted_user = f"{reply_first_name}" + (
+                    f" ({reply_username})" if reply_username else ""
+                )
+                formatted_reply = f"{formatted_user}: {reply_text}"
+                reply_role = "user"
+
+            # Truncate reply text
+            truncated_reply = truncate_text(formatted_reply)
+
+            # Check if reply exists in history
+            for msg in messages:
+                if msg["content"][0]["text"] == truncated_reply:
+                    messages.remove(msg)
+
+            messages.append(
+                {
+                    "role": reply_role,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": truncated_reply,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            )
+
+    # Get user info and context
+    first_name = message["from"]["first_name"]
+    username = message["from"].get("username", "")
+    chat_type = message["chat"]["type"]
+    chat_title = message["chat"].get("title", "") if chat_type != "private" else ""
+    buenos_aires_tz = timezone(timedelta(hours=-3))
+    current_time = datetime.now(buenos_aires_tz)
+
+    # Build context sections
+    context_parts = [
+        "CONTEXTO:",
+        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
+        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
+        f"- Hora: {current_time.strftime('%H:%M')}",
+        "\nMENSAJE:",
+        truncate_text(message_text),
+        "\nINSTRUCCIONES:",
+        "- Mantené el personaje del gordo",
+        "- Usá lenguaje coloquial argentino",
+    ]
+
+    messages.append(
+        {
+            "role": "user",
+            "content": "\n".join(context_parts),
+        }
+    )
+
+    return messages[-4:]
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -1179,103 +1274,6 @@ def get_chat_history(
         print(error_msg)
         admin_report(error_msg, e, error_context)
         return []
-
-
-def build_ai_messages(
-    message: Dict, chat_history: List[Dict], message_text: str
-) -> List[Dict]:
-    messages = []
-
-    # Add chat history messages
-    for msg in chat_history:
-        messages.append(
-            {
-                "role": msg["role"],
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg["text"],
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-            }
-        )
-
-    # Add reply message to history if present
-    if "reply_to_message" in message:
-        reply_msg = message["reply_to_message"]
-        reply_text = extract_message_text(reply_msg)
-
-        if reply_text:
-            # Check if message is from the bot by safely checking username
-            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
-                "TELEGRAM_USERNAME"
-            )
-
-            # Format message same way as it would be stored
-            if is_bot:
-                formatted_reply = reply_text
-                reply_role = "assistant"
-            else:
-                reply_username = reply_msg.get("from", {}).get("username", "")
-                reply_first_name = reply_msg.get("from", {}).get("first_name", "")
-                formatted_user = f"{reply_first_name}" + (
-                    f" ({reply_username})" if reply_username else ""
-                )
-                formatted_reply = f"{formatted_user}: {reply_text}"
-                reply_role = "user"
-
-            # Truncate reply text
-            truncated_reply = truncate_text(formatted_reply)
-
-            # Check if reply exists in history
-            for msg in messages:
-                if msg["content"][0]["text"] == truncated_reply:
-                    messages.remove(msg)
-
-            messages.append(
-                {
-                    "role": reply_role,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": truncated_reply,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                }
-            )
-
-    # Get user info and context
-    first_name = message["from"]["first_name"]
-    username = message["from"].get("username", "")
-    chat_type = message["chat"]["type"]
-    chat_title = message["chat"].get("title", "") if chat_type != "private" else ""
-    buenos_aires_tz = timezone(timedelta(hours=-3))
-    current_time = datetime.now(buenos_aires_tz)
-
-    # Build context sections
-    context_parts = [
-        "CONTEXTO:",
-        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
-        f"- Hora: {current_time.strftime('%H:%M')}",
-        "\nMENSAJE:",
-        truncate_text(message_text),
-        "\nINSTRUCCIONES:",
-        "- Mantené el personaje del gordo",
-        "- Respondé en una sola frase de máximo 64 palabras",
-        "- Usá lenguaje coloquial argentino",
-    ]
-
-    messages.append(
-        {
-            "role": "user",
-            "content": "\n".join(context_parts),
-        }
-    )
-
-    return messages[-4:]
 
 
 def should_gordo_respond(
