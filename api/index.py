@@ -983,7 +983,6 @@ def ask_ai(messages: List[Dict]) -> str:
                         "type": "text",
                         "text": f"""
             [historical bot personality removed]""",
-                        "cache_control": {"type": "ephemeral"},
                     }
                 ],
             }
@@ -1028,7 +1027,6 @@ def build_ai_messages(
                     {
                         "type": "text",
                         "text": msg["text"],
-                        "cache_control": {"type": "ephemeral"},
                     }
                 ],
             }
@@ -1073,7 +1071,6 @@ def build_ai_messages(
                         {
                             "type": "text",
                             "text": truncated_reply,
-                            "cache_control": {"type": "ephemeral"},
                         }
                     ],
                 }
@@ -1107,7 +1104,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-4:]
+    return messages[-6:]
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
