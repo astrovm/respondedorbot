@@ -1048,17 +1048,10 @@ def ask_ai(messages: List[Dict]) -> str:
             extra_body={
                 "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-r1:free"],
             },
-            # max_tokens=256,
             messages=personality_context + messages,
         )
 
-        # Loop through choices to find a valid response
-        for choice in response.choices:
-            if choice.message and choice.message.content:
-                return choice.message.content
-                
-        # If no valid response found, raise exception
-        raise Exception("No valid response found in any of the model choices")
+        return response.choices[0].message.content
 
     except Exception as e:
         error_context = {
