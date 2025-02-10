@@ -1048,7 +1048,7 @@ def ask_ai(messages: List[Dict]) -> str:
             extra_body={
                 "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-r1:free"],
             },
-            max_tokens=256,
+            # max_tokens=256,
             messages=personality_context + messages,
         )
 
