@@ -1046,7 +1046,7 @@ def ask_ai(messages: List[Dict]) -> str:
         response = openrouter.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
             extra_body={
-                "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "google/gemini-2.0-pro-exp-02-05:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-r1:free"],
+                "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "google/gemini-2.0-pro-exp-02-05:free", "deepseek/deepseek-r1:free"],
             },
             messages=personality_context + messages,
         )
