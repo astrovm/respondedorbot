@@ -1048,7 +1048,7 @@ def ask_ai(messages: List[Dict]) -> str:
             extra_body={
                 "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-r1:free"],
             },
-            max_tokens=128,
+            max_tokens=256,
             messages=personality_context + messages,
         )
 
@@ -1320,12 +1320,12 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     try:
         pipe = redis_client.pipeline()
 
-        # Check global rate limit (256 requests/hour)
+        # Check global rate limit (1024 requests/hour)
         hour_key = "rate_limit:global:hour"
         pipe.incr(hour_key)
         pipe.expire(hour_key, 3600, nx=True)
 
-        # Check individual chat rate limit (32 requests/10 minutes)
+        # Check individual chat rate limit (128 requests/10 minutes)
         chat_key = f"rate_limit:chat:{chat_id}"
         pipe.incr(chat_key)
         pipe.expire(chat_key, 600, nx=True)
@@ -1337,7 +1337,7 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
         hour_count = results[0] or 0  # Convert None to 0
         chat_count = results[2] or 0  # Convert None to 0
 
-        return hour_count <= 256 and chat_count <= 32
+        return hour_count <= 1024 and chat_count <= 128
     except redis.RedisError:
         return False
 
