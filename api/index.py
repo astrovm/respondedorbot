@@ -1043,19 +1043,32 @@ def ask_ai(messages: List[Dict]) -> str:
             }
         ]
 
-        response = openrouter.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
-            extra_body={
-                "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "google/gemini-2.0-pro-exp-02-05:free", "deepseek/deepseek-r1:free"],
-            },
-            messages=personality_context + messages,
-        )
+        # Try up to 3 times to get a valid response
+        max_retries = 3
+        for attempt in range(max_retries):
+            response = openrouter.chat.completions.create(
+                model="google/gemini-2.0-flash-exp:free",
+                extra_body={
+                    "models": [
+                        "google/gemini-2.0-flash-lite-preview-02-05:free",
+                        "google/gemini-2.0-pro-exp-02-05:free",
+                        "deepseek/deepseek-r1:free",
+                    ],
+                },
+                messages=personality_context + messages,
+            )
 
-        # Only return response if finish_reason is "stop"
-        if response.choices[0].finish_reason == "stop":
-            return response.choices[0].message.content
-        
-        # For any other finish_reason, return a random response
+            if response.choices[0].finish_reason == "stop":
+                return response.choices[0].message.content
+
+            # If not successful and we have retries left, log the attempt
+            if attempt < max_retries - 1:
+                print(
+                    f"Retry {attempt + 1}/{max_retries}: Got finish_reason '{response.choices[0].finish_reason}'"
+                )
+                time.sleep(1)  # Small delay between retries
+
+        # If we get here, all retries failed - fall back to random response
         first_name = ""
         if messages and len(messages) > 0:
             last_message = messages[-1]["content"]
