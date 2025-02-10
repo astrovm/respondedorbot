@@ -1051,7 +1051,17 @@ def ask_ai(messages: List[Dict]) -> str:
             messages=personality_context + messages,
         )
 
-        return response.choices[0].message.content
+        # Only return response if finish_reason is "stop"
+        if response.choices[0].finish_reason == "stop":
+            return response.choices[0].message.content
+        
+        # For any other finish_reason, return a random response
+        first_name = ""
+        if messages and len(messages) > 0:
+            last_message = messages[-1]["content"]
+            if "Usuario: " in last_message:
+                first_name = last_message.split("Usuario: ")[1].split(" ")[0]
+        return gen_random(first_name)
 
     except Exception as e:
         error_context = {
