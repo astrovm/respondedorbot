@@ -1046,13 +1046,19 @@ def ask_ai(messages: List[Dict]) -> str:
         response = openrouter.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
             extra_body={
-                "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "deepseek/deepseek-chat:free"],
+                "models": ["google/gemini-2.0-flash-lite-preview-02-05:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-r1:free"],
             },
             max_tokens=128,
             messages=personality_context + messages,
         )
 
-        return response.choices[0].message.content
+        # Loop through choices to find a valid response
+        for choice in response.choices:
+            if choice.message and choice.message.content:
+                return choice.message.content
+                
+        # If no valid response found, raise exception
+        raise Exception("No valid response found in any of the model choices")
 
     except Exception as e:
         error_context = {
