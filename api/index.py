@@ -925,12 +925,12 @@ def get_ai_response(
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free",
+                model="google/gemini-2.5-pro-exp-03-25:free",
                 extra_body={
                     "models": [
-                        "google/gemini-2.0-flash-lite-preview-02-05:free",
-                        "google/gemini-2.0-pro-exp-02-05:free",
-                        "deepseek/deepseek-r1:free",
+                        "google/gemini-2.0-flash-exp:free",
+                        "deepseek/deepseek-chat-v3-0324:free",
+                        "deepseek/deepseek-v3-base:free",
                     ],
                 },
                 messages=[system_msg] + messages,
