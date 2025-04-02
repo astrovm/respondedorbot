@@ -1,20 +1,20 @@
+from cryptography.fernet import Fernet
+from datetime import datetime, timedelta, timezone
+from flask import Flask, Request, request
+from math import log
+from openai import OpenAI
+from os import environ
+from requests.exceptions import RequestException
+from typing import Dict, List, Tuple, Callable, Union, Optional
+import emoji
 import hashlib
 import json
 import random
 import re
-import time
-import unicodedata
-from datetime import datetime, timedelta, timezone
-from math import log
-from os import environ
-from typing import Dict, List, Tuple, Callable, Union, Optional
 import redis
 import requests
-from cryptography.fernet import Fernet
-from flask import Flask, Request, request
-from requests.exceptions import RequestException
-import emoji
-from openai import OpenAI
+import time
+import unicodedata
 
 
 def config_redis(host=None, port=None, password=None):
