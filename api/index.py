@@ -928,9 +928,9 @@ def get_ai_response(
                 model="google/gemini-2.5-pro-exp-03-25:free",
                 extra_body={
                     "models": [
-                        "google/gemini-2.0-flash-exp:free",
                         "deepseek/deepseek-chat-v3-0324:free",
-                        "deepseek/deepseek-v3-base:free",
+                        "deepseek/deepseek-r1:free",
+                        "google/gemini-2.0-flash-exp:free",
                     ],
                 },
                 messages=[system_msg] + messages,
