@@ -1232,7 +1232,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-6:]
+    return messages[-10:]
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -1286,6 +1286,14 @@ def save_message_to_redis(
 ) -> None:
     try:
         chat_history_key = f"chat_history:{chat_id}"
+        message_ids_key = f"chat_message_ids:{chat_id}"
+
+        # Check if the message ID already exists using a SET structure
+        if redis_client.sismember(message_ids_key, message_id):
+            # Message already exists, don't save again
+            return
+
+        # Message doesn't exist, save it
         history_entry = json.dumps(
             {
                 "id": message_id,
@@ -1295,9 +1303,33 @@ def save_message_to_redis(
         )
 
         pipe = redis_client.pipeline()
-        pipe.lpush(chat_history_key, history_entry)  # Add new message
+        pipe.lpush(chat_history_key, history_entry)  # Add new message to history list
+        pipe.sadd(
+            message_ids_key, message_id
+        )  # Add message ID to set for duplicate tracking
         pipe.ltrim(chat_history_key, 0, 19)  # Keep only last 20 messages
-        pipe.execute()
+
+        # Keep the message_ids set in sync with the history
+        # Get all message IDs from history (this is expensive but needed to maintain consistency)
+        pipe.lrange(chat_history_key, 0, -1)
+        results = pipe.execute()
+
+        # Last result is the list of messages after trimming
+        message_entries = results[-1]
+        valid_ids = set()
+        for entry in message_entries:
+            try:
+                msg = json.loads(entry)
+                valid_ids.add(msg["id"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        # Remove any IDs from the set that are no longer in the history
+        current_ids = redis_client.smembers(message_ids_key)
+        to_remove = [id for id in current_ids if id not in valid_ids]
+        if to_remove:
+            redis_client.srem(message_ids_key, *to_remove)
+
     except Exception as e:
         error_context = {
             "chat_id": chat_id,
@@ -1310,7 +1342,7 @@ def save_message_to_redis(
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 5
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 10
 ) -> List[Dict]:
     try:
         chat_history_key = f"chat_history:{chat_id}"
@@ -1463,6 +1495,34 @@ def handle_msg(message: Dict) -> str:
         commands = initialize_commands()
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
+        # Save user message to history regardless of whether bot responds
+        if message_text:
+            formatted_message = format_user_message(message, message_text)
+            save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+
+        # If this is a reply to another message, save that message too if it's not from the bot
+        if "reply_to_message" in message:
+            reply_msg = message["reply_to_message"]
+            reply_text = extract_message_text(reply_msg)
+            reply_id = str(reply_msg["message_id"])
+            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
+                "TELEGRAM_USERNAME"
+            )
+
+            # Save all replied-to messages regardless of source
+            if reply_text:
+                if is_bot:
+                    # For bot messages, just save the text directly
+                    save_message_to_redis(
+                        chat_id, f"bot_{reply_id}", reply_text, redis_client
+                    )
+                else:
+                    # For user messages, format with user info
+                    formatted_reply = format_user_message(reply_msg, reply_text)
+                    save_message_to_redis(
+                        chat_id, reply_id, formatted_reply, redis_client
+                    )
+
         # Get command and message text
         command, sanitized_message_text = parse_command(message_text, bot_name)
 
@@ -1503,13 +1563,6 @@ def handle_msg(message: Dict) -> str:
 
         # Save and send response
         if response_msg:
-            # Save user message to history
-            if message_text:
-                formatted_message = format_user_message(message, message_text)
-                save_message_to_redis(
-                    chat_id, message_id, formatted_message, redis_client
-                )
-
             # Save bot response
             save_message_to_redis(
                 chat_id, f"bot_{message_id}", response_msg, redis_client
