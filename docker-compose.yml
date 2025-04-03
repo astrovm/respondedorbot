@@ -6,16 +6,16 @@ services:
         ports:
             - PORT:8080
         environment:
-            - TELEGRAM_TOKEN_HASH=
+            - TELEGRAM_TOKEN=
             - REDIS_HOST=
             - REDIS_PORT=
             - REDIS_PASSWORD=
             - COINMARKETCAP_KEY=
             - ADMIN_CHAT_ID=
-            - TELEGRAM_TOKEN_KEY==
             - TELEGRAM_USERNAME=
             - CURRENT_FUNCTION_URL=
             - MAIN_FUNCTION_URL=
             - FRIENDLY_INSTANCE_NAME=
-            - ANTHROPIC_API_KEY=
+            - OPENROUTER_API_KEY=
+            - GORDO_KEY=
         image: ghcr.io/astrovm/respondedorbot:master

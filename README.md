@@ -34,7 +34,7 @@ REDIS_PASSWORD: el password de redis si tenes
 CURRENT_FUNCTION_URL: la url donde estoy corriendo
 MAIN_FUNCTION_URL: la url principal donde deberia estar
 FRIENDLY_INSTANCE_NAME: un nombre piola para identificarme en los reports
-ANTHROPIC_API_KEY: la key de claude para que te pueda bardear como corresponde
+OPENROUTER_API_KEY: la key de openrouter para que te pueda bardear como corresponde
 GORDO_KEY: key para autenticar los requests al webhook
 ```
 
