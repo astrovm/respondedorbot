@@ -1202,6 +1202,9 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
 
 def truncate_text(text: str, max_length: int = 512) -> str:
     """Truncate text to max_length and add ellipsis if needed"""
+    if text is None:
+        return ""
+
     if max_length <= 0:
         return ""
 

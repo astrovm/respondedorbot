@@ -91,11 +91,11 @@ def test_check_rate_limit():
         assert check_rate_limit("test_chat", mock_instance) == True
 
         # Test exceeded global limit
-        mock_instance.pipeline.return_value.execute.return_value = [257, True, 5, True]
+        mock_instance.pipeline.return_value.execute.return_value = [1025, True, 5, True]
         assert check_rate_limit("test_chat", mock_instance) == False
 
         # Test exceeded chat limit
-        mock_instance.pipeline.return_value.execute.return_value = [10, True, 17, True]
+        mock_instance.pipeline.return_value.execute.return_value = [10, True, 129, True]
         assert check_rate_limit("test_chat", mock_instance) == False
 
 
@@ -223,6 +223,9 @@ def test_save_message_to_redis():
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
+
+        # Mock sismember to return False (message doesn't exist)
+        mock_instance.sismember.return_value = False
 
         # Test successful save
         chat_id = "123"
@@ -390,18 +393,18 @@ def test_truncate_text():
     from api.index import truncate_text
 
     # Test text within limit
-    assert truncate_text("short text", 256) == "short text"
+    assert truncate_text("short text", 512) == "short text"
 
     # Test text at limit
-    text_at_limit = "a" * 256
-    assert truncate_text(text_at_limit, 256) == text_at_limit
+    text_at_limit = "a" * 512
+    assert truncate_text(text_at_limit, 512) == text_at_limit
 
     # Test text exceeding limit
-    long_text = "a" * 300
-    assert truncate_text(long_text, 256) == ("a" * 253) + "..."
+    long_text = "a" * 600
+    assert truncate_text(long_text, 512) == ("a" * 509) + "..."
 
     # Test with default limit
-    assert len(truncate_text("a" * 1000)) <= 256
+    assert len(truncate_text("a" * 1000)) <= 512
 
 
 def test_is_secret_token_valid():
@@ -748,7 +751,12 @@ def test_check_rate_limit_edge_cases():
         assert check_rate_limit("test_chat", mock_instance) == True
 
         # Test with exactly at limits
-        mock_instance.pipeline.return_value.execute.return_value = [256, True, 16, True]
+        mock_instance.pipeline.return_value.execute.return_value = [
+            1024,
+            True,
+            128,
+            True,
+        ]
         assert check_rate_limit("test_chat", mock_instance) == True
 
         # Test with Redis errors
@@ -764,17 +772,17 @@ def test_truncate_text_edge_cases():
     assert truncate_text(None) == ""
 
     # Test string with exactly max length
-    text = "a" * 256
+    text = "a" * 512
     assert truncate_text(text) == text
 
     # Test string with max length minus one
-    text = "a" * 255
+    text = "a" * 511
     assert truncate_text(text) == text
 
     # Test string with max length plus one
-    text = "a" * 257
+    text = "a" * 513
     truncated = truncate_text(text)
-    assert len(truncated) == 256
+    assert len(truncated) == 512
     assert truncated.endswith("...")
 
     # Test with very small max_length
