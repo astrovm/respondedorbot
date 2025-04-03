@@ -40,29 +40,6 @@ def config_redis(host=None, port=None, password=None):
         raise  # Re-raise to prevent silent failure
 
 
-# request new data and save it in redis
-def set_new_data(request, timestamp, redis_client, request_hash, hourly_cache):
-    api_url = request["api_url"]
-    parameters = request["parameters"]
-    headers = request["headers"]
-    response = requests.get(api_url, params=parameters, headers=headers, timeout=5)
-
-    if response.status_code == 200:
-        response_json = json.loads(response.text)
-        redis_value = {"timestamp": timestamp, "data": response_json}
-        redis_client.set(request_hash, json.dumps(redis_value))
-
-        # if hourly_cache is True, save the data in redis with the current hour
-        if hourly_cache:
-            # get current date with hour
-            current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + request_hash, json.dumps(redis_value))
-
-        return redis_value
-    else:
-        return None
-
-
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
