@@ -1071,3 +1071,80 @@ def test_should_gordo_respond_complex_cases():
         # Test with case-insensitive trigger words
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
         assert should_gordo_respond(commands, "", "hey GORDO", msg) == True
+
+
+def test_get_prices_basic():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        # Mock the API response with some basic cryptocurrency data
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "quote": {"USD": {"price": 50000.0, "percent_change_24h": 5.25}},
+                },
+                {
+                    "symbol": "ETH",
+                    "name": "Ethereum",
+                    "quote": {"USD": {"price": 2500.0, "percent_change_24h": -2.5}},
+                },
+            ]
+        }
+
+        # Test basic price query
+        result = get_prices("")
+        assert "BTC: 50000" in result
+        assert "ETH: 2500" in result
+        assert "+5.25%" in result
+        assert "-2.5%" in result
+
+
+def test_cached_requests_basic():
+    from api.index import cached_requests
+
+    with patch("requests.get") as mock_get, patch("redis.Redis") as mock_redis, patch(
+        "time.time"
+    ) as mock_time:
+        # Setup mocks
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.ping.return_value = True
+
+        # Mock time
+        mock_time.return_value = 1000
+
+        # Setup mock response
+        mock_response = MagicMock()
+        mock_response.text = '{"key": "value"}'
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        # Test with no cached data
+        mock_instance.get.return_value = None
+
+        result = cached_requests(
+            "https://api.example.com", {"param": "value"}, {"header": "value"}, 300
+        )
+
+        # Verify a request was made and data was returned
+        mock_get.assert_called_once()
+        assert result["timestamp"] == 1000
+        assert result["data"] == {"key": "value"}
+
+
+def test_get_weather_description():
+    from api.index import get_weather_description
+
+    # Test various weather codes
+    assert get_weather_description(0) == "despejado"
+    assert get_weather_description(1) == "mayormente despejado"
+    assert get_weather_description(2) == "parcialmente nublado"
+    assert get_weather_description(3) == "nublado"
+    assert get_weather_description(45) == "neblina"
+    assert get_weather_description(61) == "lluvia leve"
+    assert get_weather_description(95) == "tormenta"
+
+    # Test unknown code
+    assert get_weather_description(9999) == "clima raro"
