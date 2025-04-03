@@ -790,3 +790,284 @@ def test_truncate_text_edge_cases():
     assert truncate_text("hello", 2) == ".."
     assert truncate_text("hello", 3) == "..."
     assert truncate_text("hello", 4) == "h..."
+
+
+def test_truncate_text_more_edge_cases():
+    from api.index import truncate_text
+
+    # Test with zero max_length
+    assert truncate_text("text", 0) == ""
+
+    # Test with negative max_length
+    assert truncate_text("text", -5) == ""
+
+    # Test with very large text
+    large_text = "a" * 10000
+    truncated = truncate_text(large_text)
+    assert len(truncated) == 512
+
+    # Test with max_length smaller than ellipsis
+    assert truncate_text("hello", 1) == "."
+    assert truncate_text("hello", 2) == ".."
+
+    # Test with non-string inputs - we'll use str() conversion first
+    assert truncate_text(str(123), 10) == "123"
+    assert truncate_text(str(True), 10) == "True"
+
+    # Test with empty string and various max_lengths
+    assert truncate_text("", 5) == ""
+    assert truncate_text("", 0) == ""
+
+
+def test_initialize_commands():
+    from api.index import (
+        initialize_commands,
+        ask_ai,
+        select_random,
+        get_prices,
+        get_dollar_rates,
+    )
+    from api.index import (
+        get_devo,
+        powerlaw,
+        rainbow,
+        get_timestamp,
+        convert_to_command,
+        get_instance_name,
+        get_help,
+    )
+
+    commands = initialize_commands()
+
+    # Test that commands dict contains expected entries
+    assert "/ask" in commands
+    assert "/pregunta" in commands
+    assert "/che" in commands
+    assert "/gordo" in commands
+    assert "/random" in commands
+    assert "/prices" in commands
+    assert "/dolar" in commands
+
+    # Test that AI commands are properly marked
+    assert commands["/ask"][1] == True
+    assert commands["/pregunta"][1] == True
+    assert commands["/che"][1] == True
+    assert commands["/gordo"][1] == True
+
+    # Test that non-AI commands are properly marked
+    assert commands["/random"][1] == False
+    assert commands["/prices"][1] == False
+    assert commands["/dolar"][1] == False
+
+    # Test function mappings
+    assert commands["/ask"][0] == ask_ai
+    assert commands["/random"][0] == select_random
+    assert commands["/prices"][0] == get_prices
+    assert commands["/help"][0] == get_help
+
+
+def test_config_redis_with_env_vars():
+    from api.index import config_redis
+
+    with patch("redis.Redis") as mock_redis, patch("os.environ.get") as mock_env:
+        # Setup
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.ping.return_value = True
+
+        # Configure environment variables
+        mock_env.side_effect = lambda key, default=None: {
+            "REDIS_HOST": "redis.example.com",
+            "REDIS_PORT": "1234",
+            "REDIS_PASSWORD": "secret",
+        }.get(key, default)
+
+        # Test
+        result = config_redis()
+
+        # Verify
+        assert result == mock_instance
+        mock_redis.assert_called_with(
+            host="redis.example.com",
+            port="1234",
+            password="secret",
+            decode_responses=True,
+        )
+
+
+def test_config_redis_connection_error():
+    from api.index import config_redis
+
+    with patch("redis.Redis") as mock_redis, patch(
+        "api.index.admin_report"
+    ) as mock_admin_report:
+        # Setup
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.ping.side_effect = redis.ConnectionError("Connection refused")
+
+        # Test and verify
+        try:
+            config_redis()
+            assert False, "Should have raised exception"
+        except Exception as e:
+            assert "Connection refused" in str(e)
+
+        # Verify admin report was called
+        mock_admin_report.assert_called_once()
+
+
+def test_extract_message_text_complex_cases():
+    from api.index import extract_message_text
+
+    # Test with nested structures
+    msg = {
+        "text": "",
+        "caption": "",
+        "poll": {"question": "Is this a nested poll?", "incorrect_field": "ignored"},
+    }
+    assert extract_message_text(msg) == "Is this a nested poll?"
+
+    # Test with malformed poll
+    msg = {"poll": {"not_question": "This shouldn't appear"}}
+    assert extract_message_text(msg) == ""
+
+    # Test prioritization (text > caption > poll)
+    msg = {
+        "text": "Primary text",
+        "caption": "Secondary caption",
+        "poll": {"question": "Tertiary poll question"},
+    }
+    assert extract_message_text(msg) == "Primary text"
+
+    # Test with spaces to trim
+    msg = {"text": "  Text with spaces  "}
+    assert extract_message_text(msg) == "Text with spaces"
+
+    # Test with non-string values
+    msg = {"text": 12345}
+    assert extract_message_text(msg) == "12345"
+
+    # Test with None values but valid keys
+    msg = {"text": None, "caption": None, "poll": None}
+    assert extract_message_text(msg) == ""
+
+
+def test_parse_command_complex_cases():
+    from api.index import parse_command
+
+    # Test command with different case
+    assert parse_command("/StArT hello", "@bot") == ("/start", "hello")
+
+    # Test command with multiple bot mentions
+    assert parse_command("/start@bot@bot hello", "@bot") == ("/start", "hello")
+
+    # Test command with multiple arguments and spaces
+    assert parse_command("/start arg1    arg2  arg3", "@bot") == (
+        "/start",
+        "arg1    arg2  arg3",
+    )
+
+    # Command must start with / to be recognized as a command
+    assert parse_command("Hey /start hello", "@bot") == ("hey", "/start hello")
+
+    # Test with special characters
+    assert parse_command("/start-now hello!", "@bot") == ("/start-now", "hello!")
+
+    # Test with leading/trailing spaces in entire string
+    # Note: function strips trailing spaces
+    assert parse_command("  /start  hello  ", "@bot") == ("/start", "hello")
+
+    # Test with emoji in command
+    assert parse_command("/start😀 hello", "@bot") == ("/start😀", "hello")
+
+    # Test with non-ASCII characters
+    assert parse_command("/привет мир", "@bot") == ("/привет", "мир")
+
+
+def test_format_user_message_complex_cases():
+    from api.index import format_user_message
+
+    # Test with very long names and messages
+    first_name = "A" * 50
+    username = "U" * 50
+    msg = {"from": {"first_name": first_name, "username": username}}
+    long_message = "M" * 500
+    result = format_user_message(msg, long_message)
+    assert len(result) > 100  # Should contain the name and message
+    assert first_name in result
+    assert username in result
+
+    # Test with special characters in names
+    msg = {
+        "from": {
+            "first_name": "User<script>alert(1)</script>",
+            "username": "user@example-site.com",
+        }
+    }
+    result = format_user_message(msg, "Test message")
+    assert "User<script>alert(1)</script>" in result
+    assert "user@example-site.com" in result
+
+    # Test with missing fields
+    msg = {"from": {}}
+    assert format_user_message(msg, "Test message") == ": Test message"
+
+    # Test with additional fields that should be ignored
+    msg = {
+        "from": {"first_name": "John", "username": "john123", "ignored_field": "value"}
+    }
+    assert format_user_message(msg, "Test message") == "John (john123): Test message"
+
+    # Test with empty message
+    msg = {"from": {"first_name": "John", "username": "john123"}}
+    assert format_user_message(msg, "") == "John (john123): "
+
+
+def test_should_gordo_respond_complex_cases():
+    from api.index import should_gordo_respond
+
+    commands = {"/test": (lambda x: x, False), "/other": (lambda x: x, True)}
+
+    with patch("os.environ.get") as mock_env:
+        mock_env.return_value = "testbot"  # Set mock bot username
+
+        # Test with command not in command list but starts with /
+        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        assert should_gordo_respond(commands, "/unknown", "hello", msg) == False
+
+        # Test with message containing bot username in middle of message
+        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        assert (
+            should_gordo_respond(commands, "", "hey there @testbot how are you", msg)
+            == True
+        )
+
+        # Test with reply to message that's not from the bot
+        msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "test"},
+            "reply_to_message": {"from": {"username": "not_bot"}},
+        }
+        assert should_gordo_respond(commands, "", "hello", msg) == False
+
+    # Test trigger words in a separate block with proper random mocking
+    with patch("os.environ.get") as mock_env, patch("random.random", return_value=0.5):
+        mock_env.return_value = "testbot"
+
+        # Test with trigger word but probability too high (0.5 > 0.1)
+        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        assert should_gordo_respond(commands, "", "hey gordo", msg) == False
+
+    with patch("os.environ.get") as mock_env, patch("random.random", return_value=0.05):
+        mock_env.return_value = "testbot"
+
+        # Test with multiple trigger words and low probability (0.05 < 0.1)
+        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        assert (
+            should_gordo_respond(commands, "", "hey gordo and respondedor", msg) == True
+        )
+
+        # Test with case-insensitive trigger words
+        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        assert should_gordo_respond(commands, "", "hey GORDO", msg) == True
