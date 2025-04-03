@@ -1171,7 +1171,7 @@ def build_ai_messages(
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
     """
     Initialize command handlers with metadata.
-    Returns dict of command name -> (handler_function, uses_claude)
+    Returns dict of command name -> (handler_function, uses_ai)
     """
     return {
         # AI-based commands
@@ -1474,9 +1474,9 @@ def handle_msg(message: Dict) -> str:
 
         # Process command or conversation
         if command in commands:
-            handler_func, uses_claude = commands[command]
+            handler_func, uses_ai = commands[command]
 
-            if uses_claude:
+            if uses_ai:
                 if not check_rate_limit(chat_id, redis_client):
                     response_msg = handle_rate_limit(chat_id, message)
                 else:

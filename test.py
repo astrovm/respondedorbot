@@ -270,8 +270,8 @@ def test_get_chat_history():
         assert history[1]["role"] == "user"
 
 
-def test_build_claude_messages():
-    from api.index import build_claude_messages
+def test_build_ai_messages():
+    from api.index import build_ai_messages
 
     # Test basic message building
     message = {
@@ -283,7 +283,7 @@ def test_build_claude_messages():
     chat_history = []
     message_text = "test message"
 
-    messages = build_claude_messages(message, chat_history, message_text)
+    messages = build_ai_messages(message, chat_history, message_text)
 
     assert len(messages) == 1  # Should only contain the current message
     assert "CONTEXTO:" in messages[0]["content"]
@@ -434,8 +434,8 @@ def test_handle_msg():
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
         "api.index.check_rate_limit"
     ) as mock_rate_limit, patch(
-        "api.index.ask_claude"
-    ) as mock_ask_claude, patch(
+        "api.index.ask_ai"
+    ) as mock_ask_ai, patch(
         "api.index.send_typing"
     ) as mock_send_typing, patch(
         "time.sleep"
@@ -443,7 +443,7 @@ def test_handle_msg():
 
         mock_env.return_value = "testbot"
         mock_rate_limit.return_value = True  # Don't rate limit
-        mock_ask_claude.return_value = "test response"  # Mock Claude response
+        mock_ask_ai.return_value = "test response"  # Mock ai response
 
         # Mock Redis instance
         mock_redis = MagicMock()
@@ -468,16 +468,16 @@ def test_handle_msg():
         assert handle_msg(message) == "ok"
         mock_send_msg.assert_called_once()
         mock_send_typing.assert_called_once()
-        mock_ask_claude.assert_called_once()
+        mock_ask_ai.assert_called_once()
 
         # Test rate limited message
         mock_rate_limit.return_value = False
         mock_send_msg.reset_mock()
         mock_send_typing.reset_mock()
-        mock_ask_claude.reset_mock()
+        mock_ask_ai.reset_mock()
         assert handle_msg(message) == "ok"
         mock_send_typing.assert_called_once()
-        mock_ask_claude.assert_not_called()
+        mock_ask_ai.assert_not_called()
 
 
 def test_get_weather():
@@ -585,8 +585,8 @@ def test_handle_msg_edge_cases():
     ) as mock_cached_requests, patch(
         "api.index.admin_report"
     ) as mock_admin_report, patch(
-        "api.index.ask_claude"
-    ) as mock_ask_claude, patch(
+        "api.index.ask_ai"
+    ) as mock_ask_ai, patch(
         "api.index.should_gordo_respond"
     ) as mock_should_respond, patch(
         "time.sleep"
@@ -599,7 +599,7 @@ def test_handle_msg_edge_cases():
         mock_config_redis.return_value = mock_redis
         mock_gen_random.return_value = "no boludo"
         mock_cached_requests.return_value = None  # Prevent API calls
-        mock_ask_claude.return_value = "test response"
+        mock_ask_ai.return_value = "test response"
         mock_redis.get.return_value = json.dumps(
             {"timestamp": 123, "data": {}}
         )  # Valid JSON
@@ -608,7 +608,7 @@ def test_handle_msg_edge_cases():
         # Reset all mocks before starting tests
         mock_send_msg.reset_mock()
         mock_send_typing.reset_mock()
-        mock_ask_claude.reset_mock()
+        mock_ask_ai.reset_mock()
         mock_admin_report.reset_mock()
 
         # Test empty message
