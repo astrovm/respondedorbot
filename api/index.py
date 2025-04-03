@@ -1146,7 +1146,7 @@ def build_ai_messages(
 ) -> List[Dict]:
     messages = []
 
-    # Add chat history messages
+    # Add chat history messages (which already includes replies)
     for msg in chat_history:
         messages.append(
             {
@@ -1159,50 +1159,6 @@ def build_ai_messages(
                 ],
             }
         )
-
-    # Add reply message to history if present
-    if "reply_to_message" in message:
-        reply_msg = message["reply_to_message"]
-        reply_text = extract_message_text(reply_msg)
-
-        if reply_text:
-            # Check if message is from the bot by safely checking username
-            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
-                "TELEGRAM_USERNAME"
-            )
-
-            # Format message same way as it would be stored
-            if is_bot:
-                formatted_reply = reply_text
-                reply_role = "assistant"
-            else:
-                reply_username = reply_msg.get("from", {}).get("username", "")
-                reply_first_name = reply_msg.get("from", {}).get("first_name", "")
-                formatted_user = f"{reply_first_name}" + (
-                    f" ({reply_username})" if reply_username else ""
-                )
-                formatted_reply = f"{formatted_user}: {reply_text}"
-                reply_role = "user"
-
-            # Truncate reply text
-            truncated_reply = truncate_text(formatted_reply)
-
-            # Check if reply exists in history
-            for msg in messages:
-                if msg["content"][0]["text"] == truncated_reply:
-                    messages.remove(msg)
-
-            messages.append(
-                {
-                    "role": reply_role,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": truncated_reply,
-                        }
-                    ],
-                }
-            )
 
     # Get user info and context
     first_name = message["from"]["first_name"]
@@ -1232,7 +1188,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-10:]
+    return messages[-24:]
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -1307,7 +1263,7 @@ def save_message_to_redis(
         pipe.sadd(
             message_ids_key, message_id
         )  # Add message ID to set for duplicate tracking
-        pipe.ltrim(chat_history_key, 0, 19)  # Keep only last 20 messages
+        pipe.ltrim(chat_history_key, 0, 31)  # Keep only last 32 messages
 
         # Keep the message_ids set in sync with the history
         # Get all message IDs from history (this is expensive but needed to maintain consistency)
@@ -1342,7 +1298,7 @@ def save_message_to_redis(
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 10
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 24
 ) -> List[Dict]:
     try:
         chat_history_key = f"chat_history:{chat_id}"
@@ -1495,12 +1451,28 @@ def handle_msg(message: Dict) -> str:
         commands = initialize_commands()
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
-        # Save user message to history regardless of whether bot responds
-        if message_text:
-            formatted_message = format_user_message(message, message_text)
-            save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+        # Get command and message text
+        command, sanitized_message_text = parse_command(message_text, bot_name)
 
-        # If this is a reply to another message, save that message too if it's not from the bot
+        # Check if we should respond
+        if not should_gordo_respond(commands, command, sanitized_message_text, message):
+            # Even if we don't respond, save the message for context
+            if message_text:
+                formatted_message = format_user_message(message, message_text)
+                save_message_to_redis(
+                    chat_id, message_id, formatted_message, redis_client
+                )
+            return "ok"
+
+        # Handle /comando and /command with reply special case
+        if (
+            command in ["/comando", "/command"]
+            and not sanitized_message_text
+            and "reply_to_message" in message
+        ):
+            sanitized_message_text = extract_message_text(message["reply_to_message"])
+
+        # If this is a reply to another message, save that message for context
         if "reply_to_message" in message:
             reply_msg = message["reply_to_message"]
             reply_text = extract_message_text(reply_msg)
@@ -1523,21 +1495,6 @@ def handle_msg(message: Dict) -> str:
                         chat_id, reply_id, formatted_reply, redis_client
                     )
 
-        # Get command and message text
-        command, sanitized_message_text = parse_command(message_text, bot_name)
-
-        # Check if we should respond
-        if not should_gordo_respond(commands, command, sanitized_message_text, message):
-            return "ok"
-
-        # Handle /comando and /command with reply special case
-        if (
-            command in ["/comando", "/command"]
-            and not sanitized_message_text
-            and "reply_to_message" in message
-        ):
-            sanitized_message_text = extract_message_text(message["reply_to_message"])
-
         # Process command or conversation
         if command in commands:
             handler_func, uses_claude = commands[command]
@@ -1546,6 +1503,7 @@ def handle_msg(message: Dict) -> str:
                 if not check_rate_limit(chat_id, redis_client):
                     response_msg = handle_rate_limit(chat_id, message)
                 else:
+                    # Get chat history BEFORE saving the current message
                     chat_history = get_chat_history(chat_id, redis_client)
                     messages = build_ai_messages(
                         message, chat_history, sanitized_message_text
@@ -1557,9 +1515,15 @@ def handle_msg(message: Dict) -> str:
             if not check_rate_limit(chat_id, redis_client):
                 response_msg = handle_rate_limit(chat_id, message)
             else:
+                # Get chat history BEFORE saving the current message
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_ai_messages(message, chat_history, message_text)
                 response_msg = handle_ai_response(chat_id, ask_ai, messages)
+
+        # Only save messages AFTER we've generated a response
+        if message_text:
+            formatted_message = format_user_message(message, message_text)
+            save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
 
         # Save and send response
         if response_msg:
