@@ -896,7 +896,7 @@ def get_time_context() -> Dict:
 
 
 def get_ai_response(
-    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 3
+    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 4
 ) -> Optional[str]:
     """Get AI response with retries"""
     models = [
