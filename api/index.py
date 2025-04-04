@@ -906,8 +906,8 @@ def get_ai_response(
                 extra_body={
                     "models": [
                         "deepseek/deepseek-chat-v3-0324:free",
-                        "deepseek/deepseek-r1:free",
                         "google/gemini-2.0-flash-exp:free",
+                        "deepseek/deepseek-r1:free",
                     ],
                 },
                 messages=[system_msg] + messages,
