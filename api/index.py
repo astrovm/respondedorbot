@@ -899,16 +899,24 @@ def get_ai_response(
     client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 3
 ) -> Optional[str]:
     """Get AI response with retries"""
+    models = [
+        "google/gemini-2.5-pro-exp-03-25:free",
+        "deepseek/deepseek-chat-v3-0324:free",
+        "google/gemini-2.0-flash-exp:free",
+        "deepseek/deepseek-r1:free",
+    ]
+
     for attempt in range(max_retries):
+        # Determine which model to use based on the attempt number
+        current_model = models[attempt % len(models)]
+        fallback_models = [model for model in models if model != current_model]
+
         try:
+            print(f"Attempt {attempt + 1}/{max_retries} using model: {current_model}")
             response = client.chat.completions.create(
-                model="google/gemini-2.5-pro-exp-03-25:free",
+                model=current_model,
                 extra_body={
-                    "models": [
-                        "deepseek/deepseek-chat-v3-0324:free",
-                        "google/gemini-2.0-flash-exp:free",
-                        "deepseek/deepseek-r1:free",
-                    ],
+                    "models": fallback_models,
                 },
                 messages=[system_msg] + messages,
             )
@@ -917,8 +925,9 @@ def get_ai_response(
                 if response.choices[0].finish_reason == "stop":
                     return response.choices[0].message.content
 
+            # If we got here, there was some issue with the response
             if attempt < max_retries - 1:
-                print(f"Retry {attempt + 1}/{max_retries}")
+                print(f"Retry {attempt + 1}/{max_retries} with next model")
                 time.sleep(1)
 
         except Exception as e:
@@ -930,8 +939,10 @@ def get_ai_response(
                 print("Rate limit hit, retrying...")
                 time.sleep(1)
                 continue
+
             print(f"API error: {e}")
             if attempt < max_retries - 1:
+                print(f"Switching to next model after error")
                 continue
             break
 
