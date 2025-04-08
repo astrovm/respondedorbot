@@ -900,10 +900,10 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response with retries"""
     models = [
+        "openrouter/quasar-alpha",
         "google/gemini-2.5-pro-exp-03-25:free",
         "deepseek/deepseek-chat-v3-0324:free",
         "google/gemini-2.0-flash-exp:free",
-        "deepseek/deepseek-r1:free",
     ]
 
     for attempt in range(max_retries):
