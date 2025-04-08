@@ -900,7 +900,6 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response with retries"""
     models = [
-        "openrouter/quasar-alpha",
         "google/gemini-2.5-pro-exp-03-25:free",
         "deepseek/deepseek-chat-v3-0324:free",
         "google/gemini-2.0-flash-exp:free",
@@ -908,8 +907,8 @@ def get_ai_response(
 
     for attempt in range(max_retries):
         # Determine which model to use based on the attempt number
-        current_model = models[attempt % len(models)]
-        fallback_models = [model for model in models if model != current_model]
+        current_model = models[0]  # Always use the first model in the list
+        fallback_models = models[1:]  # Use the rest as fallbacks
 
         try:
             print(f"Attempt {attempt + 1}/{max_retries} using model: {current_model}")
@@ -925,26 +924,26 @@ def get_ai_response(
                 if response.choices[0].finish_reason == "stop":
                     return response.choices[0].message.content
 
-            # If we got here, there was some issue with the response
+            # If we get here, there was a problem with the response but no exception
+            # Move the current model to the end of the list
+            models.append(models.pop(0))
+
             if attempt < max_retries - 1:
                 print(f"Retry {attempt + 1}/{max_retries} with next model")
                 time.sleep(1)
 
         except Exception as e:
-            if (
-                hasattr(e, "status_code")
-                and e.status_code == 429
-                and attempt < max_retries - 1
-            ):
-                print("Rate limit hit, retrying...")
-                time.sleep(1)
-                continue
-
+            # Simplified error handling - handle all errors the same way
             print(f"API error: {e}")
+
+            # Move the current model to the end of the list
+            models.append(models.pop(0))
+
             if attempt < max_retries - 1:
                 print(f"Switching to next model after error")
-                continue
-            break
+                time.sleep(1)
+            else:
+                break
 
     return None
 
