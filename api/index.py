@@ -901,7 +901,7 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response with retries"""
     models = [
-        "google/gemini-2.5-pro-exp-03-25:free",
+        "google/gemini-2.5-pro-exp-03-25",
         "deepseek/deepseek-chat-v3-0324:free",
         "google/gemini-2.0-flash-exp:free",
     ]
