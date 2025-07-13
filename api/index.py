@@ -534,6 +534,35 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
 
+def satoshi(msg_text: str) -> str:
+    """Calculate the value of 1 satoshi in USD and ARS"""
+    try:
+        # Get Bitcoin price in USD and ARS
+        api_response_usd = get_api_or_cache_prices("USD")
+        api_response_ars = get_api_or_cache_prices("ARS")
+        
+        btc_price_usd = api_response_usd["data"][0]["quote"]["USD"]["price"]
+        btc_price_ars = api_response_ars["data"][0]["quote"]["ARS"]["price"]
+        
+        # Calculate satoshi value (1 BTC = 100,000,000 sats)
+        sat_value_usd = btc_price_usd / 100_000_000
+        sat_value_ars = btc_price_ars / 100_000_000
+        
+        # Calculate how many sats per unit
+        sats_per_dollar = int(100_000_000 / btc_price_usd)
+        sats_per_peso = int(100_000_000 / btc_price_ars)
+        
+        msg = f"""1 satoshi = ${sat_value_usd:.8f} USD
+1 satoshi = ${sat_value_ars:.4f} ARS
+
+$1 USD = {sats_per_dollar:,} sats
+$1 ARS = {sats_per_peso:,} sats"""
+        
+        return msg
+    except Exception:
+        return "no pude conseguir el precio de btc boludo"
+
+
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
@@ -697,6 +726,8 @@ comandos disponibles boludo:
 
 - /powerlaw: te tiro el precio justo de btc segun power law y si esta caro o barato
 - /rainbow: idem pero con el rainbow chart
+
+- /satoshi, /sat, /sats: te digo cuanto vale un satoshi
 
 - /time: timestamp unix actual
 """
@@ -1205,6 +1236,9 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
         "/devo": (get_devo, False),
         "/powerlaw": (powerlaw, False),
         "/rainbow": (rainbow, False),
+        "/satoshi": (satoshi, False),
+        "/sat": (satoshi, False),
+        "/sats": (satoshi, False),
         "/time": (get_timestamp, False),
         "/comando": (convert_to_command, False),
         "/command": (convert_to_command, False),
