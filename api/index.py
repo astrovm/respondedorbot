@@ -538,7 +538,10 @@ def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
-    value = 10 ** (-17) * days_since**5.82
+    
+    # Giovanni Santostasi Bitcoin Power Law model
+    # Formula: 1.0117e-17 * (days since genesis block)^5.82
+    value = 1.0117e-17 * (days_since ** 5.82)
 
     api_response = get_api_or_cache_prices("USD")
     price = api_response["data"][0]["quote"]["USD"]["price"]
