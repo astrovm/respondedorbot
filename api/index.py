@@ -550,13 +550,13 @@ def satoshi(msg_text: str) -> str:
         
         # Calculate how many sats per unit
         sats_per_dollar = int(100_000_000 / btc_price_usd)
-        sats_per_peso = int(100_000_000 / btc_price_ars)
+        sats_per_peso = 100_000_000 / btc_price_ars
         
         msg = f"""1 satoshi = ${sat_value_usd:.8f} USD
 1 satoshi = ${sat_value_ars:.4f} ARS
 
 $1 USD = {sats_per_dollar:,} sats
-$1 ARS = {sats_per_peso:,} sats"""
+$1 ARS = {sats_per_peso:.3f} sats"""
         
         return msg
     except Exception:
