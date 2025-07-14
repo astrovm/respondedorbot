@@ -540,24 +540,24 @@ def satoshi(msg_text: str) -> str:
         # Get Bitcoin price in USD and ARS
         api_response_usd = get_api_or_cache_prices("USD")
         api_response_ars = get_api_or_cache_prices("ARS")
-        
+
         btc_price_usd = api_response_usd["data"][0]["quote"]["USD"]["price"]
         btc_price_ars = api_response_ars["data"][0]["quote"]["ARS"]["price"]
-        
+
         # Calculate satoshi value (1 BTC = 100,000,000 sats)
         sat_value_usd = btc_price_usd / 100_000_000
         sat_value_ars = btc_price_ars / 100_000_000
-        
+
         # Calculate how many sats per unit
         sats_per_dollar = int(100_000_000 / btc_price_usd)
         sats_per_peso = 100_000_000 / btc_price_ars
-        
+
         msg = f"""1 satoshi = ${sat_value_usd:.8f} USD
 1 satoshi = ${sat_value_ars:.4f} ARS
 
 $1 USD = {sats_per_dollar:,} sats
 $1 ARS = {sats_per_peso:.3f} sats"""
-        
+
         return msg
     except Exception:
         return "no pude conseguir el precio de btc boludo"
@@ -567,10 +567,10 @@ def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
-    
+
     # Giovanni Santostasi Bitcoin Power Law model
     # Formula: 1.0117e-17 * (days since genesis block)^5.82
-    value = 1.0117e-17 * (days_since ** 5.82)
+    value = 1.0117e-17 * (days_since**5.82)
 
     api_response = get_api_or_cache_prices("USD")
     price = api_response["data"][0]["quote"]["USD"]["price"]
