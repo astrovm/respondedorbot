@@ -863,7 +863,12 @@ def ask_ai(messages: List[Dict]) -> str:
         if response:
             return response
 
-        # Fallback to random response if AI fails
+        # Fallback to Cloudflare Workers AI if OpenRouter fails
+        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
+        if cloudflare_response:
+            return cloudflare_response
+
+        # Final fallback to random response if both AI providers fail
         return get_fallback_response(messages)
 
     except Exception as e:
@@ -980,6 +985,39 @@ def get_ai_response(
             else:
                 break
 
+    return None
+
+
+def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Optional[str]:
+    """Fallback using Cloudflare Workers AI"""
+    try:
+        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
+        
+        if not cloudflare_account_id or not cloudflare_api_key:
+            print("Cloudflare Workers AI credentials not configured")
+            return None
+            
+        print("Trying Cloudflare Workers AI as fallback...")
+        cloudflare = OpenAI(
+            api_key=cloudflare_api_key,
+            base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1"
+        )
+        
+        response = cloudflare.chat.completions.create(
+            model="@cf/meta/llama-4-scout-17b-16e-instruct",
+            messages=[system_msg] + messages,
+            timeout=5.0
+        )
+        
+        if response and hasattr(response, "choices") and response.choices:
+            if response.choices[0].finish_reason == "stop":
+                print("Cloudflare Workers AI response successful")
+                return response.choices[0].message.content
+                
+    except Exception as e:
+        print(f"Cloudflare Workers AI error: {e}")
+        
     return None
 
 
