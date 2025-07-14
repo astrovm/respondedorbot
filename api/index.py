@@ -1005,7 +1005,7 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
         )
         
         response = cloudflare.chat.completions.create(
-            model="@cf/meta/llama-4-scout-17b-16e-instruct",
+            model="@cf/mistralai/mistral-small-3.1-24b-instruct",
             messages=[system_msg] + messages,
             timeout=5.0
         )
