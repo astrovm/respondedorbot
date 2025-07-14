@@ -936,12 +936,13 @@ def get_time_context() -> Dict:
 
 
 def get_ai_response(
-    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 2
+    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 3
 ) -> Optional[str]:
     """Get AI response with retries and timeout"""
     models = [
         "deepseek/deepseek-chat-v3-0324:free",
-        "google/gemini-2.0-flash-exp:free",
+        "mistralai/mistral-small-3.2-24b-instruct:free",
+        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     ]
 
     for attempt in range(max_retries):
@@ -993,31 +994,31 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
         cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
-        
+
         if not cloudflare_account_id or not cloudflare_api_key:
             print("Cloudflare Workers AI credentials not configured")
             return None
-            
+
         print("Trying Cloudflare Workers AI as fallback...")
         cloudflare = OpenAI(
             api_key=cloudflare_api_key,
-            base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1"
+            base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1",
         )
-        
+
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
             messages=[system_msg] + messages,
-            timeout=5.0
+            timeout=5.0,
         )
-        
+
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason == "stop":
                 print("Cloudflare Workers AI response successful")
                 return response.choices[0].message.content
-                
+
     except Exception as e:
         print(f"Cloudflare Workers AI error: {e}")
-        
+
     return None
 
 
