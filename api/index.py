@@ -959,6 +959,11 @@ def get_ai_response(
                 },
                 messages=[system_msg] + messages,
                 timeout=5.0,  # 5 second timeout
+                temperature=0.8,           # More creativity
+                top_p=0.9,                # More token diversity
+                frequency_penalty=0.6,    # Penalize word repetition
+                presence_penalty=0.4,     # Encourage new topics
+                max_tokens=100            # Control response length
             )
 
             if response and hasattr(response, "choices") and response.choices:
@@ -1009,6 +1014,11 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
             messages=[system_msg] + messages,
             timeout=5.0,
+            temperature=0.8,           # More creativity
+            top_p=0.9,                # More diversity
+            frequency_penalty=0.6,    # Anti-repetition
+            presence_penalty=0.4,     # New topics
+            max_tokens=100            # Short responses
         )
 
         if response and hasattr(response, "choices") and response.choices:
