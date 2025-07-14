@@ -931,9 +931,9 @@ def get_time_context() -> Dict:
 
 
 def get_ai_response(
-    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 4
+    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 2
 ) -> Optional[str]:
-    """Get AI response with retries"""
+    """Get AI response with retries and timeout"""
     models = [
         "deepseek/deepseek-chat-v3-0324:free",
         "google/gemini-2.0-flash-exp:free",
@@ -952,6 +952,7 @@ def get_ai_response(
                     "models": fallback_models,
                 },
                 messages=[system_msg] + messages,
+                timeout=5.0,  # 5 second timeout
             )
 
             if response and hasattr(response, "choices") and response.choices:
@@ -964,7 +965,7 @@ def get_ai_response(
 
             if attempt < max_retries - 1:
                 print(f"Retry {attempt + 1}/{max_retries} with next model")
-                time.sleep(1)
+                time.sleep(0.5)
 
         except Exception as e:
             # Simplified error handling - handle all errors the same way
@@ -975,7 +976,7 @@ def get_ai_response(
 
             if attempt < max_retries - 1:
                 print(f"Switching to next model after error")
-                time.sleep(1)
+                time.sleep(0.5)
             else:
                 break
 
