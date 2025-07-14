@@ -35,6 +35,8 @@ CURRENT_FUNCTION_URL: la url donde estoy corriendo
 MAIN_FUNCTION_URL: la url principal donde deberia estar
 FRIENDLY_INSTANCE_NAME: un nombre piola para identificarme en los reports
 OPENROUTER_API_KEY: la key de openrouter para que te pueda bardear como corresponde
+CLOUDFLARE_API_KEY: la key de cloudflare workers ai para fallback cuando openrouter falla
+CLOUDFLARE_ACCOUNT_ID: el account id de cloudflare para acceder a workers ai
 GORDO_KEY: key para autenticar los requests al webhook
 ```
 
