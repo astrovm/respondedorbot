@@ -1028,10 +1028,14 @@ def get_cloudflare_ai_response(
         # If we have an image, modify the last user message to include it
         modified_messages = messages.copy()
         if image_base64 and modified_messages:
+            print(f"DEBUG: Looking for user message in {len(modified_messages)} messages")
             # Find the last user message and modify it
             for i in range(len(modified_messages) - 1, -1, -1):
-                if modified_messages[i].get("role") == "user":
-                    text_content = modified_messages[i]["content"]
+                msg = modified_messages[i]
+                print(f"DEBUG: Message {i}: role={msg.get('role')}, content preview={str(msg.get('content'))[:100]}...")
+                if msg.get("role") == "user":
+                    text_content = msg["content"]
+                    print(f"DEBUG: Found user message, converting to multimodal format")
                     if isinstance(text_content, list):
                         # Already in multimodal format
                         text_content.append(
@@ -1053,6 +1057,7 @@ def get_cloudflare_ai_response(
                                 },
                             },
                         ]
+                    print(f"DEBUG: Message modified successfully")
                     break
         
         final_messages = [system_msg] + modified_messages
