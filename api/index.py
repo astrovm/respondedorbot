@@ -43,6 +43,58 @@ def config_redis(host=None, port=None, password=None):
         raise  # Re-raise to prevent silent failure
 
 
+def get_cached_transcription(file_id: str) -> Optional[str]:
+    """Get cached audio transcription from Redis"""
+    try:
+        redis_client = config_redis()
+        cache_key = f"audio_transcription:{file_id}"
+        cached_text = redis_client.get(cache_key)
+        if cached_text:
+            print(f"Using cached transcription for audio: {file_id}")
+            return cached_text
+        return None
+    except Exception as e:
+        print(f"Error getting cached transcription: {e}")
+        return None
+
+
+def cache_transcription(file_id: str, text: str, ttl: int = 604800) -> None:
+    """Cache audio transcription in Redis (default 7 days)"""
+    try:
+        redis_client = config_redis()
+        cache_key = f"audio_transcription:{file_id}"
+        redis_client.setex(cache_key, ttl, text)
+        print(f"Caching new transcription for: {file_id}")
+    except Exception as e:
+        print(f"Error caching transcription: {e}")
+
+
+def get_cached_description(file_id: str) -> Optional[str]:
+    """Get cached image description from Redis"""
+    try:
+        redis_client = config_redis()
+        cache_key = f"image_description:{file_id}"
+        cached_desc = redis_client.get(cache_key)
+        if cached_desc:
+            print(f"Using cached description for image: {file_id}")
+            return cached_desc
+        return None
+    except Exception as e:
+        print(f"Error getting cached description: {e}")
+        return None
+
+
+def cache_description(file_id: str, description: str, ttl: int = 604800) -> None:
+    """Cache image description in Redis (default 7 days)"""
+    try:
+        redis_client = config_redis()
+        cache_key = f"image_description:{file_id}"
+        redis_client.setex(cache_key, ttl, description)
+        print(f"Caching new description for: {file_id}")
+    except Exception as e:
+        print(f"Error caching description: {e}")
+
+
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
@@ -1664,8 +1716,15 @@ def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en
     return None
 
 
-def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
+def transcribe_audio_cloudflare(audio_data: bytes, file_id: str = None) -> Optional[str]:
     """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
+    
+    # Check cache first if file_id is provided
+    if file_id:
+        cached_transcription = get_cached_transcription(file_id)
+        if cached_transcription:
+            return cached_transcription
+    
     cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
     cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
 
@@ -1696,6 +1755,11 @@ def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
             if result.get("success") and "result" in result:
                 transcription = result["result"].get("text", "")
                 print(f"Audio transcribed successfully: {transcription[:100]}...")
+                
+                # Cache the transcription if file_id is provided
+                if file_id and transcription:
+                    cache_transcription(file_id, transcription)
+                
                 return transcription
 
             print(f"Whisper transcription failed: {result}")
@@ -1836,7 +1900,7 @@ def handle_msg(message: Dict) -> str:
             print(f"Processing audio message: {audio_file_id}")
             audio_data = download_telegram_file(audio_file_id)
             if audio_data:
-                transcription = transcribe_audio_cloudflare(audio_data)
+                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
                 if transcription:
                     # Use transcription as message text
                     message_text = transcription
