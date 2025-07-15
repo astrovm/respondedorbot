@@ -1025,7 +1025,7 @@ def get_ai_response(
     client: OpenAI,
     system_msg: Dict,
     messages: List[Dict],
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> Optional[str]:
     """Get AI response with retries and timeout (text-only)"""
     models = [
