@@ -843,7 +843,7 @@ def get_weather() -> dict:
         return None
 
 
-def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
+def ask_ai(messages: List[Dict], image_data: Optional[bytes] = None) -> str:
     try:
         # Build context with market and weather data
         context_data = {
@@ -862,7 +862,7 @@ def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
         system_message = build_system_message(context_data)
 
         # If we have an image, first describe it with LLaVA then continue normal flow
-        if image_base64:
+        if image_data:
             print("Processing image with LLaVA model...")
             
             # Get user text for image description prompt
@@ -878,7 +878,7 @@ def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
                         user_text = content
             
             # Describe the image using LLaVA
-            image_description = describe_image_cloudflare(image_base64, user_text)
+            image_description = describe_image_cloudflare(image_data, user_text)
             
             if image_description:
                 # Add image description to the conversation context
@@ -1577,7 +1577,7 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
         return None
 
 
-def describe_image_cloudflare(image_base64: str, user_text: str = "¿Qué ves en esta imagen?") -> Optional[str]:
+def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en esta imagen?") -> Optional[str]:
     """Describe image using Cloudflare Workers AI LLaVA model"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -1593,14 +1593,17 @@ def describe_image_cloudflare(image_base64: str, user_text: str = "¿Qué ves en
             "Content-Type": "application/json"
         }
         
+        # Convert bytes to array of integers (0-255) as expected by LLaVA
+        image_array = list(image_data)
+        
         payload = {
             "prompt": user_text,
-            "image": [image_base64],
+            "image": image_array,
             "max_tokens": 512
         }
         
         # Debug: Show payload info
-        print(f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_size: {len(image_base64)} chars")
+        print(f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_array_size: {len(image_array)} bytes")
         
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -1891,7 +1894,7 @@ def handle_msg(message: Dict) -> str:
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_ai_messages(message, chat_history, message_text)
                 response_msg = handle_ai_response(
-                    chat_id, ask_ai, messages, image_base64=image_base64
+                    chat_id, ask_ai, messages, image_data=resized_image_data if photo_file_id else None
                 )
 
         # Only save messages AFTER we've generated a response
@@ -1967,7 +1970,7 @@ def handle_ai_response(
     chat_id: str,
     handler_func: Callable,
     messages: List[Dict],
-    image_base64: Optional[str] = None,
+    image_data: Optional[bytes] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
@@ -1976,11 +1979,11 @@ def handle_ai_response(
 
     # Call handler with image if supported
     if (
-        image_base64
+        image_data
         and hasattr(handler_func, "__name__")
         and handler_func.__name__ == "ask_ai"
     ):
-        response = handler_func(messages, image_base64=image_base64)
+        response = handler_func(messages, image_data=image_data)
     else:
         response = handler_func(messages)
 
