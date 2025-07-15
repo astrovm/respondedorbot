@@ -818,7 +818,7 @@ def handle_bcra_variables(msg_text: str) -> str:
         return "Error al obtener las variables del BCRA"
 
 
-def handle_transcribe(message: Dict) -> str:
+def handle_transcribe_with_message(message: Dict) -> str:
     """Transcribe audio or describe image from replied message"""
     try:
         # Check if this is a reply to another message
@@ -917,6 +917,11 @@ def handle_transcribe(message: Dict) -> str:
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
         return "Error procesando el comando, intentá más tarde"
+
+
+def handle_transcribe(msg_text: str) -> str:
+    """Transcribe command wrapper - requires special handling in message processor"""
+    return "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
 
 
 def powerlaw(msg_text: str) -> str:
@@ -2324,7 +2329,11 @@ def handle_msg(message: Dict) -> str:
                         image_file_id=photo_file_id,
                     )
             else:
-                response_msg = handler_func(sanitized_message_text)
+                # Special handling for transcribe command which needs the full message
+                if command == "/transcribe":
+                    response_msg = handle_transcribe_with_message(message)
+                else:
+                    response_msg = handler_func(sanitized_message_text)
         else:
             if not check_rate_limit(chat_id, redis_client):
                 response_msg = handle_rate_limit(chat_id, message)
