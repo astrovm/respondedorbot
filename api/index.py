@@ -738,60 +738,96 @@ def format_bcra_variables(variables: Dict) -> str:
     if not variables:
         return "No se pudieron obtener las variables del BCRA"
     
-    # Priority variables to show first
-    priority_vars = [
-        'Reservas Internacionales del BCRA',
-        'Tipo de Cambio Minorista',
-        'Tipo de Cambio Mayorista',
-        'Base Monetaria',
-        'TAMAR en pesos de bancos privados',
-        'BADLAR en pesos de bancos privados'
+    def format_number(value_str: str) -> str:
+        """Format numbers with proper thousands separators"""
+        try:
+            # Remove existing separators and convert to float
+            clean_value = value_str.replace('.', '').replace(',', '.')
+            num = float(clean_value)
+            
+            # Format based on size
+            if num >= 1000000:
+                # For millions, show as thousands
+                return f"{num/1000:,.0f}".replace(',', '.')
+            elif num >= 1000:
+                return f"{num:,.0f}".replace(',', '.')
+            else:
+                return f"{num:.2f}".replace('.', ',')
+        except:
+            return value_str
+    
+    def format_percentage(value_str: str) -> str:
+        """Format percentages with max 2 decimal places"""
+        try:
+            clean_value = value_str.replace(',', '.')
+            num = float(clean_value)
+            if num >= 10:
+                return f"{num:.1f}%"
+            else:
+                return f"{num:.2f}%"
+        except:
+            return f"{value_str}%"
+    
+    msg_lines = ["📊 Variables principales BCRA\n"]
+    
+    # Priority variables with better organization
+    priority_checks = [
+        ('reservas internacionales', lambda k, v, d: f"💰 Reservas: USD {format_number(v)} millones"),
+        ('tipo de cambio minorista', lambda k, v, d: f"💵 Dólar minorista: ${v}"),
+        ('tipo de cambio mayorista', lambda k, v, d: f"💱 Dólar mayorista: ${v}"),
+        ('inflación mensual', lambda k, v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
+        ('inflación interanual', lambda k, v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
+        ('base monetaria', lambda k, v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
+        ('tamar.*n\\.a\\.', lambda k, v, d: f"📈 TAMAR: {format_percentage(v)}"),
+        ('badlar.*n\\.a\\.', lambda k, v, d: f"📊 BADLAR: {format_percentage(v)}")
     ]
     
-    msg_lines = ["📊 *Variables principales BCRA*\n"]
-    
-    # Show priority variables first
-    for var_name in priority_vars:
+    # Process priority variables
+    for pattern, formatter in priority_checks:
         for key, data in variables.items():
-            if var_name.lower() in key.lower():
+            if re.search(pattern, key.lower()):
                 value = data['value']
                 date = data.get('date', '')
                 
-                # Format variable name
-                if 'reservas' in key.lower():
-                    msg_lines.append(f"💰 Reservas: USD {value} millones")
-                elif 'minorista' in key.lower():
-                    msg_lines.append(f"💵 Dólar minorista: ${value}")
-                elif 'mayorista' in key.lower():
-                    msg_lines.append(f"💱 Dólar mayorista: ${value}")
-                elif 'base monetaria' in key.lower():
-                    msg_lines.append(f"🏦 Base monetaria: ${value}")
-                elif 'tamar' in key.lower() and 'n.a.' in key.lower():
-                    msg_lines.append(f"📈 TAMAR: {value}%")
-                elif 'badlar' in key.lower() and 'n.a.' in key.lower():
-                    msg_lines.append(f"📊 BADLAR: {value}%")
-                
-                # Add date if available
+                formatted_line = formatter(key, value, date)
                 if date and date != value:
-                    msg_lines[-1] += f" ({date})"
+                    formatted_line += f" ({date})"
+                msg_lines.append(formatted_line)
                 break
     
-    # Add a few more relevant variables
-    other_vars = []
-    for key, data in variables.items():
-        if not any(pvar.lower() in key.lower() for pvar in priority_vars):
-            if any(term in key.lower() for term in ['inflación', 'ipc', 'tasa', 'agregado']):
-                other_vars.append((key, data))
+    # Add relevant secondary variables
+    secondary_vars = []
+    secondary_patterns = [
+        ('depósitos.*total', 'Depósitos totales'),
+        ('préstamos.*sector privado', 'Préstamos sector privado'),
+        ('m2.*privado', 'M2 privado'),
+        ('uva.*pesos', 'UVA'),
+        ('tasa.*pase.*bcra', 'Tasa pase BCRA')
+    ]
     
-    if other_vars:
-        msg_lines.append("\n🔍 *Otras variables*:")
-        for key, data in other_vars[:3]:  # Show max 3 additional
-            short_name = key.split('(')[0].strip()
-            if len(short_name) > 50:
-                short_name = short_name[:50] + "..."
-            msg_lines.append(f"• {short_name}: {data['value']}")
+    for pattern, display_name in secondary_patterns:
+        for key, data in variables.items():
+            if re.search(pattern, key.lower()):
+                value = data['value']
+                
+                # Format based on content
+                if 'millones' in key.lower():
+                    formatted_value = f"${format_number(value)} mill."
+                elif '%' in key or 'tasa' in key.lower():
+                    formatted_value = format_percentage(value)
+                elif 'uva' in key.lower():
+                    formatted_value = f"${value}"
+                else:
+                    formatted_value = format_number(value)
+                
+                secondary_vars.append(f"• {display_name}: {formatted_value}")
+                break
     
-    msg_lines.append(f"\n📅 Fuente: BCRA - Principales Variables")
+    if secondary_vars:
+        msg_lines.append("\n🔍 Otras variables:")
+        msg_lines.extend(secondary_vars[:3])  # Show max 3
+    
+    msg_lines.append(f"\n📅 Fuente: BCRA")
     
     return "\n".join(msg_lines)
 
