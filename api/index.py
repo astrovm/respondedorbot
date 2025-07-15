@@ -858,19 +858,28 @@ def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
         # Build system message with personality and context
         system_message = build_system_message(context_data)
 
-        # Try to get AI response with retries
-        response = get_ai_response(
-            openrouter, system_message, messages, image_base64=image_base64
-        )
-        if response:
-            return response
+        # If we have an image, use Cloudflare directly (better vision support)
+        if image_base64:
+            print("Processing image with Cloudflare Workers AI...")
+            cloudflare_response = get_cloudflare_ai_response(
+                system_message, messages, image_base64=image_base64
+            )
+            if cloudflare_response:
+                return cloudflare_response
+        else:
+            # For text-only, try OpenRouter first
+            response = get_ai_response(
+                openrouter, system_message, messages
+            )
+            if response:
+                return response
 
-        # Fallback to Cloudflare Workers AI if OpenRouter fails
-        cloudflare_response = get_cloudflare_ai_response(
-            system_message, messages, image_base64=image_base64
-        )
-        if cloudflare_response:
-            return cloudflare_response
+            # Fallback to Cloudflare Workers AI if OpenRouter fails
+            cloudflare_response = get_cloudflare_ai_response(
+                system_message, messages
+            )
+            if cloudflare_response:
+                return cloudflare_response
 
         # Final fallback to random response if both AI providers fail
         return get_fallback_response(messages)
@@ -944,21 +953,13 @@ def get_ai_response(
     system_msg: Dict,
     messages: List[Dict],
     max_retries: int = 3,
-    image_base64: Optional[str] = None,
 ) -> Optional[str]:
-    """Get AI response with retries and timeout"""
-    if image_base64:
-        # Use only vision-capable models for images
-        models = [
-            "mistralai/mistral-small-3.2-24b-instruct:free",
-        ]
-    else:
-        # Use regular order for text-only
-        models = [
-            "deepseek/deepseek-chat-v3-0324:free",
-            "mistralai/mistral-small-3.2-24b-instruct:free",
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-        ]
+    """Get AI response with retries and timeout (text-only)"""
+    models = [
+        "deepseek/deepseek-chat-v3-0324:free",
+        "mistralai/mistral-small-3.2-24b-instruct:free",
+        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    ]
 
     for attempt in range(max_retries):
         # Determine which model to use based on the attempt number
@@ -968,41 +969,12 @@ def get_ai_response(
         try:
             print(f"Attempt {attempt + 1}/{max_retries} using model: {current_model}")
 
-            # If we have an image, modify the last user message to include it
-            final_messages = [system_msg] + messages
-            if image_base64 and final_messages:
-                last_message = final_messages[-1]
-                if last_message.get("role") == "user":
-                    # Convert text content to multimodal format
-                    text_content = last_message["content"]
-                    if isinstance(text_content, list):
-                        # Already in multimodal format
-                        text_content.append(
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
-                                },
-                            }
-                        )
-                    else:
-                        # Convert to multimodal format
-                        final_messages[-1]["content"] = [
-                            {"type": "text", "text": text_content},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
-                                },
-                            },
-                        ]
-
             response = client.chat.completions.create(
                 model=current_model,
                 extra_body={
                     "models": fallback_models,
                 },
-                messages=final_messages,
+                messages=[system_msg] + messages,
                 timeout=5.0,  # 5 second timeout
                 max_tokens=512,  # Control response length
             )
