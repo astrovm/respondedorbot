@@ -947,11 +947,18 @@ def get_ai_response(
     image_base64: Optional[str] = None,
 ) -> Optional[str]:
     """Get AI response with retries and timeout"""
-    models = [
-        "deepseek/deepseek-chat-v3-0324:free",
-        "mistralai/mistral-small-3.2-24b-instruct:free",
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    ]
+    if image_base64:
+        # Use only vision-capable models for images
+        models = [
+            "mistralai/mistral-small-3.2-24b-instruct:free",
+        ]
+    else:
+        # Use regular order for text-only
+        models = [
+            "deepseek/deepseek-chat-v3-0324:free",
+            "mistralai/mistral-small-3.2-24b-instruct:free",
+            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        ]
 
     for attempt in range(max_retries):
         # Determine which model to use based on the attempt number
