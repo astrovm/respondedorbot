@@ -618,6 +618,107 @@ $1 ARS = {sats_per_peso:.3f} sats"""
         return "no pude conseguir el precio de btc boludo"
 
 
+def handle_transcribe(message: Dict) -> str:
+    """Transcribe audio or describe image from replied message"""
+    try:
+        # Check if this is a reply to another message
+        if "reply_to_message" not in message:
+            return "Respondé a un mensaje con audio o imagen para transcribir/describir"
+        
+        replied_msg = message["reply_to_message"]
+        
+        # Check for audio in replied message
+        if "voice" in replied_msg and replied_msg["voice"]:
+            audio_file_id = replied_msg["voice"]["file_id"]
+            
+            # Check cache first
+            cached_transcription = get_cached_transcription(audio_file_id)
+            if cached_transcription:
+                return f"🎵 Transcripción: {cached_transcription}"
+            
+            # Download and transcribe
+            audio_data = download_telegram_file(audio_file_id)
+            if audio_data:
+                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
+                if transcription:
+                    return f"🎵 Transcripción: {transcription}"
+                else:
+                    return "No pude transcribir el audio, intentá más tarde"
+            else:
+                return "No pude descargar el audio"
+        
+        # Check for regular audio
+        elif "audio" in replied_msg and replied_msg["audio"]:
+            audio_file_id = replied_msg["audio"]["file_id"]
+            
+            # Check cache first
+            cached_transcription = get_cached_transcription(audio_file_id)
+            if cached_transcription:
+                return f"🎵 Transcripción: {cached_transcription}"
+            
+            # Download and transcribe
+            audio_data = download_telegram_file(audio_file_id)
+            if audio_data:
+                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
+                if transcription:
+                    return f"🎵 Transcripción: {transcription}"
+                else:
+                    return "No pude transcribir el audio, intentá más tarde"
+            else:
+                return "No pude descargar el audio"
+        
+        # Check for photo in replied message
+        elif "photo" in replied_msg and replied_msg["photo"]:
+            photo_file_id = replied_msg["photo"][-1]["file_id"]
+            
+            # Check cache first
+            cached_description = get_cached_description(photo_file_id)
+            if cached_description:
+                return f"🖼️ Descripción: {cached_description}"
+            
+            # Download and describe
+            image_data = download_telegram_file(photo_file_id)
+            if image_data:
+                # Resize image if needed
+                resized_image_data = resize_image_if_needed(image_data)
+                description = describe_image_cloudflare(resized_image_data, "Describe what you see in this image in detail.", photo_file_id)
+                if description:
+                    return f"🖼️ Descripción: {description}"
+                else:
+                    return "No pude describir la imagen, intentá más tarde"
+            else:
+                return "No pude descargar la imagen"
+        
+        # Check for sticker in replied message
+        elif "sticker" in replied_msg and replied_msg["sticker"]:
+            sticker_file_id = replied_msg["sticker"]["file_id"]
+            
+            # Check cache first
+            cached_description = get_cached_description(sticker_file_id)
+            if cached_description:
+                return f"🎨 Descripción del sticker: {cached_description}"
+            
+            # Download and describe
+            image_data = download_telegram_file(sticker_file_id)
+            if image_data:
+                # Resize image if needed
+                resized_image_data = resize_image_if_needed(image_data)
+                description = describe_image_cloudflare(resized_image_data, "Describe what you see in this sticker in detail.", sticker_file_id)
+                if description:
+                    return f"🎨 Descripción del sticker: {description}"
+                else:
+                    return "No pude describir el sticker, intentá más tarde"
+            else:
+                return "No pude descargar el sticker"
+        
+        else:
+            return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+    
+    except Exception as e:
+        print(f"Error in handle_transcribe: {e}")
+        return "Error procesando el comando, intentá más tarde"
+
+
 def powerlaw(msg_text: str) -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
@@ -1379,6 +1480,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
         "/command": (convert_to_command, False),
         "/instance": (get_instance_name, False),
         "/help": (get_help, False),
+        "/transcribe": (handle_transcribe, False),
     }
 
 
