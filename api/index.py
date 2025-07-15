@@ -1522,10 +1522,19 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
 
     # Extract photo (get highest resolution)
     photo_file_id = None
+    
+    # First, check for photo in the main message
     if "photo" in message and message["photo"]:
         # Telegram sends array of photos in different resolutions
         # Take the last one (highest resolution)
         photo_file_id = message["photo"][-1]["file_id"]
+    
+    # If no photo in main message, check in replied message
+    elif "reply_to_message" in message and message["reply_to_message"]:
+        replied_msg = message["reply_to_message"]
+        if "photo" in replied_msg and replied_msg["photo"]:
+            photo_file_id = replied_msg["photo"][-1]["file_id"]
+            print(f"Found photo in quoted message: {photo_file_id}")
 
     # Extract audio/voice
     audio_file_id = None
@@ -1533,6 +1542,15 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
         audio_file_id = message["voice"]["file_id"]
     elif "audio" in message and message["audio"]:
         audio_file_id = message["audio"]["file_id"]
+    # Also check for audio in replied message
+    elif "reply_to_message" in message and message["reply_to_message"]:
+        replied_msg = message["reply_to_message"]
+        if "voice" in replied_msg and replied_msg["voice"]:
+            audio_file_id = replied_msg["voice"]["file_id"]
+            print(f"Found voice in quoted message: {audio_file_id}")
+        elif "audio" in replied_msg and replied_msg["audio"]:
+            audio_file_id = replied_msg["audio"]["file_id"]
+            print(f"Found audio in quoted message: {audio_file_id}")
 
     return text, photo_file_id, audio_file_id
 
