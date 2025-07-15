@@ -1517,10 +1517,10 @@ def extract_message_text(message: Dict) -> str:
 
 
 def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional[str]]:
-    """Extract text, photo file_id, and audio file_id from message"""
+    """Extract text, photo/sticker file_id, and audio file_id from message"""
     text = extract_message_text(message)
 
-    # Extract photo (get highest resolution)
+    # Extract photo or sticker (get highest resolution)
     photo_file_id = None
     
     # First, check for photo in the main message
@@ -1529,12 +1529,20 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
         # Take the last one (highest resolution)
         photo_file_id = message["photo"][-1]["file_id"]
     
-    # If no photo in main message, check in replied message
+    # Check for sticker in the main message
+    elif "sticker" in message and message["sticker"]:
+        photo_file_id = message["sticker"]["file_id"]
+        print(f"Found sticker: {photo_file_id}")
+    
+    # If no photo/sticker in main message, check in replied message
     elif "reply_to_message" in message and message["reply_to_message"]:
         replied_msg = message["reply_to_message"]
         if "photo" in replied_msg and replied_msg["photo"]:
             photo_file_id = replied_msg["photo"][-1]["file_id"]
             print(f"Found photo in quoted message: {photo_file_id}")
+        elif "sticker" in replied_msg and replied_msg["sticker"]:
+            photo_file_id = replied_msg["sticker"]["file_id"]
+            print(f"Found sticker in quoted message: {photo_file_id}")
 
     # Extract audio/voice
     audio_file_id = None
