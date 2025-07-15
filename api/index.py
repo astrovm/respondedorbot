@@ -865,17 +865,8 @@ def ask_ai(messages: List[Dict], image_data: Optional[bytes] = None) -> str:
         if image_data:
             print("Processing image with LLaVA model...")
             
-            # Get user text for image description prompt
-            user_text = "¿Qué ves en esta imagen?"
-            if messages:
-                last_msg = messages[-1]
-                if isinstance(last_msg.get("content"), str):
-                    # Extract just the message part from the context
-                    content = last_msg["content"]
-                    if "MENSAJE:" in content:
-                        user_text = content.split("MENSAJE:")[1].split("\nINSTRUCCIONES:")[0].strip()
-                    else:
-                        user_text = content
+            # Always use a description prompt for LLaVA, not the user's question
+            user_text = "Describe what you see in this image in detail."
             
             # Describe the image using LLaVA
             image_description = describe_image_cloudflare(image_data, user_text)
@@ -1613,8 +1604,16 @@ def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en
         if response.status_code == 200:
             result = response.json()
             print(f"DEBUG: LLaVA response keys: {list(result.keys())}")
-            if "result" in result and "response" in result["result"]:
-                description = result["result"]["response"]
+            if "result" in result:
+                # Try both possible response formats
+                if "response" in result["result"]:
+                    description = result["result"]["response"]
+                elif "description" in result["result"]:
+                    description = result["result"]["description"]
+                else:
+                    print(f"Unexpected LLaVA response format: {result}")
+                    return None
+                
                 print(f"Image description successful: {description[:100]}...")
                 return description
             else:
