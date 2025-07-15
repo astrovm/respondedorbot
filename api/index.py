@@ -1633,6 +1633,39 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     return gen_random(message["from"]["first_name"])
 
 
+def clean_duplicate_response(response: str) -> str:
+    """Remove duplicate consecutive text in AI responses"""
+    if not response:
+        return response
+    
+    # Split by lines and remove consecutive duplicates
+    lines = response.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line and (not cleaned_lines or line != cleaned_lines[-1]):
+            cleaned_lines.append(line)
+    
+    cleaned_response = '\n'.join(cleaned_lines)
+    
+    # Also check for repeated sentences within the same line
+    sentences = cleaned_response.split('. ')
+    cleaned_sentences = []
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if sentence and (not cleaned_sentences or sentence != cleaned_sentences[-1]):
+            cleaned_sentences.append(sentence)
+    
+    final_response = '. '.join(cleaned_sentences)
+    
+    # Clean up any double periods
+    final_response = final_response.replace('..', '.')
+    
+    return final_response
+
+
 def handle_ai_response(
     chat_id: str, handler_func: Callable, messages: List[Dict]
 ) -> str:
@@ -1640,7 +1673,16 @@ def handle_ai_response(
     token = environ.get("TELEGRAM_TOKEN")
     send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
-    return handler_func(messages)
+    
+    response = handler_func(messages)
+    print(f"DEBUG - Raw AI response: '{response}'")
+    print(f"DEBUG - Response length: {len(response) if response else 0}")
+    
+    # Clean any duplicate text
+    cleaned_response = clean_duplicate_response(response)
+    print(f"DEBUG - Cleaned response: '{cleaned_response}'")
+    
+    return cleaned_response
 
 
 def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
