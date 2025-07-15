@@ -1026,33 +1026,36 @@ def get_cloudflare_ai_response(
         )
 
         # If we have an image, modify the last user message to include it
-        final_messages = [system_msg] + messages
-        if image_base64 and final_messages:
-            last_message = final_messages[-1]
-            if last_message.get("role") == "user":
-                # Convert text content to multimodal format
-                text_content = last_message["content"]
-                if isinstance(text_content, list):
-                    # Already in multimodal format
-                    text_content.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
+        modified_messages = messages.copy()
+        if image_base64 and modified_messages:
+            # Find the last user message and modify it
+            for i in range(len(modified_messages) - 1, -1, -1):
+                if modified_messages[i].get("role") == "user":
+                    text_content = modified_messages[i]["content"]
+                    if isinstance(text_content, list):
+                        # Already in multimodal format
+                        text_content.append(
+                            {
+                                "type": "image_url", 
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                },
+                            }
+                        )
+                    else:
+                        # Convert to multimodal format
+                        modified_messages[i]["content"] = [
+                            {"type": "text", "text": text_content},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                },
                             },
-                        }
-                    )
-                else:
-                    # Convert to multimodal format
-                    final_messages[-1]["content"] = [
-                        {"type": "text", "text": text_content},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
-                            },
-                        },
-                    ]
+                        ]
+                    break
+        
+        final_messages = [system_msg] + modified_messages
 
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
