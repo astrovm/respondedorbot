@@ -858,28 +858,53 @@ def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
         # Build system message with personality and context
         system_message = build_system_message(context_data)
 
-        # If we have an image, use Cloudflare directly (better vision support)
+        # If we have an image, first describe it with LLaVA then continue normal flow
         if image_base64:
-            print("Processing image with Cloudflare Workers AI...")
-            cloudflare_response = get_cloudflare_ai_response(
-                system_message, messages, image_base64=image_base64
-            )
-            if cloudflare_response:
-                return cloudflare_response
-        else:
-            # For text-only, try OpenRouter first
-            response = get_ai_response(
-                openrouter, system_message, messages
-            )
-            if response:
-                return response
+            print("Processing image with LLaVA model...")
+            
+            # Get user text for image description prompt
+            user_text = "¿Qué ves en esta imagen?"
+            if messages:
+                last_msg = messages[-1]
+                if isinstance(last_msg.get("content"), str):
+                    # Extract just the message part from the context
+                    content = last_msg["content"]
+                    if "MENSAJE:" in content:
+                        user_text = content.split("MENSAJE:")[1].split("\nINSTRUCCIONES:")[0].strip()
+                    else:
+                        user_text = content
+            
+            # Describe the image using LLaVA
+            image_description = describe_image_cloudflare(image_base64, user_text)
+            
+            if image_description:
+                # Add image description to the conversation context
+                image_context = f"[Imagen: {image_description}]"
+                
+                # Modify the last message to include the image description
+                if messages:
+                    last_message = messages[-1]
+                    if isinstance(last_message.get("content"), str):
+                        last_message["content"] = last_message["content"] + f"\n\n{image_context}"
+                
+                print(f"Image described, continuing with normal AI flow...")
+            else:
+                print("Failed to describe image, continuing without description...")
+        
+        # Continue with normal AI flow (for both image and text)
+        # Try OpenRouter first
+        response = get_ai_response(
+            openrouter, system_message, messages
+        )
+        if response:
+            return response
 
-            # Fallback to Cloudflare Workers AI if OpenRouter fails
-            cloudflare_response = get_cloudflare_ai_response(
-                system_message, messages
-            )
-            if cloudflare_response:
-                return cloudflare_response
+        # Fallback to Cloudflare Workers AI if OpenRouter fails
+        cloudflare_response = get_cloudflare_ai_response(
+            system_message, messages
+        )
+        if cloudflare_response:
+            return cloudflare_response
 
         # Final fallback to random response if both AI providers fail
         return get_fallback_response(messages)
@@ -1008,9 +1033,9 @@ def get_ai_response(
 
 
 def get_cloudflare_ai_response(
-    system_msg: Dict, messages: List[Dict], image_base64: Optional[str] = None
+    system_msg: Dict, messages: List[Dict]
 ) -> Optional[str]:
-    """Fallback using Cloudflare Workers AI with vision support"""
+    """Fallback using Cloudflare Workers AI for text-only"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
         cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
@@ -1025,48 +1050,13 @@ def get_cloudflare_ai_response(
             base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1",
         )
 
-        # If we have an image, modify the last user message to include it
-        modified_messages = messages.copy()
-        if image_base64 and modified_messages:
-            print(f"DEBUG: Looking for user message in {len(modified_messages)} messages")
-            # Find the last user message and modify it
-            for i in range(len(modified_messages) - 1, -1, -1):
-                msg = modified_messages[i]
-                print(f"DEBUG: Message {i}: role={msg.get('role')}, content preview={str(msg.get('content'))[:100]}...")
-                if msg.get("role") == "user":
-                    text_content = msg["content"]
-                    print(f"DEBUG: Found user message, converting to multimodal format")
-                    if isinstance(text_content, list):
-                        # Already in multimodal format
-                        text_content.append(
-                            {
-                                "type": "image_url", 
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
-                                },
-                            }
-                        )
-                    else:
-                        # Convert to multimodal format
-                        modified_messages[i]["content"] = [
-                            {"type": "text", "text": text_content},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
-                                },
-                            },
-                        ]
-                    print(f"DEBUG: Message modified successfully")
-                    break
-        
-        final_messages = [system_msg] + modified_messages
+        final_messages = [system_msg] + messages
 
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
             messages=final_messages,
             timeout=5.0,
-            max_tokens=512,  # Control response length
+            max_tokens=512,
         )
 
         if response and hasattr(response, "choices") and response.choices:
@@ -1582,6 +1572,48 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
     except Exception as e:
         print(f"Error downloading Telegram file: {e}")
         return None
+
+
+def describe_image_cloudflare(image_base64: str, user_text: str = "¿Qué ves en esta imagen?") -> Optional[str]:
+    """Describe image using Cloudflare Workers AI LLaVA model"""
+    try:
+        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
+        
+        if not cloudflare_account_id or not cloudflare_api_key:
+            print("Cloudflare Workers AI credentials not configured")
+            return None
+        
+        url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/llava-hf/llava-1.5-7b-hf"
+        headers = {
+            "Authorization": f"Bearer {cloudflare_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "prompt": user_text,
+            "image": [image_base64],
+            "max_tokens": 512
+        }
+        
+        print(f"Describing image with LLaVA model...")
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if "result" in result and "response" in result["result"]:
+                description = result["result"]["response"]
+                print(f"Image description successful: {description[:100]}...")
+                return description
+            else:
+                print(f"Unexpected LLaVA response format: {result}")
+        else:
+            print(f"LLaVA API error {response.status_code}: {response.text}")
+            
+    except Exception as e:
+        print(f"Error describing image: {e}")
+    
+    return None
 
 
 def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
