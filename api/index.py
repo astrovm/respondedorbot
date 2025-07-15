@@ -1881,7 +1881,7 @@ def handle_msg(message: Dict) -> str:
                         message, chat_history, sanitized_message_text
                     )
                     response_msg = handle_ai_response(
-                        chat_id, handler_func, messages, image_base64=image_base64
+                        chat_id, handler_func, messages, image_data=resized_image_data if photo_file_id else None
                     )
             else:
                 response_msg = handler_func(sanitized_message_text)
