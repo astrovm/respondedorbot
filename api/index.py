@@ -1639,39 +1639,58 @@ def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en
 
 
 def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
-    """Transcribe audio using Cloudflare Workers AI Whisper"""
-    try:
-        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
-        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
+    """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
+    cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+    cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
 
-        if not cloudflare_account_id or not cloudflare_api_key:
-            print("Cloudflare credentials not configured for audio transcription")
+    if not cloudflare_account_id or not cloudflare_api_key:
+        print("Cloudflare credentials not configured for audio transcription")
+        return None
+
+    print("Transcribing audio with Cloudflare Whisper...")
+
+    # Use direct API call to Cloudflare Workers AI for Whisper
+    url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/openai/whisper"
+    headers = {
+        "Authorization": f"Bearer {cloudflare_api_key}",
+        "Content-Type": "application/octet-stream",
+    }
+
+    # Retry logic for timeout issues
+    for attempt in range(2):  # 2 attempts total (original + 1 retry)
+        try:
+            if attempt > 0:
+                print(f"Retrying audio transcription (attempt {attempt + 1}/2)...")
+                time.sleep(2)  # Wait 2 seconds before retry
+
+            response = requests.post(url, headers=headers, data=audio_data, timeout=30)
+            response.raise_for_status()
+
+            result = response.json()
+            if result.get("success") and "result" in result:
+                transcription = result["result"].get("text", "")
+                print(f"Audio transcribed successfully: {transcription[:100]}...")
+                return transcription
+
+            print(f"Whisper transcription failed: {result}")
             return None
 
-        print("Transcribing audio with Cloudflare Whisper...")
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            if "timeout" in str(e).lower() or "408" in str(e):
+                print(f"Audio transcription timeout on attempt {attempt + 1}/2: {e}")
+                if attempt == 1:  # Last attempt
+                    print("Audio transcription failed after all retries")
+                    return None
+                # Continue to retry
+            else:
+                # Non-timeout error, don't retry
+                print(f"Error transcribing audio: {e}")
+                return None
+        except Exception as e:
+            print(f"Error transcribing audio: {e}")
+            return None
 
-        # Use direct API call to Cloudflare Workers AI for Whisper
-        url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/openai/whisper"
-        headers = {
-            "Authorization": f"Bearer {cloudflare_api_key}",
-            "Content-Type": "application/octet-stream",
-        }
-
-        response = requests.post(url, headers=headers, data=audio_data, timeout=30)
-        response.raise_for_status()
-
-        result = response.json()
-        if result.get("success") and "result" in result:
-            transcription = result["result"].get("text", "")
-            print(f"Audio transcribed successfully: {transcription[:100]}...")
-            return transcription
-
-        print(f"Whisper transcription failed: {result}")
-        return None
-
-    except Exception as e:
-        print(f"Error transcribing audio: {e}")
-        return None
+    return None
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
