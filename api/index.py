@@ -895,7 +895,9 @@ def get_weather() -> dict:
         return None
 
 
-def ask_ai(messages: List[Dict], image_data: Optional[bytes] = None) -> str:
+def ask_ai(
+    messages: List[Dict], image_data: Optional[bytes] = None, image_file_id: str = None
+) -> str:
     try:
         # Build context with market and weather data
         context_data = {
@@ -916,39 +918,39 @@ def ask_ai(messages: List[Dict], image_data: Optional[bytes] = None) -> str:
         # If we have an image, first describe it with LLaVA then continue normal flow
         if image_data:
             print("Processing image with LLaVA model...")
-            
+
             # Always use a description prompt for LLaVA, not the user's question
             user_text = "Describe what you see in this image in detail."
-            
+
             # Describe the image using LLaVA
-            image_description = describe_image_cloudflare(image_data, user_text)
-            
+            image_description = describe_image_cloudflare(
+                image_data, user_text, image_file_id
+            )
+
             if image_description:
                 # Add image description to the conversation context
                 image_context = f"[Imagen: {image_description}]"
-                
+
                 # Modify the last message to include the image description
                 if messages:
                     last_message = messages[-1]
                     if isinstance(last_message.get("content"), str):
-                        last_message["content"] = last_message["content"] + f"\n\n{image_context}"
-                
+                        last_message["content"] = (
+                            last_message["content"] + f"\n\n{image_context}"
+                        )
+
                 print(f"Image described, continuing with normal AI flow...")
             else:
                 print("Failed to describe image, continuing without description...")
-        
+
         # Continue with normal AI flow (for both image and text)
         # Try OpenRouter first
-        response = get_ai_response(
-            openrouter, system_message, messages
-        )
+        response = get_ai_response(openrouter, system_message, messages)
         if response:
             return response
 
         # Fallback to Cloudflare Workers AI if OpenRouter fails
-        cloudflare_response = get_cloudflare_ai_response(
-            system_message, messages
-        )
+        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
             return cloudflare_response
 
@@ -1078,9 +1080,7 @@ def get_ai_response(
     return None
 
 
-def get_cloudflare_ai_response(
-    system_msg: Dict, messages: List[Dict]
-) -> Optional[str]:
+def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Optional[str]:
     """Fallback using Cloudflare Workers AI for text-only"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -1574,18 +1574,18 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
 
     # Extract photo or sticker (get highest resolution)
     photo_file_id = None
-    
+
     # First, check for photo in the main message
     if "photo" in message and message["photo"]:
         # Telegram sends array of photos in different resolutions
         # Take the last one (highest resolution)
         photo_file_id = message["photo"][-1]["file_id"]
-    
+
     # Check for sticker in the main message
     elif "sticker" in message and message["sticker"]:
         photo_file_id = message["sticker"]["file_id"]
         print(f"Found sticker: {photo_file_id}")
-    
+
     # If no photo/sticker in main message, check in replied message
     elif "reply_to_message" in message and message["reply_to_message"]:
         replied_msg = message["reply_to_message"]
@@ -1646,39 +1646,45 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
         return None
 
 
-def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en esta imagen?") -> Optional[str]:
+def describe_image_cloudflare(
+    image_data: bytes, user_text: str = "¿Qué ves en esta imagen?", file_id: str = None
+) -> Optional[str]:
     """Describe image using Cloudflare Workers AI LLaVA model"""
     try:
+        # Check cache first if file_id is provided
+        if file_id:
+            cached_description = get_cached_description(file_id)
+            if cached_description:
+                return cached_description
+
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
         cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
-        
+
         if not cloudflare_account_id or not cloudflare_api_key:
             print("Cloudflare Workers AI credentials not configured")
             return None
-        
+
         url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/llava-hf/llava-1.5-7b-hf"
         headers = {
             "Authorization": f"Bearer {cloudflare_api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         # Convert bytes to array of integers (0-255) as expected by LLaVA
         image_array = list(image_data)
-        
-        payload = {
-            "prompt": user_text,
-            "image": image_array,
-            "max_tokens": 512
-        }
-        
+
+        payload = {"prompt": user_text, "image": image_array, "max_tokens": 512}
+
         # Debug: Show payload info
-        print(f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_array_size: {len(image_array)} bytes")
-        
+        print(
+            f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_array_size: {len(image_array)} bytes"
+        )
+
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
-        
+
         print(f"DEBUG: LLaVA response status: {response.status_code}")
-        
+
         if response.status_code == 200:
             result = response.json()
             print(f"DEBUG: LLaVA response keys: {list(result.keys())}")
@@ -1691,40 +1697,49 @@ def describe_image_cloudflare(image_data: bytes, user_text: str = "¿Qué ves en
                 else:
                     print(f"Unexpected LLaVA response format: {result}")
                     return None
-                
+
                 print(f"Image description successful: {description[:100]}...")
+
+                # Cache the description if file_id is provided
+                if file_id and description:
+                    cache_description(file_id, description)
+
                 return description
             else:
                 print(f"Unexpected LLaVA response format: {result}")
         else:
             error_text = response.text
             print(f"LLaVA API error {response.status_code}: {error_text}")
-            
+
             # Parse error details if available
             try:
                 error_json = response.json()
                 if "errors" in error_json and error_json["errors"]:
                     error_msg = error_json["errors"][0].get("message", "")
                     error_code = error_json["errors"][0].get("code", "")
-                    print(f"DEBUG: LLaVA error details - Code: {error_code}, Message: {error_msg}")
+                    print(
+                        f"DEBUG: LLaVA error details - Code: {error_code}, Message: {error_msg}"
+                    )
             except:
                 print("DEBUG: Could not parse error response as JSON")
-            
+
     except Exception as e:
         print(f"Error describing image: {e}")
-    
+
     return None
 
 
-def transcribe_audio_cloudflare(audio_data: bytes, file_id: str = None) -> Optional[str]:
+def transcribe_audio_cloudflare(
+    audio_data: bytes, file_id: str = None
+) -> Optional[str]:
     """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
-    
+
     # Check cache first if file_id is provided
     if file_id:
         cached_transcription = get_cached_transcription(file_id)
         if cached_transcription:
             return cached_transcription
-    
+
     cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
     cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
 
@@ -1755,11 +1770,11 @@ def transcribe_audio_cloudflare(audio_data: bytes, file_id: str = None) -> Optio
             if result.get("success") and "result" in result:
                 transcription = result["result"].get("text", "")
                 print(f"Audio transcribed successfully: {transcription[:100]}...")
-                
+
                 # Cache the transcription if file_id is provided
                 if file_id and transcription:
                     cache_transcription(file_id, transcription)
-                
+
                 return transcription
 
             print(f"Whisper transcription failed: {result}")
@@ -1789,33 +1804,39 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
         # Open the image
         image = Image.open(io.BytesIO(image_data))
         original_size = image.size
-        
+
         # Check if resize is needed
         if max(original_size) > max_size:
-            print(f"DEBUG: Resizing image from {original_size} to fit max dimension {max_size}")
-            
+            print(
+                f"DEBUG: Resizing image from {original_size} to fit max dimension {max_size}"
+            )
+
             # Calculate new size maintaining aspect ratio
             ratio = min(max_size / original_size[0], max_size / original_size[1])
             new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
-            
+
             # Resize image
             resized_image = image.resize(new_size, Image.Resampling.LANCZOS)
-            
+
             # Convert back to bytes
             output_buffer = io.BytesIO()
             # Save as JPEG to ensure compatibility and smaller size
-            if resized_image.mode in ('RGBA', 'LA', 'P'):
+            if resized_image.mode in ("RGBA", "LA", "P"):
                 # Convert to RGB for JPEG
-                resized_image = resized_image.convert('RGB')
-            resized_image.save(output_buffer, format='JPEG', quality=85, optimize=True)
-            
+                resized_image = resized_image.convert("RGB")
+            resized_image.save(output_buffer, format="JPEG", quality=85, optimize=True)
+
             resized_data = output_buffer.getvalue()
-            print(f"DEBUG: Resized image size: {len(resized_data)} bytes (was {len(image_data)} bytes)")
+            print(
+                f"DEBUG: Resized image size: {len(resized_data)} bytes (was {len(image_data)} bytes)"
+            )
             return resized_data
         else:
-            print(f"DEBUG: Image size {original_size} is within limits, no resize needed")
+            print(
+                f"DEBUG: Image size {original_size} is within limits, no resize needed"
+            )
             return image_data
-            
+
     except ImportError:
         print("WARNING: PIL not available, cannot resize image")
         return image_data
@@ -1826,32 +1847,34 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
 
 def encode_image_to_base64(image_data: bytes) -> str:
     """Convert image bytes to base64 string for AI models"""
-    
+
     # Debug: Analyze image format
     image_size = len(image_data)
     print(f"DEBUG: Image size: {image_size} bytes")
-    
+
     # Check image format by magic bytes
     image_format = "unknown"
-    if image_data.startswith(b'\xff\xd8\xff'):
+    if image_data.startswith(b"\xff\xd8\xff"):
         image_format = "JPEG"
-    elif image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+    elif image_data.startswith(b"\x89PNG\r\n\x1a\n"):
         image_format = "PNG"
-    elif image_data.startswith(b'RIFF') and b'WEBP' in image_data[:12]:
+    elif image_data.startswith(b"RIFF") and b"WEBP" in image_data[:12]:
         image_format = "WebP"
-    elif image_data.startswith(b'GIF87a') or image_data.startswith(b'GIF89a'):
+    elif image_data.startswith(b"GIF87a") or image_data.startswith(b"GIF89a"):
         image_format = "GIF"
-    
+
     print(f"DEBUG: Image format detected: {image_format}")
-    
+
     # Check if image is too large (LLaVA might have limits)
     max_size = 1024 * 1024  # 1MB limit
     if image_size > max_size:
-        print(f"WARNING: Image size ({image_size} bytes) exceeds recommended limit ({max_size} bytes)")
-    
+        print(
+            f"WARNING: Image size ({image_size} bytes) exceeds recommended limit ({max_size} bytes)"
+        )
+
     base64_encoded = base64.b64encode(image_data).decode("utf-8")
     print(f"DEBUG: Base64 length: {len(base64_encoded)} characters")
-    
+
     return base64_encoded
 
 
@@ -1990,7 +2013,11 @@ def handle_msg(message: Dict) -> str:
                         message, chat_history, sanitized_message_text
                     )
                     response_msg = handle_ai_response(
-                        chat_id, handler_func, messages, image_data=resized_image_data if photo_file_id else None
+                        chat_id,
+                        handler_func,
+                        messages,
+                        image_data=resized_image_data if photo_file_id else None,
+                        image_file_id=photo_file_id,
                     )
             else:
                 response_msg = handler_func(sanitized_message_text)
@@ -2002,7 +2029,11 @@ def handle_msg(message: Dict) -> str:
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_ai_messages(message, chat_history, message_text)
                 response_msg = handle_ai_response(
-                    chat_id, ask_ai, messages, image_data=resized_image_data if photo_file_id else None
+                    chat_id,
+                    ask_ai,
+                    messages,
+                    image_data=resized_image_data if photo_file_id else None,
+                    image_file_id=photo_file_id,
                 )
 
         # Only save messages AFTER we've generated a response
@@ -2079,6 +2110,7 @@ def handle_ai_response(
     handler_func: Callable,
     messages: List[Dict],
     image_data: Optional[bytes] = None,
+    image_file_id: str = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
@@ -2091,7 +2123,9 @@ def handle_ai_response(
         and hasattr(handler_func, "__name__")
         and handler_func.__name__ == "ask_ai"
     ):
-        response = handler_func(messages, image_data=image_data)
+        response = handler_func(
+            messages, image_data=image_data, image_file_id=image_file_id
+        )
     else:
         response = handler_func(messages)
 
