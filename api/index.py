@@ -772,12 +772,12 @@ def format_bcra_variables(variables: Dict) -> str:
     
     # Priority variables with better organization
     priority_checks = [
-        ('reservas internacionales', lambda k, v, d: f"💰 Reservas: USD {format_number(v)} millones"),
-        ('tipo de cambio minorista', lambda k, v, d: f"💵 Dólar minorista: ${v}"),
-        ('tipo de cambio mayorista', lambda k, v, d: f"💱 Dólar mayorista: ${v}"),
-        ('inflación mensual', lambda k, v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
-        ('inflación interanual', lambda k, v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
-        ('base monetaria', lambda k, v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
+        ('reservas.*internacionales', lambda k, v, d: f"💰 Reservas: USD {format_number(v)} millones"),
+        ('tipo.*cambio.*minorista', lambda k, v, d: f"💵 Dólar minorista: ${v}"),
+        ('tipo.*cambio.*mayorista', lambda k, v, d: f"💱 Dólar mayorista: ${v}"),
+        ('inflación.*mensual', lambda k, v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
+        ('inflación.*interanual', lambda k, v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
+        ('base.*monetaria.*total', lambda k, v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
         ('tamar.*n\\.a\\.', lambda k, v, d: f"📈 TAMAR: {format_percentage(v)}"),
         ('badlar.*n\\.a\\.', lambda k, v, d: f"📊 BADLAR: {format_percentage(v)}")
     ]
