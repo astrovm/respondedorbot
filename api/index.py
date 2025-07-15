@@ -840,7 +840,7 @@ def get_weather() -> dict:
         return None
 
 
-def ask_ai(messages: List[Dict]) -> str:
+def ask_ai(messages: List[Dict], image_base64: Optional[str] = None) -> str:
     try:
         # Build context with market and weather data
         context_data = {
@@ -859,12 +859,16 @@ def ask_ai(messages: List[Dict]) -> str:
         system_message = build_system_message(context_data)
 
         # Try to get AI response with retries
-        response = get_ai_response(openrouter, system_message, messages)
+        response = get_ai_response(
+            openrouter, system_message, messages, image_base64=image_base64
+        )
         if response:
             return response
 
         # Fallback to Cloudflare Workers AI if OpenRouter fails
-        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
+        cloudflare_response = get_cloudflare_ai_response(
+            system_message, messages, image_base64=image_base64
+        )
         if cloudflare_response:
             return cloudflare_response
 
@@ -936,7 +940,11 @@ def get_time_context() -> Dict:
 
 
 def get_ai_response(
-    client: OpenAI, system_msg: Dict, messages: List[Dict], max_retries: int = 3
+    client: OpenAI,
+    system_msg: Dict,
+    messages: List[Dict],
+    max_retries: int = 3,
+    image_base64: Optional[str] = None,
 ) -> Optional[str]:
     """Get AI response with retries and timeout"""
     models = [
@@ -952,14 +960,44 @@ def get_ai_response(
 
         try:
             print(f"Attempt {attempt + 1}/{max_retries} using model: {current_model}")
+
+            # If we have an image, modify the last user message to include it
+            final_messages = [system_msg] + messages
+            if image_base64 and final_messages:
+                last_message = final_messages[-1]
+                if last_message.get("role") == "user":
+                    # Convert text content to multimodal format
+                    text_content = last_message["content"]
+                    if isinstance(text_content, list):
+                        # Already in multimodal format
+                        text_content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                },
+                            }
+                        )
+                    else:
+                        # Convert to multimodal format
+                        final_messages[-1]["content"] = [
+                            {"type": "text", "text": text_content},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                },
+                            },
+                        ]
+
             response = client.chat.completions.create(
                 model=current_model,
                 extra_body={
                     "models": fallback_models,
                 },
-                messages=[system_msg] + messages,
+                messages=final_messages,
                 timeout=5.0,  # 5 second timeout
-                max_tokens=512            # Control response length
+                max_tokens=512,  # Control response length
             )
 
             if response and hasattr(response, "choices") and response.choices:
@@ -990,8 +1028,10 @@ def get_ai_response(
     return None
 
 
-def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Optional[str]:
-    """Fallback using Cloudflare Workers AI"""
+def get_cloudflare_ai_response(
+    system_msg: Dict, messages: List[Dict], image_base64: Optional[str] = None
+) -> Optional[str]:
+    """Fallback using Cloudflare Workers AI with vision support"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
         cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
@@ -1006,11 +1046,40 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
             base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1",
         )
 
+        # If we have an image, modify the last user message to include it
+        final_messages = [system_msg] + messages
+        if image_base64 and final_messages:
+            last_message = final_messages[-1]
+            if last_message.get("role") == "user":
+                # Convert text content to multimodal format
+                text_content = last_message["content"]
+                if isinstance(text_content, list):
+                    # Already in multimodal format
+                    text_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            },
+                        }
+                    )
+                else:
+                    # Convert to multimodal format
+                    final_messages[-1]["content"] = [
+                        {"type": "text", "text": text_content},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            },
+                        },
+                    ]
+
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
-            messages=[system_msg] + messages,
+            messages=final_messages,
             timeout=5.0,
-            max_tokens=512            # Control response length
+            max_tokens=512,  # Control response length
         )
 
         if response and hasattr(response, "choices") and response.choices:
@@ -1476,6 +1545,101 @@ def extract_message_text(message: Dict) -> str:
     return ""
 
 
+def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional[str]]:
+    """Extract text, photo file_id, and audio file_id from message"""
+    text = extract_message_text(message)
+
+    # Extract photo (get highest resolution)
+    photo_file_id = None
+    if "photo" in message and message["photo"]:
+        # Telegram sends array of photos in different resolutions
+        # Take the last one (highest resolution)
+        photo_file_id = message["photo"][-1]["file_id"]
+
+    # Extract audio/voice
+    audio_file_id = None
+    if "voice" in message and message["voice"]:
+        audio_file_id = message["voice"]["file_id"]
+    elif "audio" in message and message["audio"]:
+        audio_file_id = message["audio"]["file_id"]
+
+    return text, photo_file_id, audio_file_id
+
+
+def download_telegram_file(file_id: str) -> Optional[bytes]:
+    """Download file from Telegram"""
+    try:
+        token = environ.get("TELEGRAM_TOKEN")
+
+        # Get file path from Telegram
+        file_info_url = f"https://api.telegram.org/bot{token}/getFile"
+        file_response = requests.get(
+            file_info_url, params={"file_id": file_id}, timeout=10
+        )
+        file_response.raise_for_status()
+
+        file_data = file_response.json()
+        if not file_data.get("ok"):
+            print(f"Error getting file info: {file_data}")
+            return None
+
+        file_path = file_data["result"]["file_path"]
+
+        # Download actual file
+        file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        download_response = requests.get(file_url, timeout=30)
+        download_response.raise_for_status()
+
+        return download_response.content
+
+    except Exception as e:
+        print(f"Error downloading Telegram file: {e}")
+        return None
+
+
+def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
+    """Transcribe audio using Cloudflare Workers AI Whisper"""
+    try:
+        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
+
+        if not cloudflare_account_id or not cloudflare_api_key:
+            print("Cloudflare credentials not configured for audio transcription")
+            return None
+
+        print("Transcribing audio with Cloudflare Whisper...")
+
+        # Use direct API call to Cloudflare Workers AI for Whisper
+        url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/openai/whisper"
+        headers = {
+            "Authorization": f"Bearer {cloudflare_api_key}",
+            "Content-Type": "application/octet-stream",
+        }
+
+        response = requests.post(url, headers=headers, data=audio_data, timeout=30)
+        response.raise_for_status()
+
+        result = response.json()
+        if result.get("success") and "result" in result:
+            transcription = result["result"].get("text", "")
+            print(f"Audio transcribed successfully: {transcription[:100]}...")
+            return transcription
+
+        print(f"Whisper transcription failed: {result}")
+        return None
+
+    except Exception as e:
+        print(f"Error transcribing audio: {e}")
+        return None
+
+
+def encode_image_to_base64(image_data: bytes) -> str:
+    """Convert image bytes to base64 string for AI models"""
+    import base64
+
+    return base64.b64encode(image_data).decode("utf-8")
+
+
 def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     """Parse command and message text from input"""
     # Handle empty or whitespace-only messages
@@ -1511,10 +1675,40 @@ def format_user_message(message: Dict, message_text: str) -> str:
 
 def handle_msg(message: Dict) -> str:
     try:
-        # Extract basic message info
-        message_text = extract_message_text(message)
+        # Extract multimedia content
+        message_text, photo_file_id, audio_file_id = extract_message_content(message)
         message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
+
+        # Process audio first if present
+        if audio_file_id:
+            print(f"Processing audio message: {audio_file_id}")
+            audio_data = download_telegram_file(audio_file_id)
+            if audio_data:
+                transcription = transcribe_audio_cloudflare(audio_data)
+                if transcription:
+                    # Use transcription as message text
+                    message_text = transcription
+                    print(f"Audio transcribed: {message_text[:100]}...")
+                else:
+                    # Fallback message if transcription fails
+                    message_text = "mandame texto que no soy alexa, boludo"
+            else:
+                message_text = "no pude bajar tu audio, mandalo de vuelta"
+
+        # Download image if present
+        image_base64 = None
+        if photo_file_id:
+            print(f"Processing image message: {photo_file_id}")
+            image_data = download_telegram_file(photo_file_id)
+            if image_data:
+                image_base64 = encode_image_to_base64(image_data)
+                print(f"Image encoded to base64: {len(image_base64)} chars")
+                if not message_text:
+                    message_text = "que onda con esta foto"
+            else:
+                if not message_text:
+                    message_text = "no pude ver tu foto, boludo"
 
         # Initialize Redis and commands
         redis_client = config_redis()
@@ -1578,7 +1772,9 @@ def handle_msg(message: Dict) -> str:
                     messages = build_ai_messages(
                         message, chat_history, sanitized_message_text
                     )
-                    response_msg = handle_ai_response(chat_id, handler_func, messages)
+                    response_msg = handle_ai_response(
+                        chat_id, handler_func, messages, image_base64=image_base64
+                    )
             else:
                 response_msg = handler_func(sanitized_message_text)
         else:
@@ -1588,7 +1784,9 @@ def handle_msg(message: Dict) -> str:
                 # Get chat history BEFORE saving the current message
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_ai_messages(message, chat_history, message_text)
-                response_msg = handle_ai_response(chat_id, ask_ai, messages)
+                response_msg = handle_ai_response(
+                    chat_id, ask_ai, messages, image_base64=image_base64
+                )
 
         # Only save messages AFTER we've generated a response
         if message_text:
@@ -1630,48 +1828,59 @@ def clean_duplicate_response(response: str) -> str:
     """Remove duplicate consecutive text in AI responses"""
     if not response:
         return response
-    
+
     # Split by lines and remove consecutive duplicates
-    lines = response.split('\n')
+    lines = response.split("\n")
     cleaned_lines = []
-    
+
     for line in lines:
         line = line.strip()
         if line and (not cleaned_lines or line != cleaned_lines[-1]):
             cleaned_lines.append(line)
-    
-    cleaned_response = '\n'.join(cleaned_lines)
-    
+
+    cleaned_response = "\n".join(cleaned_lines)
+
     # Also check for repeated sentences within the same line
-    sentences = cleaned_response.split('. ')
+    sentences = cleaned_response.split(". ")
     cleaned_sentences = []
-    
+
     for sentence in sentences:
         sentence = sentence.strip()
         if sentence and (not cleaned_sentences or sentence != cleaned_sentences[-1]):
             cleaned_sentences.append(sentence)
-    
-    final_response = '. '.join(cleaned_sentences)
-    
+
+    final_response = ". ".join(cleaned_sentences)
+
     # Clean up any double periods
-    final_response = final_response.replace('..', '.')
-    
+    final_response = final_response.replace("..", ".")
+
     return final_response
 
 
 def handle_ai_response(
-    chat_id: str, handler_func: Callable, messages: List[Dict]
+    chat_id: str,
+    handler_func: Callable,
+    messages: List[Dict],
+    image_base64: Optional[str] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
     send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
-    
-    response = handler_func(messages)
-    
+
+    # Call handler with image if supported
+    if (
+        image_base64
+        and hasattr(handler_func, "__name__")
+        and handler_func.__name__ == "ask_ai"
+    ):
+        response = handler_func(messages, image_base64=image_base64)
+    else:
+        response = handler_func(messages)
+
     # Clean any duplicate text
     cleaned_response = clean_duplicate_response(response)
-    
+
     return cleaned_response
 
 
