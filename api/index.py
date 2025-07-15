@@ -1,6 +1,7 @@
 from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone
 from flask import Flask, Request, request
+from html.parser import HTMLParser
 from math import log
 from openai import OpenAI
 from os import environ
@@ -16,8 +17,10 @@ import random
 import re
 import redis
 import requests
+import ssl
 import time
 import unicodedata
+import urllib.request
 
 
 def config_redis(host=None, port=None, password=None):
@@ -616,6 +619,203 @@ $1 ARS = {sats_per_peso:.3f} sats"""
         return msg
     except Exception:
         return "no pude conseguir el precio de btc boludo"
+
+
+def scrape_bcra_variables() -> Optional[Dict]:
+    """Scrape BCRA economic variables from the official page"""
+    try:
+        # Create SSL context that doesn't verify certificates
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        class BCRAParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.in_table = False
+                self.in_td = False
+                self.in_th = False
+                self.current_data = ''
+                self.table_data = []
+                self.row_data = []
+                
+            def handle_starttag(self, tag, attrs):
+                if tag == 'table':
+                    self.in_table = True
+                elif tag == 'td' and self.in_table:
+                    self.in_td = True
+                elif tag == 'th' and self.in_table:
+                    self.in_th = True
+                    
+            def handle_endtag(self, tag):
+                if tag == 'table':
+                    self.in_table = False
+                elif tag == 'td':
+                    self.in_td = False
+                    if self.current_data.strip():
+                        self.row_data.append(self.current_data.strip())
+                    self.current_data = ''
+                elif tag == 'th':
+                    self.in_th = False
+                    if self.current_data.strip():
+                        self.row_data.append(self.current_data.strip())
+                    self.current_data = ''
+                elif tag == 'tr' and self.in_table:
+                    if self.row_data:
+                        self.table_data.append(self.row_data)
+                        self.row_data = []
+                        
+            def handle_data(self, data):
+                if self.in_td or self.in_th:
+                    self.current_data += data
+        
+        # Make request
+        req = urllib.request.Request('https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp')
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
+            content = response.read().decode('iso-8859-1')
+            
+        # Parse HTML
+        parser = BCRAParser()
+        parser.feed(content)
+        
+        # Process data
+        variables = {}
+        for row in parser.table_data:
+            if len(row) >= 2:
+                # Skip header rows and empty rows
+                if row[0] in ['Fecha', 'Valor'] or not row[0].strip():
+                    continue
+                    
+                # Extract variable name and value
+                if len(row) >= 3:
+                    var_name = row[0].strip()
+                    date = row[1].strip() if len(row) > 1 else ''
+                    value = row[2].strip() if len(row) > 2 else row[1].strip()
+                    
+                    # Clean up variable name
+                    var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').strip()
+                    
+                    if var_name and value:
+                        variables[var_name] = {'value': value, 'date': date}
+        
+        return variables
+        
+    except Exception as e:
+        print(f"Error scraping BCRA variables: {e}")
+        return None
+
+
+def get_cached_bcra_variables() -> Optional[Dict]:
+    """Get cached BCRA variables from Redis"""
+    try:
+        redis_client = config_redis()
+        cache_key = "bcra_variables"
+        cached_data = redis_client.get(cache_key)
+        if cached_data:
+            print("Using cached BCRA variables")
+            return json.loads(cached_data)
+        return None
+    except Exception as e:
+        print(f"Error getting cached BCRA variables: {e}")
+        return None
+
+
+def cache_bcra_variables(variables: Dict, ttl: int = 14400) -> None:
+    """Cache BCRA variables in Redis (default 4 hours)"""
+    try:
+        redis_client = config_redis()
+        cache_key = "bcra_variables"
+        redis_client.setex(cache_key, ttl, json.dumps(variables))
+        print("Caching new BCRA variables")
+    except Exception as e:
+        print(f"Error caching BCRA variables: {e}")
+
+
+def format_bcra_variables(variables: Dict) -> str:
+    """Format BCRA variables for display"""
+    if not variables:
+        return "No se pudieron obtener las variables del BCRA"
+    
+    # Priority variables to show first
+    priority_vars = [
+        'Reservas Internacionales del BCRA',
+        'Tipo de Cambio Minorista',
+        'Tipo de Cambio Mayorista',
+        'Base Monetaria',
+        'TAMAR en pesos de bancos privados',
+        'BADLAR en pesos de bancos privados'
+    ]
+    
+    msg_lines = ["📊 *Variables principales BCRA*\n"]
+    
+    # Show priority variables first
+    for var_name in priority_vars:
+        for key, data in variables.items():
+            if var_name.lower() in key.lower():
+                value = data['value']
+                date = data.get('date', '')
+                
+                # Format variable name
+                if 'reservas' in key.lower():
+                    msg_lines.append(f"💰 Reservas: USD {value} millones")
+                elif 'minorista' in key.lower():
+                    msg_lines.append(f"💵 Dólar minorista: ${value}")
+                elif 'mayorista' in key.lower():
+                    msg_lines.append(f"💱 Dólar mayorista: ${value}")
+                elif 'base monetaria' in key.lower():
+                    msg_lines.append(f"🏦 Base monetaria: ${value}")
+                elif 'tamar' in key.lower() and 'n.a.' in key.lower():
+                    msg_lines.append(f"📈 TAMAR: {value}%")
+                elif 'badlar' in key.lower() and 'n.a.' in key.lower():
+                    msg_lines.append(f"📊 BADLAR: {value}%")
+                
+                # Add date if available
+                if date and date != value:
+                    msg_lines[-1] += f" ({date})"
+                break
+    
+    # Add a few more relevant variables
+    other_vars = []
+    for key, data in variables.items():
+        if not any(pvar.lower() in key.lower() for pvar in priority_vars):
+            if any(term in key.lower() for term in ['inflación', 'ipc', 'tasa', 'agregado']):
+                other_vars.append((key, data))
+    
+    if other_vars:
+        msg_lines.append("\n🔍 *Otras variables*:")
+        for key, data in other_vars[:3]:  # Show max 3 additional
+            short_name = key.split('(')[0].strip()
+            if len(short_name) > 50:
+                short_name = short_name[:50] + "..."
+            msg_lines.append(f"• {short_name}: {data['value']}")
+    
+    msg_lines.append(f"\n📅 Fuente: BCRA - Principales Variables")
+    
+    return "\n".join(msg_lines)
+
+
+def handle_bcra_variables(msg_text: str) -> str:
+    """Handle BCRA economic variables command"""
+    try:
+        # Check cache first
+        variables = get_cached_bcra_variables()
+        
+        if not variables:
+            # Scrape fresh data
+            variables = scrape_bcra_variables()
+            if variables:
+                cache_bcra_variables(variables)
+        
+        if not variables:
+            return "No pude obtener las variables del BCRA en este momento, probá más tarde"
+        
+        return format_bcra_variables(variables)
+        
+    except Exception as e:
+        print(f"Error handling BCRA variables: {e}")
+        return "Error al obtener las variables del BCRA"
 
 
 def handle_transcribe(message: Dict) -> str:
@@ -1481,6 +1681,8 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
         "/instance": (get_instance_name, False),
         "/help": (get_help, False),
         "/transcribe": (handle_transcribe, False),
+        "/bcra": (handle_bcra_variables, False),
+        "/variables": (handle_bcra_variables, False),
     }
 
 
