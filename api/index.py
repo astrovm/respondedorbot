@@ -770,62 +770,37 @@ def format_bcra_variables(variables: Dict) -> str:
     
     msg_lines = ["📊 Variables principales BCRA\n"]
     
-    # Priority variables with better organization
-    priority_checks = [
-        ('reservas.*internacionales', lambda k, v, d: f"💰 Reservas: USD {format_number(v)} millones"),
-        ('tipo.*cambio.*minorista', lambda k, v, d: f"💵 Dólar minorista: ${v}"),
-        ('tipo.*cambio.*mayorista', lambda k, v, d: f"💱 Dólar mayorista: ${v}"),
-        ('inflación.*mensual', lambda k, v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
-        ('inflación.*interanual', lambda k, v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
-        ('base.*monetaria.*total', lambda k, v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
-        ('tamar.*n\\.a\\.', lambda k, v, d: f"📈 TAMAR: {format_percentage(v)}"),
-        ('badlar.*n\\.a\\.', lambda k, v, d: f"📊 BADLAR: {format_percentage(v)}")
+    # Specific variables in the exact order requested
+    variable_specs = [
+        # Pattern, Display format, Icon
+        ('base.*monetaria.*total', lambda v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
+        ('inflación.*mensual', lambda v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
+        ('inflación.*interanual', lambda v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
+        ('inflación.*esperada.*rem', lambda v, d: f"🔮 Inflación esperada: {format_percentage(v)}"),
+        ('tamar.*n\\.a\\.', lambda v, d: f"📈 TAMAR: {format_percentage(v)}"),
+        ('badlar.*n\\.a\\.', lambda v, d: f"📊 BADLAR: {format_percentage(v)}"),
+        ('tasa.*interés.*justicia', lambda v, d: f"⚖️ Tasa justicia: {v}%"),
+        ('tipo.*cambio.*minorista', lambda v, d: f"💵 Dólar minorista: ${v}"),
+        ('tipo.*cambio.*mayorista', lambda v, d: f"💱 Dólar mayorista: ${v}"),
+        ('unidad.*valor.*adquisitivo.*uva', lambda v, d: f"💰 UVA: ${v}"),
+        ('cer.*base.*2002', lambda v, d: f"📊 CER: {v}"),
+        ('reservas.*internacionales', lambda v, d: f"🏛️ Reservas: USD {format_number(v)} millones")
     ]
     
-    # Process priority variables
-    for pattern, formatter in priority_checks:
+    # Process each variable in order
+    for pattern, formatter in variable_specs:
         for key, data in variables.items():
             if re.search(pattern, key.lower()):
                 value = data['value']
                 date = data.get('date', '')
                 
-                formatted_line = formatter(key, value, date)
+                formatted_line = formatter(value, date)
                 if date and date != value:
-                    formatted_line += f" ({date})"
+                    # Clean up date format
+                    clean_date = date.replace('/2025', '/25')
+                    formatted_line += f" ({clean_date})"
                 msg_lines.append(formatted_line)
                 break
-    
-    # Add relevant secondary variables
-    secondary_vars = []
-    secondary_patterns = [
-        ('unidad.*valor.*adquisitivo.*uva', 'UVA'),
-        ('depósitos.*total', 'Depósitos totales'),
-        ('préstamos.*sector privado', 'Préstamos sector privado'),
-        ('m2.*privado', 'M2 privado'),
-        ('tasa.*pase.*bcra', 'Tasa pase BCRA')
-    ]
-    
-    for pattern, display_name in secondary_patterns:
-        for key, data in variables.items():
-            if re.search(pattern, key.lower()):
-                value = data['value']
-                
-                # Format based on content
-                if 'millones' in key.lower():
-                    formatted_value = f"${format_number(value)} mill."
-                elif '%' in key or 'tasa' in key.lower():
-                    formatted_value = format_percentage(value)
-                elif 'uva' in key.lower():
-                    formatted_value = f"${value}"
-                else:
-                    formatted_value = format_number(value)
-                
-                secondary_vars.append(f"• {display_name}: {formatted_value}")
-                break
-    
-    if secondary_vars:
-        msg_lines.append("\n🔍 Otras variables:")
-        msg_lines.extend(secondary_vars[:3])  # Show max 3
     
     msg_lines.append(f"\n📅 Fuente: BCRA")
     
