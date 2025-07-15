@@ -722,8 +722,8 @@ def get_cached_bcra_variables() -> Optional[Dict]:
         return None
 
 
-def cache_bcra_variables(variables: Dict, ttl: int = 14400) -> None:
-    """Cache BCRA variables in Redis (default 4 hours)"""
+def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
+    """Cache BCRA variables in Redis (default 5 minutes)"""
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
