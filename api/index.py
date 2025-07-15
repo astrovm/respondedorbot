@@ -1675,12 +1675,9 @@ def handle_ai_response(
     time.sleep(random.uniform(0, 1))
     
     response = handler_func(messages)
-    print(f"DEBUG - Raw AI response: '{response}'")
-    print(f"DEBUG - Response length: {len(response) if response else 0}")
     
     # Clean any duplicate text
     cleaned_response = clean_duplicate_response(response)
-    print(f"DEBUG - Cleaned response: '{cleaned_response}'")
     
     return cleaned_response
 
