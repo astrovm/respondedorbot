@@ -1344,7 +1344,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-12:]
+    return messages[-8:]
 
 
 def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
@@ -1460,7 +1460,7 @@ def save_message_to_redis(
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 12
+    chat_id: str, redis_client: redis.Redis, max_messages: int = 8
 ) -> List[Dict]:
     try:
         chat_history_key = f"chat_history:{chat_id}"
