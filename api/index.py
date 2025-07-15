@@ -798,10 +798,10 @@ def format_bcra_variables(variables: Dict) -> str:
     # Add relevant secondary variables
     secondary_vars = []
     secondary_patterns = [
+        ('unidad.*valor.*adquisitivo.*uva', 'UVA'),
         ('depósitos.*total', 'Depósitos totales'),
         ('préstamos.*sector privado', 'Préstamos sector privado'),
         ('m2.*privado', 'M2 privado'),
-        ('uva.*pesos', 'UVA'),
         ('tasa.*pase.*bcra', 'Tasa pase BCRA')
     ]
     
