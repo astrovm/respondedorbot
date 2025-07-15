@@ -4,10 +4,13 @@ from flask import Flask, Request, request
 from math import log
 from openai import OpenAI
 from os import environ
+from PIL import Image
 from requests.exceptions import RequestException
 from typing import Dict, List, Tuple, Callable, Union, Optional
+import base64
 import emoji
 import hashlib
+import io
 import json
 import random
 import re
@@ -1596,11 +1599,17 @@ def describe_image_cloudflare(image_base64: str, user_text: str = "¿Qué ves en
             "max_tokens": 512
         }
         
+        # Debug: Show payload info
+        print(f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_size: {len(image_base64)} chars")
+        
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
         
+        print(f"DEBUG: LLaVA response status: {response.status_code}")
+        
         if response.status_code == 200:
             result = response.json()
+            print(f"DEBUG: LLaVA response keys: {list(result.keys())}")
             if "result" in result and "response" in result["result"]:
                 description = result["result"]["response"]
                 print(f"Image description successful: {description[:100]}...")
@@ -1608,7 +1617,18 @@ def describe_image_cloudflare(image_base64: str, user_text: str = "¿Qué ves en
             else:
                 print(f"Unexpected LLaVA response format: {result}")
         else:
-            print(f"LLaVA API error {response.status_code}: {response.text}")
+            error_text = response.text
+            print(f"LLaVA API error {response.status_code}: {error_text}")
+            
+            # Parse error details if available
+            try:
+                error_json = response.json()
+                if "errors" in error_json and error_json["errors"]:
+                    error_msg = error_json["errors"][0].get("message", "")
+                    error_code = error_json["errors"][0].get("code", "")
+                    print(f"DEBUG: LLaVA error details - Code: {error_code}, Message: {error_msg}")
+            except:
+                print("DEBUG: Could not parse error response as JSON")
             
     except Exception as e:
         print(f"Error describing image: {e}")
@@ -1652,11 +1672,76 @@ def transcribe_audio_cloudflare(audio_data: bytes) -> Optional[str]:
         return None
 
 
+def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
+    """Resize image if it's too large for LLaVA processing"""
+    try:
+        # Open the image
+        image = Image.open(io.BytesIO(image_data))
+        original_size = image.size
+        
+        # Check if resize is needed
+        if max(original_size) > max_size:
+            print(f"DEBUG: Resizing image from {original_size} to fit max dimension {max_size}")
+            
+            # Calculate new size maintaining aspect ratio
+            ratio = min(max_size / original_size[0], max_size / original_size[1])
+            new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
+            
+            # Resize image
+            resized_image = image.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Convert back to bytes
+            output_buffer = io.BytesIO()
+            # Save as JPEG to ensure compatibility and smaller size
+            if resized_image.mode in ('RGBA', 'LA', 'P'):
+                # Convert to RGB for JPEG
+                resized_image = resized_image.convert('RGB')
+            resized_image.save(output_buffer, format='JPEG', quality=85, optimize=True)
+            
+            resized_data = output_buffer.getvalue()
+            print(f"DEBUG: Resized image size: {len(resized_data)} bytes (was {len(image_data)} bytes)")
+            return resized_data
+        else:
+            print(f"DEBUG: Image size {original_size} is within limits, no resize needed")
+            return image_data
+            
+    except ImportError:
+        print("WARNING: PIL not available, cannot resize image")
+        return image_data
+    except Exception as e:
+        print(f"ERROR: Failed to resize image: {e}")
+        return image_data
+
+
 def encode_image_to_base64(image_data: bytes) -> str:
     """Convert image bytes to base64 string for AI models"""
-    import base64
-
-    return base64.b64encode(image_data).decode("utf-8")
+    
+    # Debug: Analyze image format
+    image_size = len(image_data)
+    print(f"DEBUG: Image size: {image_size} bytes")
+    
+    # Check image format by magic bytes
+    image_format = "unknown"
+    if image_data.startswith(b'\xff\xd8\xff'):
+        image_format = "JPEG"
+    elif image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+        image_format = "PNG"
+    elif image_data.startswith(b'RIFF') and b'WEBP' in image_data[:12]:
+        image_format = "WebP"
+    elif image_data.startswith(b'GIF87a') or image_data.startswith(b'GIF89a'):
+        image_format = "GIF"
+    
+    print(f"DEBUG: Image format detected: {image_format}")
+    
+    # Check if image is too large (LLaVA might have limits)
+    max_size = 1024 * 1024  # 1MB limit
+    if image_size > max_size:
+        print(f"WARNING: Image size ({image_size} bytes) exceeds recommended limit ({max_size} bytes)")
+    
+    base64_encoded = base64.b64encode(image_data).decode("utf-8")
+    print(f"DEBUG: Base64 length: {len(base64_encoded)} characters")
+    
+    return base64_encoded
 
 
 def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
@@ -1721,7 +1806,9 @@ def handle_msg(message: Dict) -> str:
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
             if image_data:
-                image_base64 = encode_image_to_base64(image_data)
+                # Resize image if needed for LLaVA compatibility
+                resized_image_data = resize_image_if_needed(image_data)
+                image_base64 = encode_image_to_base64(resized_image_data)
                 print(f"Image encoded to base64: {len(image_base64)} chars")
                 if not message_text:
                     message_text = "que onda con esta foto"
