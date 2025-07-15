@@ -1763,7 +1763,6 @@ def should_gordo_respond(
         "username", ""
     ) == environ.get("TELEGRAM_USERNAME")
     
-    print(f"DEBUG should_gordo_respond: command='{command}', is_command={is_command}, is_private={is_private}, is_mention={is_mention}, is_reply={is_reply}")
 
     # Check gordo keywords with 10% chance
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
@@ -2170,8 +2169,8 @@ def handle_msg(message: Dict) -> str:
         message_id = str(message["message_id"])
         chat_id = str(message["chat"]["id"])
 
-        # Process audio first if present
-        if audio_file_id:
+        # Process audio first if present (but not for /transcribe commands)
+        if audio_file_id and not (message_text and message_text.strip().lower().startswith('/transcribe')):
             print(f"Processing audio message: {audio_file_id}")
             audio_data = download_telegram_file(audio_file_id)
             if audio_data:
@@ -2209,7 +2208,6 @@ def handle_msg(message: Dict) -> str:
 
         # Get command and message text
         command, sanitized_message_text = parse_command(message_text, bot_name)
-        print(f"DEBUG: Parsed command: '{command}', message_text: '{message_text}', sanitized: '{sanitized_message_text}'")
 
         # Check if we should respond
         if not should_gordo_respond(commands, command, sanitized_message_text, message):
@@ -2255,7 +2253,6 @@ def handle_msg(message: Dict) -> str:
         # Process command or conversation
         if command in commands:
             handler_func, uses_ai = commands[command]
-            print(f"DEBUG: Command '{command}' found, uses_ai: {uses_ai}")
 
             if uses_ai:
                 if not check_rate_limit(chat_id, redis_client):
@@ -2276,13 +2273,10 @@ def handle_msg(message: Dict) -> str:
             else:
                 # Special handling for transcribe command which needs the full message
                 if command == "/transcribe":
-                    print("DEBUG: Using handle_transcribe_with_message")
                     response_msg = handle_transcribe_with_message(message)
                 else:
-                    print(f"DEBUG: Using regular handler for command: {command}")
                     response_msg = handler_func(sanitized_message_text)
         else:
-            print(f"DEBUG: Command '{command}' not found in commands, using AI")
             if not check_rate_limit(chat_id, redis_client):
                 response_msg = handle_rate_limit(chat_id, message)
             else:
