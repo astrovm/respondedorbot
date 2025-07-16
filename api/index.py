@@ -670,14 +670,14 @@ def scrape_bcra_variables() -> Optional[Dict]:
         
         variables = {}
         for row in parser.table_data:
-            if len(row) < 2 or row[0] in ['Fecha', 'Valor'] or not row[0].strip():
+            if len(row) < 2:
                 continue
                 
             # Special case: reservas in 5-column header format
             if len(row) == 5 and row[0] == 'Fecha' and row[1] == 'Valor':
                 var_name, date, value = row[2].strip(), row[3].strip(), row[4].strip()
-            # Standard 3-column format
-            elif len(row) >= 3:
+            # Standard 3-column format - skip headers
+            elif len(row) >= 3 and row[0] not in ['Fecha', 'Valor'] and row[0].strip():
                 var_name, date, value = row[0].strip(), row[1].strip(), row[2].strip()
             else:
                 continue
