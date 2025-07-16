@@ -53,7 +53,6 @@ def get_cached_transcription(file_id: str) -> Optional[str]:
         cache_key = f"audio_transcription:{file_id}"
         cached_text = redis_client.get(cache_key)
         if cached_text:
-            print(f"Using cached transcription for audio: {file_id}")
             return cached_text
         return None
     except Exception as e:
@@ -67,7 +66,6 @@ def cache_transcription(file_id: str, text: str, ttl: int = 604800) -> None:
         redis_client = config_redis()
         cache_key = f"audio_transcription:{file_id}"
         redis_client.setex(cache_key, ttl, text)
-        print(f"Caching new transcription for: {file_id}")
     except Exception as e:
         print(f"Error caching transcription: {e}")
 
@@ -79,7 +77,6 @@ def get_cached_description(file_id: str) -> Optional[str]:
         cache_key = f"image_description:{file_id}"
         cached_desc = redis_client.get(cache_key)
         if cached_desc:
-            print(f"Using cached description for image: {file_id}")
             return cached_desc
         return None
     except Exception as e:
@@ -93,7 +90,6 @@ def cache_description(file_id: str, description: str, ttl: int = 604800) -> None
         redis_client = config_redis()
         cache_key = f"image_description:{file_id}"
         redis_client.setex(cache_key, ttl, description)
-        print(f"Caching new description for: {file_id}")
     except Exception as e:
         print(f"Error caching description: {e}")
 
@@ -126,116 +122,64 @@ def cached_requests(
 ):
     """Generic proxy for caching any request"""
     try:
-        # create unique hash for the request
         arguments_dict = {
             "api_url": api_url,
             "parameters": parameters,
             "headers": headers,
         }
-        arguments_str = json.dumps(arguments_dict, sort_keys=True).encode()
-        request_hash = hashlib.md5(arguments_str).hexdigest()
+        request_hash = hashlib.md5(
+            json.dumps(arguments_dict, sort_keys=True).encode()
+        ).hexdigest()
 
-        print(f"[CACHE] Request for {api_url}")
-        print(f"[CACHE] Hash: {request_hash}")
-        print(f"[CACHE] SSL verification: {'enabled' if verify_ssl else 'disabled'}")
-
-        # redis config
         redis_client = config_redis()
-
-        # get previous api data from redis cache
         redis_response = redis_client.get(request_hash)
-
-        if redis_response:
-            print(f"[CACHE] Found cached data for {api_url}")
-        else:
-            print(f"[CACHE] No cached data found for {api_url}")
-
-        if get_history is not False:
-            cache_history = get_cache_history(get_history, request_hash, redis_client)
-            print(f"[CACHE] History data found: {bool(cache_history)}")
-        else:
-            cache_history = None
-
-        # set current timestamp
+        cache_history = (
+            get_cache_history(get_history, request_hash, redis_client)
+            if get_history
+            else None
+        )
         timestamp = int(time.time())
 
-        # if there's no cached data request it
+        def make_request():
+            response = requests.get(
+                api_url,
+                params=parameters,
+                headers=headers,
+                timeout=5,
+                verify=verify_ssl,
+            )
+            response.raise_for_status()
+            redis_value = {"timestamp": timestamp, "data": json.loads(response.text)}
+            redis_client.set(request_hash, json.dumps(redis_value))
+
+            if hourly_cache:
+                current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+                redis_client.set(current_hour + request_hash, json.dumps(redis_value))
+
+            if cache_history is not None:
+                redis_value["history"] = cache_history
+            return redis_value
+
         if redis_response is None:
-            print(f"[CACHE] Requesting new data from {api_url}")
             try:
-                response = requests.get(
-                    api_url,
-                    params=parameters,
-                    headers=headers,
-                    timeout=5,
-                    verify=verify_ssl,
-                )
-                response.raise_for_status()
-                response_json = json.loads(response.text)
-                redis_value = {"timestamp": timestamp, "data": response_json}
-                redis_client.set(request_hash, json.dumps(redis_value))
-
-                if hourly_cache:
-                    current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                    redis_client.set(
-                        current_hour + request_hash, json.dumps(redis_value)
-                    )
-
-                print(f"[CACHE] Successfully got new data from {api_url}")
-
-                if cache_history is not None:
-                    redis_value["history"] = cache_history
-
-                return redis_value
+                return make_request()
             except Exception as e:
                 print(f"[CACHE] Error requesting {api_url}: {str(e)}")
                 return None
-
         else:
-            # loads cached data
             cached_data = json.loads(redis_response)
-            cached_data_timestamp = int(cached_data["timestamp"])
-            cache_age = timestamp - cached_data_timestamp
-
-            print(f"[CACHE] Cache age: {cache_age}s (expiration: {expiration_time}s)")
+            cache_age = timestamp - int(cached_data["timestamp"])
 
             if cache_history is not None:
                 cached_data["history"] = cache_history
 
-            # get new data if cache is older than expiration_time
             if cache_age > expiration_time:
-                print(f"[CACHE] Cache expired, requesting new data from {api_url}")
                 try:
-                    response = requests.get(
-                        api_url,
-                        params=parameters,
-                        headers=headers,
-                        timeout=5,
-                        verify=verify_ssl,
-                    )
-                    response.raise_for_status()
-                    response_json = json.loads(response.text)
-                    new_data = {"timestamp": timestamp, "data": response_json}
-                    redis_client.set(request_hash, json.dumps(new_data))
-
-                    if hourly_cache:
-                        current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                        redis_client.set(
-                            current_hour + request_hash, json.dumps(new_data)
-                        )
-
-                    print(f"[CACHE] Successfully updated cache for {api_url}")
-
-                    if cache_history is not None:
-                        new_data["history"] = cache_history
-
-                    return new_data
+                    return make_request()
                 except Exception as e:
                     print(f"[CACHE] Error updating cache for {api_url}: {str(e)}")
-                    print(f"[CACHE] Using old cached data")
                     return cached_data
             else:
-                print(f"[CACHE] Using cached data for {api_url}")
                 return cached_data
 
     except Exception as e:
@@ -627,67 +571,76 @@ def scrape_bcra_variables() -> Optional[Dict]:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
-        
+
         class BCRAParser(HTMLParser):
             def __init__(self):
                 super().__init__()
                 self.in_table = self.in_td = self.in_th = False
-                self.current_data = ''
+                self.current_data = ""
                 self.table_data = []
                 self.row_data = []
-                
+
             def handle_starttag(self, tag, attrs):
-                if tag == 'table':
+                if tag == "table":
                     self.in_table = True
-                elif tag in ['td', 'th'] and self.in_table:
-                    self.in_td = tag == 'td'
-                    self.in_th = tag == 'th'
-                    
+                elif tag in ["td", "th"] and self.in_table:
+                    self.in_td = tag == "td"
+                    self.in_th = tag == "th"
+
             def handle_endtag(self, tag):
-                if tag == 'table':
+                if tag == "table":
                     self.in_table = False
-                elif tag in ['td', 'th']:
+                elif tag in ["td", "th"]:
                     self.in_td = self.in_th = False
                     if self.current_data.strip():
                         self.row_data.append(self.current_data.strip())
-                    self.current_data = ''
-                elif tag == 'tr' and self.in_table and self.row_data:
+                    self.current_data = ""
+                elif tag == "tr" and self.in_table and self.row_data:
                     self.table_data.append(self.row_data)
                     self.row_data = []
-                        
+
             def handle_data(self, data):
                 if self.in_td or self.in_th:
                     self.current_data += data
-        
-        req = urllib.request.Request('https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp')
-        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        
+
+        req = urllib.request.Request(
+            "https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp"
+        )
+        req.add_header(
+            "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        )
+
         with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
-            content = response.read().decode('iso-8859-1')
-            
+            content = response.read().decode("iso-8859-1")
+
         parser = BCRAParser()
         parser.feed(content)
-        
+
         variables = {}
         for row in parser.table_data:
             if len(row) < 2:
                 continue
-                
+
             # Special case: reservas in 5-column header format
-            if len(row) == 5 and row[0] == 'Fecha' and row[1] == 'Valor':
+            if len(row) == 5 and row[0] == "Fecha" and row[1] == "Valor":
                 var_name, date, value = row[2].strip(), row[3].strip(), row[4].strip()
             # Standard 3-column format - skip headers
-            elif len(row) >= 3 and row[0] not in ['Fecha', 'Valor'] and row[0].strip():
+            elif len(row) >= 3 and row[0] not in ["Fecha", "Valor"] and row[0].strip():
                 var_name, date, value = row[0].strip(), row[1].strip(), row[2].strip()
             else:
                 continue
-            
-            var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
+
+            var_name = (
+                var_name.replace("\xa0", " ")
+                .replace("\n", " ")
+                .replace("�", "ó")
+                .strip()
+            )
             if var_name and value:
-                variables[var_name] = {'value': value, 'date': date}
-        
+                variables[var_name] = {"value": value, "date": date}
+
         return variables
-        
+
     except Exception as e:
         print(f"Error scraping BCRA variables: {e}")
         return None
@@ -700,7 +653,6 @@ def get_cached_bcra_variables() -> Optional[Dict]:
         cache_key = "bcra_variables"
         cached_data = redis_client.get(cache_key)
         if cached_data:
-            print("Using cached BCRA variables")
             return json.loads(cached_data)
         return None
     except Exception as e:
@@ -714,7 +666,6 @@ def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
         redis_client = config_redis()
         cache_key = "bcra_variables"
         redis_client.setex(cache_key, ttl, json.dumps(variables))
-        print("Caching new BCRA variables")
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
 
@@ -723,50 +674,69 @@ def format_bcra_variables(variables: Dict) -> str:
     """Format BCRA variables for display"""
     if not variables:
         return "No se pudieron obtener las variables del BCRA"
-    
+
     def format_value(value_str: str, is_percentage: bool = False) -> str:
         """Format numbers and percentages"""
         try:
-            clean_value = value_str.replace('.', '').replace(',', '.') if not is_percentage else value_str.replace(',', '.')
+            clean_value = (
+                value_str.replace(".", "").replace(",", ".")
+                if not is_percentage
+                else value_str.replace(",", ".")
+            )
             num = float(clean_value)
-            
+
             if is_percentage:
                 return f"{num:.1f}%" if num >= 10 else f"{num:.2f}%"
             elif num >= 1000000:
-                return f"{num/1000:,.0f}".replace(',', '.')
+                return f"{num/1000:,.0f}".replace(",", ".")
             elif num >= 1000:
-                return f"{num:,.0f}".replace(',', '.')
+                return f"{num:,.0f}".replace(",", ".")
             else:
-                return f"{num:.2f}".replace('.', ',')
+                return f"{num:.2f}".replace(".", ",")
         except:
             return f"{value_str}%" if is_percentage else value_str
-    
+
     specs = [
-        ('base.*monetaria.*total', lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos"),
-        ('inflación.*mensual', lambda v: f"📈 Inflación mensual: {format_value(v, True)}"),
-        ('inflación.*interanual', lambda v: f"📊 Inflación interanual: {format_value(v, True)}"),
-        ('inflación.*esperada.*rem', lambda v: f"🔮 Inflación esperada: {format_value(v, True)}"),
-        ('tamar.*n\\.a\\.', lambda v: f"📈 TAMAR: {format_value(v, True)}"),
-        ('badlar.*n\\.a\\.', lambda v: f"📊 BADLAR: {format_value(v, True)}"),
-        ('tasa.*interés.*justicia', lambda v: f"⚖️ Tasa justicia: {v}%"),
-        ('tipo.*cambio.*minorista', lambda v: f"💵 Dólar minorista: ${v}"),
-        ('tipo.*cambio.*mayorista', lambda v: f"💱 Dólar mayorista: ${v}"),
-        ('unidad.*valor.*adquisitivo.*uva', lambda v: f"💰 UVA: ${v}"),
-        ('cer.*base.*2002', lambda v: f"📊 CER: {v}"),
-        ('reservas.*internacionales', lambda v: f"🏛️ Reservas: USD {format_value(v)} millones")
+        (
+            "base.*monetaria.*total",
+            lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos",
+        ),
+        (
+            "inflación.*mensual",
+            lambda v: f"📈 Inflación mensual: {format_value(v, True)}",
+        ),
+        (
+            "inflación.*interanual",
+            lambda v: f"📊 Inflación interanual: {format_value(v, True)}",
+        ),
+        (
+            "inflación.*esperada.*rem",
+            lambda v: f"🔮 Inflación esperada: {format_value(v, True)}",
+        ),
+        ("tamar.*n\\.a\\.", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
+        ("badlar.*n\\.a\\.", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
+        ("tasa.*interés.*justicia", lambda v: f"⚖️ Tasa justicia: {v}%"),
+        ("tipo.*cambio.*minorista", lambda v: f"💵 Dólar minorista: ${v}"),
+        ("tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
+        ("unidad.*valor.*adquisitivo.*uva", lambda v: f"💰 UVA: ${v}"),
+        ("cer.*base.*2002", lambda v: f"📊 CER: {v}"),
+        (
+            "reservas.*internacionales",
+            lambda v: f"🏛️ Reservas: USD {format_value(v)} millones",
+        ),
     ]
-    
+
     lines = ["📊 Variables principales BCRA\n"]
     for pattern, formatter in specs:
         for key, data in variables.items():
             if re.search(pattern, key.lower()):
-                value, date = data['value'], data.get('date', '')
+                value, date = data["value"], data.get("date", "")
                 line = formatter(value)
                 if date and date != value:
                     line += f" ({date.replace('/2025', '/25')})"
                 lines.append(line)
                 break
-    
+
     return "\n".join(lines)
 
 
@@ -775,18 +745,18 @@ def handle_bcra_variables(msg_text: str) -> str:
     try:
         # Check cache first
         variables = get_cached_bcra_variables()
-        
+
         if not variables:
             # Scrape fresh data
             variables = scrape_bcra_variables()
             if variables:
                 cache_bcra_variables(variables)
-        
+
         if not variables:
             return "No pude obtener las variables del BCRA en este momento, probá más tarde"
-        
+
         return format_bcra_variables(variables)
-        
+
     except Exception as e:
         print(f"Error handling BCRA variables: {e}")
         return "Error al obtener las variables del BCRA"
@@ -798,18 +768,18 @@ def handle_transcribe_with_message(message: Dict) -> str:
         # Check if this is a reply to another message
         if "reply_to_message" not in message:
             return "Respondé a un mensaje con audio o imagen para transcribir/describir"
-        
+
         replied_msg = message["reply_to_message"]
-        
+
         # Check for audio in replied message
         if "voice" in replied_msg and replied_msg["voice"]:
             audio_file_id = replied_msg["voice"]["file_id"]
-            
+
             # Check cache first
             cached_transcription = get_cached_transcription(audio_file_id)
             if cached_transcription:
                 return f"🎵 Transcripción: {cached_transcription}"
-            
+
             # Download and transcribe
             audio_data = download_telegram_file(audio_file_id)
             if audio_data:
@@ -820,16 +790,16 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     return "No pude transcribir el audio, intentá más tarde"
             else:
                 return "No pude descargar el audio"
-        
+
         # Check for regular audio
         elif "audio" in replied_msg and replied_msg["audio"]:
             audio_file_id = replied_msg["audio"]["file_id"]
-            
+
             # Check cache first
             cached_transcription = get_cached_transcription(audio_file_id)
             if cached_transcription:
                 return f"🎵 Transcripción: {cached_transcription}"
-            
+
             # Download and transcribe
             audio_data = download_telegram_file(audio_file_id)
             if audio_data:
@@ -840,54 +810,62 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     return "No pude transcribir el audio, intentá más tarde"
             else:
                 return "No pude descargar el audio"
-        
+
         # Check for photo in replied message
         elif "photo" in replied_msg and replied_msg["photo"]:
             photo_file_id = replied_msg["photo"][-1]["file_id"]
-            
+
             # Check cache first
             cached_description = get_cached_description(photo_file_id)
             if cached_description:
                 return f"🖼️ Descripción: {cached_description}"
-            
+
             # Download and describe
             image_data = download_telegram_file(photo_file_id)
             if image_data:
                 # Resize image if needed
                 resized_image_data = resize_image_if_needed(image_data)
-                description = describe_image_cloudflare(resized_image_data, "Describe what you see in this image in detail.", photo_file_id)
+                description = describe_image_cloudflare(
+                    resized_image_data,
+                    "Describe what you see in this image in detail.",
+                    photo_file_id,
+                )
                 if description:
                     return f"🖼️ Descripción: {description}"
                 else:
                     return "No pude describir la imagen, intentá más tarde"
             else:
                 return "No pude descargar la imagen"
-        
+
         # Check for sticker in replied message
         elif "sticker" in replied_msg and replied_msg["sticker"]:
             sticker_file_id = replied_msg["sticker"]["file_id"]
-            
+
             # Check cache first
             cached_description = get_cached_description(sticker_file_id)
             if cached_description:
                 return f"🎨 Descripción del sticker: {cached_description}"
-            
+
             # Download and describe
             image_data = download_telegram_file(sticker_file_id)
             if image_data:
                 # Resize image if needed
                 resized_image_data = resize_image_if_needed(image_data)
-                description = describe_image_cloudflare(resized_image_data, "Describe what you see in this sticker in detail.", sticker_file_id)
+                description = describe_image_cloudflare(
+                    resized_image_data,
+                    "Describe what you see in this sticker in detail.",
+                    sticker_file_id,
+                )
                 if description:
                     return f"🎨 Descripción del sticker: {description}"
                 else:
                     return "No pude describir el sticker, intentá más tarde"
             else:
                 return "No pude descargar el sticker"
-        
+
         else:
             return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
-    
+
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
         return "Error procesando el comando, intentá más tarde"
@@ -1795,7 +1773,6 @@ def should_gordo_respond(
     is_reply = message.get("reply_to_message", {}).get("from", {}).get(
         "username", ""
     ) == environ.get("TELEGRAM_USERNAME")
-    
 
     # Check gordo keywords with 10% chance
     trigger_words = ["gordo", "respondedor", "atendedor", "gordito", "dogor", "bot"]
@@ -1967,11 +1944,8 @@ def describe_image_cloudflare(
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
 
-        print(f"DEBUG: LLaVA response status: {response.status_code}")
-
         if response.status_code == 200:
             result = response.json()
-            print(f"DEBUG: LLaVA response keys: {list(result.keys())}")
             if "result" in result:
                 # Try both possible response formats
                 if "response" in result["result"]:
@@ -2005,7 +1979,7 @@ def describe_image_cloudflare(
                         f"DEBUG: LLaVA error details - Code: {error_code}, Message: {error_msg}"
                     )
             except:
-                print("DEBUG: Could not parse error response as JSON")
+                pass
 
     except Exception as e:
         print(f"Error describing image: {e}")
@@ -2134,7 +2108,6 @@ def encode_image_to_base64(image_data: bytes) -> str:
 
     # Debug: Analyze image format
     image_size = len(image_data)
-    print(f"DEBUG: Image size: {image_size} bytes")
 
     # Check image format by magic bytes
     image_format = "unknown"
@@ -2147,8 +2120,6 @@ def encode_image_to_base64(image_data: bytes) -> str:
     elif image_data.startswith(b"GIF87a") or image_data.startswith(b"GIF89a"):
         image_format = "GIF"
 
-    print(f"DEBUG: Image format detected: {image_format}")
-
     # Check if image is too large (LLaVA might have limits)
     max_size = 1024 * 1024  # 1MB limit
     if image_size > max_size:
@@ -2157,7 +2128,6 @@ def encode_image_to_base64(image_data: bytes) -> str:
         )
 
     base64_encoded = base64.b64encode(image_data).decode("utf-8")
-    print(f"DEBUG: Base64 length: {len(base64_encoded)} characters")
 
     return base64_encoded
 
@@ -2203,7 +2173,9 @@ def handle_msg(message: Dict) -> str:
         chat_id = str(message["chat"]["id"])
 
         # Process audio first if present (but not for /transcribe commands)
-        if audio_file_id and not (message_text and message_text.strip().lower().startswith('/transcribe')):
+        if audio_file_id and not (
+            message_text and message_text.strip().lower().startswith("/transcribe")
+        ):
             print(f"Processing audio message: {audio_file_id}")
             audio_data = download_telegram_file(audio_file_id)
             if audio_data:
