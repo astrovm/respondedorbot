@@ -684,21 +684,51 @@ def scrape_bcra_variables() -> Optional[Dict]:
         variables = {}
         for row in parser.table_data:
             if len(row) >= 2:
-                # Skip header rows and empty rows
+                # Special case for header row with reservas (5 columns)
+                if len(row) == 5 and row[0] == 'Fecha' and row[1] == 'Valor':
+                    # This is the special header row with reservas data
+                    var_name = row[2].strip()
+                    date = row[3].strip()
+                    value = row[4].strip()
+                    
+                    # Clean up variable name and handle encoding issues
+                    var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
+                    
+                    if var_name and value:
+                        variables[var_name] = {'value': value, 'date': date}
+                    continue
+                
+                # Skip regular header rows and empty rows
                 if row[0] in ['Fecha', 'Valor'] or not row[0].strip():
                     continue
                     
-                # Extract variable name and value
+                # Extract variable name and value - handle both 2 and 3 column formats
                 if len(row) >= 3:
                     var_name = row[0].strip()
                     date = row[1].strip() if len(row) > 1 else ''
                     value = row[2].strip() if len(row) > 2 else row[1].strip()
-                    
-                    # Clean up variable name
-                    var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').strip()
-                    
-                    if var_name and value:
-                        variables[var_name] = {'value': value, 'date': date}
+                elif len(row) == 2:
+                    # Handle 2-column format where date and value might be in second column
+                    var_name = row[0].strip()
+                    second_col = row[1].strip()
+                    # Try to split date and value if they're together
+                    if '\t' in second_col or '  ' in second_col:
+                        parts = second_col.split()
+                        if len(parts) >= 2:
+                            date = parts[0]
+                            value = parts[-1]
+                        else:
+                            date = ''
+                            value = second_col
+                    else:
+                        date = ''
+                        value = second_col
+                
+                # Clean up variable name and handle encoding issues
+                var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
+                
+                if var_name and value:
+                    variables[var_name] = {'value': value, 'date': date}
         
         return variables
         
