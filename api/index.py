@@ -624,7 +624,6 @@ $1 ARS = {sats_per_peso:.3f} sats"""
 def scrape_bcra_variables() -> Optional[Dict]:
     """Scrape BCRA economic variables from the official page"""
     try:
-        # Create SSL context that doesn't verify certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -632,9 +631,7 @@ def scrape_bcra_variables() -> Optional[Dict]:
         class BCRAParser(HTMLParser):
             def __init__(self):
                 super().__init__()
-                self.in_table = False
-                self.in_td = False
-                self.in_th = False
+                self.in_table = self.in_td = self.in_th = False
                 self.current_data = ''
                 self.table_data = []
                 self.row_data = []
@@ -642,93 +639,52 @@ def scrape_bcra_variables() -> Optional[Dict]:
             def handle_starttag(self, tag, attrs):
                 if tag == 'table':
                     self.in_table = True
-                elif tag == 'td' and self.in_table:
-                    self.in_td = True
-                elif tag == 'th' and self.in_table:
-                    self.in_th = True
+                elif tag in ['td', 'th'] and self.in_table:
+                    self.in_td = tag == 'td'
+                    self.in_th = tag == 'th'
                     
             def handle_endtag(self, tag):
                 if tag == 'table':
                     self.in_table = False
-                elif tag == 'td':
-                    self.in_td = False
+                elif tag in ['td', 'th']:
+                    self.in_td = self.in_th = False
                     if self.current_data.strip():
                         self.row_data.append(self.current_data.strip())
                     self.current_data = ''
-                elif tag == 'th':
-                    self.in_th = False
-                    if self.current_data.strip():
-                        self.row_data.append(self.current_data.strip())
-                    self.current_data = ''
-                elif tag == 'tr' and self.in_table:
-                    if self.row_data:
-                        self.table_data.append(self.row_data)
-                        self.row_data = []
+                elif tag == 'tr' and self.in_table and self.row_data:
+                    self.table_data.append(self.row_data)
+                    self.row_data = []
                         
             def handle_data(self, data):
                 if self.in_td or self.in_th:
                     self.current_data += data
         
-        # Make request
         req = urllib.request.Request('https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp')
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
         with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
             content = response.read().decode('iso-8859-1')
             
-        # Parse HTML
         parser = BCRAParser()
         parser.feed(content)
         
-        # Process data
         variables = {}
         for row in parser.table_data:
-            if len(row) >= 2:
-                # Special case for header row with reservas (5 columns)
-                if len(row) == 5 and row[0] == 'Fecha' and row[1] == 'Valor':
-                    # This is the special header row with reservas data
-                    var_name = row[2].strip()
-                    date = row[3].strip()
-                    value = row[4].strip()
-                    
-                    # Clean up variable name and handle encoding issues
-                    var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
-                    
-                    if var_name and value:
-                        variables[var_name] = {'value': value, 'date': date}
-                    continue
+            if len(row) < 2 or row[0] in ['Fecha', 'Valor'] or not row[0].strip():
+                continue
                 
-                # Skip regular header rows and empty rows
-                if row[0] in ['Fecha', 'Valor'] or not row[0].strip():
-                    continue
-                    
-                # Extract variable name and value - handle both 2 and 3 column formats
-                if len(row) >= 3:
-                    var_name = row[0].strip()
-                    date = row[1].strip() if len(row) > 1 else ''
-                    value = row[2].strip() if len(row) > 2 else row[1].strip()
-                elif len(row) == 2:
-                    # Handle 2-column format where date and value might be in second column
-                    var_name = row[0].strip()
-                    second_col = row[1].strip()
-                    # Try to split date and value if they're together
-                    if '\t' in second_col or '  ' in second_col:
-                        parts = second_col.split()
-                        if len(parts) >= 2:
-                            date = parts[0]
-                            value = parts[-1]
-                        else:
-                            date = ''
-                            value = second_col
-                    else:
-                        date = ''
-                        value = second_col
-                
-                # Clean up variable name and handle encoding issues
-                var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
-                
-                if var_name and value:
-                    variables[var_name] = {'value': value, 'date': date}
+            # Special case: reservas in 5-column header format
+            if len(row) == 5 and row[0] == 'Fecha' and row[1] == 'Valor':
+                var_name, date, value = row[2].strip(), row[3].strip(), row[4].strip()
+            # Standard 3-column format
+            elif len(row) >= 3:
+                var_name, date, value = row[0].strip(), row[1].strip(), row[2].strip()
+            else:
+                continue
+            
+            var_name = var_name.replace('\xa0', ' ').replace('\n', ' ').replace('�', 'ó').strip()
+            if var_name and value:
+                variables[var_name] = {'value': value, 'date': date}
         
         return variables
         
@@ -768,72 +724,50 @@ def format_bcra_variables(variables: Dict) -> str:
     if not variables:
         return "No se pudieron obtener las variables del BCRA"
     
-    def format_number(value_str: str) -> str:
-        """Format numbers with proper thousands separators"""
+    def format_value(value_str: str, is_percentage: bool = False) -> str:
+        """Format numbers and percentages"""
         try:
-            # Remove existing separators and convert to float
-            clean_value = value_str.replace('.', '').replace(',', '.')
+            clean_value = value_str.replace('.', '').replace(',', '.') if not is_percentage else value_str.replace(',', '.')
             num = float(clean_value)
             
-            # Format based on size
-            if num >= 1000000:
-                # For millions, show as thousands
+            if is_percentage:
+                return f"{num:.1f}%" if num >= 10 else f"{num:.2f}%"
+            elif num >= 1000000:
                 return f"{num/1000:,.0f}".replace(',', '.')
             elif num >= 1000:
                 return f"{num:,.0f}".replace(',', '.')
             else:
                 return f"{num:.2f}".replace('.', ',')
         except:
-            return value_str
+            return f"{value_str}%" if is_percentage else value_str
     
-    def format_percentage(value_str: str) -> str:
-        """Format percentages with max 2 decimal places"""
-        try:
-            clean_value = value_str.replace(',', '.')
-            num = float(clean_value)
-            if num >= 10:
-                return f"{num:.1f}%"
-            else:
-                return f"{num:.2f}%"
-        except:
-            return f"{value_str}%"
-    
-    msg_lines = ["📊 Variables principales BCRA\n"]
-    
-    # Specific variables in the exact order requested
-    variable_specs = [
-        # Pattern, Display format, Icon
-        ('base.*monetaria.*total', lambda v, d: f"🏦 Base monetaria: ${format_number(v)} mill. pesos"),
-        ('inflación.*mensual', lambda v, d: f"📈 Inflación mensual: {format_percentage(v)}"),
-        ('inflación.*interanual', lambda v, d: f"📊 Inflación interanual: {format_percentage(v)}"),
-        ('inflación.*esperada.*rem', lambda v, d: f"🔮 Inflación esperada: {format_percentage(v)}"),
-        ('tamar.*n\\.a\\.', lambda v, d: f"📈 TAMAR: {format_percentage(v)}"),
-        ('badlar.*n\\.a\\.', lambda v, d: f"📊 BADLAR: {format_percentage(v)}"),
-        ('tasa.*interés.*justicia', lambda v, d: f"⚖️ Tasa justicia: {v}%"),
-        ('tipo.*cambio.*minorista', lambda v, d: f"💵 Dólar minorista: ${v}"),
-        ('tipo.*cambio.*mayorista', lambda v, d: f"💱 Dólar mayorista: ${v}"),
-        ('unidad.*valor.*adquisitivo.*uva', lambda v, d: f"💰 UVA: ${v}"),
-        ('cer.*base.*2002', lambda v, d: f"📊 CER: {v}"),
-        ('reservas.*internacionales', lambda v, d: f"🏛️ Reservas: USD {format_number(v)} millones")
+    specs = [
+        ('base.*monetaria.*total', lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos"),
+        ('inflación.*mensual', lambda v: f"📈 Inflación mensual: {format_value(v, True)}"),
+        ('inflación.*interanual', lambda v: f"📊 Inflación interanual: {format_value(v, True)}"),
+        ('inflación.*esperada.*rem', lambda v: f"🔮 Inflación esperada: {format_value(v, True)}"),
+        ('tamar.*n\\.a\\.', lambda v: f"📈 TAMAR: {format_value(v, True)}"),
+        ('badlar.*n\\.a\\.', lambda v: f"📊 BADLAR: {format_value(v, True)}"),
+        ('tasa.*interés.*justicia', lambda v: f"⚖️ Tasa justicia: {v}%"),
+        ('tipo.*cambio.*minorista', lambda v: f"💵 Dólar minorista: ${v}"),
+        ('tipo.*cambio.*mayorista', lambda v: f"💱 Dólar mayorista: ${v}"),
+        ('unidad.*valor.*adquisitivo.*uva', lambda v: f"💰 UVA: ${v}"),
+        ('cer.*base.*2002', lambda v: f"📊 CER: {v}"),
+        ('reservas.*internacionales', lambda v: f"🏛️ Reservas: USD {format_value(v)} millones")
     ]
     
-    # Process each variable in order
-    for pattern, formatter in variable_specs:
+    lines = ["📊 Variables principales BCRA\n"]
+    for pattern, formatter in specs:
         for key, data in variables.items():
             if re.search(pattern, key.lower()):
-                value = data['value']
-                date = data.get('date', '')
-                
-                formatted_line = formatter(value, date)
+                value, date = data['value'], data.get('date', '')
+                line = formatter(value)
                 if date and date != value:
-                    # Clean up date format
-                    clean_date = date.replace('/2025', '/25')
-                    formatted_line += f" ({clean_date})"
-                msg_lines.append(formatted_line)
+                    line += f" ({date.replace('/2025', '/25')})"
+                lines.append(line)
                 break
     
-    
-    return "\n".join(msg_lines)
+    return "\n".join(lines)
 
 
 def handle_bcra_variables(msg_text: str) -> str:
