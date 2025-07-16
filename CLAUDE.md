@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RespondedorBot is a Telegram bot written in Python/Flask that operates as "el gordo" - an Argentine bot character based on the "atendedor de boludos" meme. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, and various utility commands.
+RespondedorBot is a Telegram bot written in Python/Flask that operates as "el gordo" - an Argentine bot character based on the "atendedor de boludos" meme. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, BCRA economic data, audio/image transcription, and various utility commands.
 
 ## Development Commands
 
@@ -45,11 +45,11 @@ python -m pytest test.py::test_handle_msg -v
 - Multiple command handlers for crypto prices, currency rates, utilities
 
 **Key Functions:**
-- `handle_msg()` - Main message processing pipeline at api/index.py:1432
-- `ask_ai()` - AI conversation handler at api/index.py:809
-- `cached_requests()` - Generic API caching wrapper at api/index.py:60
-- `get_prices()` - Cryptocurrency price fetcher at api/index.py:248
-- `get_dollar_rates()` - Argentine peso exchange rates at api/index.py:472
+- `handle_msg()` - Main message processing pipeline at api/index.py:2168
+- `ask_ai()` - AI conversation handler at api/index.py:1156
+- `cached_requests()` - Generic API caching wrapper at api/index.py:114
+- `scrape_bcra_variables()` - BCRA economic data scraper at api/index.py:568
+- `handle_transcribe_with_message()` - Audio/image transcription handler at api/index.py:759
 
 ### Data Flow
 1. Telegram webhook → `responder()` → `process_request_parameters()` → `handle_msg()`
@@ -65,10 +65,12 @@ python -m pytest test.py::test_handle_msg -v
 - **Cryptography**: For webhook security tokens
 
 ### External APIs
-- **Telegram Bot API**: Message sending/receiving
+- **Telegram Bot API**: Message sending/receiving and file downloads
 - **CoinMarketCap**: Cryptocurrency prices (requires `COINMARKETCAP_KEY`)
 - **CriptoYa**: Argentine peso exchange rates
 - **OpenRouter**: AI model access (requires `OPENROUTER_API_KEY`)
+- **Cloudflare Workers AI**: Fallback AI and image/audio processing
+- **BCRA**: Economic variables web scraping from official page
 - **Open-Meteo**: Weather data for Buenos Aires
 
 ### Environment Variables
@@ -76,6 +78,7 @@ Required environment variables are documented in README.md. Critical ones:
 - `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`: Bot authentication
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Cache configuration
 - `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`: API access
+- `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Workers AI
 - `ADMIN_CHAT_ID`: Error reporting destination
 
 ### Rate Limiting
@@ -94,5 +97,21 @@ Required environment variables are documented in README.md. Critical ones:
 - Edge case testing for message parsing, rate limiting, error conditions
 - Tests run independently without external service dependencies
 
+### Recent Major Features
+
+**BCRA Economic Data (/bcra, /variables):**
+- Web scraping from official BCRA website (https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp)
+- Extracts 12 specific economic variables in precise order: Base monetaria, Inflación (mensual/interanual/esperada), TAMAR, BADLAR, Tasa justicia, Dólar (minorista/mayorista), UVA, CER, Reservas
+- Handles special HTML table formats including 5-column header rows for reservas data
+- 5-minute Redis caching for performance
+- SSL certificate bypass and encoding handling (iso-8859-1)
+
+**Audio/Image Transcription (/transcribe):**
+- Must be used as reply to messages containing audio, images, or stickers
+- Audio transcription via Cloudflare Workers AI
+- Image description via LLaVA model
+- 7-day Redis caching for both audio and image processing
+- Automatic file download from Telegram servers
+
 ## Character and Content
-The bot operates as "el gordo" - an Argentine character with specific personality traits and language patterns. When modifying conversation logic, maintain the established character voice and Argentine Spanish vernacular present in the system prompts and responses.
+The bot operates as "el gordo" - an Argentine character with specific personality traits and language patterns. When modifying conversation logic, maintain the established character voice and Argentine Spanish vernacular present in the system prompts and responses. Key personality rule: ALWAYS respond without quotes, emojis, or formal punctuation.
