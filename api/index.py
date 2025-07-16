@@ -832,7 +832,6 @@ def format_bcra_variables(variables: Dict) -> str:
                 msg_lines.append(formatted_line)
                 break
     
-    msg_lines.append(f"\n📅 Fuente: BCRA")
     
     return "\n".join(msg_lines)
 
