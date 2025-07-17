@@ -1540,3 +1540,246 @@ def test_ask_ai_with_image():
         mock_encode_image.assert_called_once_with(image_data)
         mock_get_ai_response.assert_called_once()
         mock_clean_duplicate.assert_called_once()
+
+
+def test_get_dollar_rates_basic():
+    from api.index import get_dollar_rates
+
+    with patch("api.index.cached_requests") as mock_cached_requests:
+        # Mock the API response with dollar rate data
+        mock_cached_requests.return_value = {
+            "data": {
+                "oficial": {"price": 100.0, "variation": 0.5},
+                "tarjeta": {"price": 150.0, "variation": 0.75},
+                "mep": {"al30": {"ci": {"price": 200.0, "variation": 1.25}}},
+                "ccl": {"al30": {"ci": {"price": 210.0, "variation": 1.5}}},
+                "blue": {"ask": 220.0, "variation": 2.0},
+                "cripto": {
+                    "ccb": {"ask": 230.0, "variation": 2.5},
+                    "usdc": {"ask": 235.0, "variation": 2.75},
+                    "usdt": {"ask": 240.0, "variation": 3.0},
+                },
+            }
+        }
+
+        result = get_dollar_rates()
+        assert result is not None
+        assert "Oficial: 100" in result
+        assert "Tarjeta: 150" in result
+        assert "MEP: 200" in result
+        assert "CCL: 210" in result
+        assert "Blue: 220" in result
+        assert "Bitcoin: 230" in result
+        assert "USDC: 235" in result
+        assert "USDT: 240" in result
+
+
+def test_get_dollar_rates_api_failure():
+    from api.index import get_dollar_rates
+
+    with patch("api.index.cached_requests") as mock_cached_requests:
+        # Mock API failure
+        mock_cached_requests.return_value = None
+
+        result = get_dollar_rates()
+        assert result is None
+
+
+def test_get_devo_with_fee_only():
+    from api.index import get_devo
+
+    with patch("api.index.cached_requests") as mock_cached_requests:
+        # Mock the API response
+        mock_cached_requests.return_value = {
+            "data": {
+                "oficial": {"price": 100.0},
+                "tarjeta": {"price": 150.0},
+                "cripto": {"usdt": {"ask": 200.0, "bid": 190.0}},
+            }
+        }
+
+        result = get_devo("0.5")
+        assert result is not None
+        assert "Profit: 29.35%" in result
+
+
+def test_get_devo_with_fee_and_amount():
+    from api.index import get_devo
+
+    with patch("api.index.cached_requests") as mock_cached_requests:
+        # Mock the API response
+        mock_cached_requests.return_value = {
+            "data": {
+                "oficial": {"price": 100.0},
+                "tarjeta": {"price": 150.0},
+                "cripto": {"usdt": {"ask": 200.0, "bid": 190.0}},
+            }
+        }
+
+        result = get_devo("0.5, 100")
+        assert result is not None
+        assert "100.00 USD Tarjeta" in result
+        assert "Ganarias" in result
+
+
+def test_get_devo_invalid_input():
+    from api.index import get_devo
+
+    result = get_devo("invalid")
+    assert "mandate /devo 0.5 o /devo 0.5, 100" in result
+
+
+def test_satoshi_basic():
+    from api.index import satoshi
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        # Mock the API response for both USD and ARS
+        def mock_get_prices_side_effect(currency):
+            if currency == "USD":
+                return {
+                    "data": [
+                        {"quote": {"USD": {"price": 50000.0}}},
+                    ]
+                }
+            elif currency == "ARS":
+                return {
+                    "data": [
+                        {"quote": {"ARS": {"price": 10000000.0}}},
+                    ]
+                }
+            return None
+
+        mock_get_prices.side_effect = mock_get_prices_side_effect
+
+        result = satoshi()
+        assert result is not None
+        assert "1 satoshi = $0.00050000 USD" in result
+        assert "1 satoshi = $0.1000 ARS" in result
+        assert "$1 USD = 2,000 sats" in result
+        assert "$1 ARS = 0.010 sats" in result
+
+
+def test_powerlaw_basic():
+    from api.index import powerlaw
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices, patch(
+        "api.index.datetime"
+    ) as mock_datetime:
+        # Mock the API response for BTC price
+        mock_get_prices.return_value = {
+            "data": [
+                {"quote": {"USD": {"price": 50000.0}}},
+            ]
+        }
+
+        # Mock the current date to a fixed value for consistent calculations
+        mock_datetime.now.return_value = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        result = powerlaw()
+        assert result is not None
+        assert "segun power law btc deberia estar en" in result
+
+
+def test_rainbow_basic():
+    from api.index import rainbow
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices, patch(
+        "api.index.datetime"
+    ) as mock_datetime:
+        # Mock the API response for BTC price
+        mock_get_prices.return_value = {
+            "data": [
+                {"quote": {"USD": {"price": 50000.0}}},
+            ]
+        }
+
+        # Mock the current date to a fixed value for consistent calculations
+        mock_datetime.now.return_value = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        result = rainbow()
+        assert result is not None
+        assert "segun rainbow chart btc deberia estar en" in result
+
+
+def test_convert_base_basic():
+    from api.index import convert_base
+
+    # Test binary to decimal
+    assert convert_base("101, 2, 10") == "ahi tenes boludo, 101 en base 2 es 5 en base 10"
+
+    # Test decimal to hexadecimal
+    assert convert_base("255, 10, 16") == "ahi tenes boludo, 255 en base 10 es FF en base 16"
+
+    # Test invalid input
+    assert (
+        convert_base("invalid")
+        == "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
+    )
+
+
+def test_get_timestamp_basic():
+    from api.index import get_timestamp
+
+    with patch("time.time") as mock_time:
+        mock_time.return_value = 1672531200  # January 1, 2023
+        assert get_timestamp() == "1672531200"
+
+
+def test_get_help_basic():
+    from api.index import get_help
+
+    result = get_help()
+    assert "comandos disponibles boludo:" in result
+    assert "/ask" in result
+    assert "/dolar" in result
+    assert "/prices" in result
+
+
+def test_get_instance_name_basic():
+    from api.index import get_instance_name
+
+    with patch("os.environ.get") as mock_env:
+        mock_env.return_value = "test_instance"
+        assert get_instance_name() == "estoy corriendo en test_instance boludo"
+
+
+def test_send_typing_basic():
+    from api.index import send_typing
+
+    with patch("requests.get") as mock_get:
+        send_typing("test_token", "12345")
+        mock_get.assert_called_once_with(
+            "https://api.telegram.org/bottest_token/sendChatAction",
+            params={"chat_id": "12345", "action": "typing"},
+            timeout=5,
+        )
+
+
+def test_send_msg_basic():
+    from api.index import send_msg
+
+    with patch("requests.get") as mock_get, patch("os.environ.get") as mock_env:
+        mock_env.return_value = "test_token"
+        send_msg("12345", "hello")
+        mock_get.assert_called_once_with(
+            "https://api.telegram.org/bottest_token/sendMessage",
+            params={"chat_id": "12345", "text": "hello"},
+            timeout=5,
+        )
+
+
+def test_admin_report_basic():
+    from api.index import admin_report
+
+    with patch("api.index.send_msg") as mock_send_msg, patch(
+        "os.environ.get"
+    ) as mock_env:
+        mock_env.side_effect = lambda key, default=None: {
+            "ADMIN_CHAT_ID": "12345",
+            "FRIENDLY_INSTANCE_NAME": "test_instance",
+        }.get(key, default)
+
+        admin_report("test message")
+        mock_send_msg.assert_called_once_with(
+            "12345", "Admin report from test_instance: test message"
+        )
