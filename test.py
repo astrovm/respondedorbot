@@ -60,7 +60,7 @@ def test_responder_valid_key_with_valid_message():
     }
     
     with app.test_request_context("/?key=valid_key", method="POST", json=message_data), patch("os.environ.get") as mock_env, patch("api.index.handle_msg") as mock_handle:
-        mock_env.return_value = "valid_key"
+        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(key, default)
         mock_handle.return_value = "response message"
         response = responder()
         assert response == ("response message", 200)
@@ -68,7 +68,7 @@ def test_responder_valid_key_with_valid_message():
 
 def test_responder_exception_handling():
     with app.test_request_context("/?key=valid_key"), patch("os.environ.get") as mock_env, patch("api.index.process_request_parameters") as mock_process, patch("api.index.admin_report") as mock_admin:
-        mock_env.return_value = "valid_key"
+        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(key, default)
         mock_process.side_effect = Exception("Test error")
         
         response = responder()
@@ -539,6 +539,196 @@ def test_handle_msg():
         assert handle_msg(message) == "ok"
         mock_send_typing.assert_called_once()
         mock_ask_ai.assert_not_called()
+
+
+def test_handle_msg_with_crypto_command():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.get_prices"
+    ) as mock_get_prices:
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_get_prices.return_value = "BTC: 50000"
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "text": "/prices btc"
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_get_prices.assert_called_once()
+        mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_with_image():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.describe_image_cloudflare"
+    ) as mock_describe, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download:
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_download.return_value = b"image data"
+        mock_describe.return_value = "A beautiful landscape"
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "photo": [{"file_id": "photo_123"}]
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_describe.assert_called_once()
+        mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_with_audio():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.transcribe_audio_cloudflare"
+    ) as mock_transcribe, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download:
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_download.return_value = b"audio data"
+        mock_transcribe.return_value = "transcribed text"
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "voice": {"file_id": "voice_123"}
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_transcribe.assert_called_once()
+        mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_with_transcribe_command():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.handle_transcribe_with_message"
+    ) as mock_handle_transcribe:
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_handle_transcribe.return_value = "Transcription result"
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "voice": {"file_id": "voice_123"}
+            }
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_handle_transcribe.assert_called_once()
+        mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_with_unknown_command():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should_respond:
+
+        mock_env.return_value = "testbot"
+        mock_rate_limit.return_value = True
+        mock_should_respond.return_value = False
+
+        # Mock Redis instance
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "group"},
+            "from": {"first_name": "John", "username": "john"},
+            "text": "/unknown_command"
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_send_msg.assert_not_called()  # Should not send message
+
+
+def test_handle_msg_with_exception():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.admin_report"
+    ) as mock_admin_report, patch("os.environ.get") as mock_env:
+
+        mock_env.return_value = "testbot"
+        mock_config_redis.side_effect = Exception("Redis error")
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "text": "hello"
+        }
+
+        result = handle_msg(message)
+        assert result == "error"
+        mock_admin_report.assert_called_once()
 
 
 def test_get_weather():
@@ -1208,3 +1398,145 @@ def test_get_weather_description():
 
     # Test unknown code
     assert get_weather_description(9999) == "clima raro"
+
+
+def test_ask_ai_with_openrouter_success():
+    from api.index import ask_ai
+
+    with patch("api.index.get_ai_response") as mock_get_ai_response, patch(
+        "api.index.build_system_message"
+    ) as mock_build_system_message, patch(
+        "api.index.get_market_context"
+    ) as mock_get_market_context, patch(
+        "api.index.get_weather_context"
+    ) as mock_get_weather_context, patch(
+        "api.index.get_time_context"
+    ) as mock_get_time_context, patch(
+        "api.index.clean_duplicate_response"
+    ) as mock_clean_duplicate, patch(
+        "openai.OpenAI"
+    ) as mock_openai:
+
+        # Setup mocks
+        mock_get_ai_response.return_value = "AI response from OpenRouter"
+        mock_build_system_message.return_value = {"role": "system", "content": "system message"}
+        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
+        mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_time_context.return_value = {"formatted": "Monday"}
+        
+        # Mock OpenAI client
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
+
+        messages = [{"role": "user", "content": "hello"}]
+        result = ask_ai(messages)
+
+        assert result == "AI response from OpenRouter"
+        mock_get_ai_response.assert_called_once()
+        # clean_duplicate_response is not called in ask_ai directly
+
+
+def test_ask_ai_with_cloudflare_fallback():
+    from api.index import ask_ai
+
+    with patch("api.index.get_ai_response") as mock_get_ai_response, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_get_cloudflare_response, patch(
+        "api.index.build_system_message"
+    ) as mock_build_system_message, patch(
+        "api.index.get_market_context"
+    ) as mock_get_market_context, patch(
+        "api.index.get_weather_context"
+    ) as mock_get_weather_context, patch(
+        "api.index.get_time_context"
+    ) as mock_get_time_context, patch(
+        "api.index.clean_duplicate_response"
+    ) as mock_clean_duplicate:
+
+        # Setup mocks - OpenRouter fails, Cloudflare succeeds
+        mock_get_ai_response.return_value = None
+        mock_get_cloudflare_response.return_value = "Cloudflare AI response"
+        mock_build_system_message.return_value = {"role": "system", "content": "system message"}
+        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
+        mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_clean_duplicate.return_value = "Cleaned Cloudflare response"
+
+        messages = [{"role": "user", "content": "hello"}]
+        result = ask_ai(messages)
+
+        assert result == "Cleaned Cloudflare response"
+        mock_get_ai_response.assert_called_once()
+        mock_get_cloudflare_response.assert_called_once()
+        mock_clean_duplicate.assert_called_once()
+
+
+def test_ask_ai_with_all_failures():
+    from api.index import ask_ai
+
+    with patch("api.index.get_ai_response") as mock_get_ai_response, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_get_cloudflare_response, patch(
+        "api.index.get_fallback_response"
+    ) as mock_get_fallback_response, patch(
+        "api.index.build_system_message"
+    ) as mock_build_system_message, patch(
+        "api.index.get_market_context"
+    ) as mock_get_market_context, patch(
+        "api.index.get_weather_context"
+    ) as mock_get_weather_context, patch(
+        "api.index.get_time_context"
+    ) as mock_get_time_context:
+
+        # Setup mocks - both AI services fail
+        mock_get_ai_response.return_value = None
+        mock_get_cloudflare_response.return_value = None
+        mock_get_fallback_response.return_value = "Fallback response"
+        mock_build_system_message.return_value = {"role": "system", "content": "system message"}
+        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
+        mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_time_context.return_value = {"formatted": "Monday"}
+
+        messages = [{"role": "user", "content": "hello"}]
+        result = ask_ai(messages)
+
+        assert result == "Fallback response"
+        mock_get_ai_response.assert_called_once()
+        mock_get_cloudflare_response.assert_called_once()
+        mock_get_fallback_response.assert_called_once()
+
+
+def test_ask_ai_with_image():
+    from api.index import ask_ai
+
+    with patch("api.index.get_ai_response") as mock_get_ai_response, patch(
+        "api.index.build_system_message"
+    ) as mock_build_system_message, patch(
+        "api.index.get_market_context"
+    ) as mock_get_market_context, patch(
+        "api.index.get_weather_context"
+    ) as mock_get_weather_context, patch(
+        "api.index.get_time_context"
+    ) as mock_get_time_context, patch(
+        "api.index.clean_duplicate_response"
+    ) as mock_clean_duplicate, patch(
+        "api.index.encode_image_to_base64"
+    ) as mock_encode_image:
+
+        # Setup mocks
+        mock_get_ai_response.return_value = "AI response about image"
+        mock_build_system_message.return_value = {"role": "system", "content": "system message"}
+        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
+        mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_clean_duplicate.return_value = "Cleaned AI response about image"
+        mock_encode_image.return_value = "base64_encoded_image"
+
+        messages = [{"role": "user", "content": "what do you see in this image?"}]
+        image_data = b"fake_image_data"
+        result = ask_ai(messages, image_data=image_data, image_file_id="img123")
+
+        assert result == "Cleaned AI response about image"
+        mock_encode_image.assert_called_once_with(image_data)
+        mock_get_ai_response.assert_called_once()
+        mock_clean_duplicate.assert_called_once()
