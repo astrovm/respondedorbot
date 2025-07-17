@@ -25,6 +25,57 @@ def test_responder_no_args():
         assert response == ("No key", 200)
 
 
+def test_responder_wrong_key():
+    with app.test_request_context("/?key=wrong_key"), patch("os.environ.get") as mock_env, patch("api.index.admin_report") as mock_admin:
+        mock_env.return_value = "correct_key"
+        response = responder()
+        assert response == ("Wrong key", 400)
+        mock_admin.assert_called_once_with("Wrong key attempt")
+
+
+def test_responder_valid_key_with_webhook_check():
+    with app.test_request_context("/?key=valid_key&check_webhook=true"), patch("os.environ.get") as mock_env, patch("api.index.verify_webhook") as mock_verify:
+        mock_env.return_value = "valid_key"
+        mock_verify.return_value = True
+        response = responder()
+        assert response == ("Webhook checked", 200)
+
+
+def test_responder_valid_key_with_webhook_update():
+    with app.test_request_context("/?key=valid_key&update_webhook=true"), patch("os.environ.get") as mock_env, patch("api.index.set_telegram_webhook") as mock_set:
+        mock_env.side_effect = lambda key: {"GORDO_KEY": "valid_key", "CURRENT_FUNCTION_URL": "https://example.com"}.get(key)
+        mock_set.return_value = True
+        response = responder()
+        assert response == ("Webhook updated", 200)
+
+
+def test_responder_valid_key_with_valid_message():
+    message_data = {
+        "message": {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"first_name": "John", "username": "john"},
+            "text": "hello"
+        }
+    }
+    
+    with app.test_request_context("/?key=valid_key", method="POST", json=message_data), patch("os.environ.get") as mock_env, patch("api.index.handle_msg") as mock_handle:
+        mock_env.return_value = "valid_key"
+        mock_handle.return_value = "response message"
+        response = responder()
+        assert response == ("response message", 200)
+
+
+def test_responder_exception_handling():
+    with app.test_request_context("/?key=valid_key"), patch("os.environ.get") as mock_env, patch("api.index.process_request_parameters") as mock_process, patch("api.index.admin_report") as mock_admin:
+        mock_env.return_value = "valid_key"
+        mock_process.side_effect = Exception("Test error")
+        
+        response = responder()
+        assert response == ("Critical error", 500)
+        mock_admin.assert_called_once()
+
+
 def test_convert_to_command():
     # Test basic string
     msg_text1 = "h3llo W0RLD"
