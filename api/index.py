@@ -7,7 +7,7 @@ from openai import OpenAI
 from os import environ
 from PIL import Image
 from requests.exceptions import RequestException
-from typing import Dict, List, Tuple, Callable, Union, Optional
+from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
 import base64
 import emoji
 import hashlib
@@ -19,6 +19,7 @@ import redis
 import requests
 import ssl
 import time
+import traceback
 import unicodedata
 import urllib.request
 
@@ -26,7 +27,7 @@ import urllib.request
 def config_redis(host=None, port=None, password=None):
     try:
         host = host or environ.get("REDIS_HOST", "localhost")
-        port = port or environ.get("REDIS_PORT", 6379)
+        port = int(port or environ.get("REDIS_PORT", 6379))
         password = password or environ.get("REDIS_PASSWORD", None)
         redis_client = redis.Redis(
             host=host, port=port, password=password, decode_responses=True
@@ -53,7 +54,7 @@ def get_cached_transcription(file_id: str) -> Optional[str]:
         cache_key = f"audio_transcription:{file_id}"
         cached_text = redis_client.get(cache_key)
         if cached_text:
-            return cached_text
+            return str(cached_text)
         return None
     except Exception as e:
         print(f"Error getting cached transcription: {e}")
@@ -77,7 +78,7 @@ def get_cached_description(file_id: str) -> Optional[str]:
         cache_key = f"image_description:{file_id}"
         cached_desc = redis_client.get(cache_key)
         if cached_desc:
-            return cached_desc
+            return str(cached_desc)
         return None
     except Exception as e:
         print(f"Error getting cached description: {e}")
@@ -167,7 +168,7 @@ def cached_requests(
                 print(f"[CACHE] Error requesting {api_url}: {str(e)}")
                 return None
         else:
-            cached_data = json.loads(redis_response)
+            cached_data = json.loads(str(redis_response))
             cache_age = timestamp - int(cached_data["timestamp"])
 
             if cache_history is not None:
@@ -230,7 +231,6 @@ def select_random(msg_text: str) -> str:
     return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
 
-# check if prices are cached before request to api
 def get_api_or_cache_prices(convert_to):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
@@ -243,18 +243,17 @@ def get_api_or_cache_prices(convert_to):
     cache_expiration_time = 300
     response = cached_requests(api_url, parameters, headers, cache_expiration_time)
 
-    return response["data"]
+    return response["data"] if response else None
 
 
 # get crypto pices from coinmarketcap
-def get_prices(msg_text: str) -> str:
+def get_prices(msg_text: str) -> Optional[str]:
     prices_number = 0
     # when the user asks for sats we need to ask for btc to the api and convert later
     convert_to = "USD"
     # here we keep the currency that we'll request to the api
     convert_to_parameter = "USD"
 
-    # check if the user wants to convert the prices
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
         coins = [
@@ -307,7 +306,6 @@ def get_prices(msg_text: str) -> str:
     # get prices from api or cache
     prices = get_api_or_cache_prices(convert_to_parameter)
 
-    # check if the user requested a custom number of prices
     if msg_text != "":
         numbers = msg_text.upper().replace(" ", "").split(",")
 
@@ -320,7 +318,6 @@ def get_prices(msg_text: str) -> str:
                 # ignore items which aren't integers
                 pass
 
-    # check if the user requested a list of coins
     if msg_text.upper().isupper():
         new_prices = []
         coins = msg_text.upper().replace(" ", "").split(",")
@@ -357,13 +354,20 @@ def get_prices(msg_text: str) -> str:
                 ]
             )
 
+        if not prices or "data" not in prices:
+            return "Error getting crypto prices"
+
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
             name = coin["name"].upper().replace(" ", "")
 
             if symbol in coins or name in coins:
                 new_prices.append(coin)
-            elif prices_number > 0 and coin in prices["data"][:prices_number]:
+            elif (
+                prices_number > 0
+                and "data" in prices
+                and coin in prices["data"][:prices_number]
+            ):
                 new_prices.append(coin)
 
         if not new_prices:
@@ -378,6 +382,9 @@ def get_prices(msg_text: str) -> str:
 
     # generate the message to answer the user
     msg = ""
+    if not prices or "data" not in prices:
+        return "Error getting crypto prices"
+
     for coin in prices["data"][:prices_number]:
         if convert_to == "SATS":
             coin["quote"][convert_to_parameter]["price"] = (
@@ -398,7 +405,12 @@ def get_prices(msg_text: str) -> str:
         )
         line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
 
-        if prices["data"][0]["symbol"] == coin["symbol"]:
+        if (
+            prices
+            and "data" in prices
+            and len(prices["data"]) > 0
+            and prices["data"][0]["symbol"] == coin["symbol"]
+        ):
             msg = line
         else:
             msg = f"{msg}\n{line}"
@@ -471,9 +483,8 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     return "\n".join(msg_lines)
 
 
-def get_dollar_rates(msg_text: str) -> str:
+def get_dollar_rates() -> Optional[str]:
     cache_expiration_time = 300
-    # hours_ago = int(msg_text) if msg_text.isdecimal() and int(msg_text) >= 0 else 24
     api_url = "https://criptoya.com/api/dolar"
 
     dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
@@ -504,6 +515,9 @@ def get_devo(msg_text: str) -> str:
         api_url = "https://criptoya.com/api/dolar"
 
         dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+
+        if not dollars or "data" not in dollars:
+            return "Error getting dollar rates"
 
         usdt_ask = float(dollars["data"]["cripto"]["usdt"]["ask"])
         usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
@@ -536,12 +550,25 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
 
-def satoshi(msg_text: str) -> str:
+def satoshi() -> str:
     """Calculate the value of 1 satoshi in USD and ARS"""
     try:
         # Get Bitcoin price in USD and ARS
         api_response_usd = get_api_or_cache_prices("USD")
         api_response_ars = get_api_or_cache_prices("ARS")
+
+        if (
+            not api_response_usd
+            or "data" not in api_response_usd
+            or len(api_response_usd["data"]) == 0
+        ):
+            return "Error getting BTC USD price"
+        if (
+            not api_response_ars
+            or "data" not in api_response_ars
+            or len(api_response_ars["data"]) == 0
+        ):
+            return "Error getting BTC ARS price"
 
         btc_price_usd = api_response_usd["data"][0]["quote"]["USD"]["price"]
         btc_price_ars = api_response_ars["data"][0]["quote"]["ARS"]["price"]
@@ -653,7 +680,7 @@ def get_cached_bcra_variables() -> Optional[Dict]:
         cache_key = "bcra_variables"
         cached_data = redis_client.get(cache_key)
         if cached_data:
-            return json.loads(cached_data)
+            return json.loads(str(cached_data))
         return None
     except Exception as e:
         print(f"Error getting cached BCRA variables: {e}")
@@ -740,7 +767,7 @@ def format_bcra_variables(variables: Dict) -> str:
     return "\n".join(lines)
 
 
-def handle_bcra_variables(msg_text: str) -> str:
+def handle_bcra_variables() -> str:
     """Handle BCRA economic variables command"""
     try:
         # Check cache first
@@ -871,12 +898,12 @@ def handle_transcribe_with_message(message: Dict) -> str:
         return "Error procesando el comando, intentá más tarde"
 
 
-def handle_transcribe(msg_text: str) -> str:
+def handle_transcribe() -> str:
     """Transcribe command wrapper - requires special handling in message processor"""
     return "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
 
 
-def powerlaw(msg_text: str) -> str:
+def powerlaw() -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
@@ -886,6 +913,8 @@ def powerlaw(msg_text: str) -> str:
     value = 1.0117e-17 * (days_since**5.82)
 
     api_response = get_api_or_cache_prices("USD")
+    if not api_response or "data" not in api_response or len(api_response["data"]) == 0:
+        return "Error getting BTC price for power law calculation"
     price = api_response["data"][0]["quote"]["USD"]["price"]
 
     percentage = ((price - value) / value) * 100
@@ -898,13 +927,15 @@ def powerlaw(msg_text: str) -> str:
     return msg
 
 
-def rainbow(msg_text: str) -> str:
+def rainbow() -> str:
     today = datetime.now(timezone.utc)
     since = datetime(day=9, month=1, year=2009).replace(tzinfo=timezone.utc)
     days_since = (today - since).days
     value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
 
     api_response = get_api_or_cache_prices("USD")
+    if not api_response or "data" not in api_response or len(api_response["data"]) == 0:
+        return "Error getting BTC price for rainbow calculation"
     price = api_response["data"][0]["quote"]["USD"]["price"]
 
     percentage = ((price - value) / value) * 100
@@ -956,7 +987,7 @@ def convert_base(msg_text: str) -> str:
         return "mandate numeros posta gordo, no me hagas perder el tiempo"
 
 
-def get_timestamp(msg_text: str) -> str:
+def get_timestamp() -> str:
     return f"{int(time.time())}"
 
 
@@ -1005,12 +1036,11 @@ def convert_to_command(msg_text: str) -> str:
     if not cleaned_text:
         return "no me mandes giladas boludo, tiene que tener letras o numeros"
 
-    # Add a forward slash at the beginning
     command = f"/{cleaned_text}"
     return command
 
 
-def get_help(msg_text: str) -> str:
+def get_help() -> str:
     return """
 comandos disponibles boludo:
 
@@ -1046,7 +1076,7 @@ comandos disponibles boludo:
 """
 
 
-def get_instance_name(msg_text: str) -> str:
+def get_instance_name() -> str:
     instance = environ.get("FRIENDLY_INSTANCE_NAME")
     return f"estoy corriendo en {instance} boludo"
 
@@ -1090,14 +1120,12 @@ def admin_report(
         error_details = f"\n\nError Type: {type(error).__name__}"
         error_details += f"\nError Message: {str(error)}"
 
-        # Add traceback for more detailed debugging
-        import traceback
-
         error_details += f"\n\nTraceback:\n{traceback.format_exc()}"
 
         formatted_message += error_details
 
-    send_msg(admin_chat_id, formatted_message)
+    if admin_chat_id:
+        send_msg(admin_chat_id, formatted_message)
 
 
 def get_weather() -> dict:
@@ -1135,7 +1163,7 @@ def get_weather() -> dict:
                     break
 
             if current_index is None:
-                return None
+                return {}
 
             # Get current values
             return {
@@ -1147,14 +1175,16 @@ def get_weather() -> dict:
                 "cloud_cover": hourly["cloud_cover"][current_index],
                 "visibility": hourly["visibility"][current_index],
             }
-        return None
+        return {}
     except Exception as e:
         print(f"Error getting weather: {str(e)}")
-        return None
+        return {}
 
 
 def ask_ai(
-    messages: List[Dict], image_data: Optional[bytes] = None, image_file_id: str = None
+    messages: List[Dict[str, Any]],
+    image_data: Optional[bytes] = None,
+    image_file_id: Optional[str] = None,
 ) -> str:
     try:
         # Build context with market and weather data
@@ -1305,7 +1335,7 @@ def get_ai_response(
                 extra_body={
                     "models": fallback_models,
                 },
-                messages=[system_msg] + messages,
+                messages=[system_msg] + messages,  # type: ignore
                 timeout=5.0,  # 5 second timeout
                 max_tokens=512,  # Control response length
             )
@@ -1358,7 +1388,7 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
 
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
-            messages=final_messages,
+            messages=final_messages,  # type: ignore
             timeout=5.0,
             max_tokens=512,
         )
@@ -1605,48 +1635,46 @@ def build_ai_messages(
     return messages[-8:]
 
 
-def initialize_commands() -> Dict[str, Tuple[Callable, bool]]:
+def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
     """
     Initialize command handlers with metadata.
-    Returns dict of command name -> (handler_function, uses_ai)
+    Returns dict of command name -> (handler_function, uses_ai, takes_params)
     """
     return {
         # AI-based commands
-        "/ask": (ask_ai, True),
-        "/pregunta": (ask_ai, True),
-        "/che": (ask_ai, True),
-        "/gordo": (ask_ai, True),
+        "/ask": (ask_ai, True, True),
+        "/pregunta": (ask_ai, True, True),
+        "/che": (ask_ai, True, True),
+        "/gordo": (ask_ai, True, True),
         # Regular commands
-        "/convertbase": (convert_base, False),
-        "/random": (select_random, False),
-        "/prices": (get_prices, False),
-        "/precios": (get_prices, False),
-        "/precio": (get_prices, False),
-        "/presios": (get_prices, False),
-        "/presio": (get_prices, False),
-        "/dolar": (get_dollar_rates, False),
-        "/dollar": (get_dollar_rates, False),
-        "/devo": (get_devo, False),
-        "/powerlaw": (powerlaw, False),
-        "/rainbow": (rainbow, False),
-        "/satoshi": (satoshi, False),
-        "/sat": (satoshi, False),
-        "/sats": (satoshi, False),
-        "/time": (get_timestamp, False),
-        "/comando": (convert_to_command, False),
-        "/command": (convert_to_command, False),
-        "/instance": (get_instance_name, False),
-        "/help": (get_help, False),
-        "/transcribe": (handle_transcribe, False),
-        "/bcra": (handle_bcra_variables, False),
-        "/variables": (handle_bcra_variables, False),
+        "/convertbase": (convert_base, False, True),
+        "/random": (select_random, False, True),
+        "/prices": (get_prices, False, True),
+        "/precios": (get_prices, False, True),
+        "/precio": (get_prices, False, True),
+        "/presios": (get_prices, False, True),
+        "/presio": (get_prices, False, True),
+        "/dolar": (get_dollar_rates, False, False),
+        "/dollar": (get_dollar_rates, False, False),
+        "/devo": (get_devo, False, True),
+        "/powerlaw": (powerlaw, False, False),
+        "/rainbow": (rainbow, False, False),
+        "/satoshi": (satoshi, False, False),
+        "/sat": (satoshi, False, False),
+        "/sats": (satoshi, False, False),
+        "/time": (get_timestamp, False, False),
+        "/comando": (convert_to_command, False, True),
+        "/command": (convert_to_command, False, True),
+        "/instance": (get_instance_name, False, False),
+        "/help": (get_help, False, False),
+        "/transcribe": (handle_transcribe, False, False),
+        "/bcra": (handle_bcra_variables, False, False),
+        "/variables": (handle_bcra_variables, False, False),
     }
 
 
 def truncate_text(text: str, max_length: int = 512) -> str:
     """Truncate text to max_length and add ellipsis if needed"""
-    if text is None:
-        return ""
 
     if max_length <= 0:
         return ""
@@ -1704,8 +1732,15 @@ def save_message_to_redis(
                 continue
 
         # Remove any IDs from the set that are no longer in the history
-        current_ids = redis_client.smembers(message_ids_key)
-        to_remove = [id for id in current_ids if id not in valid_ids]
+        try:
+            current_ids_set = redis_client.smembers(message_ids_key)
+            current_ids = (
+                list(cast(Set[str], current_ids_set)) if current_ids_set else []
+            )
+            to_remove = [id for id in current_ids if id not in valid_ids]
+        except Exception:
+            current_ids = []
+            to_remove = []
         if to_remove:
             redis_client.srem(message_ids_key, *to_remove)
 
@@ -1731,7 +1766,7 @@ def get_chat_history(
             return []
 
         messages = []
-        for entry in history:
+        for entry in history:  # type: ignore
             try:
                 msg = json.loads(entry)
                 # Add role based on if it's from the bot or user
@@ -1745,7 +1780,7 @@ def get_chat_history(
                 admin_report(error_msg, decode_error, error_context)
                 continue
 
-        return reversed(messages)
+        return list(reversed(messages))
     except Exception as e:
         error_context = {"chat_id": chat_id, "max_messages": max_messages}
         error_msg = f"Error retrieving chat history: {str(e)}"
@@ -1755,7 +1790,7 @@ def get_chat_history(
 
 
 def should_gordo_respond(
-    commands: Dict[str, Tuple[Callable, bool]],
+    commands: Dict[str, Tuple[Callable, bool, bool]],
     command: str,
     message_text: str,
     message: dict,
@@ -1908,7 +1943,9 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
 
 
 def describe_image_cloudflare(
-    image_data: bytes, user_text: str = "¿Qué ves en esta imagen?", file_id: str = None
+    image_data: bytes,
+    user_text: str = "¿Qué ves en esta imagen?",
+    file_id: Optional[str] = None,
 ) -> Optional[str]:
     """Describe image using Cloudflare Workers AI LLaVA model"""
     try:
@@ -1935,11 +1972,6 @@ def describe_image_cloudflare(
         image_array = list(image_data)
 
         payload = {"prompt": user_text, "image": image_array, "max_tokens": 512}
-
-        # Debug: Show payload info
-        print(
-            f"DEBUG: LLaVA payload - prompt: '{user_text[:50]}...', image_array_size: {len(image_array)} bytes"
-        )
 
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -1973,11 +2005,7 @@ def describe_image_cloudflare(
             try:
                 error_json = response.json()
                 if "errors" in error_json and error_json["errors"]:
-                    error_msg = error_json["errors"][0].get("message", "")
-                    error_code = error_json["errors"][0].get("code", "")
-                    print(
-                        f"DEBUG: LLaVA error details - Code: {error_code}, Message: {error_msg}"
-                    )
+                    pass
             except:
                 pass
 
@@ -1988,7 +2016,7 @@ def describe_image_cloudflare(
 
 
 def transcribe_audio_cloudflare(
-    audio_data: bytes, file_id: str = None
+    audio_data: bytes, file_id: Optional[str] = None
 ) -> Optional[str]:
     """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
 
@@ -2065,9 +2093,6 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
 
         # Check if resize is needed
         if max(original_size) > max_size:
-            print(
-                f"DEBUG: Resizing image from {original_size} to fit max dimension {max_size}"
-            )
 
             # Calculate new size maintaining aspect ratio
             ratio = min(max_size / original_size[0], max_size / original_size[1])
@@ -2085,14 +2110,8 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
             resized_image.save(output_buffer, format="JPEG", quality=85, optimize=True)
 
             resized_data = output_buffer.getvalue()
-            print(
-                f"DEBUG: Resized image size: {len(resized_data)} bytes (was {len(image_data)} bytes)"
-            )
             return resized_data
         else:
-            print(
-                f"DEBUG: Image size {original_size} is within limits, no resize needed"
-            )
             return image_data
 
     except ImportError:
@@ -2105,27 +2124,6 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
 
 def encode_image_to_base64(image_data: bytes) -> str:
     """Convert image bytes to base64 string for AI models"""
-
-    # Debug: Analyze image format
-    image_size = len(image_data)
-
-    # Check image format by magic bytes
-    image_format = "unknown"
-    if image_data.startswith(b"\xff\xd8\xff"):
-        image_format = "JPEG"
-    elif image_data.startswith(b"\x89PNG\r\n\x1a\n"):
-        image_format = "PNG"
-    elif image_data.startswith(b"RIFF") and b"WEBP" in image_data[:12]:
-        image_format = "WebP"
-    elif image_data.startswith(b"GIF87a") or image_data.startswith(b"GIF89a"):
-        image_format = "GIF"
-
-    # Check if image is too large (LLaVA might have limits)
-    max_size = 1024 * 1024  # 1MB limit
-    if image_size > max_size:
-        print(
-            f"WARNING: Image size ({image_size} bytes) exceeds recommended limit ({max_size} bytes)"
-        )
 
     base64_encoded = base64.b64encode(image_data).decode("utf-8")
 
@@ -2192,6 +2190,7 @@ def handle_msg(message: Dict) -> str:
 
         # Download image if present
         image_base64 = None
+        resized_image_data = None
         if photo_file_id:
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
@@ -2257,7 +2256,7 @@ def handle_msg(message: Dict) -> str:
 
         # Process command or conversation
         if command in commands:
-            handler_func, uses_ai = commands[command]
+            handler_func, uses_ai, takes_params = commands[command]
 
             if uses_ai:
                 if not check_rate_limit(chat_id, redis_client):
@@ -2273,14 +2272,17 @@ def handle_msg(message: Dict) -> str:
                         handler_func,
                         messages,
                         image_data=resized_image_data if photo_file_id else None,
-                        image_file_id=photo_file_id,
+                        image_file_id=photo_file_id or None,
                     )
             else:
                 # Special handling for transcribe command which needs the full message
                 if command == "/transcribe":
                     response_msg = handle_transcribe_with_message(message)
                 else:
-                    response_msg = handler_func(sanitized_message_text)
+                    if takes_params:
+                        response_msg = handler_func(sanitized_message_text)
+                    else:
+                        response_msg = handler_func()
         else:
             if not check_rate_limit(chat_id, redis_client):
                 response_msg = handle_rate_limit(chat_id, message)
@@ -2293,7 +2295,7 @@ def handle_msg(message: Dict) -> str:
                     ask_ai,
                     messages,
                     image_data=resized_image_data if photo_file_id else None,
-                    image_file_id=photo_file_id,
+                    image_file_id=photo_file_id or None,
                 )
 
         # Only save messages AFTER we've generated a response
@@ -2327,7 +2329,8 @@ def handle_msg(message: Dict) -> str:
 def handle_rate_limit(chat_id: str, message: Dict) -> str:
     """Handle rate limited responses"""
     token = environ.get("TELEGRAM_TOKEN")
-    send_typing(token, chat_id)
+    if token:
+        send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
     return gen_random(message["from"]["first_name"])
 
@@ -2370,11 +2373,12 @@ def handle_ai_response(
     handler_func: Callable,
     messages: List[Dict],
     image_data: Optional[bytes] = None,
-    image_file_id: str = None,
+    image_file_id: Optional[str] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
-    send_typing(token, chat_id)
+    if token:
+        send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
 
     # Call handler with image if supported
@@ -2428,6 +2432,8 @@ def set_telegram_webhook(webhook_url: str) -> bool:
 
 def verify_webhook() -> bool:
     token = environ.get("TELEGRAM_TOKEN")
+    if not token:
+        return False
     gordo_key = environ.get("GORDO_KEY")
     webhook_info = get_telegram_webhook_info(token)
     if "error" in webhook_info:
@@ -2435,6 +2441,8 @@ def verify_webhook() -> bool:
 
     main_function_url = environ.get("MAIN_FUNCTION_URL")
     current_function_url = environ.get("CURRENT_FUNCTION_URL")
+    if not main_function_url or not gordo_key:
+        return False
     main_webhook_url = f"{main_function_url}?key={gordo_key}"
     current_webhook_url = f"{current_function_url}?key={gordo_key}"
 
@@ -2446,10 +2454,16 @@ def verify_webhook() -> bool:
             if webhook_info.get("url") != current_webhook_url:
                 error_message = f"Main webhook failed with error: {str(request_error)}"
                 admin_report(error_message)
-                return set_telegram_webhook(current_function_url)
+                return (
+                    set_telegram_webhook(current_function_url)
+                    if current_function_url
+                    else False
+                )
             return True
     elif webhook_info.get("url") != main_webhook_url:
-        set_main_webhook_success = set_telegram_webhook(main_function_url)
+        set_main_webhook_success = (
+            set_telegram_webhook(main_function_url) if main_function_url else False
+        )
         if set_main_webhook_success:
             admin_report("Main webhook is up again")
         else:
@@ -2482,6 +2496,8 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         update_webhook = request.args.get("update_webhook") == "true"
         if update_webhook:
             function_url = environ.get("CURRENT_FUNCTION_URL")
+            if not function_url:
+                return ("Webhook update error", 400)
             return (
                 ("Webhook updated", 200)
                 if set_telegram_webhook(function_url)
@@ -2491,7 +2507,7 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         # Handle dollar rates update
         update_dollars = request.args.get("update_dollars") == "true"
         if update_dollars:
-            get_dollar_rates("")
+            get_dollar_rates()
             return "Dollars updated", 200
 
         # Validate secret token
@@ -2501,6 +2517,8 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
 
         # Process message
         request_json = request.get_json(silent=True)
+        if not request_json:
+            return "Invalid JSON", 400
         message = request_json.get("message")
         if not message:
             return "No message", 200
