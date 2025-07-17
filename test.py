@@ -139,7 +139,7 @@ def test_format_user_message():
 
 
 def test_should_gordo_respond():
-    commands = {"/test": (lambda x: x, False)}
+    commands = {"/test": (lambda x: x, False, False)}
 
     with patch("os.environ.get") as mock_env:
         mock_env.return_value = "testbot"  # Set mock bot username
@@ -305,8 +305,9 @@ def test_process_request_parameters():
             assert "Webhook checked" in response
 
     with app.test_request_context("/?update_webhook=true"):
-        with patch("api.index.set_telegram_webhook") as mock_set:
+        with patch("api.index.set_telegram_webhook") as mock_set, patch("os.environ.get") as mock_env:
             mock_set.return_value = True
+            mock_env.return_value = "https://example.com/webhook"  # Mock CURRENT_FUNCTION_URL
             response, status = process_request_parameters(request)
             assert status == 200
             assert "Webhook updated" in response
@@ -317,11 +318,12 @@ def test_handle_rate_limit():
 
     with patch("api.index.send_typing") as mock_send_typing, patch(
         "time.sleep"
-    ) as mock_sleep, patch("api.index.gen_random") as mock_gen_random:
+    ) as mock_sleep, patch("api.index.gen_random") as mock_gen_random, patch("os.environ.get") as mock_env:
 
         chat_id = "123"
         message = {"from": {"first_name": "John"}}
         mock_gen_random.return_value = "no boludo"
+        mock_env.return_value = "fake_token"  # Mock TELEGRAM_TOKEN
 
         response = handle_rate_limit(chat_id, message)
 
@@ -410,23 +412,28 @@ def test_truncate_text():
 def test_is_secret_token_valid():
     from api.index import is_secret_token_valid
 
-    with patch("redis.Redis") as mock_redis, app.test_request_context() as ctx:
+    with patch("api.index.config_redis") as mock_config_redis:
 
         mock_instance = MagicMock()
-        mock_redis.return_value = mock_instance
+        mock_config_redis.return_value = mock_instance
 
         # Test valid token
         mock_instance.get.return_value = "valid_token"
-        ctx.request.headers = {"X-Telegram-Bot-Api-Secret-Token": "valid_token"}
-        assert is_secret_token_valid(ctx.request) == True
+        # Create a mock request with the right headers
+        mock_request = MagicMock()
+        mock_request.headers.get.return_value = "valid_token"
+        result = is_secret_token_valid(mock_request)
+        assert result == True
 
         # Test invalid token
-        ctx.request.headers = {"X-Telegram-Bot-Api-Secret-Token": "invalid_token"}
-        assert is_secret_token_valid(ctx.request) == False
+        mock_instance.get.return_value = "valid_token"  # Redis has valid_token
+        mock_request.headers.get.return_value = "invalid_token"
+        assert is_secret_token_valid(mock_request) == False
 
         # Test missing token
-        ctx.request.headers = {}
-        assert is_secret_token_valid(ctx.request) == False
+        mock_instance.get.return_value = "valid_token"  # Redis has valid_token
+        mock_request.headers.get.return_value = None
+        assert is_secret_token_valid(mock_request) == False
 
 
 def test_handle_msg():
@@ -442,7 +449,7 @@ def test_handle_msg():
         "api.index.send_typing"
     ) as mock_send_typing, patch(
         "time.sleep"
-    ) as mock_sleep:  # Add sleep mock to avoid delays
+    ) as _mock_sleep:  # Add sleep mock to avoid delays
 
         mock_env.return_value = "testbot"
         mock_rate_limit.return_value = True  # Don't rate limit
@@ -539,7 +546,7 @@ def test_get_weather():
 
         # Test failed weather fetch
         mock_cached_requests.return_value = None
-        assert get_weather() is None
+        assert get_weather() == {}
 
 
 def test_set_telegram_webhook():
@@ -593,7 +600,7 @@ def test_handle_msg_edge_cases():
         "api.index.should_gordo_respond"
     ) as mock_should_respond, patch(
         "time.sleep"
-    ) as mock_sleep:
+    ) as _mock_sleep:
 
         # Set up mocks
         mock_env.return_value = "testbot"
@@ -825,15 +832,15 @@ def test_initialize_commands():
         ask_ai,
         select_random,
         get_prices,
-        get_dollar_rates,
+        get_dollar_rates as _get_dollar_rates,
     )
     from api.index import (
-        get_devo,
-        powerlaw,
-        rainbow,
-        get_timestamp,
-        convert_to_command,
-        get_instance_name,
+        get_devo as _get_devo,
+        powerlaw as _powerlaw,
+        rainbow as _rainbow,
+        get_timestamp as _get_timestamp,
+        convert_to_command as _convert_to_command,
+        get_instance_name as _get_instance_name,
         get_help,
     )
 
@@ -889,7 +896,7 @@ def test_config_redis_with_env_vars():
         assert result == mock_instance
         mock_redis.assert_called_with(
             host="redis.example.com",
-            port="1234",
+            port=1234,
             password="secret",
             decode_responses=True,
         )
@@ -1027,7 +1034,7 @@ def test_format_user_message_complex_cases():
 def test_should_gordo_respond_complex_cases():
     from api.index import should_gordo_respond
 
-    commands = {"/test": (lambda x: x, False), "/other": (lambda x: x, True)}
+    commands = {"/test": (lambda x: x, False, False), "/other": (lambda x: x, True, False)}
 
     with patch("os.environ.get") as mock_env:
         mock_env.return_value = "testbot"  # Set mock bot username
@@ -1095,6 +1102,7 @@ def test_get_prices_basic():
 
         # Test basic price query
         result = get_prices("")
+        assert result is not None
         assert "BTC: 50000" in result
         assert "ETH: 2500" in result
         assert "+5.25%" in result
@@ -1130,6 +1138,7 @@ def test_cached_requests_basic():
 
         # Verify a request was made and data was returned
         mock_get.assert_called_once()
+        assert result is not None
         assert result["timestamp"] == 1000
         assert result["data"] == {"key": "value"}
 
