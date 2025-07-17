@@ -45,11 +45,11 @@ python -m pytest test.py::test_handle_msg -v
 - Multiple command handlers for crypto prices, currency rates, utilities
 
 **Key Functions:**
-- `handle_msg()` - Main message processing pipeline at api/index.py:2168
-- `ask_ai()` - AI conversation handler at api/index.py:1156
-- `cached_requests()` - Generic API caching wrapper at api/index.py:114
-- `scrape_bcra_variables()` - BCRA economic data scraper at api/index.py:568
-- `handle_transcribe_with_message()` - Audio/image transcription handler at api/index.py:759
+- `handle_msg()` - Main message processing pipeline at api/index.py:2166
+- `ask_ai()` - AI conversation handler at api/index.py:1184
+- `cached_requests()` - Generic API caching wrapper at api/index.py:115
+- `scrape_bcra_variables()` - BCRA economic data scraper at api/index.py:595
+- `handle_transcribe_with_message()` - Audio/image transcription handler at api/index.py:792
 
 ### Data Flow
 1. Telegram webhook → `responder()` → `process_request_parameters()` → `handle_msg()`
@@ -80,14 +80,17 @@ Required environment variables are documented in README.md. Critical ones:
 - `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`: API access
 - `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Workers AI
 - `ADMIN_CHAT_ID`: Error reporting destination
+- `GORDO_KEY`: Webhook authentication key
+- `CURRENT_FUNCTION_URL`, `MAIN_FUNCTION_URL`: Deployment URLs
+- `FRIENDLY_INSTANCE_NAME`: Instance identification for reports
 
 ### Rate Limiting
 - Global: 1024 requests/hour
 - Per chat: 128 requests/10 minutes
-- Implemented in `check_rate_limit()` at api/index.py:1357
+- Implemented in `check_rate_limit()` at api/index.py:1825
 
 ### Error Handling
-- All errors are reported to admin via `admin_report()` at api/index.py:722
+- All errors are reported to admin via `admin_report()` at api/index.py:1099
 - Graceful fallbacks for API failures
 - Redis connection failures raise exceptions to prevent silent failures
 
@@ -112,6 +115,11 @@ Required environment variables are documented in README.md. Critical ones:
 - Image description via LLaVA model
 - 7-day Redis caching for both audio and image processing
 - Automatic file download from Telegram servers
+
+### Webhook Setup
+To configure the Telegram webhook:
+- Set webhook: `{function_url}/?update_webhook=true&key={gordo_key}`
+- Check webhook: `{function_url}/?check_webhook=true&key={gordo_key}`
 
 ## Character and Content
 The bot operates as "el gordo" - an Argentine character with specific personality traits and language patterns. When modifying conversation logic, maintain the established character voice and Argentine Spanish vernacular present in the system prompts and responses. Key personality rule: ALWAYS respond without quotes, emojis, or formal punctuation.
