@@ -1311,8 +1311,8 @@ def get_time_context() -> Dict:
 
 def get_ai_response(
     client: OpenAI,
-    system_msg: Dict,
-    messages: List[Dict],
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
     max_retries: int = 2,
 ) -> Optional[str]:
     """Get AI response with retries and timeout (text-only)"""
@@ -1335,7 +1335,7 @@ def get_ai_response(
                 extra_body={
                     "models": fallback_models,
                 },
-                messages=[system_msg] + messages,  # type: ignore
+                messages=cast(Any, [system_msg] + messages),
                 timeout=5.0,  # 5 second timeout
                 max_tokens=512,  # Control response length
             )
@@ -1368,7 +1368,7 @@ def get_ai_response(
     return None
 
 
-def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Optional[str]:
+def get_cloudflare_ai_response(system_msg: Dict[str, Any], messages: List[Dict[str, Any]]) -> Optional[str]:
     """Fallback using Cloudflare Workers AI for text-only"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -1388,7 +1388,7 @@ def get_cloudflare_ai_response(system_msg: Dict, messages: List[Dict]) -> Option
 
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
-            messages=final_messages,  # type: ignore
+            messages=cast(Any, final_messages),
             timeout=5.0,
             max_tokens=512,
         )
@@ -1483,7 +1483,7 @@ def get_weather_description(code: int) -> str:
     return descriptions.get(code, "clima raro")
 
 
-def build_system_message(context: Dict) -> Dict:
+def build_system_message(context: Dict) -> Dict[str, Any]:
     """Build system message with personality and context"""
     market_info = format_market_info(context["market"])
     weather_info = format_weather_info(context["weather"]) if context["weather"] else ""
@@ -1760,13 +1760,13 @@ def get_chat_history(
 ) -> List[Dict]:
     try:
         chat_history_key = f"chat_history:{chat_id}"
-        history = redis_client.lrange(chat_history_key, 0, max_messages - 1)
+        history: List[str] = cast(List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1))
 
         if not history:
             return []
 
         messages = []
-        for entry in history:  # type: ignore
+        for entry in history:
             try:
                 msg = json.loads(entry)
                 # Add role based on if it's from the bot or user
