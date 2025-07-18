@@ -502,7 +502,7 @@ def test_handle_msg():
         "api.index.send_typing"
     ) as mock_send_typing, patch(
         "time.sleep"
-    ) as _mock_sleep:  # Add sleep mock to avoid delays
+    ) as _mock_sleep:  # Add sleep mock to avoid delays  # noqa: F841
 
         mock_env.return_value = "testbot"
         mock_rate_limit.return_value = True  # Don't rate limit
@@ -617,6 +617,7 @@ def test_handle_msg_with_image():
         assert result == "ok"
         mock_download.assert_called_once()
         mock_encode.assert_called_once()
+        mock_send_msg.assert_called_once()
 
 
 def test_handle_msg_with_audio():
@@ -863,7 +864,7 @@ def test_handle_msg_edge_cases():
         "api.index.should_gordo_respond"
     ) as mock_should_respond, patch(
         "time.sleep"
-    ) as _mock_sleep:
+    ) as _mock_sleep:  # noqa: F841
 
         # Set up mocks
         mock_env.return_value = "testbot"
@@ -1095,15 +1096,15 @@ def test_initialize_commands():
         ask_ai,
         select_random,
         get_prices,
-        get_dollar_rates as _get_dollar_rates,
+        get_dollar_rates as _get_dollar_rates,  # noqa: F401
     )
     from api.index import (
-        get_devo as _get_devo,
-        powerlaw as _powerlaw,
-        rainbow as _rainbow,
-        get_timestamp as _get_timestamp,
-        convert_to_command as _convert_to_command,
-        get_instance_name as _get_instance_name,
+        get_devo as _get_devo,  # noqa: F401
+        powerlaw as _powerlaw,  # noqa: F401
+        rainbow as _rainbow,  # noqa: F401
+        get_timestamp as _get_timestamp,  # noqa: F401
+        convert_to_command as _convert_to_command,  # noqa: F401
+        get_instance_name as _get_instance_name,  # noqa: F401
         get_help,
     )
 
@@ -2398,7 +2399,7 @@ def test_get_market_context_success():
             }
         }
         
-        def mock_requests_side_effect(url, *_args, **_kwargs):
+        def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
             if "coinmarketcap" in url:
                 return crypto_response
             elif "criptoya" in url:
@@ -2431,7 +2432,7 @@ def test_get_market_context_crypto_fail():
             }
         }
         
-        def mock_requests_side_effect(url, *_args, **_kwargs):
+        def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
             if "coinmarketcap" in url:
                 return None  # Crypto fails
             elif "criptoya" in url:
@@ -2641,7 +2642,7 @@ def test_format_market_info():
     assert "1000" in result or "1,000" in result
 
 
-def test_format_market_info_empty():
+def test_format_market_info_empty_dict():
     from api.index import format_market_info
     
     result = format_market_info({})
@@ -2675,3 +2676,345 @@ def test_format_weather_info_empty():
     # Function doesn't handle empty data gracefully - should raise KeyError
     with pytest.raises(KeyError):
         format_weather_info({})
+
+
+# === PHASE 4: UTILITY AND HELPER FUNCTIONS ===
+
+def test_sort_dollar_rates_success():
+    """Test sort_dollar_rates with valid dollar rates data"""
+    from api.index import sort_dollar_rates
+    
+    dollar_rates = {
+        "data": {
+            "oficial": {"price": 1000.50, "variation": 1.2},
+            "tarjeta": {"price": 1600.75, "variation": -0.8},
+            "mep": {"al30": {"ci": {"price": 1050.25, "variation": 0.5}}},
+            "ccl": {"al30": {"ci": {"price": 1075.80, "variation": 0.7}}},
+            "blue": {"ask": 1200.00, "variation": 2.1},
+            "cripto": {
+                "ccb": {"ask": 1150.90, "variation": 1.8},
+                "usdc": {"ask": 1140.30, "variation": 1.5},
+                "usdt": {"ask": 1145.60, "variation": 1.6}
+            }
+        }
+    }
+    
+    result = sort_dollar_rates(dollar_rates)
+    
+    assert len(result) == 8
+    assert result[0]["name"] == "Oficial"
+    assert result[0]["price"] == 1000.50
+    assert result[-1]["name"] == "Tarjeta"
+    assert result[-1]["price"] == 1600.75
+    # Verify sorting by price
+    for i in range(len(result) - 1):
+        assert result[i]["price"] <= result[i + 1]["price"]
+
+def test_sort_dollar_rates_with_none_variations():
+    """Test sort_dollar_rates with None variation values"""
+    from api.index import sort_dollar_rates
+    
+    dollar_rates = {
+        "data": {
+            "oficial": {"price": 1000.50, "variation": None},
+            "tarjeta": {"price": 1600.75, "variation": None},
+            "mep": {"al30": {"ci": {"price": 1050.25, "variation": None}}},
+            "ccl": {"al30": {"ci": {"price": 1075.80, "variation": None}}},
+            "blue": {"ask": 1200.00, "variation": None},
+            "cripto": {
+                "ccb": {"ask": 1150.90, "variation": None},
+                "usdc": {"ask": 1140.30, "variation": None},
+                "usdt": {"ask": 1145.60, "variation": None}
+            }
+        }
+    }
+    
+    result = sort_dollar_rates(dollar_rates)
+    
+    assert len(result) == 8
+    for rate in result:
+        assert rate["history"] is None
+
+def test_format_dollar_rates_with_positive_variations():
+    """Test format_dollar_rates with positive variation values"""
+    from api.index import format_dollar_rates
+    
+    dollar_rates = [
+        {"name": "Oficial", "price": 1000.50, "history": 1.2},
+        {"name": "Blue", "price": 1200.00, "history": 2.1},
+        {"name": "MEP", "price": 1050.25, "history": 0.5}
+    ]
+    
+    result = format_dollar_rates(dollar_rates, 24)
+    
+    expected_lines = [
+        "Oficial: 1000.5 (+1.2% 24hs)",
+        "Blue: 1200 (+2.1% 24hs)",
+        "MEP: 1050.25 (+0.5% 24hs)"
+    ]
+    assert result == "\n".join(expected_lines)
+
+def test_format_dollar_rates_with_negative_variations():
+    """Test format_dollar_rates with negative variation values"""
+    from api.index import format_dollar_rates
+    
+    dollar_rates = [
+        {"name": "Tarjeta", "price": 1600.75, "history": -0.8},
+        {"name": "CCL", "price": 1075.80, "history": -1.5}
+    ]
+    
+    result = format_dollar_rates(dollar_rates, 12)
+    
+    expected_lines = [
+        "Tarjeta: 1600.75 (-0.8% 12hs)",
+        "CCL: 1075.8 (-1.5% 12hs)"
+    ]
+    assert result == "\n".join(expected_lines)
+
+def test_format_dollar_rates_with_none_variations():
+    """Test format_dollar_rates with None variation values"""
+    from api.index import format_dollar_rates
+    
+    dollar_rates = [
+        {"name": "Oficial", "price": 1000.50, "history": None},
+        {"name": "Blue", "price": 1200.00, "history": None}
+    ]
+    
+    result = format_dollar_rates(dollar_rates, 24)
+    
+    expected_lines = [
+        "Oficial: 1000.5",
+        "Blue: 1200"
+    ]
+    assert result == "\n".join(expected_lines)
+
+def test_format_dollar_rates_mixed_variations():
+    """Test format_dollar_rates with mixed variation values"""
+    from api.index import format_dollar_rates
+    
+    dollar_rates = [
+        {"name": "Oficial", "price": 1000.50, "history": 1.2},
+        {"name": "Blue", "price": 1200.00, "history": None},
+        {"name": "Tarjeta", "price": 1600.75, "history": -0.8}
+    ]
+    
+    result = format_dollar_rates(dollar_rates, 6)
+    
+    expected_lines = [
+        "Oficial: 1000.5 (+1.2% 6hs)",
+        "Blue: 1200",
+        "Tarjeta: 1600.75 (-0.8% 6hs)"
+    ]
+    assert result == "\n".join(expected_lines)
+
+def test_format_dollar_rates_zero_decimal_formatting():
+    """Test format_dollar_rates decimal formatting for whole numbers"""
+    from api.index import format_dollar_rates
+    
+    dollar_rates = [
+        {"name": "Test1", "price": 1000.00, "history": 0.00},
+        {"name": "Test2", "price": 1200.10, "history": 1.00},
+        {"name": "Test3", "price": 1500.50, "history": -2.50}
+    ]
+    
+    result = format_dollar_rates(dollar_rates, 24)
+    
+    expected_lines = [
+        "Test1: 1000 (+0% 24hs)",
+        "Test2: 1200.1 (+1% 24hs)", 
+        "Test3: 1500.5 (-2.5% 24hs)"
+    ]
+    assert result == "\n".join(expected_lines)
+
+def test_clean_crypto_data_success():
+    """Test clean_crypto_data with valid crypto data"""
+    from api.index import clean_crypto_data
+    
+    cryptos = [
+        {
+            "name": "Bitcoin",
+            "symbol": "BTC",
+            "slug": "bitcoin",
+            "max_supply": 21000000,
+            "circulating_supply": 19500000,
+            "total_supply": 19500000,
+            "infinite_supply": False,
+            "quote": {
+                "USD": {
+                    "price": 45000.50,
+                    "volume_24h": 25000000000,
+                    "percent_change_1h": 0.5,
+                    "percent_change_24h": 2.1,
+                    "percent_change_7d": -1.8,
+                    "percent_change_30d": 15.2,
+                    "market_cap": 877500000000,
+                    "market_cap_dominance": 42.5
+                }
+            }
+        }
+    ]
+    
+    result = clean_crypto_data(cryptos)
+    
+    assert len(result) == 1
+    crypto = result[0]
+    assert crypto["name"] == "Bitcoin"
+    assert crypto["symbol"] == "BTC"
+    assert crypto["slug"] == "bitcoin"
+    assert crypto["supply"]["max"] == 21000000
+    assert crypto["supply"]["circulating"] == 19500000
+    assert crypto["quote"]["USD"]["price"] == 45000.50
+    assert crypto["quote"]["USD"]["changes"]["24h"] == 2.1
+
+def test_clean_crypto_data_multiple_cryptos():
+    """Test clean_crypto_data with multiple cryptocurrencies"""
+    from api.index import clean_crypto_data
+    
+    cryptos = [
+        {
+            "name": "Bitcoin",
+            "symbol": "BTC",
+            "slug": "bitcoin",
+            "max_supply": 21000000,
+            "circulating_supply": 19500000,
+            "total_supply": 19500000,
+            "infinite_supply": False,
+            "quote": {
+                "USD": {
+                    "price": 45000.50,
+                    "volume_24h": 25000000000,
+                    "percent_change_1h": 0.5,
+                    "percent_change_24h": 2.1,
+                    "percent_change_7d": -1.8,
+                    "percent_change_30d": 15.2,
+                    "market_cap": 877500000000,
+                    "market_cap_dominance": 42.5
+                }
+            }
+        },
+        {
+            "name": "Ethereum",
+            "symbol": "ETH",
+            "slug": "ethereum",
+            "max_supply": None,
+            "circulating_supply": 120000000,
+            "total_supply": 120000000,
+            "infinite_supply": True,
+            "quote": {
+                "USD": {
+                    "price": 3000.25,
+                    "volume_24h": 15000000000,
+                    "percent_change_1h": -0.2,
+                    "percent_change_24h": 1.8,
+                    "percent_change_7d": -3.2,
+                    "percent_change_30d": 8.5,
+                    "market_cap": 360000000000,
+                    "market_cap_dominance": 18.2
+                }
+            }
+        }
+    ]
+    
+    result = clean_crypto_data(cryptos)
+    
+    assert len(result) == 2
+    assert result[0]["name"] == "Bitcoin"
+    assert result[1]["name"] == "Ethereum"
+    assert result[1]["supply"]["max"] is None
+    assert result[1]["supply"]["infinite"] is True
+
+def test_format_market_info_with_crypto_and_dollar():
+    """Test format_market_info with both crypto and dollar data"""
+    from api.index import format_market_info
+    
+    market = {
+        "crypto": [
+            {"name": "Bitcoin", "price": 45000.50},
+            {"name": "Ethereum", "price": 3000.25}
+        ],
+        "dollar": [
+            {"name": "Oficial", "price": 1000.50},
+            {"name": "Blue", "price": 1200.00}
+        ]
+    }
+    
+    result = format_market_info(market)
+    
+    assert "PRECIOS DE CRIPTOS:" in result
+    assert "DOLARES:" in result
+    assert '"name": "Bitcoin"' in result
+    assert '"name": "Oficial"' in result
+
+def test_format_market_info_crypto_only():
+    """Test format_market_info with only crypto data"""
+    from api.index import format_market_info
+    
+    market = {
+        "crypto": [
+            {"name": "Bitcoin", "price": 45000.50}
+        ]
+    }
+    
+    result = format_market_info(market)
+    
+    assert "PRECIOS DE CRIPTOS:" in result
+    assert "DOLARES:" not in result
+    assert '"name": "Bitcoin"' in result
+
+def test_format_market_info_dollar_only():
+    """Test format_market_info with only dollar data"""
+    from api.index import format_market_info
+    
+    market = {
+        "dollar": [
+            {"name": "Oficial", "price": 1000.50}
+        ]
+    }
+    
+    result = format_market_info(market)
+    
+    assert "PRECIOS DE CRIPTOS:" not in result
+    assert "DOLARES:" in result
+    assert '"name": "Oficial"' in result
+
+def test_format_market_info_empty():
+    """Test format_market_info with empty market data"""
+    from api.index import format_market_info
+    
+    market = {}
+    
+    result = format_market_info(market)
+    
+    assert result == ""
+
+def test_get_weather_description_clear():
+    """Test get_weather_description for clear weather codes"""
+    from api.index import get_weather_description
+    
+    assert get_weather_description(0) == "despejado"
+    assert get_weather_description(1) == "mayormente despejado"
+    assert get_weather_description(2) == "parcialmente nublado"
+    assert get_weather_description(3) == "nublado"
+
+def test_get_weather_description_rain():
+    """Test get_weather_description for rain weather codes"""
+    from api.index import get_weather_description
+    
+    assert get_weather_description(61) == "lluvia leve"
+    assert get_weather_description(63) == "lluvia moderada"
+    assert get_weather_description(65) == "lluvia intensa"
+
+def test_get_weather_description_storm():
+    """Test get_weather_description for storm weather codes"""
+    from api.index import get_weather_description
+    
+    assert get_weather_description(95) == "tormenta"
+    assert get_weather_description(96) == "tormenta con granizo leve"
+    assert get_weather_description(99) == "tormenta con granizo intenso"
+
+def test_get_weather_description_unknown():
+    """Test get_weather_description for unknown weather codes"""
+    from api.index import get_weather_description
+    
+    assert get_weather_description(999) == "clima raro"
+    assert get_weather_description(-1) == "clima raro"
