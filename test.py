@@ -3018,3 +3018,290 @@ def test_get_weather_description_unknown():
     
     assert get_weather_description(999) == "clima raro"
     assert get_weather_description(-1) == "clima raro"
+
+
+# === PHASE 5: ADVANCED FEATURES ===
+
+def test_download_telegram_file_success():
+    """Test download_telegram_file with successful download"""
+    from api.index import download_telegram_file
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.get"
+    ) as mock_get:
+        mock_env.return_value = "test_token"
+        
+        # Mock file info response
+        mock_file_info = MagicMock()
+        mock_file_info.json.return_value = {
+            "ok": True,
+            "result": {"file_path": "photos/file_123.jpg"}
+        }
+        mock_file_info.raise_for_status.return_value = None
+        
+        # Mock file download response
+        mock_file_download = MagicMock()
+        mock_file_download.content = b"fake image data"
+        mock_file_download.raise_for_status.return_value = None
+        
+        # Configure side effect for two different calls
+        mock_get.side_effect = [mock_file_info, mock_file_download]
+        
+        result = download_telegram_file("test_file_id")
+        
+        assert result == b"fake image data"
+        assert mock_get.call_count == 2
+        
+        # Verify file info call
+        info_call = mock_get.call_args_list[0]
+        assert "getFile" in info_call[0][0]
+        assert info_call[1]["params"]["file_id"] == "test_file_id"
+        
+        # Verify file download call
+        download_call = mock_get.call_args_list[1]
+        assert "photos/file_123.jpg" in download_call[0][0]
+
+def test_download_telegram_file_api_error():
+    """Test download_telegram_file with API error"""
+    from api.index import download_telegram_file
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.get"
+    ) as mock_get:
+        mock_env.return_value = "test_token"
+        
+        # Mock failed API response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": False, "error": "File not found"}
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
+        result = download_telegram_file("invalid_file_id")
+        
+        assert result is None
+
+def test_download_telegram_file_network_error():
+    """Test download_telegram_file with network error"""
+    from api.index import download_telegram_file
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.get"
+    ) as mock_get:
+        mock_env.return_value = "test_token"
+        mock_get.side_effect = requests.exceptions.RequestException("Network error")
+        
+        result = download_telegram_file("test_file_id")
+        
+        assert result is None
+
+def test_encode_image_to_base64_success():
+    """Test encode_image_to_base64 with valid image data"""
+    from api.index import encode_image_to_base64
+    import base64
+    
+    test_data = b"fake image bytes"
+    expected = base64.b64encode(test_data).decode("utf-8")
+    
+    result = encode_image_to_base64(test_data)
+    
+    assert result == expected
+    assert isinstance(result, str)
+
+def test_encode_image_to_base64_empty():
+    """Test encode_image_to_base64 with empty data"""
+    from api.index import encode_image_to_base64
+    
+    result = encode_image_to_base64(b"")
+    
+    assert result == ""
+
+def test_resize_image_if_needed_no_resize():
+    """Test resize_image_if_needed when image is already small enough"""
+    from api.index import resize_image_if_needed
+    
+    with patch("api.index.Image") as mock_image_module:
+        # Mock small image
+        mock_image = MagicMock()
+        mock_image.size = (200, 150)  # Smaller than max_size of 512
+        mock_image_module.open.return_value = mock_image
+        
+        test_data = b"small image data"
+        result = resize_image_if_needed(test_data, max_size=512)
+        
+        assert result == test_data  # Should return original data unchanged
+
+def test_resize_image_if_needed_with_resize():
+    """Test resize_image_if_needed when image needs resizing"""
+    from api.index import resize_image_if_needed
+    
+    with patch("api.index.Image") as mock_image_module, patch("api.index.io.BytesIO") as mock_bytesio:
+        # Mock large image that needs resizing
+        mock_image = MagicMock()
+        mock_image.size = (1024, 768)  # Larger than max_size of 512
+        mock_image.mode = "RGB"
+        
+        # Mock resized image
+        mock_resized = MagicMock()
+        mock_image.resize.return_value = mock_resized
+        
+        # Mock output buffer
+        mock_output_buffer = MagicMock()
+        mock_output_buffer.getvalue.return_value = b"resized image data"
+        mock_bytesio.return_value = mock_output_buffer
+        
+        mock_image_module.open.return_value = mock_image
+        mock_image_module.Resampling.LANCZOS = "LANCZOS"
+        
+        test_data = b"large image data"
+        result = resize_image_if_needed(test_data, max_size=512)
+        
+        assert result == b"resized image data"
+        mock_image.resize.assert_called_once()
+        mock_resized.save.assert_called_once()
+
+def test_resize_image_if_needed_rgba_conversion():
+    """Test resize_image_if_needed with RGBA image conversion"""
+    from api.index import resize_image_if_needed
+    
+    with patch("api.index.Image") as mock_image_module, patch("api.index.io.BytesIO") as mock_bytesio:
+        # Mock large RGBA image that needs conversion
+        mock_image = MagicMock()
+        mock_image.size = (1024, 768)
+        mock_image.mode = "RGBA"
+        
+        # Mock converted image
+        mock_converted = MagicMock()
+        mock_image.convert.return_value = mock_converted
+        
+        # Mock resized image that also has RGBA mode
+        mock_resized = MagicMock()
+        mock_resized.mode = "RGBA"
+        mock_resized_converted = MagicMock()
+        mock_resized.convert.return_value = mock_resized_converted
+        mock_image.resize.return_value = mock_resized
+        
+        # Mock output buffer
+        mock_output_buffer = MagicMock()
+        mock_output_buffer.getvalue.return_value = b"converted resized image"
+        mock_bytesio.return_value = mock_output_buffer
+        
+        mock_image_module.open.return_value = mock_image
+        mock_image_module.Resampling.LANCZOS = "LANCZOS"
+        
+        result = resize_image_if_needed(b"rgba image data")
+        
+        assert result == b"converted resized image"
+        mock_resized.convert.assert_called_once_with("RGB")
+
+def test_resize_image_if_needed_import_error():
+    """Test resize_image_if_needed when PIL is not available"""
+    from api.index import resize_image_if_needed
+    
+    with patch("api.index.Image") as mock_image_module:
+        mock_image_module.open.side_effect = ImportError("PIL not available")
+        
+        test_data = b"image data"
+        result = resize_image_if_needed(test_data)
+        
+        assert result == test_data  # Should return original data on ImportError
+
+def test_resize_image_if_needed_processing_error():
+    """Test resize_image_if_needed with image processing error"""
+    from api.index import resize_image_if_needed
+    
+    with patch("api.index.Image") as mock_image_module:
+        mock_image_module.open.side_effect = Exception("Invalid image format")
+        
+        test_data = b"corrupted image data"
+        result = resize_image_if_needed(test_data)
+        
+        assert result == test_data  # Should return original data on error
+
+def test_describe_image_cloudflare_success():
+    """Test describe_image_cloudflare with successful API response"""
+    from api.index import describe_image_cloudflare
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.post"
+    ) as mock_post:
+        mock_env.side_effect = lambda key, default=None: {
+            "CLOUDFLARE_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+        }.get(key, default)
+        
+        # Mock successful response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "result": {"response": "A beautiful landscape with mountains"}
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+        
+        result = describe_image_cloudflare(b"base64_image_data")
+        
+        assert result == "A beautiful landscape with mountains"
+        mock_post.assert_called_once()
+
+def test_describe_image_cloudflare_api_error():
+    """Test describe_image_cloudflare with API error"""
+    from api.index import describe_image_cloudflare
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.post"
+    ) as mock_post:
+        mock_env.side_effect = lambda key, default=None: {
+            "CLOUDFLARE_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+        }.get(key, default)
+        
+        mock_post.side_effect = requests.exceptions.RequestException("API error")
+        
+        result = describe_image_cloudflare(b"base64_image_data")
+        
+        assert result is None
+
+def test_transcribe_audio_cloudflare_success():
+    """Test transcribe_audio_cloudflare with successful transcription"""
+    from api.index import transcribe_audio_cloudflare
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.post"
+    ) as mock_post:
+        mock_env.side_effect = lambda key, default=None: {
+            "CLOUDFLARE_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+        }.get(key, default)
+        
+        # Mock successful response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "success": True,
+            "result": {"text": "Hello, this is a test audio transcription"}
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+        
+        result = transcribe_audio_cloudflare(b"audio_data")
+        
+        assert result == "Hello, this is a test audio transcription"
+        mock_post.assert_called_once()
+
+def test_transcribe_audio_cloudflare_network_error():
+    """Test transcribe_audio_cloudflare with network error"""
+    from api.index import transcribe_audio_cloudflare
+    
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index.requests.post"
+    ) as mock_post:
+        mock_env.side_effect = lambda key, default=None: {
+            "CLOUDFLARE_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+        }.get(key, default)
+        
+        mock_post.side_effect = requests.exceptions.RequestException("Network error")
+        
+        result = transcribe_audio_cloudflare(b"audio_data")
+        
+        assert result is None
+
