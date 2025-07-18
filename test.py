@@ -26,7 +26,9 @@ def test_responder_no_args():
 
 
 def test_responder_wrong_key():
-    with app.test_request_context("/?key=wrong_key"), patch("os.environ.get") as mock_env, patch("api.index.admin_report") as mock_admin:
+    with app.test_request_context("/?key=wrong_key"), patch(
+        "os.environ.get"
+    ) as mock_env, patch("api.index.admin_report") as mock_admin:
         mock_env.return_value = "correct_key"
         response = responder()
         assert response == ("Wrong key", 400)
@@ -34,7 +36,9 @@ def test_responder_wrong_key():
 
 
 def test_responder_valid_key_with_webhook_check():
-    with app.test_request_context("/?key=valid_key&check_webhook=true"), patch("os.environ.get") as mock_env, patch("api.index.verify_webhook") as mock_verify:
+    with app.test_request_context("/?key=valid_key&check_webhook=true"), patch(
+        "os.environ.get"
+    ) as mock_env, patch("api.index.verify_webhook") as mock_verify:
         mock_env.return_value = "valid_key"
         mock_verify.return_value = True
         response = responder()
@@ -42,8 +46,13 @@ def test_responder_valid_key_with_webhook_check():
 
 
 def test_responder_valid_key_with_webhook_update():
-    with app.test_request_context("/?key=valid_key&update_webhook=true"), patch("os.environ.get") as mock_env, patch("api.index.set_telegram_webhook") as mock_set:
-        mock_env.side_effect = lambda key: {"GORDO_KEY": "valid_key", "CURRENT_FUNCTION_URL": "https://example.com"}.get(key)
+    with app.test_request_context("/?key=valid_key&update_webhook=true"), patch(
+        "os.environ.get"
+    ) as mock_env, patch("api.index.set_telegram_webhook") as mock_set:
+        mock_env.side_effect = lambda key: {
+            "GORDO_KEY": "valid_key",
+            "CURRENT_FUNCTION_URL": "https://example.com",
+        }.get(key)
         mock_set.return_value = True
         response = responder()
         assert response == ("Webhook updated", 200)
@@ -55,12 +64,22 @@ def test_responder_valid_key_with_valid_message():
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
-            "text": "hello"
+            "text": "hello",
         }
     }
-    
-    with app.test_request_context("/?key=valid_key", method="POST", json=message_data), patch("os.environ.get") as mock_env, patch("api.index.handle_msg") as mock_handle, patch("api.index.config_redis") as mock_redis, patch("api.index.is_secret_token_valid") as mock_token:
-        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(key, default)
+
+    with app.test_request_context(
+        "/?key=valid_key", method="POST", json=message_data
+    ), patch("os.environ.get") as mock_env, patch(
+        "api.index.handle_msg"
+    ) as mock_handle, patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch(
+        "api.index.is_secret_token_valid"
+    ) as mock_token:
+        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(
+            key, default
+        )
         mock_handle.return_value = "ok"
         mock_redis.return_value = MagicMock()
         mock_token.return_value = True
@@ -69,10 +88,16 @@ def test_responder_valid_key_with_valid_message():
 
 
 def test_responder_exception_handling():
-    with app.test_request_context("/?key=valid_key"), patch("os.environ.get") as mock_env, patch("api.index.process_request_parameters") as mock_process, patch("api.index.admin_report") as mock_admin:
-        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(key, default)
+    with app.test_request_context("/?key=valid_key"), patch(
+        "os.environ.get"
+    ) as mock_env, patch("api.index.process_request_parameters") as mock_process, patch(
+        "api.index.admin_report"
+    ) as mock_admin:
+        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(
+            key, default
+        )
         mock_process.side_effect = Exception("Test error")
-        
+
         response = responder()
         assert response == ("Critical error", 500)
         mock_admin.assert_called_once()
@@ -358,9 +383,13 @@ def test_process_request_parameters():
             assert "Webhook checked" in response
 
     with app.test_request_context("/?update_webhook=true"):
-        with patch("api.index.set_telegram_webhook") as mock_set, patch("os.environ.get") as mock_env:
+        with patch("api.index.set_telegram_webhook") as mock_set, patch(
+            "os.environ.get"
+        ) as mock_env:
             mock_set.return_value = True
-            mock_env.return_value = "https://example.com/webhook"  # Mock CURRENT_FUNCTION_URL
+            mock_env.return_value = (
+                "https://example.com/webhook"  # Mock CURRENT_FUNCTION_URL
+            )
             response, status = process_request_parameters(request)
             assert status == 200
             assert "Webhook updated" in response
@@ -371,7 +400,9 @@ def test_handle_rate_limit():
 
     with patch("api.index.send_typing") as mock_send_typing, patch(
         "time.sleep"
-    ) as mock_sleep, patch("api.index.gen_random") as mock_gen_random, patch("os.environ.get") as mock_env:
+    ) as mock_sleep, patch("api.index.gen_random") as mock_gen_random, patch(
+        "os.environ.get"
+    ) as mock_env:
 
         chat_id = "123"
         message = {"from": {"first_name": "John"}}
@@ -566,7 +597,7 @@ def test_handle_msg_with_crypto_command():
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
-            "text": "/prices btc"
+            "text": "/prices btc",
         }
 
         result = handle_msg(message)
@@ -594,7 +625,10 @@ def test_handle_msg_with_image():
         "api.index.cached_requests"
     ) as mock_requests:
 
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot", "TELEGRAM_TOKEN": "test_token"}.get(key, default)
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot",
+            "TELEGRAM_TOKEN": "test_token",
+        }.get(key, default)
         mock_rate_limit.return_value = True
         mock_download.return_value = b"image data"
         mock_describe.return_value = "A beautiful landscape"
@@ -610,7 +644,7 @@ def test_handle_msg_with_image():
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
-            "photo": [{"file_id": "photo_123"}]
+            "photo": [{"file_id": "photo_123"}],
         }
 
         result = handle_msg(message)
@@ -636,7 +670,7 @@ def test_handle_msg_with_audio():
         mock_env.side_effect = lambda key: {
             "TELEGRAM_USERNAME": "testbot",
             "CLOUDFLARE_API_KEY": "test_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account"
+            "CLOUDFLARE_ACCOUNT_ID": "test_account",
         }.get(key)
         mock_rate_limit.return_value = True
         mock_download.return_value = b"audio data"
@@ -650,7 +684,7 @@ def test_handle_msg_with_audio():
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
-            "voice": {"file_id": "voice_123"}
+            "voice": {"file_id": "voice_123"},
         }
 
         result = handle_msg(message)
@@ -670,9 +704,7 @@ def test_handle_msg_with_transcribe_command():
         "api.index.handle_transcribe_with_message"
     ) as mock_handle_transcribe:
 
-        mock_env.side_effect = lambda key: {
-            "TELEGRAM_USERNAME": "testbot"
-        }.get(key)
+        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_rate_limit.return_value = True
         mock_handle_transcribe.return_value = "Transcription result"
 
@@ -685,10 +717,7 @@ def test_handle_msg_with_transcribe_command():
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {
-                "message_id": 2,
-                "voice": {"file_id": "voice_123"}
-            }
+            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123"}},
         }
 
         result = handle_msg(message)
@@ -708,9 +737,7 @@ def test_handle_msg_with_unknown_command():
         "api.index.should_gordo_respond"
     ) as mock_should_respond:
 
-        mock_env.side_effect = lambda key: {
-            "TELEGRAM_USERNAME": "testbot"
-        }.get(key)
+        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_rate_limit.return_value = True
         mock_should_respond.return_value = False
 
@@ -722,7 +749,7 @@ def test_handle_msg_with_unknown_command():
             "message_id": 1,
             "chat": {"id": 123, "type": "group"},
             "from": {"first_name": "John", "username": "john"},
-            "text": "/unknown_command"
+            "text": "/unknown_command",
         }
 
         result = handle_msg(message)
@@ -737,16 +764,14 @@ def test_handle_msg_with_exception():
         "api.index.admin_report"
     ) as mock_admin_report, patch("os.environ.get") as mock_env:
 
-        mock_env.side_effect = lambda key: {
-            "TELEGRAM_USERNAME": "testbot"
-        }.get(key)
+        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_config_redis.side_effect = Exception("Redis error")
 
         message = {
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"first_name": "John", "username": "john"},
-            "text": "hello"
+            "text": "hello",
         }
 
         result = handle_msg(message)
@@ -1298,7 +1323,10 @@ def test_format_user_message_complex_cases():
 def test_should_gordo_respond_complex_cases():
     from api.index import should_gordo_respond
 
-    commands = {"/test": (lambda x: x, False, False), "/other": (lambda x: x, True, False)}
+    commands = {
+        "/test": (lambda x: x, False, False),
+        "/other": (lambda x: x, True, False),
+    }
 
     with patch("os.environ.get") as mock_env:
         mock_env.return_value = "testbot"  # Set mock bot username
@@ -1461,7 +1489,7 @@ def test_ask_ai_with_cloudflare_fallback():
         "os.environ.get"
     ) as mock_env:
 
-        # Setup basic mocks  
+        # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
@@ -1691,10 +1719,15 @@ def test_convert_base_basic():
     from api.index import convert_base
 
     # Test binary to decimal
-    assert convert_base("101, 2, 10") == "ahi tenes boludo, 101 en base 2 es 5 en base 10"
+    assert (
+        convert_base("101, 2, 10") == "ahi tenes boludo, 101 en base 2 es 5 en base 10"
+    )
 
     # Test decimal to hexadecimal
-    assert convert_base("255, 10, 16") == "ahi tenes boludo, 255 en base 10 es FF en base 16"
+    assert (
+        convert_base("255, 10, 16")
+        == "ahi tenes boludo, 255 en base 10 es FF en base 16"
+    )
 
     # Test invalid input
     assert (
@@ -1771,150 +1804,156 @@ def test_admin_report_basic():
         )
 
 
-# Phase 1: Cache Functions Tests
-
 def test_get_cached_transcription_success():
     from api.index import get_cached_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = "cached transcription text"
-        
+
         result = get_cached_transcription("test_file_id")
-        
+
         assert result == "cached transcription text"
         mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
 
 
 def test_get_cached_transcription_not_found():
     from api.index import get_cached_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = None
-        
+
         result = get_cached_transcription("test_file_id")
-        
+
         assert result is None
         mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
 
 
 def test_get_cached_transcription_exception():
     from api.index import get_cached_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
-        
+
         result = get_cached_transcription("test_file_id")
-        
+
         assert result is None
 
 
 def test_cache_transcription_success():
     from api.index import cache_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
-        
+
         cache_transcription("test_file_id", "transcription text", 3600)
-        
-        mock_redis.setex.assert_called_once_with("audio_transcription:test_file_id", 3600, "transcription text")
+
+        mock_redis.setex.assert_called_once_with(
+            "audio_transcription:test_file_id", 3600, "transcription text"
+        )
 
 
 def test_cache_transcription_default_ttl():
     from api.index import cache_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
-        
+
         cache_transcription("test_file_id", "transcription text")
-        
-        mock_redis.setex.assert_called_once_with("audio_transcription:test_file_id", 604800, "transcription text")
+
+        mock_redis.setex.assert_called_once_with(
+            "audio_transcription:test_file_id", 604800, "transcription text"
+        )
 
 
 def test_cache_transcription_exception():
     from api.index import cache_transcription
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
-        
+
         # Should not raise exception, just print error
         cache_transcription("test_file_id", "transcription text")
 
 
 def test_get_cached_description_success():
     from api.index import get_cached_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = "cached image description"
-        
+
         result = get_cached_description("test_file_id")
-        
+
         assert result == "cached image description"
         mock_redis.get.assert_called_once_with("image_description:test_file_id")
 
 
 def test_get_cached_description_not_found():
     from api.index import get_cached_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = None
-        
+
         result = get_cached_description("test_file_id")
-        
+
         assert result is None
         mock_redis.get.assert_called_once_with("image_description:test_file_id")
 
 
 def test_get_cached_description_exception():
     from api.index import get_cached_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
-        
+
         result = get_cached_description("test_file_id")
-        
+
         assert result is None
 
 
 def test_cache_description_success():
     from api.index import cache_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
-        
+
         cache_description("test_file_id", "image description", 3600)
-        
-        mock_redis.setex.assert_called_once_with("image_description:test_file_id", 3600, "image description")
+
+        mock_redis.setex.assert_called_once_with(
+            "image_description:test_file_id", 3600, "image description"
+        )
 
 
 def test_cache_description_default_ttl():
     from api.index import cache_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
-        
+
         cache_description("test_file_id", "image description")
-        
-        mock_redis.setex.assert_called_once_with("image_description:test_file_id", 604800, "image description")
+
+        mock_redis.setex.assert_called_once_with(
+            "image_description:test_file_id", 604800, "image description"
+        )
 
 
 def test_cache_description_exception():
     from api.index import cache_description
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
-        
+
         # Should not raise exception, just print error
         cache_description("test_file_id", "image description")
 
@@ -1923,19 +1962,19 @@ def test_get_cache_history_success():
     from api.index import get_cache_history
     import json
     from datetime import datetime, timedelta
-    
+
     with patch("api.index.datetime") as mock_datetime:
         mock_redis = MagicMock()
         test_data = {"data": "test", "timestamp": "2024-01-01"}
         mock_redis.get.return_value = json.dumps(test_data)
-        
+
         # Mock datetime.now() to return a fixed time
         fixed_time = datetime(2024, 1, 1, 12, 0, 0)
         mock_datetime.now.return_value = fixed_time
         mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-        
+
         result = get_cache_history(1, "test_hash", mock_redis)
-        
+
         assert result == test_data
         expected_timestamp = (fixed_time - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
         mock_redis.get.assert_called_once_with(expected_timestamp + "test_hash")
@@ -1943,138 +1982,136 @@ def test_get_cache_history_success():
 
 def test_get_cache_history_not_found():
     from api.index import get_cache_history
-    
+
     mock_redis = MagicMock()
     mock_redis.get.return_value = None
-    
+
     result = get_cache_history(1, "test_hash", mock_redis)
-    
+
     assert result is None
 
 
 def test_get_cache_history_invalid_data():
     from api.index import get_cache_history
     import json
-    
+
     mock_redis = MagicMock()
     test_data = {"data": "test"}  # Missing timestamp
     mock_redis.get.return_value = json.dumps(test_data)
-    
+
     result = get_cache_history(1, "test_hash", mock_redis)
-    
+
     assert result is None
 
 
 def test_get_cached_bcra_variables_success():
     from api.index import get_cached_bcra_variables
     import json
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
         mock_redis.get.return_value = json.dumps(test_data)
-        
+
         result = get_cached_bcra_variables()
-        
+
         assert result == test_data
         mock_redis.get.assert_called_once_with("bcra_variables")
 
 
 def test_get_cached_bcra_variables_not_found():
     from api.index import get_cached_bcra_variables
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = None
-        
+
         result = get_cached_bcra_variables()
-        
+
         assert result is None
         mock_redis.get.assert_called_once_with("bcra_variables")
 
 
 def test_get_cached_bcra_variables_exception():
     from api.index import get_cached_bcra_variables
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
-        
+
         result = get_cached_bcra_variables()
-        
+
         assert result is None
 
 
 def test_cache_bcra_variables_success():
     from api.index import cache_bcra_variables
     import json
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
-        
+
         cache_bcra_variables(test_data, 600)
-        
-        mock_redis.setex.assert_called_once_with("bcra_variables", 600, json.dumps(test_data))
+
+        mock_redis.setex.assert_called_once_with(
+            "bcra_variables", 600, json.dumps(test_data)
+        )
 
 
 def test_cache_bcra_variables_default_ttl():
     from api.index import cache_bcra_variables
     import json
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         test_data = {"base_monetaria": "1000000"}
-        
+
         cache_bcra_variables(test_data)
-        
-        mock_redis.setex.assert_called_once_with("bcra_variables", 300, json.dumps(test_data))
+
+        mock_redis.setex.assert_called_once_with(
+            "bcra_variables", 300, json.dumps(test_data)
+        )
 
 
 def test_cache_bcra_variables_exception():
     from api.index import cache_bcra_variables
-    
+
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
         test_data = {"base_monetaria": "1000000"}
-        
+
         # Should not raise exception, just print error
         cache_bcra_variables(test_data)
 
 
-# Phase 2: Media Processing Functions Tests
-
 def test_handle_transcribe_with_message_no_reply():
     from api.index import handle_transcribe_with_message
-    
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123},
-        "text": "/transcribe"
-    }
-    
+
+    message = {"message_id": 1, "chat": {"id": 123}, "text": "/transcribe"}
+
     result = handle_transcribe_with_message(message)
-    assert result == "Respondé a un mensaje con audio o imagen para transcribir/describir"
+    assert (
+        result == "Respondé a un mensaje con audio o imagen para transcribir/describir"
+    )
 
 
 def test_handle_transcribe_with_message_voice_cached():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_transcription") as mock_cached:
         mock_cached.return_value = "cached voice transcription"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "voice": {"file_id": "voice123"}
-            }
+            "reply_to_message": {"voice": {"file_id": "voice123"}},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🎵 Transcripción: cached voice transcription"
         mock_cached.assert_called_once_with("voice123")
@@ -2082,26 +2119,24 @@ def test_handle_transcribe_with_message_voice_cached():
 
 def test_handle_transcribe_with_message_voice_download_success():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
         "api.index.transcribe_audio_cloudflare"
     ) as mock_transcribe:
-        
+
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
         mock_transcribe.return_value = "new transcription"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "voice": {"file_id": "voice123"}
-            }
+            "reply_to_message": {"voice": {"file_id": "voice123"}},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🎵 Transcripción: new transcription"
         mock_download.assert_called_once_with("voice123")
@@ -2110,68 +2145,62 @@ def test_handle_transcribe_with_message_voice_download_success():
 
 def test_handle_transcribe_with_message_voice_download_fail():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download:
-        
+
         mock_cached.return_value = None
         mock_download.return_value = None
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "voice": {"file_id": "voice123"}
-            }
+            "reply_to_message": {"voice": {"file_id": "voice123"}},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "No pude descargar el audio"
 
 
 def test_handle_transcribe_with_message_audio_success():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
         "api.index.transcribe_audio_cloudflare"
     ) as mock_transcribe:
-        
+
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
         mock_transcribe.return_value = "audio transcription"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "audio": {"file_id": "audio123"}
-            }
+            "reply_to_message": {"audio": {"file_id": "audio123"}},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🎵 Transcripción: audio transcription"
 
 
 def test_handle_transcribe_with_message_photo_cached():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_description") as mock_cached:
         mock_cached.return_value = "cached image description"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "photo": [{"file_id": "photo123"}]
-            }
+            "reply_to_message": {"photo": [{"file_id": "photo123"}]},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🖼️ Descripción: cached image description"
         mock_cached.assert_called_once_with("photo123")
@@ -2179,29 +2208,25 @@ def test_handle_transcribe_with_message_photo_cached():
 
 def test_handle_transcribe_with_message_photo_success():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
-    ) as mock_download, patch(
-        "api.index.resize_image_if_needed"
-    ) as mock_resize, patch(
+    ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
         "api.index.describe_image_cloudflare"
     ) as mock_describe:
-        
+
         mock_cached.return_value = None
         mock_download.return_value = b"image data"
         mock_resize.return_value = b"resized image data"
         mock_describe.return_value = "image description"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "photo": [{"file_id": "photo123"}]
-            }
+            "reply_to_message": {"photo": [{"file_id": "photo123"}]},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🖼️ Descripción: image description"
         mock_download.assert_called_once_with("photo123")
@@ -2209,103 +2234,104 @@ def test_handle_transcribe_with_message_photo_success():
         mock_describe.assert_called_once_with(
             b"resized image data",
             "Describe what you see in this image in detail.",
-            "photo123"
+            "photo123",
         )
 
 
 def test_handle_transcribe_with_message_sticker_success():
     from api.index import handle_transcribe_with_message
-    
+
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
-    ) as mock_download, patch(
-        "api.index.resize_image_if_needed"
-    ) as mock_resize, patch(
+    ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
         "api.index.describe_image_cloudflare"
     ) as mock_describe:
-        
+
         mock_cached.return_value = None
         mock_download.return_value = b"sticker data"
         mock_resize.return_value = b"resized sticker data"
         mock_describe.return_value = "sticker description"
-        
+
         message = {
             "message_id": 1,
             "chat": {"id": 123},
             "text": "/transcribe",
-            "reply_to_message": {
-                "sticker": {"file_id": "sticker123"}
-            }
+            "reply_to_message": {"sticker": {"file_id": "sticker123"}},
         }
-        
+
         result = handle_transcribe_with_message(message)
         assert result == "🎨 Descripción del sticker: sticker description"
 
 
 def test_handle_transcribe_with_message_no_media():
     from api.index import handle_transcribe_with_message
-    
+
     message = {
         "message_id": 1,
         "chat": {"id": 123},
         "text": "/transcribe",
-        "reply_to_message": {
-            "text": "just text"
-        }
+        "reply_to_message": {"text": "just text"},
     }
-    
+
     result = handle_transcribe_with_message(message)
-    assert result == "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+    assert (
+        result
+        == "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+    )
 
 
 def test_handle_transcribe_with_message_exception():
     from api.index import handle_transcribe_with_message
     from typing import cast, Dict, Any
-    
+
     # Malformed message that causes exception
     message = cast(Dict[str, Any], None)
-    
+
     result = handle_transcribe_with_message(message)
     assert result == "Error procesando el comando, intentá más tarde"
 
 
 def test_handle_transcribe():
     from api.index import handle_transcribe
-    
+
     result = handle_transcribe()
-    assert result == "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
+    assert (
+        result
+        == "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
+    )
 
 
 def test_format_bcra_variables_empty():
     from api.index import format_bcra_variables
-    
+
     result = format_bcra_variables({})
     assert result == "No se pudieron obtener las variables del BCRA"
-    
+
     from typing import cast, Dict, Any
+
     result = format_bcra_variables(cast(Dict[str, Any], None))
     assert result == "No se pudieron obtener las variables del BCRA"
 
 
 def test_format_bcra_variables_with_data():
     from api.index import format_bcra_variables
-    
+
     variables = {
         "base_monetaria_total": {"value": "5.000.000,50", "date": "15/01/2025"},
         "inflacion_mensual": {"value": "5,2", "date": "15/01/2025"},
         "inflacion_interanual": {"value": "150,5", "date": "15/01/2025"},
         "inflacion_esperada": {"value": "3,1", "date": "15/01/2025"},
         "tasa_tamar": {"value": "45,0", "date": "15/01/2025"},
-        "tasa_badlar": {"value": "40,5", "date": "15/01/2025"}, 
+        "tasa_badlar": {"value": "40,5", "date": "15/01/2025"},
         "tasa_justicia": {"value": "50,0", "date": "15/01/2025"},
         "dolar_minorista_compra": {"value": "1.200,50", "date": "15/01/2025"},
         "dolar_minorista_venta": {"value": "1.250,75", "date": "15/01/2025"},
         "dolar_mayorista": {"value": "1.180,25", "date": "15/01/2025"},
         "uva": {"value": "500,75", "date": "15/01/2025"},
         "cer": {"value": "0,45", "date": "15/01/2025"},
-        "reservas_int": {"value": "25.000", "date": "15/01/2025"}
+        "reservas_int": {"value": "25.000", "date": "15/01/2025"},
     }
-    
+
     result = format_bcra_variables(variables)
     assert "📊 Variables principales BCRA" in result
     assert "15/01/25" in result  # Date should be formatted
@@ -2313,14 +2339,14 @@ def test_format_bcra_variables_with_data():
 
 def test_handle_bcra_variables_cached():
     from api.index import handle_bcra_variables
-    
+
     with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
         "api.index.format_bcra_variables"
     ) as mock_format:
-        
+
         mock_cached.return_value = {"test": "data"}
         mock_format.return_value = "formatted variables"
-        
+
         result = handle_bcra_variables()
         assert result == "formatted variables"
         mock_cached.assert_called_once()
@@ -2329,19 +2355,17 @@ def test_handle_bcra_variables_cached():
 
 def test_handle_bcra_variables_scrape_fresh():
     from api.index import handle_bcra_variables
-    
+
     with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
         "api.index.scrape_bcra_variables"
-    ) as mock_scrape, patch(
-        "api.index.cache_bcra_variables"
-    ) as mock_cache, patch(
+    ) as mock_scrape, patch("api.index.cache_bcra_variables") as mock_cache, patch(
         "api.index.format_bcra_variables"
     ) as mock_format:
-        
+
         mock_cached.return_value = None
         mock_scrape.return_value = {"scraped": "data"}
         mock_format.return_value = "formatted scraped data"
-        
+
         result = handle_bcra_variables()
         assert result == "formatted scraped data"
         mock_scrape.assert_called_once()
@@ -2351,67 +2375,61 @@ def test_handle_bcra_variables_scrape_fresh():
 
 def test_handle_bcra_variables_no_data():
     from api.index import handle_bcra_variables
-    
+
     with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
         "api.index.scrape_bcra_variables"
     ) as mock_scrape:
-        
+
         mock_cached.return_value = None
         mock_scrape.return_value = None
-        
+
         result = handle_bcra_variables()
-        assert result == "No pude obtener las variables del BCRA en este momento, probá más tarde"
+        assert (
+            result
+            == "No pude obtener las variables del BCRA en este momento, probá más tarde"
+        )
 
 
 def test_handle_bcra_variables_exception():
     from api.index import handle_bcra_variables
-    
+
     with patch("api.index.get_cached_bcra_variables") as mock_cached:
         mock_cached.side_effect = Exception("Cache error")
-        
+
         result = handle_bcra_variables()
         assert result == "Error al obtener las variables del BCRA"
 
 
-# Phase 3: AI Context Functions Tests
-
 def test_get_market_context_success():
     from api.index import get_market_context
-    
+
     with patch("api.index.cached_requests") as mock_cached, patch(
         "api.index.clean_crypto_data"
     ) as mock_clean, patch("os.environ.get") as mock_env:
-        
+
         # Mock crypto response
         crypto_response = {
-            "data": {
-                "data": [
-                    {"symbol": "BTC", "quote": {"USD": {"price": 50000}}}
-                ]
-            }
+            "data": {"data": [{"symbol": "BTC", "quote": {"USD": {"price": 50000}}}]}
         }
-        
-        # Mock dollar response  
+
+        # Mock dollar response
         dollar_response = {
-            "data": {
-                "oficial": {"price": 1000},
-                "blue": {"price": 1200}
-            }
+            "data": {"oficial": {"price": 1000}, "blue": {"price": 1200}}
         }
-        
+
         def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
             if "coinmarketcap" in url:
                 return crypto_response
             elif "criptoya" in url:
                 return dollar_response
             return None
-        
+
         mock_cached.side_effect = mock_requests_side_effect
         mock_clean.return_value = [{"symbol": "BTC", "price": 50000}]
         mock_env.return_value = "test_api_key"
-        
+
         result = get_market_context()
-        
+
         assert "crypto" in result
         assert "dollar" in result
         assert result["crypto"] == [{"symbol": "BTC", "price": 50000}]
@@ -2420,64 +2438,57 @@ def test_get_market_context_success():
 
 def test_get_market_context_crypto_fail():
     from api.index import get_market_context
-    
+
     with patch("api.index.cached_requests") as mock_cached, patch(
         "os.environ.get"
     ) as mock_env:
-        
+
         # Mock dollar response only
-        dollar_response = {
-            "data": {
-                "oficial": {"price": 1000}
-            }
-        }
-        
+        dollar_response = {"data": {"oficial": {"price": 1000}}}
+
         def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
             if "coinmarketcap" in url:
                 return None  # Crypto fails
             elif "criptoya" in url:
                 return dollar_response
             return None
-        
+
         mock_cached.side_effect = mock_requests_side_effect
         mock_env.return_value = "test_api_key"
-        
+
         result = get_market_context()
-        
+
         assert "crypto" not in result
         assert "dollar" in result
 
 
 def test_get_market_context_all_fail():
     from api.index import get_market_context
-    
+
     with patch("api.index.cached_requests") as mock_cached, patch(
         "os.environ.get"
     ) as mock_env:
-        
+
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
-        
+
         result = get_market_context()
-        
+
         assert result == {}
 
 
 def test_get_weather_context_success():
     from api.index import get_weather_context
-    
+
     with patch("api.index.get_weather") as mock_weather, patch(
         "api.index.get_weather_description"
     ) as mock_description:
-        
-        mock_weather.return_value = {
-            "temperature": 25.0,
-            "weather_code": 0
-        }
+
+        mock_weather.return_value = {"temperature": 25.0, "weather_code": 0}
         mock_description.return_value = "cielo despejado"
-        
+
         result = get_weather_context()
-        
+
         assert result is not None
         assert result["temperature"] == 25.0
         assert result["weather_code"] == 0
@@ -2487,41 +2498,41 @@ def test_get_weather_context_success():
 
 def test_get_weather_context_fail():
     from api.index import get_weather_context
-    
+
     with patch("api.index.get_weather") as mock_weather:
         mock_weather.return_value = None
-        
+
         result = get_weather_context()
-        
+
         assert result is None
 
 
 def test_get_weather_context_exception():
     from api.index import get_weather_context
-    
+
     with patch("api.index.get_weather") as mock_weather:
         mock_weather.side_effect = Exception("Weather API error")
-        
+
         result = get_weather_context()
-        
+
         assert result is None
 
 
 def test_get_time_context():
     from api.index import get_time_context
     from datetime import datetime, timezone, timedelta
-    
+
     with patch("api.index.datetime") as mock_datetime:
         # Mock a fixed time
         fixed_time = datetime(2024, 1, 15, 14, 30, 0)
         buenos_aires_tz = timezone(timedelta(hours=-3))
         fixed_time_ba = fixed_time.replace(tzinfo=buenos_aires_tz)
-        
+
         mock_datetime.now.return_value = fixed_time_ba
         mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-        
+
         result = get_time_context()
-        
+
         assert "datetime" in result
         assert "formatted" in result
         assert result["datetime"] == fixed_time_ba
@@ -2529,11 +2540,11 @@ def test_get_time_context():
 
 def test_get_fallback_response():
     from api.index import get_fallback_response
-    
+
     messages = [{"role": "user", "content": "hello"}]
-    
+
     result = get_fallback_response(messages)
-    
+
     # Should return a string (one of many predefined fallback responses)
     assert isinstance(result, str)
     assert len(result) > 0
@@ -2542,11 +2553,11 @@ def test_get_fallback_response():
 
 def test_build_system_message():
     from api.index import build_system_message
-    
+
     context = {
         "market": {
             "crypto": [{"symbol": "BTC", "price": 50000}],
-            "dollar": {"oficial": {"price": 1000}}
+            "dollar": {"oficial": {"price": 1000}},
         },
         "weather": {
             "temperature": 25,
@@ -2554,13 +2565,13 @@ def test_build_system_message():
             "precipitation_probability": 10,
             "description": "cielo despejado",
             "cloud_cover": 20,
-            "visibility": 10000
+            "visibility": 10000,
         },
-        "time": {"formatted": "Monday 15/01/2024"}
+        "time": {"formatted": "Monday 15/01/2024"},
     }
-    
+
     result = build_system_message(context)
-    
+
     assert result["role"] == "system"
     assert "content" in result
     assert isinstance(result["content"], list)
@@ -2572,11 +2583,11 @@ def test_build_system_message():
 
 def test_build_system_message_empty_context():
     from api.index import build_system_message
-    
+
     context = {"market": {}, "weather": None, "time": {"formatted": "Monday"}}
-    
+
     result = build_system_message(context)
-    
+
     assert result["role"] == "system"
     assert "content" in result
     assert isinstance(result["content"], list)
@@ -2587,7 +2598,7 @@ def test_build_system_message_empty_context():
 
 def test_clean_crypto_data():
     from api.index import clean_crypto_data
-    
+
     raw_data = [
         {
             "id": 1,
@@ -2607,14 +2618,14 @@ def test_clean_crypto_data():
                     "percent_change_7d": 5.0,
                     "percent_change_30d": 10.0,
                     "market_cap": 1000000000000,
-                    "market_cap_dominance": 45.5
+                    "market_cap_dominance": 45.5,
                 }
-            }
+            },
         }
     ]
-    
+
     result = clean_crypto_data(raw_data)
-    
+
     assert len(result) == 1
     assert result[0]["symbol"] == "BTC"
     assert result[0]["name"] == "Bitcoin"
@@ -2624,19 +2635,14 @@ def test_clean_crypto_data():
 
 def test_format_market_info():
     from api.index import format_market_info
-    
+
     market_data = {
-        "crypto": [
-            {"symbol": "BTC", "price": 50000, "change_24h": 2.5}
-        ],
-        "dollar": {
-            "oficial": {"price": 1000},
-            "blue": {"price": 1200}
-        }
+        "crypto": [{"symbol": "BTC", "price": 50000, "change_24h": 2.5}],
+        "dollar": {"oficial": {"price": 1000}, "blue": {"price": 1200}},
     }
-    
+
     result = format_market_info(market_data)
-    
+
     assert "BTC" in result
     assert "50000" in result or "50,000" in result
     assert "1000" in result or "1,000" in result
@@ -2644,26 +2650,26 @@ def test_format_market_info():
 
 def test_format_market_info_empty_dict():
     from api.index import format_market_info
-    
+
     result = format_market_info({})
-    
+
     assert result == ""
 
 
 def test_format_weather_info():
     from api.index import format_weather_info
-    
+
     weather_data = {
         "temperature": 25.5,
         "apparent_temperature": 26.0,
         "precipitation_probability": 10,
         "description": "cielo despejado",
         "cloud_cover": 20,
-        "visibility": 10000
+        "visibility": 10000,
     }
-    
+
     result = format_weather_info(weather_data)
-    
+
     assert "26" in result  # apparent_temperature
     assert "cielo despejado" in result
     assert "10%" in result  # precipitation_probability
@@ -2672,18 +2678,16 @@ def test_format_weather_info():
 def test_format_weather_info_empty():
     from api.index import format_weather_info
     import pytest
-    
+
     # Function doesn't handle empty data gracefully - should raise KeyError
     with pytest.raises(KeyError):
         format_weather_info({})
 
 
-# === PHASE 4: UTILITY AND HELPER FUNCTIONS ===
-
 def test_sort_dollar_rates_success():
     """Test sort_dollar_rates with valid dollar rates data"""
     from api.index import sort_dollar_rates
-    
+
     dollar_rates = {
         "data": {
             "oficial": {"price": 1000.50, "variation": 1.2},
@@ -2694,13 +2698,13 @@ def test_sort_dollar_rates_success():
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": 1.8},
                 "usdc": {"ask": 1140.30, "variation": 1.5},
-                "usdt": {"ask": 1145.60, "variation": 1.6}
-            }
+                "usdt": {"ask": 1145.60, "variation": 1.6},
+            },
         }
     }
-    
+
     result = sort_dollar_rates(dollar_rates)
-    
+
     assert len(result) == 8
     assert result[0]["name"] == "Oficial"
     assert result[0]["price"] == 1000.50
@@ -2710,10 +2714,11 @@ def test_sort_dollar_rates_success():
     for i in range(len(result) - 1):
         assert result[i]["price"] <= result[i + 1]["price"]
 
+
 def test_sort_dollar_rates_with_none_variations():
     """Test sort_dollar_rates with None variation values"""
     from api.index import sort_dollar_rates
-    
+
     dollar_rates = {
         "data": {
             "oficial": {"price": 1000.50, "variation": None},
@@ -2724,112 +2729,112 @@ def test_sort_dollar_rates_with_none_variations():
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": None},
                 "usdc": {"ask": 1140.30, "variation": None},
-                "usdt": {"ask": 1145.60, "variation": None}
-            }
+                "usdt": {"ask": 1145.60, "variation": None},
+            },
         }
     }
-    
+
     result = sort_dollar_rates(dollar_rates)
-    
+
     assert len(result) == 8
     for rate in result:
         assert rate["history"] is None
 
+
 def test_format_dollar_rates_with_positive_variations():
     """Test format_dollar_rates with positive variation values"""
     from api.index import format_dollar_rates
-    
+
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
         {"name": "Blue", "price": 1200.00, "history": 2.1},
-        {"name": "MEP", "price": 1050.25, "history": 0.5}
+        {"name": "MEP", "price": 1050.25, "history": 0.5},
     ]
-    
+
     result = format_dollar_rates(dollar_rates, 24)
-    
+
     expected_lines = [
         "Oficial: 1000.5 (+1.2% 24hs)",
         "Blue: 1200 (+2.1% 24hs)",
-        "MEP: 1050.25 (+0.5% 24hs)"
+        "MEP: 1050.25 (+0.5% 24hs)",
     ]
     assert result == "\n".join(expected_lines)
+
 
 def test_format_dollar_rates_with_negative_variations():
     """Test format_dollar_rates with negative variation values"""
     from api.index import format_dollar_rates
-    
+
     dollar_rates = [
         {"name": "Tarjeta", "price": 1600.75, "history": -0.8},
-        {"name": "CCL", "price": 1075.80, "history": -1.5}
+        {"name": "CCL", "price": 1075.80, "history": -1.5},
     ]
-    
+
     result = format_dollar_rates(dollar_rates, 12)
-    
-    expected_lines = [
-        "Tarjeta: 1600.75 (-0.8% 12hs)",
-        "CCL: 1075.8 (-1.5% 12hs)"
-    ]
+
+    expected_lines = ["Tarjeta: 1600.75 (-0.8% 12hs)", "CCL: 1075.8 (-1.5% 12hs)"]
     assert result == "\n".join(expected_lines)
+
 
 def test_format_dollar_rates_with_none_variations():
     """Test format_dollar_rates with None variation values"""
     from api.index import format_dollar_rates
-    
+
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": None},
-        {"name": "Blue", "price": 1200.00, "history": None}
+        {"name": "Blue", "price": 1200.00, "history": None},
     ]
-    
+
     result = format_dollar_rates(dollar_rates, 24)
-    
-    expected_lines = [
-        "Oficial: 1000.5",
-        "Blue: 1200"
-    ]
+
+    expected_lines = ["Oficial: 1000.5", "Blue: 1200"]
     assert result == "\n".join(expected_lines)
+
 
 def test_format_dollar_rates_mixed_variations():
     """Test format_dollar_rates with mixed variation values"""
     from api.index import format_dollar_rates
-    
+
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
         {"name": "Blue", "price": 1200.00, "history": None},
-        {"name": "Tarjeta", "price": 1600.75, "history": -0.8}
+        {"name": "Tarjeta", "price": 1600.75, "history": -0.8},
     ]
-    
+
     result = format_dollar_rates(dollar_rates, 6)
-    
+
     expected_lines = [
         "Oficial: 1000.5 (+1.2% 6hs)",
         "Blue: 1200",
-        "Tarjeta: 1600.75 (-0.8% 6hs)"
+        "Tarjeta: 1600.75 (-0.8% 6hs)",
     ]
     assert result == "\n".join(expected_lines)
+
 
 def test_format_dollar_rates_zero_decimal_formatting():
     """Test format_dollar_rates decimal formatting for whole numbers"""
     from api.index import format_dollar_rates
-    
+
     dollar_rates = [
         {"name": "Test1", "price": 1000.00, "history": 0.00},
         {"name": "Test2", "price": 1200.10, "history": 1.00},
-        {"name": "Test3", "price": 1500.50, "history": -2.50}
+        {"name": "Test3", "price": 1500.50, "history": -2.50},
     ]
-    
+
     result = format_dollar_rates(dollar_rates, 24)
-    
+
     expected_lines = [
         "Test1: 1000 (+0% 24hs)",
-        "Test2: 1200.1 (+1% 24hs)", 
-        "Test3: 1500.5 (-2.5% 24hs)"
+        "Test2: 1200.1 (+1% 24hs)",
+        "Test3: 1500.5 (-2.5% 24hs)",
     ]
     assert result == "\n".join(expected_lines)
+
 
 def test_clean_crypto_data_success():
     """Test clean_crypto_data with valid crypto data"""
     from api.index import clean_crypto_data
-    
+
     cryptos = [
         {
             "name": "Bitcoin",
@@ -2848,14 +2853,14 @@ def test_clean_crypto_data_success():
                     "percent_change_7d": -1.8,
                     "percent_change_30d": 15.2,
                     "market_cap": 877500000000,
-                    "market_cap_dominance": 42.5
+                    "market_cap_dominance": 42.5,
                 }
-            }
+            },
         }
     ]
-    
+
     result = clean_crypto_data(cryptos)
-    
+
     assert len(result) == 1
     crypto = result[0]
     assert crypto["name"] == "Bitcoin"
@@ -2866,10 +2871,11 @@ def test_clean_crypto_data_success():
     assert crypto["quote"]["USD"]["price"] == 45000.50
     assert crypto["quote"]["USD"]["changes"]["24h"] == 2.1
 
+
 def test_clean_crypto_data_multiple_cryptos():
     """Test clean_crypto_data with multiple cryptocurrencies"""
     from api.index import clean_crypto_data
-    
+
     cryptos = [
         {
             "name": "Bitcoin",
@@ -2888,9 +2894,9 @@ def test_clean_crypto_data_multiple_cryptos():
                     "percent_change_7d": -1.8,
                     "percent_change_30d": 15.2,
                     "market_cap": 877500000000,
-                    "market_cap_dominance": 42.5
+                    "market_cap_dominance": 42.5,
                 }
-            }
+            },
         },
         {
             "name": "Ethereum",
@@ -2909,326 +2915,338 @@ def test_clean_crypto_data_multiple_cryptos():
                     "percent_change_7d": -3.2,
                     "percent_change_30d": 8.5,
                     "market_cap": 360000000000,
-                    "market_cap_dominance": 18.2
+                    "market_cap_dominance": 18.2,
                 }
-            }
-        }
+            },
+        },
     ]
-    
+
     result = clean_crypto_data(cryptos)
-    
+
     assert len(result) == 2
     assert result[0]["name"] == "Bitcoin"
     assert result[1]["name"] == "Ethereum"
     assert result[1]["supply"]["max"] is None
     assert result[1]["supply"]["infinite"] is True
 
+
 def test_format_market_info_with_crypto_and_dollar():
     """Test format_market_info with both crypto and dollar data"""
     from api.index import format_market_info
-    
+
     market = {
         "crypto": [
             {"name": "Bitcoin", "price": 45000.50},
-            {"name": "Ethereum", "price": 3000.25}
+            {"name": "Ethereum", "price": 3000.25},
         ],
         "dollar": [
             {"name": "Oficial", "price": 1000.50},
-            {"name": "Blue", "price": 1200.00}
-        ]
+            {"name": "Blue", "price": 1200.00},
+        ],
     }
-    
+
     result = format_market_info(market)
-    
+
     assert "PRECIOS DE CRIPTOS:" in result
     assert "DOLARES:" in result
     assert '"name": "Bitcoin"' in result
     assert '"name": "Oficial"' in result
+
 
 def test_format_market_info_crypto_only():
     """Test format_market_info with only crypto data"""
     from api.index import format_market_info
-    
-    market = {
-        "crypto": [
-            {"name": "Bitcoin", "price": 45000.50}
-        ]
-    }
-    
+
+    market = {"crypto": [{"name": "Bitcoin", "price": 45000.50}]}
+
     result = format_market_info(market)
-    
+
     assert "PRECIOS DE CRIPTOS:" in result
     assert "DOLARES:" not in result
     assert '"name": "Bitcoin"' in result
 
+
 def test_format_market_info_dollar_only():
     """Test format_market_info with only dollar data"""
     from api.index import format_market_info
-    
-    market = {
-        "dollar": [
-            {"name": "Oficial", "price": 1000.50}
-        ]
-    }
-    
+
+    market = {"dollar": [{"name": "Oficial", "price": 1000.50}]}
+
     result = format_market_info(market)
-    
+
     assert "PRECIOS DE CRIPTOS:" not in result
     assert "DOLARES:" in result
     assert '"name": "Oficial"' in result
 
+
 def test_format_market_info_empty():
     """Test format_market_info with empty market data"""
     from api.index import format_market_info
-    
+
     market = {}
-    
+
     result = format_market_info(market)
-    
+
     assert result == ""
+
 
 def test_get_weather_description_clear():
     """Test get_weather_description for clear weather codes"""
     from api.index import get_weather_description
-    
+
     assert get_weather_description(0) == "despejado"
     assert get_weather_description(1) == "mayormente despejado"
     assert get_weather_description(2) == "parcialmente nublado"
     assert get_weather_description(3) == "nublado"
 
+
 def test_get_weather_description_rain():
     """Test get_weather_description for rain weather codes"""
     from api.index import get_weather_description
-    
+
     assert get_weather_description(61) == "lluvia leve"
     assert get_weather_description(63) == "lluvia moderada"
     assert get_weather_description(65) == "lluvia intensa"
 
+
 def test_get_weather_description_storm():
     """Test get_weather_description for storm weather codes"""
     from api.index import get_weather_description
-    
+
     assert get_weather_description(95) == "tormenta"
     assert get_weather_description(96) == "tormenta con granizo leve"
     assert get_weather_description(99) == "tormenta con granizo intenso"
 
+
 def test_get_weather_description_unknown():
     """Test get_weather_description for unknown weather codes"""
     from api.index import get_weather_description
-    
+
     assert get_weather_description(999) == "clima raro"
     assert get_weather_description(-1) == "clima raro"
 
 
-# === PHASE 5: ADVANCED FEATURES ===
-
 def test_download_telegram_file_success():
     """Test download_telegram_file with successful download"""
     from api.index import download_telegram_file
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.get"
     ) as mock_get:
         mock_env.return_value = "test_token"
-        
+
         # Mock file info response
         mock_file_info = MagicMock()
         mock_file_info.json.return_value = {
             "ok": True,
-            "result": {"file_path": "photos/file_123.jpg"}
+            "result": {"file_path": "photos/file_123.jpg"},
         }
         mock_file_info.raise_for_status.return_value = None
-        
+
         # Mock file download response
         mock_file_download = MagicMock()
         mock_file_download.content = b"fake image data"
         mock_file_download.raise_for_status.return_value = None
-        
+
         # Configure side effect for two different calls
         mock_get.side_effect = [mock_file_info, mock_file_download]
-        
+
         result = download_telegram_file("test_file_id")
-        
+
         assert result == b"fake image data"
         assert mock_get.call_count == 2
-        
+
         # Verify file info call
         info_call = mock_get.call_args_list[0]
         assert "getFile" in info_call[0][0]
         assert info_call[1]["params"]["file_id"] == "test_file_id"
-        
+
         # Verify file download call
         download_call = mock_get.call_args_list[1]
         assert "photos/file_123.jpg" in download_call[0][0]
 
+
 def test_download_telegram_file_api_error():
     """Test download_telegram_file with API error"""
     from api.index import download_telegram_file
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.get"
     ) as mock_get:
         mock_env.return_value = "test_token"
-        
+
         # Mock failed API response
         mock_response = MagicMock()
         mock_response.json.return_value = {"ok": False, "error": "File not found"}
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
-        
+
         result = download_telegram_file("invalid_file_id")
-        
+
         assert result is None
+
 
 def test_download_telegram_file_network_error():
     """Test download_telegram_file with network error"""
     from api.index import download_telegram_file
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.get"
     ) as mock_get:
         mock_env.return_value = "test_token"
         mock_get.side_effect = requests.exceptions.RequestException("Network error")
-        
+
         result = download_telegram_file("test_file_id")
-        
+
         assert result is None
+
 
 def test_encode_image_to_base64_success():
     """Test encode_image_to_base64 with valid image data"""
     from api.index import encode_image_to_base64
     import base64
-    
+
     test_data = b"fake image bytes"
     expected = base64.b64encode(test_data).decode("utf-8")
-    
+
     result = encode_image_to_base64(test_data)
-    
+
     assert result == expected
     assert isinstance(result, str)
+
 
 def test_encode_image_to_base64_empty():
     """Test encode_image_to_base64 with empty data"""
     from api.index import encode_image_to_base64
-    
+
     result = encode_image_to_base64(b"")
-    
+
     assert result == ""
+
 
 def test_resize_image_if_needed_no_resize():
     """Test resize_image_if_needed when image is already small enough"""
     from api.index import resize_image_if_needed
-    
+
     with patch("api.index.Image") as mock_image_module:
         # Mock small image
         mock_image = MagicMock()
         mock_image.size = (200, 150)  # Smaller than max_size of 512
         mock_image_module.open.return_value = mock_image
-        
+
         test_data = b"small image data"
         result = resize_image_if_needed(test_data, max_size=512)
-        
+
         assert result == test_data  # Should return original data unchanged
+
 
 def test_resize_image_if_needed_with_resize():
     """Test resize_image_if_needed when image needs resizing"""
     from api.index import resize_image_if_needed
-    
-    with patch("api.index.Image") as mock_image_module, patch("api.index.io.BytesIO") as mock_bytesio:
+
+    with patch("api.index.Image") as mock_image_module, patch(
+        "api.index.io.BytesIO"
+    ) as mock_bytesio:
         # Mock large image that needs resizing
         mock_image = MagicMock()
         mock_image.size = (1024, 768)  # Larger than max_size of 512
         mock_image.mode = "RGB"
-        
+
         # Mock resized image
         mock_resized = MagicMock()
         mock_image.resize.return_value = mock_resized
-        
+
         # Mock output buffer
         mock_output_buffer = MagicMock()
         mock_output_buffer.getvalue.return_value = b"resized image data"
         mock_bytesio.return_value = mock_output_buffer
-        
+
         mock_image_module.open.return_value = mock_image
         mock_image_module.Resampling.LANCZOS = "LANCZOS"
-        
+
         test_data = b"large image data"
         result = resize_image_if_needed(test_data, max_size=512)
-        
+
         assert result == b"resized image data"
         mock_image.resize.assert_called_once()
         mock_resized.save.assert_called_once()
 
+
 def test_resize_image_if_needed_rgba_conversion():
     """Test resize_image_if_needed with RGBA image conversion"""
     from api.index import resize_image_if_needed
-    
-    with patch("api.index.Image") as mock_image_module, patch("api.index.io.BytesIO") as mock_bytesio:
+
+    with patch("api.index.Image") as mock_image_module, patch(
+        "api.index.io.BytesIO"
+    ) as mock_bytesio:
         # Mock large RGBA image that needs conversion
         mock_image = MagicMock()
         mock_image.size = (1024, 768)
         mock_image.mode = "RGBA"
-        
+
         # Mock converted image
         mock_converted = MagicMock()
         mock_image.convert.return_value = mock_converted
-        
+
         # Mock resized image that also has RGBA mode
         mock_resized = MagicMock()
         mock_resized.mode = "RGBA"
         mock_resized_converted = MagicMock()
         mock_resized.convert.return_value = mock_resized_converted
         mock_image.resize.return_value = mock_resized
-        
+
         # Mock output buffer
         mock_output_buffer = MagicMock()
         mock_output_buffer.getvalue.return_value = b"converted resized image"
         mock_bytesio.return_value = mock_output_buffer
-        
+
         mock_image_module.open.return_value = mock_image
         mock_image_module.Resampling.LANCZOS = "LANCZOS"
-        
+
         result = resize_image_if_needed(b"rgba image data")
-        
+
         assert result == b"converted resized image"
         mock_resized.convert.assert_called_once_with("RGB")
+
 
 def test_resize_image_if_needed_import_error():
     """Test resize_image_if_needed when PIL is not available"""
     from api.index import resize_image_if_needed
-    
+
     with patch("api.index.Image") as mock_image_module:
         mock_image_module.open.side_effect = ImportError("PIL not available")
-        
+
         test_data = b"image data"
         result = resize_image_if_needed(test_data)
-        
+
         assert result == test_data  # Should return original data on ImportError
+
 
 def test_resize_image_if_needed_processing_error():
     """Test resize_image_if_needed with image processing error"""
     from api.index import resize_image_if_needed
-    
+
     with patch("api.index.Image") as mock_image_module:
         mock_image_module.open.side_effect = Exception("Invalid image format")
-        
+
         test_data = b"corrupted image data"
         result = resize_image_if_needed(test_data)
-        
+
         assert result == test_data  # Should return original data on error
+
 
 def test_describe_image_cloudflare_success():
     """Test describe_image_cloudflare with successful API response"""
     from api.index import describe_image_cloudflare
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.post"
     ) as mock_post:
         mock_env.side_effect = lambda key, default=None: {
             "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
         }.get(key, default)
-        
+
         # Mock successful response
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -3237,71 +3255,73 @@ def test_describe_image_cloudflare_success():
         }
         mock_response.raise_for_status.return_value = None
         mock_post.return_value = mock_response
-        
+
         result = describe_image_cloudflare(b"base64_image_data")
-        
+
         assert result == "A beautiful landscape with mountains"
         mock_post.assert_called_once()
+
 
 def test_describe_image_cloudflare_api_error():
     """Test describe_image_cloudflare with API error"""
     from api.index import describe_image_cloudflare
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.post"
     ) as mock_post:
         mock_env.side_effect = lambda key, default=None: {
             "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
         }.get(key, default)
-        
+
         mock_post.side_effect = requests.exceptions.RequestException("API error")
-        
+
         result = describe_image_cloudflare(b"base64_image_data")
-        
+
         assert result is None
+
 
 def test_transcribe_audio_cloudflare_success():
     """Test transcribe_audio_cloudflare with successful transcription"""
     from api.index import transcribe_audio_cloudflare
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.post"
     ) as mock_post:
         mock_env.side_effect = lambda key, default=None: {
             "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
         }.get(key, default)
-        
+
         # Mock successful response
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "success": True,
-            "result": {"text": "Hello, this is a test audio transcription"}
+            "result": {"text": "Hello, this is a test audio transcription"},
         }
         mock_response.raise_for_status.return_value = None
         mock_post.return_value = mock_response
-        
+
         result = transcribe_audio_cloudflare(b"audio_data")
-        
+
         assert result == "Hello, this is a test audio transcription"
         mock_post.assert_called_once()
+
 
 def test_transcribe_audio_cloudflare_network_error():
     """Test transcribe_audio_cloudflare with network error"""
     from api.index import transcribe_audio_cloudflare
-    
+
     with patch("api.index.environ.get") as mock_env, patch(
         "api.index.requests.post"
     ) as mock_post:
         mock_env.side_effect = lambda key, default=None: {
             "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id"
+            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
         }.get(key, default)
-        
-        mock_post.side_effect = requests.exceptions.RequestException("Network error")
-        
-        result = transcribe_audio_cloudflare(b"audio_data")
-        
-        assert result is None
 
+        mock_post.side_effect = requests.exceptions.RequestException("Network error")
+
+        result = transcribe_audio_cloudflare(b"audio_data")
+
+        assert result is None
