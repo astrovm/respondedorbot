@@ -2042,3 +2042,636 @@ def test_cache_bcra_variables_exception():
         
         # Should not raise exception, just print error
         cache_bcra_variables(test_data)
+
+
+# Phase 2: Media Processing Functions Tests
+
+def test_handle_transcribe_with_message_no_reply():
+    from api.index import handle_transcribe_with_message
+    
+    message = {
+        "message_id": 1,
+        "chat": {"id": 123},
+        "text": "/transcribe"
+    }
+    
+    result = handle_transcribe_with_message(message)
+    assert result == "Respondé a un mensaje con audio o imagen para transcribir/describir"
+
+
+def test_handle_transcribe_with_message_voice_cached():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_transcription") as mock_cached:
+        mock_cached.return_value = "cached voice transcription"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "voice": {"file_id": "voice123"}
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🎵 Transcripción: cached voice transcription"
+        mock_cached.assert_called_once_with("voice123")
+
+
+def test_handle_transcribe_with_message_voice_download_success():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_transcription") as mock_cached, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download, patch(
+        "api.index.transcribe_audio_cloudflare"
+    ) as mock_transcribe:
+        
+        mock_cached.return_value = None
+        mock_download.return_value = b"audio data"
+        mock_transcribe.return_value = "new transcription"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "voice": {"file_id": "voice123"}
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🎵 Transcripción: new transcription"
+        mock_download.assert_called_once_with("voice123")
+        mock_transcribe.assert_called_once_with(b"audio data", "voice123")
+
+
+def test_handle_transcribe_with_message_voice_download_fail():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_transcription") as mock_cached, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download:
+        
+        mock_cached.return_value = None
+        mock_download.return_value = None
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "voice": {"file_id": "voice123"}
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "No pude descargar el audio"
+
+
+def test_handle_transcribe_with_message_audio_success():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_transcription") as mock_cached, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download, patch(
+        "api.index.transcribe_audio_cloudflare"
+    ) as mock_transcribe:
+        
+        mock_cached.return_value = None
+        mock_download.return_value = b"audio data"
+        mock_transcribe.return_value = "audio transcription"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "audio": {"file_id": "audio123"}
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🎵 Transcripción: audio transcription"
+
+
+def test_handle_transcribe_with_message_photo_cached():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_description") as mock_cached:
+        mock_cached.return_value = "cached image description"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "photo": [{"file_id": "photo123"}]
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🖼️ Descripción: cached image description"
+        mock_cached.assert_called_once_with("photo123")
+
+
+def test_handle_transcribe_with_message_photo_success():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_description") as mock_cached, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download, patch(
+        "api.index.resize_image_if_needed"
+    ) as mock_resize, patch(
+        "api.index.describe_image_cloudflare"
+    ) as mock_describe:
+        
+        mock_cached.return_value = None
+        mock_download.return_value = b"image data"
+        mock_resize.return_value = b"resized image data"
+        mock_describe.return_value = "image description"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "photo": [{"file_id": "photo123"}]
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🖼️ Descripción: image description"
+        mock_download.assert_called_once_with("photo123")
+        mock_resize.assert_called_once_with(b"image data")
+        mock_describe.assert_called_once_with(
+            b"resized image data",
+            "Describe what you see in this image in detail.",
+            "photo123"
+        )
+
+
+def test_handle_transcribe_with_message_sticker_success():
+    from api.index import handle_transcribe_with_message
+    
+    with patch("api.index.get_cached_description") as mock_cached, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download, patch(
+        "api.index.resize_image_if_needed"
+    ) as mock_resize, patch(
+        "api.index.describe_image_cloudflare"
+    ) as mock_describe:
+        
+        mock_cached.return_value = None
+        mock_download.return_value = b"sticker data"
+        mock_resize.return_value = b"resized sticker data"
+        mock_describe.return_value = "sticker description"
+        
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "sticker": {"file_id": "sticker123"}
+            }
+        }
+        
+        result = handle_transcribe_with_message(message)
+        assert result == "🎨 Descripción del sticker: sticker description"
+
+
+def test_handle_transcribe_with_message_no_media():
+    from api.index import handle_transcribe_with_message
+    
+    message = {
+        "message_id": 1,
+        "chat": {"id": 123},
+        "text": "/transcribe",
+        "reply_to_message": {
+            "text": "just text"
+        }
+    }
+    
+    result = handle_transcribe_with_message(message)
+    assert result == "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+
+
+def test_handle_transcribe_with_message_exception():
+    from api.index import handle_transcribe_with_message
+    from typing import cast, Dict, Any
+    
+    # Malformed message that causes exception
+    message = cast(Dict[str, Any], None)
+    
+    result = handle_transcribe_with_message(message)
+    assert result == "Error procesando el comando, intentá más tarde"
+
+
+def test_handle_transcribe():
+    from api.index import handle_transcribe
+    
+    result = handle_transcribe()
+    assert result == "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
+
+
+def test_format_bcra_variables_empty():
+    from api.index import format_bcra_variables
+    
+    result = format_bcra_variables({})
+    assert result == "No se pudieron obtener las variables del BCRA"
+    
+    from typing import cast, Dict, Any
+    result = format_bcra_variables(cast(Dict[str, Any], None))
+    assert result == "No se pudieron obtener las variables del BCRA"
+
+
+def test_format_bcra_variables_with_data():
+    from api.index import format_bcra_variables
+    
+    variables = {
+        "base_monetaria_total": {"value": "5.000.000,50", "date": "15/01/2025"},
+        "inflacion_mensual": {"value": "5,2", "date": "15/01/2025"},
+        "inflacion_interanual": {"value": "150,5", "date": "15/01/2025"},
+        "inflacion_esperada": {"value": "3,1", "date": "15/01/2025"},
+        "tasa_tamar": {"value": "45,0", "date": "15/01/2025"},
+        "tasa_badlar": {"value": "40,5", "date": "15/01/2025"}, 
+        "tasa_justicia": {"value": "50,0", "date": "15/01/2025"},
+        "dolar_minorista_compra": {"value": "1.200,50", "date": "15/01/2025"},
+        "dolar_minorista_venta": {"value": "1.250,75", "date": "15/01/2025"},
+        "dolar_mayorista": {"value": "1.180,25", "date": "15/01/2025"},
+        "uva": {"value": "500,75", "date": "15/01/2025"},
+        "cer": {"value": "0,45", "date": "15/01/2025"},
+        "reservas_int": {"value": "25.000", "date": "15/01/2025"}
+    }
+    
+    result = format_bcra_variables(variables)
+    assert "📊 Variables principales BCRA" in result
+    assert "15/01/25" in result  # Date should be formatted
+
+
+def test_handle_bcra_variables_cached():
+    from api.index import handle_bcra_variables
+    
+    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
+        "api.index.format_bcra_variables"
+    ) as mock_format:
+        
+        mock_cached.return_value = {"test": "data"}
+        mock_format.return_value = "formatted variables"
+        
+        result = handle_bcra_variables()
+        assert result == "formatted variables"
+        mock_cached.assert_called_once()
+        mock_format.assert_called_once_with({"test": "data"})
+
+
+def test_handle_bcra_variables_scrape_fresh():
+    from api.index import handle_bcra_variables
+    
+    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
+        "api.index.scrape_bcra_variables"
+    ) as mock_scrape, patch(
+        "api.index.cache_bcra_variables"
+    ) as mock_cache, patch(
+        "api.index.format_bcra_variables"
+    ) as mock_format:
+        
+        mock_cached.return_value = None
+        mock_scrape.return_value = {"scraped": "data"}
+        mock_format.return_value = "formatted scraped data"
+        
+        result = handle_bcra_variables()
+        assert result == "formatted scraped data"
+        mock_scrape.assert_called_once()
+        mock_cache.assert_called_once_with({"scraped": "data"})
+        mock_format.assert_called_once_with({"scraped": "data"})
+
+
+def test_handle_bcra_variables_no_data():
+    from api.index import handle_bcra_variables
+    
+    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
+        "api.index.scrape_bcra_variables"
+    ) as mock_scrape:
+        
+        mock_cached.return_value = None
+        mock_scrape.return_value = None
+        
+        result = handle_bcra_variables()
+        assert result == "No pude obtener las variables del BCRA en este momento, probá más tarde"
+
+
+def test_handle_bcra_variables_exception():
+    from api.index import handle_bcra_variables
+    
+    with patch("api.index.get_cached_bcra_variables") as mock_cached:
+        mock_cached.side_effect = Exception("Cache error")
+        
+        result = handle_bcra_variables()
+        assert result == "Error al obtener las variables del BCRA"
+
+
+# Phase 3: AI Context Functions Tests
+
+def test_get_market_context_success():
+    from api.index import get_market_context
+    
+    with patch("api.index.cached_requests") as mock_cached, patch(
+        "api.index.clean_crypto_data"
+    ) as mock_clean, patch("os.environ.get") as mock_env:
+        
+        # Mock crypto response
+        crypto_response = {
+            "data": {
+                "data": [
+                    {"symbol": "BTC", "quote": {"USD": {"price": 50000}}}
+                ]
+            }
+        }
+        
+        # Mock dollar response  
+        dollar_response = {
+            "data": {
+                "oficial": {"price": 1000},
+                "blue": {"price": 1200}
+            }
+        }
+        
+        def mock_requests_side_effect(url, *_args, **_kwargs):
+            if "coinmarketcap" in url:
+                return crypto_response
+            elif "criptoya" in url:
+                return dollar_response
+            return None
+        
+        mock_cached.side_effect = mock_requests_side_effect
+        mock_clean.return_value = [{"symbol": "BTC", "price": 50000}]
+        mock_env.return_value = "test_api_key"
+        
+        result = get_market_context()
+        
+        assert "crypto" in result
+        assert "dollar" in result
+        assert result["crypto"] == [{"symbol": "BTC", "price": 50000}]
+        assert result["dollar"] == {"oficial": {"price": 1000}, "blue": {"price": 1200}}
+
+
+def test_get_market_context_crypto_fail():
+    from api.index import get_market_context
+    
+    with patch("api.index.cached_requests") as mock_cached, patch(
+        "os.environ.get"
+    ) as mock_env:
+        
+        # Mock dollar response only
+        dollar_response = {
+            "data": {
+                "oficial": {"price": 1000}
+            }
+        }
+        
+        def mock_requests_side_effect(url, *_args, **_kwargs):
+            if "coinmarketcap" in url:
+                return None  # Crypto fails
+            elif "criptoya" in url:
+                return dollar_response
+            return None
+        
+        mock_cached.side_effect = mock_requests_side_effect
+        mock_env.return_value = "test_api_key"
+        
+        result = get_market_context()
+        
+        assert "crypto" not in result
+        assert "dollar" in result
+
+
+def test_get_market_context_all_fail():
+    from api.index import get_market_context
+    
+    with patch("api.index.cached_requests") as mock_cached, patch(
+        "os.environ.get"
+    ) as mock_env:
+        
+        mock_cached.return_value = None
+        mock_env.return_value = "test_api_key"
+        
+        result = get_market_context()
+        
+        assert result == {}
+
+
+def test_get_weather_context_success():
+    from api.index import get_weather_context
+    
+    with patch("api.index.get_weather") as mock_weather, patch(
+        "api.index.get_weather_description"
+    ) as mock_description:
+        
+        mock_weather.return_value = {
+            "temperature": 25.0,
+            "weather_code": 0
+        }
+        mock_description.return_value = "cielo despejado"
+        
+        result = get_weather_context()
+        
+        assert result is not None
+        assert result["temperature"] == 25.0
+        assert result["weather_code"] == 0
+        assert result["description"] == "cielo despejado"
+        mock_description.assert_called_once_with(0)
+
+
+def test_get_weather_context_fail():
+    from api.index import get_weather_context
+    
+    with patch("api.index.get_weather") as mock_weather:
+        mock_weather.return_value = None
+        
+        result = get_weather_context()
+        
+        assert result is None
+
+
+def test_get_weather_context_exception():
+    from api.index import get_weather_context
+    
+    with patch("api.index.get_weather") as mock_weather:
+        mock_weather.side_effect = Exception("Weather API error")
+        
+        result = get_weather_context()
+        
+        assert result is None
+
+
+def test_get_time_context():
+    from api.index import get_time_context
+    from datetime import datetime, timezone, timedelta
+    
+    with patch("api.index.datetime") as mock_datetime:
+        # Mock a fixed time
+        fixed_time = datetime(2024, 1, 15, 14, 30, 0)
+        buenos_aires_tz = timezone(timedelta(hours=-3))
+        fixed_time_ba = fixed_time.replace(tzinfo=buenos_aires_tz)
+        
+        mock_datetime.now.return_value = fixed_time_ba
+        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+        
+        result = get_time_context()
+        
+        assert "datetime" in result
+        assert "formatted" in result
+        assert result["datetime"] == fixed_time_ba
+
+
+def test_get_fallback_response():
+    from api.index import get_fallback_response
+    
+    messages = [{"role": "user", "content": "hello"}]
+    
+    result = get_fallback_response(messages)
+    
+    # Should return a string (one of many predefined fallback responses)
+    assert isinstance(result, str)
+    assert len(result) > 0
+    assert len(result) < 50  # Reasonable length for a fallback response
+
+
+def test_build_system_message():
+    from api.index import build_system_message
+    
+    context = {
+        "market": {
+            "crypto": [{"symbol": "BTC", "price": 50000}],
+            "dollar": {"oficial": {"price": 1000}}
+        },
+        "weather": {
+            "temperature": 25,
+            "apparent_temperature": 26,
+            "precipitation_probability": 10,
+            "description": "cielo despejado",
+            "cloud_cover": 20,
+            "visibility": 10000
+        },
+        "time": {"formatted": "Monday 15/01/2024"}
+    }
+    
+    result = build_system_message(context)
+    
+    assert result["role"] == "system"
+    assert "content" in result
+    assert isinstance(result["content"], list)
+    assert len(result["content"]) > 0
+    content_text = result["content"][0]["text"]
+    assert "argentina" in content_text.lower()
+    assert "gordo" in content_text.lower()
+
+
+def test_build_system_message_empty_context():
+    from api.index import build_system_message
+    
+    context = {"market": {}, "weather": None, "time": {"formatted": "Monday"}}
+    
+    result = build_system_message(context)
+    
+    assert result["role"] == "system"
+    assert "content" in result
+    assert isinstance(result["content"], list)
+    # Should still have base personality
+    content_text = result["content"][0]["text"]
+    assert len(content_text) > 100
+
+
+def test_clean_crypto_data():
+    from api.index import clean_crypto_data
+    
+    raw_data = [
+        {
+            "id": 1,
+            "name": "Bitcoin",
+            "symbol": "BTC",
+            "slug": "bitcoin",
+            "max_supply": 21000000,
+            "circulating_supply": 19500000,
+            "total_supply": 19500000,
+            "infinite_supply": False,
+            "quote": {
+                "USD": {
+                    "price": 50000.123456,
+                    "volume_24h": 1000000000,
+                    "percent_change_1h": 0.5,
+                    "percent_change_24h": 2.5,
+                    "percent_change_7d": 5.0,
+                    "percent_change_30d": 10.0,
+                    "market_cap": 1000000000000,
+                    "market_cap_dominance": 45.5
+                }
+            }
+        }
+    ]
+    
+    result = clean_crypto_data(raw_data)
+    
+    assert len(result) == 1
+    assert result[0]["symbol"] == "BTC"
+    assert result[0]["name"] == "Bitcoin"
+    assert result[0]["slug"] == "bitcoin"
+    assert result[0]["quote"]["USD"]["price"] == 50000.123456
+
+
+def test_format_market_info():
+    from api.index import format_market_info
+    
+    market_data = {
+        "crypto": [
+            {"symbol": "BTC", "price": 50000, "change_24h": 2.5}
+        ],
+        "dollar": {
+            "oficial": {"price": 1000},
+            "blue": {"price": 1200}
+        }
+    }
+    
+    result = format_market_info(market_data)
+    
+    assert "BTC" in result
+    assert "50000" in result or "50,000" in result
+    assert "1000" in result or "1,000" in result
+
+
+def test_format_market_info_empty():
+    from api.index import format_market_info
+    
+    result = format_market_info({})
+    
+    assert result == ""
+
+
+def test_format_weather_info():
+    from api.index import format_weather_info
+    
+    weather_data = {
+        "temperature": 25.5,
+        "apparent_temperature": 26.0,
+        "precipitation_probability": 10,
+        "description": "cielo despejado",
+        "cloud_cover": 20,
+        "visibility": 10000
+    }
+    
+    result = format_weather_info(weather_data)
+    
+    assert "26" in result  # apparent_temperature
+    assert "cielo despejado" in result
+    assert "10%" in result  # precipitation_probability
+
+
+def test_format_weather_info_empty():
+    from api.index import format_weather_info
+    import pytest
+    
+    # Function doesn't handle empty data gracefully - should raise KeyError
+    with pytest.raises(KeyError):
+        format_weather_info({})
