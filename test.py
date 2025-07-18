@@ -1768,3 +1768,277 @@ def test_admin_report_basic():
         mock_send_msg.assert_called_once_with(
             "12345", "Admin report from test_instance: test message"
         )
+
+
+# Phase 1: Cache Functions Tests
+
+def test_get_cached_transcription_success():
+    from api.index import get_cached_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = "cached transcription text"
+        
+        result = get_cached_transcription("test_file_id")
+        
+        assert result == "cached transcription text"
+        mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
+
+
+def test_get_cached_transcription_not_found():
+    from api.index import get_cached_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = None
+        
+        result = get_cached_transcription("test_file_id")
+        
+        assert result is None
+        mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
+
+
+def test_get_cached_transcription_exception():
+    from api.index import get_cached_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        
+        result = get_cached_transcription("test_file_id")
+        
+        assert result is None
+
+
+def test_cache_transcription_success():
+    from api.index import cache_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        
+        cache_transcription("test_file_id", "transcription text", 3600)
+        
+        mock_redis.setex.assert_called_once_with("audio_transcription:test_file_id", 3600, "transcription text")
+
+
+def test_cache_transcription_default_ttl():
+    from api.index import cache_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        
+        cache_transcription("test_file_id", "transcription text")
+        
+        mock_redis.setex.assert_called_once_with("audio_transcription:test_file_id", 604800, "transcription text")
+
+
+def test_cache_transcription_exception():
+    from api.index import cache_transcription
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        
+        # Should not raise exception, just print error
+        cache_transcription("test_file_id", "transcription text")
+
+
+def test_get_cached_description_success():
+    from api.index import get_cached_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = "cached image description"
+        
+        result = get_cached_description("test_file_id")
+        
+        assert result == "cached image description"
+        mock_redis.get.assert_called_once_with("image_description:test_file_id")
+
+
+def test_get_cached_description_not_found():
+    from api.index import get_cached_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = None
+        
+        result = get_cached_description("test_file_id")
+        
+        assert result is None
+        mock_redis.get.assert_called_once_with("image_description:test_file_id")
+
+
+def test_get_cached_description_exception():
+    from api.index import get_cached_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        
+        result = get_cached_description("test_file_id")
+        
+        assert result is None
+
+
+def test_cache_description_success():
+    from api.index import cache_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        
+        cache_description("test_file_id", "image description", 3600)
+        
+        mock_redis.setex.assert_called_once_with("image_description:test_file_id", 3600, "image description")
+
+
+def test_cache_description_default_ttl():
+    from api.index import cache_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        
+        cache_description("test_file_id", "image description")
+        
+        mock_redis.setex.assert_called_once_with("image_description:test_file_id", 604800, "image description")
+
+
+def test_cache_description_exception():
+    from api.index import cache_description
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        
+        # Should not raise exception, just print error
+        cache_description("test_file_id", "image description")
+
+
+def test_get_cache_history_success():
+    from api.index import get_cache_history
+    import json
+    from datetime import datetime, timedelta
+    
+    with patch("api.index.datetime") as mock_datetime:
+        mock_redis = MagicMock()
+        test_data = {"data": "test", "timestamp": "2024-01-01"}
+        mock_redis.get.return_value = json.dumps(test_data)
+        
+        # Mock datetime.now() to return a fixed time
+        fixed_time = datetime(2024, 1, 1, 12, 0, 0)
+        mock_datetime.now.return_value = fixed_time
+        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+        
+        result = get_cache_history(1, "test_hash", mock_redis)
+        
+        assert result == test_data
+        expected_timestamp = (fixed_time - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        mock_redis.get.assert_called_once_with(expected_timestamp + "test_hash")
+
+
+def test_get_cache_history_not_found():
+    from api.index import get_cache_history
+    
+    mock_redis = MagicMock()
+    mock_redis.get.return_value = None
+    
+    result = get_cache_history(1, "test_hash", mock_redis)
+    
+    assert result is None
+
+
+def test_get_cache_history_invalid_data():
+    from api.index import get_cache_history
+    import json
+    
+    mock_redis = MagicMock()
+    test_data = {"data": "test"}  # Missing timestamp
+    mock_redis.get.return_value = json.dumps(test_data)
+    
+    result = get_cache_history(1, "test_hash", mock_redis)
+    
+    assert result is None
+
+
+def test_get_cached_bcra_variables_success():
+    from api.index import get_cached_bcra_variables
+    import json
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
+        mock_redis.get.return_value = json.dumps(test_data)
+        
+        result = get_cached_bcra_variables()
+        
+        assert result == test_data
+        mock_redis.get.assert_called_once_with("bcra_variables")
+
+
+def test_get_cached_bcra_variables_not_found():
+    from api.index import get_cached_bcra_variables
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = None
+        
+        result = get_cached_bcra_variables()
+        
+        assert result is None
+        mock_redis.get.assert_called_once_with("bcra_variables")
+
+
+def test_get_cached_bcra_variables_exception():
+    from api.index import get_cached_bcra_variables
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        
+        result = get_cached_bcra_variables()
+        
+        assert result is None
+
+
+def test_cache_bcra_variables_success():
+    from api.index import cache_bcra_variables
+    import json
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
+        
+        cache_bcra_variables(test_data, 600)
+        
+        mock_redis.setex.assert_called_once_with("bcra_variables", 600, json.dumps(test_data))
+
+
+def test_cache_bcra_variables_default_ttl():
+    from api.index import cache_bcra_variables
+    import json
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        test_data = {"base_monetaria": "1000000"}
+        
+        cache_bcra_variables(test_data)
+        
+        mock_redis.setex.assert_called_once_with("bcra_variables", 300, json.dumps(test_data))
+
+
+def test_cache_bcra_variables_exception():
+    from api.index import cache_bcra_variables
+    
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+        test_data = {"base_monetaria": "1000000"}
+        
+        # Should not raise exception, just print error
+        cache_bcra_variables(test_data)
