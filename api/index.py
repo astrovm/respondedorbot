@@ -1317,8 +1317,8 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response with retries and timeout (text-only)"""
     models = [
+        "moonshotai/kimi-k2:free",
         "deepseek/deepseek-chat-v3-0324:free",
-        "mistralai/mistral-small-3.2-24b-instruct:free",
         "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     ]
 
@@ -1368,7 +1368,9 @@ def get_ai_response(
     return None
 
 
-def get_cloudflare_ai_response(system_msg: Dict[str, Any], messages: List[Dict[str, Any]]) -> Optional[str]:
+def get_cloudflare_ai_response(
+    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> Optional[str]:
     """Fallback using Cloudflare Workers AI for text-only"""
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -1763,7 +1765,9 @@ def get_chat_history(
 ) -> List[Dict]:
     try:
         chat_history_key = f"chat_history:{chat_id}"
-        history: List[str] = cast(List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1))
+        history: List[str] = cast(
+            List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1)
+        )
 
         if not history:
             return []
