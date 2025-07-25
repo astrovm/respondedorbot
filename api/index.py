@@ -1237,12 +1237,17 @@ def ask_ai(
         if response:
             return response
 
-        # Fallback to Cloudflare Workers AI if OpenRouter fails
+        # Try Groq second
+        groq_response = get_groq_ai_response(system_message, messages)
+        if groq_response:
+            return groq_response
+
+        # Fallback to Cloudflare Workers AI third
         cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
             return cloudflare_response
 
-        # Final fallback to random response if both AI providers fail
+        # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
 
     except Exception as e:
@@ -1402,6 +1407,42 @@ def get_cloudflare_ai_response(
 
     except Exception as e:
         print(f"Cloudflare Workers AI error: {e}")
+
+    return None
+
+
+def get_groq_ai_response(
+    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Second option using Groq AI"""
+    try:
+        groq_api_key = environ.get("GROQ_API_KEY")
+        if not groq_api_key:
+            print("Groq API key not configured")
+            return None
+
+        print("Trying Groq AI as second option...")
+        groq_client = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+
+        final_messages = [system_msg] + messages
+
+        response = groq_client.chat.completions.create(
+            model="moonshotai/kimi-k2-instruct",
+            messages=cast(Any, final_messages),
+            timeout=5.0,
+            max_tokens=512,
+        )
+
+        if response and hasattr(response, "choices") and response.choices:
+            if response.choices[0].finish_reason == "stop":
+                print("Groq AI response successful")
+                return response.choices[0].message.content
+
+    except Exception as e:
+        print(f"Groq AI error: {e}")
 
     return None
 
