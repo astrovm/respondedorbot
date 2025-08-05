@@ -1394,7 +1394,7 @@ def get_cloudflare_ai_response(
         final_messages = [system_msg] + messages
 
         response = cloudflare.chat.completions.create(
-            model="@cf/mistralai/mistral-small-3.1-24b-instruct",
+            model="@cf/openai/gpt-oss-120b",
             messages=cast(Any, final_messages),
             timeout=5.0,
             max_tokens=512,
