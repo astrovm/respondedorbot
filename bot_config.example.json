@@ -1,6 +1,0 @@
-{
-  "trigger_words": [
-    "bot", "assistant", "help"
-  ],
-  "system_prompt": "You are a helpful AI assistant. Define your bot's complete personality here, including:\n\n- Who the bot is and their background\n- Main personality traits and characteristics\n- Areas of expertise and knowledge\n- Response style, tone, and language\n- Behavioral rules and guidelines\n- Any specific phrases or expressions the bot uses\n\nThis prompt will be sent to the AI model to establish your bot's character and behavior."
-}

@@ -117,16 +117,9 @@ To configure the Telegram webhook:
 - Check webhook: `{function_url}/?check_webhook=true&key={webhook_auth_key}`
 
 ## Bot Configuration
-The bot's personality and behavior are configured through a `bot_config.json` file. This file contains:
-- Bot information (name, creator, character inspiration)
-- Personality traits and expertise areas
-- Response style and rules
-- Trigger words for group chat interactions
-- Complete system prompt for AI interactions
+The bot's personality and behavior are configured entirely through environment variables:
 
-To set up the bot:
-1. Copy `bot_config.example.json` to `bot_config.json`
-2. Customize the configuration with your bot's personality
-3. The bot will fallback to generic behavior if no config file is found
+- `BOT_SYSTEM_PROMPT`: Complete AI personality prompt that defines the bot's character
+- `BOT_TRIGGER_WORDS`: Comma-separated keywords that trigger responses in group chats
 
-This separation allows the codebase to remain public while keeping specific bot personalities private.
+This approach allows the codebase to remain public while keeping specific bot personalities private and makes deployment much simpler across different platforms.

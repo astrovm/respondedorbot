@@ -29,14 +29,22 @@ class GordoBenchmark:
         ]
 
     def load_bot_config(self) -> Dict[str, Any]:
-        """Cargar configuración del bot desde bot_config.json"""
-        try:
-            with open('bot_config.json', 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"❌ Error loading bot_config.json: {e}")
-            print("Make sure bot_config.json exists and is valid JSON")
+        """Cargar configuración del bot desde variables de entorno"""
+        system_prompt = os.environ.get('BOT_SYSTEM_PROMPT')
+        trigger_words_str = os.environ.get('BOT_TRIGGER_WORDS')
+        
+        if not system_prompt:
+            print("❌ Error: BOT_SYSTEM_PROMPT environment variable is required")
             exit(1)
+            
+        if not trigger_words_str:
+            print("❌ Error: BOT_TRIGGER_WORDS environment variable is required")
+            exit(1)
+            
+        return {
+            "trigger_words": [word.strip() for word in trigger_words_str.split(',')],
+            "system_prompt": system_prompt
+        }
 
     def get_system_prompt(self) -> str:
         """Sistema prompt basado en la configuración del bot"""
@@ -252,12 +260,6 @@ def main():
     print("🎯 Benchmark del Bot - Evaluación Manual")
     print("Evaluando capacidad de replicar personalidad configurada del bot")
     print("👤 Evaluación humana caso por caso\n")
-    
-    # Verificar que existe bot_config.json
-    if not os.path.exists('bot_config.json'):
-        print("❌ Error: bot_config.json not found")
-        print("Please create bot_config.json with your bot configuration")
-        return
 
     # Ejecutar evaluación manual
     manual_scores = benchmark.run_manual_benchmark()
