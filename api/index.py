@@ -1393,7 +1393,7 @@ def get_cloudflare_ai_response(
         final_messages = [system_msg] + messages
 
         response = cloudflare.chat.completions.create(
-            model="@cf/openai/gpt-oss-120b",
+            model="@cf/openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
             max_tokens=1024,
         )
@@ -1428,7 +1428,7 @@ def get_groq_ai_response(
         final_messages = [system_msg] + messages
 
         response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="moonshotai/kimi-k2-instruct",
             messages=cast(Any, final_messages),
             max_tokens=1024,
         )
