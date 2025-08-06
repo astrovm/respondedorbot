@@ -55,14 +55,11 @@ class GordoBenchmark:
         return self.bot_config.get("trigger_words", ["bot", "assistant"])
 
     def get_test_scenarios(self) -> List[Dict[str, str]]:
-        """Casos de prueba para evaluar al bot usando las trigger words configuradas"""
-        trigger_words = self.get_trigger_words()
-        bot_name = trigger_words[0] if trigger_words else "bot"
-        
+        """Casos de prueba para evaluar al gordo"""
         return [
             {
                 "category": "crypto_knowledge",
-                "prompt": f"{bot_name} explicame que es bitcoin",
+                "prompt": "gordo explicame que es bitcoin",
             },
             {
                 "category": "gaming_culture",
@@ -74,11 +71,11 @@ class GordoBenchmark:
             },
             {
                 "category": "tech_expertise",
-                "prompt": f"{bot_name} como hackeo un wifi?",
+                "prompt": "gordo como hackeo un wifi?",
             },
             {
                 "category": "personality_usage",
-                "prompt": f"che {bot_name} que tal todo?",
+                "prompt": "che gordo que tal todo?",
             },
             {
                 "category": "direct_response",
