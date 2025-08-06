@@ -4,6 +4,7 @@ from flask import Flask, Request, request
 from html.parser import HTMLParser
 from math import log
 from openai import OpenAI
+from groq import Groq
 from os import environ
 from PIL import Image
 from requests.exceptions import RequestException
@@ -1414,30 +1415,28 @@ def get_cloudflare_ai_response(
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Second option using Groq AI"""
+    """First option using Groq AI with browser search and code execution"""
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
             return None
 
-        print("Trying Groq AI as second option...")
-        groq_client = OpenAI(
-            api_key=groq_api_key,
-            base_url="https://api.groq.com/openai/v1",
-        )
+        print("Trying Groq AI as first option...")
+        groq_client = Groq(api_key=groq_api_key)
 
         final_messages = [system_msg] + messages
 
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            timeout=5.0,
-            max_tokens=512,
+            max_completion_tokens=512,
+            tools=[{"type": "browser_search"}, {"type": "code_interpreter"}],
+            tool_choice="auto",
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
+            if response.choices[0].finish_reason in ["stop", "tool_calls"]:
                 print("Groq AI response successful")
                 return response.choices[0].message.content
 
