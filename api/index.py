@@ -1090,11 +1090,31 @@ def send_typing(token: str, chat_id: str) -> None:
 
 def send_msg(chat_id: str, msg: str, msg_id: str = "") -> None:
     token = environ.get("TELEGRAM_TOKEN")
-    parameters = {"chat_id": chat_id, "text": msg}
-    if msg_id != "":
-        parameters["reply_to_message_id"] = msg_id
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.get(url, params=parameters, timeout=5)
+    
+    print(f"Sending message of {len(msg)} characters")
+    
+    # Telegram has a 4096 character limit per message
+    if len(msg) > 4096:
+        print(f"Message too long ({len(msg)} chars), splitting...")
+        # Split message into chunks
+        chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+        for i, chunk in enumerate(chunks):
+            print(f"Sending chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+            parameters = {"chat_id": chat_id, "text": chunk}
+            if msg_id != "" and i == 0:  # Only reply to original message on first chunk
+                parameters["reply_to_message_id"] = msg_id
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            response = requests.get(url, params=parameters, timeout=5)
+            print(f"Telegram API response: {response.status_code}")
+    else:
+        parameters = {"chat_id": chat_id, "text": msg}
+        if msg_id != "":
+            parameters["reply_to_message_id"] = msg_id
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        response = requests.get(url, params=parameters, timeout=5)
+        print(f"Telegram API response: {response.status_code}")
+        if response.status_code != 200:
+            print(f"Telegram error: {response.text}")
 
 
 def admin_report(
