@@ -1232,15 +1232,15 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text)
-        # Try Groq first
-        groq_response = get_groq_ai_response(system_message, messages)
-        if groq_response:
-            return groq_response
-
-        # Try Cloudflare Workers AI second
+        # Try Cloudflare Workers AI first
         cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
             return cloudflare_response
+
+        # Try Groq second
+        groq_response = get_groq_ai_response(system_message, messages)
+        if groq_response:
+            return groq_response
 
         # Fallback to OpenRouter third
         response = get_ai_response(openrouter, system_message, messages)
@@ -1412,14 +1412,14 @@ def get_cloudflare_ai_response(
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """First option using Groq AI"""
+    """Second option using Groq AI"""
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
             return None
 
-        print("Trying Groq AI as first option...")
+        print("Trying Groq AI as second option...")
         print(f"Debug: System message contains {len(str(system_msg))} characters")
         print(f"Debug: User messages: {len(messages)}")
         groq_client = OpenAI(
@@ -1436,11 +1436,15 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            print(f"Debug: Groq finish_reason: {response.choices[0].finish_reason}")
-            print(f"Debug: Groq content: {response.choices[0].message.content[:100]}...")
+            choice = response.choices[0]
+            print(f"Debug: Groq finish_reason: {choice.finish_reason}")
             
-            if response.choices[0].finish_reason == "stop" and response.choices[0].message.content:
-                content = response.choices[0].message.content.strip()
+            # Safe access to message content
+            content_preview = choice.message.content[:100] if choice.message.content else "None"
+            print(f"Debug: Groq content: {content_preview}...")
+            
+            if choice.finish_reason == "stop" and choice.message.content:
+                content = choice.message.content.strip()
                 
                 # Check for refusal responses that should trigger fallback to next provider
                 refusal_phrases = [
