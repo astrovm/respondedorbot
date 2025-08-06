@@ -1440,14 +1440,27 @@ def get_groq_ai_response(
                 
                 # If content has search results (L0:, L1: pattern), extract only the final response
                 if content and "L0:" in content:
-                    # Split by lines and find the last substantial line that doesn't start with L\d:
+                    # Split by lines and collect all lines that are not search results
                     lines = content.split('\n')
-                    for line in reversed(lines):
+                    bot_response_lines = []
+                    
+                    for line in lines:
                         line = line.strip()
-                        # Skip empty lines and lines that start with L followed by digits
-                        if line and not (line.startswith('L') and ':' in line and line.split(':')[0][1:].isdigit()):
-                            # This should be the bot's actual response
-                            return line
+                        # Skip empty lines and lines that start with L followed by digits and colon
+                        if line and not (line.startswith('L') and ':' in line and len(line.split(':')[0]) > 1 and line.split(':')[0][1:].isdigit()):
+                            # Skip URLs and markdown headers that are part of search results
+                            if not (line.startswith('URL:') or line.startswith('# Search Results') or line.startswith('\\*')):
+                                bot_response_lines.append(line)
+                    
+                    # Join the bot response lines and return
+                    if bot_response_lines:
+                        bot_response = ' '.join(bot_response_lines)
+                        # Clean up any remaining search artifacts
+                        bot_response = bot_response.replace('【', '').replace('】', '').replace('†', '')
+                        return bot_response
+                    
+                    # If no bot response found, fallback to a generic message
+                    return "no pude procesar esa búsqueda, probá de vuelta"
                 
                 return content
 
