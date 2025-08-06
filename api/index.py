@@ -1322,6 +1322,8 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response with retries and timeout (text-only)"""
     models = [
+        "openrouter/horizon-beta",
+        "z-ai/glm-4.5-air:free",
         "moonshotai/kimi-k2:free",
         "deepseek/deepseek-chat-v3-0324:free",
         "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
@@ -1394,7 +1396,7 @@ def get_cloudflare_ai_response(
         final_messages = [system_msg] + messages
 
         response = cloudflare.chat.completions.create(
-            model="@cf/openai/gpt-oss-120b",
+            model="@cf/openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
             timeout=5.0,
             max_tokens=512,
