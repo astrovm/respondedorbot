@@ -75,7 +75,7 @@ Required environment variables are documented in README.md. Critical ones:
 - `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Workers AI
 - `ADMIN_CHAT_ID`: Error reporting destination
 - `WEBHOOK_AUTH_KEY`: Webhook authentication key
-- `CURRENT_FUNCTION_URL`, `MAIN_FUNCTION_URL`: Deployment URLs
+- `FUNCTION_URL`: Deployment URL
 - `FRIENDLY_INSTANCE_NAME`: Instance identification for reports
 - `BOT_NAME`, `CREATOR_NAME`: Optional fallback bot configuration
 

@@ -51,7 +51,7 @@ def test_responder_valid_key_with_webhook_update():
     ) as mock_env, patch("api.index.set_telegram_webhook") as mock_set:
         mock_env.side_effect = lambda key: {
             "GORDO_KEY": "valid_key",
-            "CURRENT_FUNCTION_URL": "https://example.com",
+            "FUNCTION_URL": "https://example.com",
         }.get(key)
         mock_set.return_value = True
         response = responder()
@@ -217,10 +217,24 @@ def test_format_user_message():
 
 
 def test_should_gordo_respond():
+    import api.index
+    
+    # Reset global cache to ensure clean state
+    api.index._bot_config = None
+    
     commands = {"/test": (lambda x: x, False, False)}
 
     with patch("os.environ.get") as mock_env:
-        mock_env.return_value = "testbot"  # Set mock bot username
+        # Mock environment variables for both bot config and telegram username
+        def env_side_effect(key):
+            env_vars = {
+                "TELEGRAM_USERNAME": "testbot",
+                "BOT_SYSTEM_PROMPT": "You are a test bot",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot"
+            }
+            return env_vars.get(key)
+        
+        mock_env.side_effect = env_side_effect
 
         # Test command
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
@@ -388,7 +402,7 @@ def test_process_request_parameters():
         ) as mock_env:
             mock_set.return_value = True
             mock_env.return_value = (
-                "https://example.com/webhook"  # Mock CURRENT_FUNCTION_URL
+                "https://example.com/webhook"  # Mock FUNCTION_URL
             )
             response, status = process_request_parameters(request)
             assert status == 200
@@ -420,59 +434,35 @@ def test_verify_webhook():
     from api.index import verify_webhook
 
     with patch("api.index.get_telegram_webhook_info") as mock_get_info, patch(
-        "api.index.set_telegram_webhook"
-    ) as mock_set_webhook, patch("requests.get") as mock_request, patch(
         "os.environ.get"
-    ) as mock_env, patch(
-        "api.index.admin_report"
-    ) as mock_admin_report:
+    ) as mock_env:
 
         # Mock environment variables
         def mock_env_get(key):
             env_vars = {
-                "MAIN_FUNCTION_URL": "https://main.function.url",
-                "CURRENT_FUNCTION_URL": "https://main.function.url",
-                "GORDO_KEY": "test_key",
+                "FUNCTION_URL": "https://my-app.vercel.app",
+                "WEBHOOK_AUTH_KEY": "test_key",
                 "TELEGRAM_TOKEN": "test_token",
-                "ADMIN_CHAT_ID": "123456789",
-                "FRIENDLY_INSTANCE_NAME": "test_instance",
             }
             return env_vars.get(key)
 
         mock_env.side_effect = mock_env_get
 
         # Test when webhook is correctly set
-        mock_get_info.return_value = {"url": "https://main.function.url?key=test_key"}
-        mock_request.return_value.raise_for_status.return_value = None
-
+        mock_get_info.return_value = {"url": "https://my-app.vercel.app?key=test_key"}
         assert verify_webhook() == True
 
-        # Test when webhook needs update
-        mock_get_info.return_value = {"url": "https://old.function.url?key=test_key"}
-        mock_set_webhook.return_value = True
+        # Test when webhook URL doesn't match
+        mock_get_info.return_value = {"url": "https://old-app.vercel.app?key=test_key"}
+        assert verify_webhook() == False
 
-        assert verify_webhook() == True
+        # Test when webhook info has error
+        mock_get_info.return_value = {"error": "Something went wrong"}
+        assert verify_webhook() == False
 
-        # Reset admin_report mock for next test
-        mock_admin_report.reset_mock()
-
-        # Test when main webhook is down
-        mock_env_get = lambda key: {
-            "MAIN_FUNCTION_URL": "https://main.function.url",
-            "CURRENT_FUNCTION_URL": "https://backup.function.url",
-            "GORDO_KEY": "test_key",
-            "TELEGRAM_TOKEN": "test_token",
-            "ADMIN_CHAT_ID": "123456789",
-            "FRIENDLY_INSTANCE_NAME": "test_instance",
-        }.get(key)
-        mock_env.side_effect = mock_env_get
-        mock_request.side_effect = requests.exceptions.RequestException("Test error")
-        mock_set_webhook.return_value = True
-
-        assert verify_webhook() == True
-        mock_admin_report.assert_called_once_with(
-            "Main webhook failed with error: Test error"
-        )
+        # Test when missing environment variables
+        mock_env.side_effect = lambda key: None
+        assert verify_webhook() == False
 
 
 def test_truncate_text():
@@ -2553,6 +2543,10 @@ def test_get_fallback_response():
 
 def test_build_system_message():
     from api.index import build_system_message
+    import api.index
+    
+    # Reset global cache to ensure clean state
+    api.index._bot_config = None
 
     context = {
         "market": {
@@ -2570,30 +2564,56 @@ def test_build_system_message():
         "time": {"formatted": "Monday 15/01/2024"},
     }
 
-    result = build_system_message(context)
+    with patch("os.environ.get") as mock_env:
+        # Mock environment variables
+        def env_side_effect(key):
+            env_vars = {
+                "BOT_SYSTEM_PROMPT": "Sos el gordo, un bot argentino de prueba.",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot"
+            }
+            return env_vars.get(key)
+        
+        mock_env.side_effect = env_side_effect
 
-    assert result["role"] == "system"
-    assert "content" in result
-    assert isinstance(result["content"], list)
-    assert len(result["content"]) > 0
-    content_text = result["content"][0]["text"]
-    assert "argentina" in content_text.lower()
-    assert "gordo" in content_text.lower()
+        result = build_system_message(context)
+
+        assert result["role"] == "system"
+        assert "content" in result
+        assert isinstance(result["content"], list)
+        assert len(result["content"]) > 0
+        content_text = result["content"][0]["text"]
+        assert "argentina" in content_text.lower()
+        assert "gordo" in content_text.lower()
 
 
 def test_build_system_message_empty_context():
     from api.index import build_system_message
+    import api.index
+    
+    # Reset global cache to ensure clean state
+    api.index._bot_config = None
 
     context = {"market": {}, "weather": None, "time": {"formatted": "Monday"}}
 
-    result = build_system_message(context)
+    with patch("os.environ.get") as mock_env:
+        # Mock environment variables
+        def env_side_effect(key):
+            env_vars = {
+                "BOT_SYSTEM_PROMPT": "You are a test bot assistant.",
+                "BOT_TRIGGER_WORDS": "test,bot"
+            }
+            return env_vars.get(key)
+        
+        mock_env.side_effect = env_side_effect
 
-    assert result["role"] == "system"
-    assert "content" in result
-    assert isinstance(result["content"], list)
-    # Should still have base personality
-    content_text = result["content"][0]["text"]
-    assert len(content_text) > 100
+        result = build_system_message(context)
+
+        assert result["role"] == "system"
+        assert "content" in result
+        assert isinstance(result["content"], list)
+        # Should still have base personality
+        content_text = result["content"][0]["text"]
+        assert len(content_text) > 100
 
 
 def test_clean_crypto_data():
