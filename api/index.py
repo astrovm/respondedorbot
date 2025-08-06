@@ -1342,7 +1342,6 @@ def get_ai_response(
                     "models": fallback_models,
                 },
                 messages=cast(Any, [system_msg] + messages),
-                timeout=5.0,  # 5 second timeout
                 max_tokens=512,  # Control response length
             )
 
@@ -1397,7 +1396,6 @@ def get_cloudflare_ai_response(
         response = cloudflare.chat.completions.create(
             model="@cf/openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            timeout=5.0,
             max_tokens=512,
         )
 
