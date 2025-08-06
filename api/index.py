@@ -1434,9 +1434,28 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason in ["stop", "tool_calls"]:
-                print("Groq AI response successful")
-                return response.choices[0].message.content
+            choice = response.choices[0]
+            if choice.finish_reason in ["stop", "tool_calls"]:
+                content = choice.message.content
+                if content:
+                    # Clean the response from Groq AI
+                    # 1. Remove the end of text token and any trailing garbage
+                    cleaned_content = content.split("<|endoftext|>")[0]
+
+                    # 2. Remove raw search result artifacts (L0:, L1:, URL:, etc.)
+                    cleaned_content = re.sub(
+                        r"^(L\d+:|URL:).*\n?",
+                        "",
+                        cleaned_content,
+                        flags=re.MULTILINE,
+                    )
+
+                    # 3. Remove any blank lines at the start of the response
+                    cleaned_content = cleaned_content.strip()
+
+                    if cleaned_content:
+                        print("Groq AI response successful")
+                        return cleaned_content
 
     except Exception as e:
         print(f"Groq AI error: {e}")
