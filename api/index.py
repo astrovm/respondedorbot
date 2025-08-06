@@ -1432,7 +1432,7 @@ def get_groq_ai_response(
         final_messages = [system_msg] + messages
 
         response = groq_client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct",
+            model="openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
             timeout=5.0,
             max_tokens=512,
