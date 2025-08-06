@@ -130,6 +130,3 @@ dmypy.json
 
 # Vercel
 .vercel
-
-# Bot configuration (contains commercial/private information)
-bot_config.json

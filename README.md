@@ -4,38 +4,29 @@ A configurable Telegram bot framework written in Python/Flask that can be custom
 
 ## Configuration Setup
 
-This bot uses external configuration files to separate the codebase from specific personalities or commercial information. 
+This bot is configured entirely through environment variables, making it easy to deploy and customize without touching the code.
 
 ### Quick Start:
-1. Copy `bot_config.example.json` to `bot_config.json`
-2. Customize the configuration with your bot's personality
-3. Set up the required environment variables (see below)
-4. Deploy to your preferred platform
 
-### Bot Configuration Structure
+1. Set up the required environment variables (see below)
+2. Deploy to your preferred platform
+3. Configure the webhook URL
 
-The `bot_config.json` file contains only two essential fields:
+### Required Bot Configuration:
 
-- **trigger_words**: Keywords that trigger bot responses in group chats
-- **system_prompt**: The complete AI personality prompt that defines the bot's character
-
-### Fallback Behavior
-
-If no `bot_config.json` is found, the bot will:
-- Use generic helpful assistant personality
-- Look for `BOT_NAME` and `CREATOR_NAME` environment variables
-- Default to basic functionality without specific personality traits
+- **BOT_SYSTEM_PROMPT**: Complete AI personality prompt that defines the bot's character
+- **BOT_TRIGGER_WORDS**: Comma-separated keywords that trigger responses in group chats
 
 ## Features
 
 - AI-powered conversations with configurable personality
 - Cryptocurrency prices with `/prices` command
 - Currency exchange rates with `/dolar` or `/dollar`
-- Arbitrage calculator with `/devo` 
+- Arbitrage calculator with `/devo`
 - Bitcoin analysis with `/powerlaw` and `/rainbow`
 - Random choices with `/random`
 - Text to command conversion with `/comando` or `/command`
-- Base number conversion with `/convertbase` 
+- Base number conversion with `/convertbase`
 - Unix timestamp with `/time`
 - And many more commands - use `/help` for complete list
 
@@ -43,27 +34,32 @@ If no `bot_config.json` is found, the bot will:
 
 ### Required Environment Variables:
 
-```
-TELEGRAM_TOKEN: Your Telegram bot token
-TELEGRAM_USERNAME: Bot username for mention detection  
-ADMIN_CHAT_ID: Chat ID for admin error reports
-COINMARKETCAP_KEY: CoinMarketCap API key for crypto prices
-REDIS_HOST: Redis server host
-REDIS_PORT: Redis server port
-REDIS_PASSWORD: Redis password (if required)
-CURRENT_FUNCTION_URL: Current deployment URL
-MAIN_FUNCTION_URL: Main deployment URL
-FRIENDLY_INSTANCE_NAME: Instance name for reports
-OPENROUTER_API_KEY: OpenRouter API key for AI responses
-CLOUDFLARE_API_KEY: Cloudflare Workers AI key (fallback)
-CLOUDFLARE_ACCOUNT_ID: Cloudflare account ID
-WEBHOOK_AUTH_KEY: Key for webhook authentication
-```
+```bash
+# Bot Configuration (Required)
+BOT_SYSTEM_PROMPT=Your complete bot personality prompt here
+BOT_TRIGGER_WORDS=bot,assistant,help
 
-### Optional Environment Variables (for fallback when no bot_config.json):
-```
-BOT_NAME: Default bot name
-CREATOR_NAME: Creator/developer name
+# Telegram Configuration (Required)
+TELEGRAM_TOKEN=your_telegram_bot_token
+TELEGRAM_USERNAME=your_bot_username
+WEBHOOK_AUTH_KEY=your_webhook_authentication_key
+
+# Infrastructure (Required)
+REDIS_HOST=your_redis_host
+REDIS_PORT=6379
+REDIS_PASSWORD=your_redis_password
+CURRENT_FUNCTION_URL=https://your-app.vercel.app
+MAIN_FUNCTION_URL=https://your-app.vercel.app
+
+# APIs (Required)
+OPENROUTER_API_KEY=your_openrouter_key
+CLOUDFLARE_API_KEY=your_cloudflare_key
+CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id
+COINMARKETCAP_KEY=your_coinmarketcap_key
+
+# Monitoring (Required)
+ADMIN_CHAT_ID=your_telegram_chat_id
+FRIENDLY_INSTANCE_NAME=My_Bot_Instance
 ```
 
 ## Webhook Setup
@@ -73,11 +69,3 @@ Set the webhook URL:
 
 Check webhook status:
 `{function_url}/?check_webhook=true&key={webhook_auth_key}`
-
-## License
-
-MIT License - Use it however you want.
-
-## Credits
-
-Open source Telegram bot framework. Contributions welcome!
