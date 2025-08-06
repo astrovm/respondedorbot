@@ -1434,9 +1434,28 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason in ["stop", "tool_calls"]:
+            choice = response.choices[0]
+            print(f"Groq finish_reason: {choice.finish_reason}")
+            print(f"Groq message.content: {choice.message.content}")
+            print(f"Groq message type: {type(choice.message)}")
+            
+            if choice.finish_reason in ["stop", "tool_calls"]:
                 print("Groq AI response successful")
-                return response.choices[0].message.content
+                
+                # Debug: check what's in the message
+                if choice.message.content:
+                    print(f"Returning content: {choice.message.content[:100]}...")
+                    return choice.message.content
+                else:
+                    print("No content in message, checking other attributes...")
+                    # Debug: check all available attributes
+                    print(f"Message attributes: {dir(choice.message)}")
+                    
+                    # Try to find the actual response
+                    if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                        print(f"Found tool_calls: {choice.message.tool_calls}")
+                    
+                    return "Debug: Respuesta vacía de Groq"
 
     except Exception as e:
         print(f"Groq AI error: {e}")
