@@ -2446,7 +2446,7 @@ def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
 
 
 def set_telegram_webhook(webhook_url: str) -> bool:
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY") or environ.get("WEBHOOK_AUTH_KEY") or environ.get("GORDO_KEY")
+    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
     token = environ.get("TELEGRAM_TOKEN")
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
@@ -2471,7 +2471,7 @@ def verify_webhook() -> bool:
     if not token:
         return False
         
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY") or environ.get("GORDO_KEY")
+    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
     function_url = environ.get("FUNCTION_URL")
     
     if not function_url or not webhook_key:
@@ -2563,7 +2563,7 @@ def responder() -> Tuple[str, int]:
         if not webhook_key:
             return "No key", 200
 
-        if webhook_key != (environ.get("WEBHOOK_AUTH_KEY") or environ.get("GORDO_KEY")):
+        if webhook_key != environ.get("WEBHOOK_AUTH_KEY"):
             admin_report("Wrong key attempt")
             return "Wrong key", 400
 
