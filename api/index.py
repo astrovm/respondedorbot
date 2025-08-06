@@ -1436,7 +1436,20 @@ def get_groq_ai_response(
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason in ["stop", "tool_calls"]:
                 print("Groq AI response successful")
-                return response.choices[0].message.content
+                content = response.choices[0].message.content
+                
+                # If content has search results (L0:, L1: pattern), extract only the final response
+                if content and "L0:" in content:
+                    # Split by lines and find the last substantial line that doesn't start with L\d:
+                    lines = content.split('\n')
+                    for line in reversed(lines):
+                        line = line.strip()
+                        # Skip empty lines and lines that start with L followed by digits
+                        if line and not (line.startswith('L') and ':' in line and line.split(':')[0][1:].isdigit()):
+                            # This should be the bot's actual response
+                            return line
+                
+                return content
 
     except Exception as e:
         print(f"Groq AI error: {e}")
