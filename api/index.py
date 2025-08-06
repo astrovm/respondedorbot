@@ -1420,6 +1420,8 @@ def get_groq_ai_response(
             return None
 
         print("Trying Groq AI as first option...")
+        print(f"Debug: System message contains {len(str(system_msg))} characters")
+        print(f"Debug: User messages: {len(messages)}")
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
@@ -1434,6 +1436,9 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
+            print(f"Debug: Groq finish_reason: {response.choices[0].finish_reason}")
+            print(f"Debug: Groq content: {response.choices[0].message.content[:100]}...")
+            
             if response.choices[0].finish_reason == "stop" and response.choices[0].message.content:
                 content = response.choices[0].message.content.strip()
                 
@@ -1454,11 +1459,16 @@ def get_groq_ai_response(
                     "i don't feel comfortable"
                 ]
                 
+                # Debug: Check which phrases match
+                matching_phrases = [phrase for phrase in refusal_phrases if phrase in content.lower()]
+                print(f"Debug: Matching refusal phrases: {matching_phrases}")
+                
                 if content and not any(phrase in content.lower() for phrase in refusal_phrases):
                     print("Groq AI response successful")
                     return content
                 else:
                     print(f"Groq refused request, trying next provider: {content[:50]}...")
+                    return None  # Explicitly return None to trigger fallback
 
     except Exception as e:
         print(f"Groq AI error: {e}")
