@@ -1342,7 +1342,7 @@ def get_ai_response(
                     "models": fallback_models,
                 },
                 messages=cast(Any, [system_msg] + messages),
-                max_tokens=512,  # Control response length
+                max_tokens=1024,  # Control response length
             )
 
             if response and hasattr(response, "choices") and response.choices:
@@ -1396,7 +1396,7 @@ def get_cloudflare_ai_response(
         response = cloudflare.chat.completions.create(
             model="@cf/openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            max_tokens=512,
+            max_tokens=1024,
         )
 
         if response and hasattr(response, "choices") and response.choices:
@@ -1428,7 +1428,7 @@ def get_groq_ai_response(
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            max_completion_tokens=2048,
+            max_completion_tokens=1024,
             tools=[{"type": "browser_search"}, {"type": "code_interpreter"}],
             tool_choice="auto",
         )
@@ -2024,7 +2024,7 @@ def describe_image_cloudflare(
         # Convert bytes to array of integers (0-255) as expected by LLaVA
         image_array = list(image_data)
 
-        payload = {"prompt": user_text, "image": image_array, "max_tokens": 512}
+        payload = {"prompt": user_text, "image": image_array, "max_tokens": 1024}
 
         print(f"Describing image with LLaVA model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
