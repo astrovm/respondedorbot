@@ -1295,7 +1295,7 @@ def ask_ai(
 
 
 def get_market_context() -> Dict:
-    """Get crypto and dollar market data"""
+    """Get crypto, dollar and BCRA market data"""
     market_data = {}
 
     try:
@@ -1326,6 +1326,18 @@ def get_market_context() -> Dict:
             market_data["dollar"] = dollar_response["data"]
     except Exception as e:
         print(f"Error fetching dollar data: {e}")
+
+    try:
+        # Get BCRA variables
+        bcra_variables = get_cached_bcra_variables()
+        if not bcra_variables:
+            bcra_variables = scrape_bcra_variables()
+            if bcra_variables:
+                cache_bcra_variables(bcra_variables)
+        if bcra_variables:
+            market_data["bcra"] = bcra_variables
+    except Exception as e:
+        print(f"Error fetching BCRA data: {e}")
 
     return market_data
 
@@ -1604,6 +1616,10 @@ def format_market_info(market: Dict) -> str:
     if "dollar" in market:
         info.append("DOLARES:")
         info.append(json.dumps(market["dollar"]))
+
+    if "bcra" in market:
+        info.append("VARIABLES ECONOMICAS BCRA:")
+        info.append(json.dumps(market["bcra"]))
 
     return "\n".join(info)
 
