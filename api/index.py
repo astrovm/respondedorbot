@@ -1434,9 +1434,26 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                print("Groq AI response successful")
-                return response.choices[0].message.content
+            if response.choices[0].finish_reason == "stop" and response.choices[0].message.content:
+                content = response.choices[0].message.content.strip()
+                
+                # Check for refusal responses that should trigger fallback to next provider
+                refusal_phrases = [
+                    "no puedo ayudar",
+                    "no puedo proporcionar", 
+                    "no puedo generar",
+                    "cannot help",
+                    "cannot provide",
+                    "cannot generate",
+                    "i cannot",
+                    "i can't"
+                ]
+                
+                if content and not any(phrase in content.lower() for phrase in refusal_phrases):
+                    print("Groq AI response successful")
+                    return content
+                else:
+                    print(f"Groq refused request, trying next provider: {content[:50]}...")
 
     except Exception as e:
         print(f"Groq AI error: {e}")
