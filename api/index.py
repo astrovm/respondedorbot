@@ -29,28 +29,30 @@ _bot_config = None
 
 
 def load_bot_config():
-    """Load bot configuration from bot_config.json file with fallback to environment variables"""
+    """Load bot configuration from environment variables"""
     global _bot_config
     
     if _bot_config is not None:
         return _bot_config
     
-    # Try to load from bot_config.json first
-    try:
-        with open('bot_config.json', 'r', encoding='utf-8') as f:
-            _bot_config = json.load(f)
-            return _bot_config
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Fallback to generic configuration using environment variables
-        bot_name = environ.get('BOT_NAME', 'bot')
-        creator_name = environ.get('CREATOR_NAME', 'developer')
-        
-        _bot_config = {
-            "trigger_words": [bot_name, "bot", "assistant", "help"],
-            "system_prompt": f"You are {bot_name}, a helpful AI assistant created by {creator_name}. You are friendly, informative, and always try to be helpful. You provide accurate information and maintain a professional yet approachable tone in all interactions."
-        }
-        
-        return _bot_config
+    # Get required configuration from environment variables
+    system_prompt = environ.get('BOT_SYSTEM_PROMPT')
+    trigger_words_str = environ.get('BOT_TRIGGER_WORDS')
+    
+    if not system_prompt:
+        raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
+    
+    if not trigger_words_str:
+        raise ValueError("BOT_TRIGGER_WORDS environment variable is required")
+    
+    trigger_words = [word.strip() for word in trigger_words_str.split(',')]
+    
+    _bot_config = {
+        "trigger_words": trigger_words,
+        "system_prompt": system_prompt
+    }
+    
+    return _bot_config
 
 
 def config_redis(host=None, port=None, password=None):
