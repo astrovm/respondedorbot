@@ -4,7 +4,6 @@ from flask import Flask, Request, request
 from html.parser import HTMLParser
 from math import log
 from openai import OpenAI
-from groq import Groq
 from os import environ
 from PIL import Image
 from requests.exceptions import RequestException
@@ -1413,49 +1412,31 @@ def get_cloudflare_ai_response(
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """First option using Groq AI with browser search and code execution"""
+    """Second option using Groq AI"""
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
             return None
 
-        print("Trying Groq AI as first option...")
-        groq_client = Groq(api_key=groq_api_key)
+        print("Trying Groq AI as second option...")
+        groq_client = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
 
         final_messages = [system_msg] + messages
 
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            max_completion_tokens=1024,
-            tools=[{"type": "browser_search"}, {"type": "code_interpreter"}],
-            tool_choice="auto",
+            max_tokens=1024,
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            choice = response.choices[0]
-            if choice.finish_reason in ["stop", "tool_calls"]:
-                content = choice.message.content
-                if content:
-                    # Clean the response from Groq AI
-                    # 1. Remove the end of text token and any trailing garbage
-                    cleaned_content = content.split("<|endoftext|>")[0]
-
-                    # 2. Remove raw search result artifacts (L0:, L1:, URL:, etc.)
-                    cleaned_content = re.sub(
-                        r"^(L\d+:|URL:).*\n?",
-                        "",
-                        cleaned_content,
-                        flags=re.MULTILINE,
-                    )
-
-                    # 3. Remove any blank lines at the start of the response
-                    cleaned_content = cleaned_content.strip()
-
-                    if cleaned_content:
-                        print("Groq AI response successful")
-                        return cleaned_content
+            if response.choices[0].finish_reason == "stop":
+                print("Groq AI response successful")
+                return response.choices[0].message.content
 
     except Exception as e:
         print(f"Groq AI error: {e}")
