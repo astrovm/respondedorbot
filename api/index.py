@@ -2385,6 +2385,11 @@ def clean_duplicate_response(response: str) -> str:
     if not response:
         return response
 
+    # Skip cleaning if response looks like Groq search results (has L0:, L1: pattern)
+    if "L0:" in response and "L1:" in response:
+        print("Skipping cleanup for Groq search results")
+        return response
+
     # Split by lines and remove consecutive duplicates
     lines = response.split("\n")
     cleaned_lines = []
