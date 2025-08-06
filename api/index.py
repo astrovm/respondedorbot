@@ -2470,43 +2470,21 @@ def verify_webhook() -> bool:
     token = environ.get("TELEGRAM_TOKEN")
     if not token:
         return False
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY") or environ.get("WEBHOOK_AUTH_KEY") or environ.get("GORDO_KEY")
+        
+    webhook_key = environ.get("WEBHOOK_AUTH_KEY") or environ.get("GORDO_KEY")
+    function_url = environ.get("FUNCTION_URL")
+    
+    if not function_url or not webhook_key:
+        return False
+        
     webhook_info = get_telegram_webhook_info(token)
     if "error" in webhook_info:
         return False
 
-    main_function_url = environ.get("MAIN_FUNCTION_URL")
-    current_function_url = environ.get("CURRENT_FUNCTION_URL")
-    if not main_function_url or not webhook_key:
-        return False
-    main_webhook_url = f"{main_function_url}?key={webhook_key}"
-    current_webhook_url = f"{current_function_url}?key={webhook_key}"
-
-    if main_function_url != current_function_url:
-        try:
-            function_response = requests.get(main_function_url, timeout=5)
-            function_response.raise_for_status()
-        except RequestException as request_error:
-            if webhook_info.get("url") != current_webhook_url:
-                error_message = f"Main webhook failed with error: {str(request_error)}"
-                admin_report(error_message)
-                return (
-                    set_telegram_webhook(current_function_url)
-                    if current_function_url
-                    else False
-                )
-            return True
-    elif webhook_info.get("url") != main_webhook_url:
-        set_main_webhook_success = (
-            set_telegram_webhook(main_function_url) if main_function_url else False
-        )
-        if set_main_webhook_success:
-            admin_report("Main webhook is up again")
-        else:
-            admin_report("Failed to set main webhook")
-        return set_main_webhook_success
-
-    return True
+    expected_webhook_url = f"{function_url}?key={webhook_key}"
+    current_webhook_url = webhook_info.get("url")
+    
+    return current_webhook_url == expected_webhook_url
 
 
 def is_secret_token_valid(request: Request) -> bool:
@@ -2531,7 +2509,7 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         # Handle webhook updates
         update_webhook = request.args.get("update_webhook") == "true"
         if update_webhook:
-            function_url = environ.get("CURRENT_FUNCTION_URL")
+            function_url = environ.get("FUNCTION_URL")
             if not function_url:
                 return ("Webhook update error", 400)
             return (

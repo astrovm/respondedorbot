@@ -48,8 +48,7 @@ WEBHOOK_AUTH_KEY=your_webhook_authentication_key
 REDIS_HOST=your_redis_host
 REDIS_PORT=6379
 REDIS_PASSWORD=your_redis_password
-CURRENT_FUNCTION_URL=https://your-app.vercel.app
-MAIN_FUNCTION_URL=https://your-app.vercel.app
+FUNCTION_URL=https://your-app.vercel.app
 
 # APIs (Required)
 OPENROUTER_API_KEY=your_openrouter_key
