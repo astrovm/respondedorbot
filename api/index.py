@@ -1446,7 +1446,12 @@ def get_groq_ai_response(
                     "cannot provide",
                     "cannot generate",
                     "i cannot",
-                    "i can't"
+                    "i can't",
+                    "i'm sorry",
+                    "sorry, but",
+                    "unable to",
+                    "not able to",
+                    "i don't feel comfortable"
                 ]
                 
                 if content and not any(phrase in content.lower() for phrase in refusal_phrases):
