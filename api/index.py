@@ -1077,6 +1077,8 @@ comandos disponibles boludo:
 
 - /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
+- /bcra, /variables: te tiro las variables economicas del bcra
+
 - /comando, /command algo: te lo convierto en comando de telegram
 
 - /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
@@ -1104,6 +1106,8 @@ comandos disponibles boludo:
 - /satoshi, /sat, /sats: te digo cuanto vale un satoshi
 
 - /time: timestamp unix actual
+
+- /transcribe: te transcribo audio o describo imagen (responde a un mensaje)
 """
 
 
