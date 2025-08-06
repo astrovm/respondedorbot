@@ -1232,20 +1232,20 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text)
-        # Try Cloudflare Workers AI first
-        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
-        if cloudflare_response:
-            return cloudflare_response
-
-        # Try Groq second
+        # Try Groq first
         groq_response = get_groq_ai_response(system_message, messages)
         if groq_response:
             return groq_response
 
-        # Fallback to OpenRouter third
+        # Try OpenRouter second
         response = get_ai_response(openrouter, system_message, messages)
         if response:
             return response
+
+        # Fallback to Cloudflare Workers AI third
+        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
+        if cloudflare_response:
+            return cloudflare_response
 
         # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
@@ -1412,16 +1412,14 @@ def get_cloudflare_ai_response(
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Second option using Groq AI"""
+    """First option using Groq AI"""
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
             return None
 
-        print("Trying Groq AI as second option...")
-        print(f"Debug: System message contains {len(str(system_msg))} characters")
-        print(f"Debug: User messages: {len(messages)}")
+        print("Trying Groq AI as first option...")
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
@@ -1436,43 +1434,9 @@ def get_groq_ai_response(
         )
 
         if response and hasattr(response, "choices") and response.choices:
-            choice = response.choices[0]
-            print(f"Debug: Groq finish_reason: {choice.finish_reason}")
-            
-            # Safe access to message content
-            content_preview = choice.message.content[:100] if choice.message.content else "None"
-            print(f"Debug: Groq content: {content_preview}...")
-            
-            if choice.finish_reason == "stop" and choice.message.content:
-                content = choice.message.content.strip()
-                
-                # Check for refusal responses that should trigger fallback to next provider
-                refusal_phrases = [
-                    "no puedo ayudar",
-                    "no puedo proporcionar", 
-                    "no puedo generar",
-                    "cannot help",
-                    "cannot provide",
-                    "cannot generate",
-                    "i cannot",
-                    "i can't",
-                    "i'm sorry",
-                    "sorry, but",
-                    "unable to",
-                    "not able to",
-                    "i don't feel comfortable"
-                ]
-                
-                # Debug: Check which phrases match
-                matching_phrases = [phrase for phrase in refusal_phrases if phrase in content.lower()]
-                print(f"Debug: Matching refusal phrases: {matching_phrases}")
-                
-                if content and not any(phrase in content.lower() for phrase in refusal_phrases):
-                    print("Groq AI response successful")
-                    return content
-                else:
-                    print(f"Groq refused request, trying next provider: {content[:50]}...")
-                    return None  # Explicitly return None to trigger fallback
+            if response.choices[0].finish_reason == "stop":
+                print("Groq AI response successful")
+                return response.choices[0].message.content
 
     except Exception as e:
         print(f"Groq AI error: {e}")
