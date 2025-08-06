@@ -1428,7 +1428,7 @@ def get_groq_ai_response(
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=cast(Any, final_messages),
-            max_completion_tokens=512,
+            max_completion_tokens=2048,
             tools=[{"type": "browser_search"}, {"type": "code_interpreter"}],
             tool_choice="auto",
         )
