@@ -1325,8 +1325,6 @@ def get_ai_response(
         "openrouter/horizon-beta",
         "z-ai/glm-4.5-air:free",
         "moonshotai/kimi-k2:free",
-        "deepseek/deepseek-chat-v3-0324:free",
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     ]
 
     for attempt in range(max_retries):
