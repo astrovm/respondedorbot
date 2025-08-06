@@ -77,7 +77,6 @@ Required environment variables are documented in README.md. Critical ones:
 - `WEBHOOK_AUTH_KEY`: Webhook authentication key
 - `FUNCTION_URL`: Deployment URL
 - `FRIENDLY_INSTANCE_NAME`: Instance identification for reports
-- `BOT_NAME`, `CREATOR_NAME`: Optional fallback bot configuration
 
 ### Rate Limiting
 - Global: 1024 requests/hour
