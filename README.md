@@ -1,59 +1,83 @@
-# respondedorbot
+# Telegram Bot Framework
 
-soy el gordo, un bot basado en el atendedor de boludos que labura 24/7 respondiendo boludeces en telegram
+A configurable Telegram bot framework written in Python/Flask that can be customized with different personalities and behaviors. The bot runs 24/7 responding to messages in Telegram with various useful commands.
 
-## che gordo como te agrego?
+## Configuration Setup
 
-mandate aca capo [@respondedorbot](https://t.me/respondedorbot)
+This bot uses external configuration files to separate the codebase from specific personalities or commercial information. 
 
-## que onda, que sabes hacer?
+### Quick Start:
+1. Copy `bot_config.example.json` to `bot_config.json`
+2. Customize the configuration with your bot's personality
+3. Set up the required environment variables (see below)
+4. Deploy to your preferred platform
 
-- te contesto cualquier gilada que me preguntes con /ask, /pregunta, /che o /gordo
-- te tiro la posta de los precios crypto con /prices (o /precio, /precios, /presio, /presios)
-- te digo como esta el dolar blue y toda la movida con /dolar o /dollar
-- te calculo el arbitraje entre tarjeta y crypto con /devo
-- te tiro el precio justo de btc segun powerlaw y rainbow con /powerlaw y /rainbow
-- te elijo random entre pizza o hamburguesa con /random
-- te convierto texto a comando telegram con /comando o /command
-- te paso numeros entre bases con /convertbase
-- te tiro la hora unix con /time
-- y bocha de giladas mas, mandate /help y te cuento todo
+### Bot Configuration Structure
 
-## como te deployas?
+The `bot_config.json` file contains only two essential fields:
 
-necesitas estas variables de entorno:
+- **trigger_words**: Keywords that trigger bot responses in group chats
+- **system_prompt**: The complete AI personality prompt that defines the bot's character
+
+### Fallback Behavior
+
+If no `bot_config.json` is found, the bot will:
+- Use generic helpful assistant personality
+- Look for `BOT_NAME` and `CREATOR_NAME` environment variables
+- Default to basic functionality without specific personality traits
+
+## Features
+
+- AI-powered conversations with configurable personality
+- Cryptocurrency prices with `/prices` command
+- Currency exchange rates with `/dolar` or `/dollar`
+- Arbitrage calculator with `/devo` 
+- Bitcoin analysis with `/powerlaw` and `/rainbow`
+- Random choices with `/random`
+- Text to command conversion with `/comando` or `/command`
+- Base number conversion with `/convertbase` 
+- Unix timestamp with `/time`
+- And many more commands - use `/help` for complete list
+
+## Deployment
+
+### Required Environment Variables:
 
 ```
-TELEGRAM_TOKEN: el token del bot de telegram
-TELEGRAM_USERNAME: mi nombre de usuario para saber cuando me hablan
-ADMIN_CHAT_ID: el chat id del admin para mandarle reports
-COINMARKETCAP_KEY: key de la api de coinmarketcap para los precios crypto
-REDIS_HOST: el host de redis
-REDIS_PORT: el puerto de redis
-REDIS_PASSWORD: el password de redis si tenes
-CURRENT_FUNCTION_URL: la url donde estoy corriendo
-MAIN_FUNCTION_URL: la url principal donde deberia estar
-FRIENDLY_INSTANCE_NAME: un nombre piola para identificarme en los reports
-OPENROUTER_API_KEY: la key de openrouter para que te pueda bardear como corresponde
-CLOUDFLARE_API_KEY: la key de cloudflare workers ai para fallback cuando openrouter falla
-CLOUDFLARE_ACCOUNT_ID: el account id de cloudflare para acceder a workers ai
-GORDO_KEY: key para autenticar los requests al webhook
+TELEGRAM_TOKEN: Your Telegram bot token
+TELEGRAM_USERNAME: Bot username for mention detection  
+ADMIN_CHAT_ID: Chat ID for admin error reports
+COINMARKETCAP_KEY: CoinMarketCap API key for crypto prices
+REDIS_HOST: Redis server host
+REDIS_PORT: Redis server port
+REDIS_PASSWORD: Redis password (if required)
+CURRENT_FUNCTION_URL: Current deployment URL
+MAIN_FUNCTION_URL: Main deployment URL
+FRIENDLY_INSTANCE_NAME: Instance name for reports
+OPENROUTER_API_KEY: OpenRouter API key for AI responses
+CLOUDFLARE_API_KEY: Cloudflare Workers AI key (fallback)
+CLOUDFLARE_ACCOUNT_ID: Cloudflare account ID
+WEBHOOK_AUTH_KEY: Key for webhook authentication
 ```
 
-## como seteas el webhook?
+### Optional Environment Variables (for fallback when no bot_config.json):
+```
+BOT_NAME: Default bot name
+CREATOR_NAME: Creator/developer name
+```
 
-mandate esta url master:
+## Webhook Setup
 
-`{function_url}/?update_webhook=true&key={gordo_key}`
+Set the webhook URL:
+`{function_url}/?update_webhook=true&key={webhook_auth_key}`
 
-o si queres checkear que onda:
+Check webhook status:
+`{function_url}/?check_webhook=true&key={webhook_auth_key}`
 
-`{function_url}/?check_webhook=true&key={gordo_key}`
+## License
 
-## licencia
+MIT License - Use it however you want.
 
-hace lo que se te cante el orto, total es todo codigo choreado de stackoverflow
+## Credits
 
-## creditos
-
-creditos al gordo astro que me programo mientras se bajaba una birra y puteaba a javascript
+Open source Telegram bot framework. Contributions welcome!

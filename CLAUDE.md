@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RespondedorBot is a Telegram bot written in Python/Flask that operates as "el gordo" - an Argentine bot character based on the "atendedor de boludos" meme. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, BCRA economic data, audio/image transcription, and various utility commands.
+This is a configurable Telegram bot written in Python/Flask that can be customized with different personalities and characteristics. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, BCRA economic data, audio/image transcription, and various utility commands. The bot's personality and behavior are fully configurable through external configuration files.
 
 ## Development Commands
 
@@ -74,9 +74,10 @@ Required environment variables are documented in README.md. Critical ones:
 - `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`: API access
 - `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Workers AI
 - `ADMIN_CHAT_ID`: Error reporting destination
-- `GORDO_KEY`: Webhook authentication key
+- `WEBHOOK_AUTH_KEY`: Webhook authentication key
 - `CURRENT_FUNCTION_URL`, `MAIN_FUNCTION_URL`: Deployment URLs
 - `FRIENDLY_INSTANCE_NAME`: Instance identification for reports
+- `BOT_NAME`, `CREATOR_NAME`: Optional fallback bot configuration
 
 ### Rate Limiting
 - Global: 1024 requests/hour
@@ -112,8 +113,20 @@ Required environment variables are documented in README.md. Critical ones:
 
 ### Webhook Setup
 To configure the Telegram webhook:
-- Set webhook: `{function_url}/?update_webhook=true&key={gordo_key}`
-- Check webhook: `{function_url}/?check_webhook=true&key={gordo_key}`
+- Set webhook: `{function_url}/?update_webhook=true&key={webhook_auth_key}`
+- Check webhook: `{function_url}/?check_webhook=true&key={webhook_auth_key}`
 
-## Character and Content
-The bot operates as "el gordo" - an Argentine character with specific personality traits and language patterns. When modifying conversation logic, maintain the established character voice and Argentine Spanish vernacular present in the system prompts and responses. Key personality rule: ALWAYS respond without quotes, emojis, or formal punctuation.
+## Bot Configuration
+The bot's personality and behavior are configured through a `bot_config.json` file. This file contains:
+- Bot information (name, creator, character inspiration)
+- Personality traits and expertise areas
+- Response style and rules
+- Trigger words for group chat interactions
+- Complete system prompt for AI interactions
+
+To set up the bot:
+1. Copy `bot_config.example.json` to `bot_config.json`
+2. Customize the configuration with your bot's personality
+3. The bot will fallback to generic behavior if no config file is found
+
+This separation allows the codebase to remain public while keeping specific bot personalities private.
