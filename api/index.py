@@ -1090,31 +1090,11 @@ def send_typing(token: str, chat_id: str) -> None:
 
 def send_msg(chat_id: str, msg: str, msg_id: str = "") -> None:
     token = environ.get("TELEGRAM_TOKEN")
-    
-    print(f"Sending message of {len(msg)} characters")
-    
-    # Telegram has a 4096 character limit per message
-    if len(msg) > 4096:
-        print(f"Message too long ({len(msg)} chars), splitting...")
-        # Split message into chunks
-        chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
-        for i, chunk in enumerate(chunks):
-            print(f"Sending chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-            parameters = {"chat_id": chat_id, "text": chunk}
-            if msg_id != "" and i == 0:  # Only reply to original message on first chunk
-                parameters["reply_to_message_id"] = msg_id
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            response = requests.get(url, params=parameters, timeout=5)
-            print(f"Telegram API response: {response.status_code}")
-    else:
-        parameters = {"chat_id": chat_id, "text": msg}
-        if msg_id != "":
-            parameters["reply_to_message_id"] = msg_id
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        response = requests.get(url, params=parameters, timeout=5)
-        print(f"Telegram API response: {response.status_code}")
-        if response.status_code != 200:
-            print(f"Telegram error: {response.text}")
+    parameters = {"chat_id": chat_id, "text": msg}
+    if msg_id != "":
+        parameters["reply_to_message_id"] = msg_id
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    requests.get(url, params=parameters, timeout=5)
 
 
 def admin_report(
@@ -1591,6 +1571,14 @@ REGLAS:
 - SIEMPRE usá lenguaje coloquial argentino
 - NUNCA des respuestas formales o corporativas
 - NUNCA rompas el personaje
+
+CUANDO USES HERRAMIENTAS DE BÚSQUEDA WEB:
+- NUNCA devuelvas los datos crudos (L0:, L1:, URLs, etc.)
+- SIEMPRE procesá la información y respondé como el personaje
+- Resumí lo importante en tu estilo coloquial argentino
+- Si encontrás noticias de tecnología/Linux, explicálas de forma simple y directa
+- Si es información financiera, dá los números importantes
+- Mantené la personalidad del gordo en todo momento
 
 FRASES DEL ATENDEDOR DE BOLUDOS:
 - "tomatelá"
@@ -2403,11 +2391,6 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
 def clean_duplicate_response(response: str) -> str:
     """Remove duplicate consecutive text in AI responses"""
     if not response:
-        return response
-
-    # Skip cleaning if response looks like Groq search results (has L0:, L1: pattern)
-    if "L0:" in response and "L1:" in response:
-        print("Skipping cleanup for Groq search results")
         return response
 
     # Split by lines and remove consecutive duplicates
