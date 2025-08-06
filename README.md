@@ -8,9 +8,15 @@ This bot is configured entirely through environment variables, making it easy to
 
 ### Quick Start:
 
-1. Set up the required environment variables (see below)
+1. Copy `.env.example` to `.env` and configure your environment variables
 2. Deploy to your preferred platform
 3. Configure the webhook URL
+
+### Local Development:
+
+1. `cp .env.example .env`
+2. Fill in your actual API keys and configuration in `.env`
+3. `flask --app api/index run --host 0.0.0.0 --port 8080`
 
 ### Required Bot Configuration:
 
