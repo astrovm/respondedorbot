@@ -4,12 +4,15 @@ Benchmark del Gordo - Evaluación de Personalidad del Bot
 Evalúa qué tan bien diferentes LLMs replican el estilo y personalidad del gordo
 """
 
-import json
 import requests
 import time
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Any
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class GordoBenchmark:
@@ -30,20 +33,20 @@ class GordoBenchmark:
 
     def load_bot_config(self) -> Dict[str, Any]:
         """Cargar configuración del bot desde variables de entorno"""
-        system_prompt = os.environ.get('BOT_SYSTEM_PROMPT')
-        trigger_words_str = os.environ.get('BOT_TRIGGER_WORDS')
-        
+        system_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
+        trigger_words_str = os.environ.get("BOT_TRIGGER_WORDS")
+
         if not system_prompt:
             print("❌ Error: BOT_SYSTEM_PROMPT environment variable is required")
             exit(1)
-            
+
         if not trigger_words_str:
             print("❌ Error: BOT_TRIGGER_WORDS environment variable is required")
             exit(1)
-            
+
         return {
-            "trigger_words": [word.strip() for word in trigger_words_str.split(',')],
-            "system_prompt": system_prompt
+            "trigger_words": [word.strip() for word in trigger_words_str.split(",")],
+            "system_prompt": system_prompt,
         }
 
     def get_system_prompt(self) -> str:
@@ -236,7 +239,7 @@ class GordoBenchmark:
         system_prompt_length = len(self.get_system_prompt())
         report.append(f"- Trigger words: {trigger_words}")
         report.append(f"- System prompt: {system_prompt_length} caracteres")
-        
+
         report.append(f"\n## 📋 Metodología")
         report.append(f"- Evaluación manual caso por caso")
         report.append(f"- Criterio: Mejor captura de personalidad del bot configurado")
