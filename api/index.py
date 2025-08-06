@@ -1412,14 +1412,14 @@ def get_cloudflare_ai_response(
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Second option using Groq AI"""
+    """First option using Groq AI"""
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
             return None
 
-        print("Trying Groq AI as second option...")
+        print("Trying Groq AI as first option...")
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
