@@ -1232,20 +1232,20 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text)
-        # Try OpenRouter first
-        response = get_ai_response(openrouter, system_message, messages)
-        if response:
-            return response
-
-        # Try Groq second
+        # Try Groq first
         groq_response = get_groq_ai_response(system_message, messages)
         if groq_response:
             return groq_response
 
-        # Fallback to Cloudflare Workers AI third
+        # Try Cloudflare Workers AI second
         cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
             return cloudflare_response
+
+        # Fallback to OpenRouter third
+        response = get_ai_response(openrouter, system_message, messages)
+        if response:
+            return response
 
         # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
