@@ -16,12 +16,6 @@ flask --app api/index run --host 0.0.0.0 --port 8080
 # Run tests
 python -m pytest test.py -v
 
-# Build and run with Docker
-docker build -t respondedorbot .
-docker run -p 8080:8080 respondedorbot
-
-# Deploy with Docker Compose
-docker-compose up -d
 ```
 
 ### Testing
