@@ -1085,7 +1085,7 @@ comandos disponibles boludo:
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
 
-- /dolar, /dollar: te tiro la posta del blue y todos los dolares
+- /dolar, /dollar, /usd: te tiro la posta del blue y todos los dolares
 
 - /instance: te digo donde estoy corriendo
 
@@ -1706,6 +1706,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/presio": (get_prices, False, True),
         "/dolar": (get_dollar_rates, False, False),
         "/dollar": (get_dollar_rates, False, False),
+        "/usd": (get_dollar_rates, False, False),
         "/devo": (get_devo, False, True),
         "/powerlaw": (powerlaw, False, False),
         "/rainbow": (rainbow, False, False),
