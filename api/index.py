@@ -22,6 +22,7 @@ import time
 import traceback
 import unicodedata
 import urllib.request
+import urllib.parse
 
 
 # Global variable to cache bot configuration
@@ -1083,6 +1084,8 @@ comandos disponibles boludo:
 
 - /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
 
+- /buscar algo: te busco en la web (si hay API configurada)
+
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
 
 - /dolar, /dollar, /usd: te tiro la posta del blue y todos los dolares
@@ -1235,8 +1238,8 @@ def ask_ai(
             api_key=environ.get("OPENROUTER_API_KEY"),
         )
 
-        # Build system message with personality and context
-        system_message = build_system_message(context_data)
+        # Build system message with personality, context and tool instructions
+        system_message = build_system_message(context_data, include_tools=True)
 
         # If we have an image, first describe it with LLaVA then continue normal flow
         if image_data:
@@ -1266,21 +1269,43 @@ def ask_ai(
             else:
                 print("Failed to describe image, continuing without description...")
 
-        # Continue with normal AI flow (for both image and text)
-        # Try Groq first
-        groq_response = get_groq_ai_response(system_message, messages)
-        if groq_response:
-            return groq_response
+        # Continue with normal AI flow (for both image and text).
+        # First pass: get an initial response that might include a tool call.
+        initial = complete_with_providers(system_message, messages)
 
-        # Try OpenRouter second
-        response = get_ai_response(openrouter, system_message, messages)
-        if response:
-            return response
+        # If the model asked to call a tool, execute and do a second pass
+        tool_call = parse_tool_call(initial) if initial else None
+        if tool_call:
+            tool_name, tool_args = tool_call
+            try:
+                tool_output = execute_tool(tool_name, tool_args)
+            except Exception as tool_err:
+                tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
 
-        # Fallback to Cloudflare Workers AI third
-        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
-        if cloudflare_response:
-            return cloudflare_response
+            # Feed tool result back into the conversation and get final answer
+            tool_context = {
+                "tool": tool_name,
+                "args": tool_args,
+                "result": tool_output,
+            }
+            messages = messages + [
+                {
+                    "role": "assistant",
+                    "content": initial,
+                },
+                {
+                    "role": "user",
+                    "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+                },
+            ]
+
+            final = complete_with_providers(system_message, messages)
+            if final:
+                return final
+
+        # If no tool call or second pass failed, return the best we had
+        if initial:
+            return initial
 
         # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
@@ -1292,6 +1317,123 @@ def ask_ai(
         }
         admin_report("Error in ask_ai", e, error_context)
         return get_fallback_response(messages)
+
+
+def complete_with_providers(
+    system_message: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
+    # Try Groq first
+    groq_response = get_groq_ai_response(system_message, messages)
+    if groq_response:
+        return groq_response
+
+    # Try OpenRouter second (OpenAI-compatible via OpenRouter)
+    openrouter = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=environ.get("OPENROUTER_API_KEY"),
+    )
+    response = get_ai_response(openrouter, system_message, messages)
+    if response:
+        return response
+
+    # Fallback to Cloudflare Workers AI third
+    cloudflare_response = get_cloudflare_ai_response(system_message, messages)
+    if cloudflare_response:
+        return cloudflare_response
+
+    return None
+
+
+def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Detect a tool call line like: [TOOL] web_search {"query": "...", "limit": 3}"""
+    if not text:
+        return None
+    try:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("[TOOL]"):
+                continue
+            # Expected format: [TOOL] name {json}
+            without_prefix = line[len("[TOOL]") :].strip()
+            parts = without_prefix.split(" ", 1)
+            if len(parts) != 2:
+                continue
+            name, json_part = parts[0].strip(), parts[1].strip()
+            if not json_part.startswith("{"):
+                continue
+            args = json.loads(json_part)
+            if isinstance(args, dict):
+                return name, args
+    except Exception:
+        return None
+    return None
+
+
+def execute_tool(name: str, args: Dict[str, Any]) -> str:
+    """Execute a named tool and return a plain-text result string."""
+    name = name.lower()
+    if name == "web_search":
+        query = str(args.get("query", "")).strip()
+        limit = int(args.get("limit", 3) or 3)
+        if not query:
+            return "query vacío"
+        results = web_search(query, limit=limit)
+        return json.dumps({"query": query, "results": results})
+    return f"herramienta desconocida: {name}"
+
+
+def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
+    """Simple web search using DuckDuckGo lite search."""
+    query = query.strip()
+    limit = max(1, min(int(limit), 10))
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        params = {"q": query, "kl": "us-en"}
+        resp = requests.get(
+            "https://lite.duckduckgo.com/lite/", params=params, headers=headers, timeout=8
+        )
+        resp.raise_for_status()
+        html = resp.text
+        results: List[Dict[str, str]] = []
+        
+        # Parse lite version results
+        for m in re.finditer(
+            r'<a[^>]*href="(https?://[^"]+)"[^>]*>\s*([^<]+?)\s*</a>',
+            html,
+        ):
+            url = m.group(1)
+            title = m.group(2).strip()
+            if url and title and not url.startswith("https://duckduckgo.com"):
+                results.append({"title": title, "url": url, "snippet": ""})
+            if len(results) >= limit:
+                break
+        return results
+    except Exception:
+        return []
+
+
+def search_command(msg_text: str) -> str:
+    """/buscar command: perform a web search and return concise results"""
+    q = (msg_text or "").strip()
+    if not q:
+        return "decime qué querés buscar capo"
+    results = web_search(q, limit=5)
+    if not results:
+        return "no encontré resultados ahora con duckduckgo"
+    lines = [f"🔎 Resultados para: {q}"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title") or r.get("url")
+        url = r.get("url", "")
+        snippet = (r.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"{i}. {title}\n{url}\n{snippet[:180]}")
+        else:
+            lines.append(f"{i}. {title}\n{url}")
+    return "\n\n".join(lines[:6])
 
 
 def get_market_context() -> Dict:
@@ -1570,8 +1712,12 @@ def get_weather_description(code: int) -> str:
     return descriptions.get(code, "clima raro")
 
 
-def build_system_message(context: Dict) -> Dict[str, Any]:
-    """Build system message with personality and context"""
+def build_system_message(context: Dict, include_tools: bool = False) -> Dict[str, Any]:
+    """Build system message with personality and context.
+
+    include_tools: when True, advertise available tool calls and exact call syntax
+    so the model can request a tool in plain text (provider-agnostic).
+    """
     config = load_bot_config()
     market_info = format_market_info(context["market"])
     weather_info = format_weather_info(context["weather"]) if context["weather"] else ""
@@ -1594,12 +1740,25 @@ CONTEXTO POLITICO:
 - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
 """
 
+    tools_section = ""
+    if include_tools:
+        tools_section = (
+            "\n\nHERRAMIENTAS DISPONIBLES:\n"
+            "- web_search: buscador web actual.\n"
+            "\nCÓMO LLAMAR HERRAMIENTAS:\n"
+            "Escribe exactamente una línea con el formato:\n"
+            "[TOOL] <nombre> {JSON}\n"
+            "Ejemplo: [TOOL] web_search {\"query\": \"inflación argentina hoy\", \"limit\": 3}\n"
+            "Luego espera la respuesta y continúa con tu contestación final.\n"
+            "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
+        )
+
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": base_prompt + contextual_info,
+                "text": base_prompt + contextual_info + tools_section,
             }
         ],
     }
@@ -1716,6 +1875,8 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/time": (get_timestamp, False, False),
         "/comando": (convert_to_command, False, True),
         "/command": (convert_to_command, False, True),
+        "/buscar": (search_command, False, True),
+        "/search": (search_command, False, True),
         "/instance": (get_instance_name, False, False),
         "/help": (get_help, False, False),
         "/transcribe": (handle_transcribe, False, False),
