@@ -49,10 +49,10 @@ def test_responder_valid_key_with_webhook_update():
     with app.test_request_context("/?key=valid_key&update_webhook=true"), patch(
         "os.environ.get"
     ) as mock_env, patch("api.index.set_telegram_webhook") as mock_set:
-        mock_env.side_effect = lambda key: {
-            "GORDO_KEY": "valid_key",
+        mock_env.side_effect = lambda key, default=None: {
+            "WEBHOOK_AUTH_KEY": "valid_key",
             "FUNCTION_URL": "https://example.com",
-        }.get(key)
+        }.get(key, default)
         mock_set.return_value = True
         response = responder()
         assert response == ("Webhook updated", 200)
@@ -77,9 +77,9 @@ def test_responder_valid_key_with_valid_message():
     ) as mock_redis, patch(
         "api.index.is_secret_token_valid"
     ) as mock_token:
-        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(
-            key, default
-        )
+        mock_env.side_effect = lambda key, default=None: {
+            "WEBHOOK_AUTH_KEY": "valid_key"
+        }.get(key, default)
         mock_handle.return_value = "ok"
         mock_redis.return_value = MagicMock()
         mock_token.return_value = True
@@ -93,9 +93,9 @@ def test_responder_exception_handling():
     ) as mock_env, patch("api.index.process_request_parameters") as mock_process, patch(
         "api.index.admin_report"
     ) as mock_admin:
-        mock_env.side_effect = lambda key, default=None: {"GORDO_KEY": "valid_key"}.get(
-            key, default
-        )
+        mock_env.side_effect = lambda key, default=None: {
+            "WEBHOOK_AUTH_KEY": "valid_key"
+        }.get(key, default)
         mock_process.side_effect = Exception("Test error")
 
         response = responder()
@@ -613,7 +613,9 @@ def test_handle_msg_with_image():
         "api.index.encode_image_to_base64"
     ) as mock_encode, patch(
         "api.index.cached_requests"
-    ) as mock_requests:
+    ) as mock_requests, patch(
+        "api.index.send_typing"
+    ) as mock_send_typing:
 
         mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
@@ -642,6 +644,7 @@ def test_handle_msg_with_image():
         mock_download.assert_called_once()
         mock_encode.assert_called_once()
         mock_send_msg.assert_called_once()
+        mock_send_typing.assert_called()
 
 
 def test_handle_msg_with_audio():
@@ -837,7 +840,7 @@ def test_set_telegram_webhook():
 
         # Fix: lambda to handle both arguments
         mock_env.side_effect = lambda key, default=None: {
-            "GORDO_KEY": "test_key",
+            "WEBHOOK_AUTH_KEY": "test_key",
             "TELEGRAM_TOKEN": "test_token",
             "REDIS_HOST": "localhost",
             "REDIS_PORT": "6379",
@@ -1111,7 +1114,7 @@ def test_initialize_commands():
         ask_ai,
         select_random,
         get_prices,
-        get_dollar_rates as _get_dollar_rates,  # noqa: F401
+        get_dollar_rates as _get_dollar_rates,
     )
     from api.index import (
         get_devo as _get_devo,  # noqa: F401
@@ -1133,6 +1136,7 @@ def test_initialize_commands():
     assert "/random" in commands
     assert "/prices" in commands
     assert "/dolar" in commands
+    assert "/usd" in commands
 
     # Test that AI commands are properly marked
     assert commands["/ask"][1] == True
@@ -1144,12 +1148,14 @@ def test_initialize_commands():
     assert commands["/random"][1] == False
     assert commands["/prices"][1] == False
     assert commands["/dolar"][1] == False
+    assert commands["/usd"][1] == False
 
     # Test function mappings
     assert commands["/ask"][0] == ask_ai
     assert commands["/random"][0] == select_random
     assert commands["/prices"][0] == get_prices
     assert commands["/help"][0] == get_help
+    assert commands["/usd"][0] == _get_dollar_rates
 
 
 def test_config_redis_with_env_vars():
@@ -1741,6 +1747,7 @@ def test_get_help_basic():
     assert "comandos disponibles boludo:" in result
     assert "/ask" in result
     assert "/dolar" in result
+    assert "/usd" in result
     assert "/prices" in result
 
 
