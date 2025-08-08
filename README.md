@@ -27,7 +27,7 @@ This bot is configured entirely through environment variables, making it easy to
 
 - AI-powered conversations with configurable personality
 - Cryptocurrency prices with `/prices` command
-- Currency exchange rates with `/dolar` or `/dollar`
+- Currency exchange rates with `/dolar`, `/dollar`, or `/usd`
 - Arbitrage calculator with `/devo`
 - Bitcoin analysis with `/powerlaw` and `/rainbow`
 - Random choices with `/random`
