@@ -1,4 +1,6 @@
 from unittest.mock import patch, MagicMock
+import os
+import pytest
 from flask import Flask, request
 from api.index import (
     responder,
@@ -22,6 +24,18 @@ import requests
 import redis
 
 app = Flask(__name__)
+
+
+# Cleanup potential test artifact files left behind
+@pytest.fixture(autouse=True, scope="session")
+def cleanup_test_artifacts():
+    yield
+    # Remove any stray file named 'test_api_key' after tests
+    try:
+        if os.path.isfile("test_api_key"):
+            os.remove("test_api_key")
+    except Exception:
+        pass
 
 
 def test_responder_no_args():
@@ -223,10 +237,10 @@ def test_format_user_message():
 
 def test_should_gordo_respond():
     import api.index
-    
+
     # Reset global cache to ensure clean state
     api.index._bot_config = None
-    
+
     commands = {"/test": (lambda x: x, False, False)}
 
     with patch("os.environ.get") as mock_env:
@@ -238,7 +252,7 @@ def test_should_gordo_respond():
                 "BOT_TRIGGER_WORDS": "gordo,test,bot"
             }
             return env_vars.get(key)
-        
+
         mock_env.side_effect = env_side_effect
 
         # Test command
@@ -2567,7 +2581,7 @@ def test_get_fallback_response():
 def test_build_system_message():
     from api.index import build_system_message
     import api.index
-    
+
     # Reset global cache to ensure clean state
     api.index._bot_config = None
 
@@ -2595,7 +2609,7 @@ def test_build_system_message():
                 "BOT_TRIGGER_WORDS": "gordo,test,bot"
             }
             return env_vars.get(key)
-        
+
         mock_env.side_effect = env_side_effect
 
         result = build_system_message(context)
@@ -2612,7 +2626,7 @@ def test_build_system_message():
 def test_build_system_message_empty_context():
     from api.index import build_system_message
     import api.index
-    
+
     # Reset global cache to ensure clean state
     api.index._bot_config = None
 
@@ -2626,7 +2640,7 @@ def test_build_system_message_empty_context():
                 "BOT_TRIGGER_WORDS": "test,bot"
             }
             return env_vars.get(key)
-        
+
         mock_env.side_effect = env_side_effect
 
         result = build_system_message(context)
@@ -3384,14 +3398,14 @@ def test_web_search_success():
                 "body": "This is test result 1 description"
             },
             {
-                "title": "Test Result 2", 
+                "title": "Test Result 2",
                 "href": "https://example.com/test2",
                 "body": "This is test result 2 description"
             }
         ]
-        
+
         results = web_search("test query", limit=3)
-        
+
         assert len(results) == 2
         assert results[0]["title"] == "Test Result 1"
         assert results[0]["url"] == "https://example.com/test1"
@@ -3407,9 +3421,9 @@ def test_web_search_no_results():
         mock_ddgs = MagicMock()
         mock_ddgs_class.return_value = mock_ddgs
         mock_ddgs.text.return_value = []
-        
+
         results = web_search("nonexistent query")
-        
+
         assert len(results) == 0
 
 
@@ -3417,9 +3431,9 @@ def test_web_search_network_error():
     """Test web_search when network error occurs"""
     with patch('ddgs.DDGS') as mock_ddgs_class:
         mock_ddgs_class.side_effect = Exception("Network error")
-        
+
         results = web_search("test query")
-        
+
         assert len(results) == 0
 
 
@@ -3432,18 +3446,18 @@ def test_web_search_limit_parameter():
             {"title": "Result 1", "href": "https://example.com/1", "body": "Description 1"},
             {"title": "Result 2", "href": "https://example.com/2", "body": "Description 2"}
         ]
-        
+
         results = web_search("test query", limit=2)
-        
+
         assert len(results) == 2
         assert results[0]["title"] == "Result 1"
         assert results[1]["title"] == "Result 2"
-        
+
         # Verify that DDGS was called with the correct limit
         mock_ddgs.text.assert_called_once_with(
             query="test query",
             region="ar-es",
-            safesearch="off", 
+            safesearch="off",
             max_results=2
         )
 
@@ -3456,9 +3470,9 @@ def test_search_command_success():
             {"title": "Test Result", "url": "https://example.com", "snippet": ""},
             {"title": "Another Result", "url": "https://test.com", "snippet": "Test snippet"}
         ]
-        
+
         result = search_command("python programming")
-        
+
         assert "🔎 Resultados para: python programming" in result
         assert "Test Result" in result
         assert "https://example.com" in result
@@ -3470,7 +3484,7 @@ def test_search_command_empty_query():
     """Test search_command with empty query"""
     result = search_command("")
     assert result == "decime qué querés buscar capo"
-    
+
     result = search_command(None)
     assert result == "decime qué querés buscar capo"
 
@@ -3479,9 +3493,9 @@ def test_search_command_no_results():
     """Test search_command when no results found"""
     with patch('api.index.web_search') as mock_search:
         mock_search.return_value = []
-        
+
         result = search_command("nonexistent query")
-        
+
         assert result == "no encontré resultados ahora con duckduckgo"
 
 
@@ -3489,9 +3503,9 @@ def test_search_command_no_results():
 def test_parse_tool_call_valid():
     """Test parse_tool_call with valid tool call"""
     text = 'Some text\n[TOOL] web_search {"query": "test", "limit": 3}\nMore text'
-    
+
     result = parse_tool_call(text)
-    
+
     assert result is not None
     tool_name, args = result
     assert tool_name == "web_search"
@@ -3502,15 +3516,15 @@ def test_parse_tool_call_invalid():
     """Test parse_tool_call with invalid inputs"""
     # No tool call
     assert parse_tool_call("Just normal text") is None
-    
+
     # Malformed JSON
     text = '[TOOL] web_search {"query": invalid json}'
     assert parse_tool_call(text) is None
-    
+
     # Missing arguments
     text = '[TOOL] web_search'
     assert parse_tool_call(text) is None
-    
+
     # None input
     assert parse_tool_call(None) is None
 
@@ -3519,9 +3533,9 @@ def test_execute_tool_web_search():
     """Test execute_tool with web_search tool"""
     with patch('api.index.web_search') as mock_search:
         mock_search.return_value = [{"title": "Test", "url": "https://test.com", "snippet": ""}]
-        
+
         result = execute_tool("web_search", {"query": "test", "limit": 3})
-        
+
         import json
         parsed_result = json.loads(result)
         assert parsed_result["query"] == "test"
@@ -3531,14 +3545,14 @@ def test_execute_tool_web_search():
 def test_execute_tool_empty_query():
     """Test execute_tool with empty query"""
     result = execute_tool("web_search", {"query": "", "limit": 3})
-    
+
     assert result == "query vacío"
 
 
 def test_execute_tool_unknown():
     """Test execute_tool with unknown tool"""
     result = execute_tool("unknown_tool", {})
-    
+
     assert result == "herramienta desconocida: unknown_tool"
 
 
@@ -3547,17 +3561,17 @@ def test_complete_with_providers_groq_success():
     """Test complete_with_providers when Groq succeeds"""
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
-    
+
     with patch('api.index.get_groq_ai_response') as mock_groq, \
          patch('api.index.get_ai_response') as mock_openrouter, \
          patch('api.index.get_cloudflare_ai_response') as mock_cloudflare:
-        
+
         mock_groq.return_value = "Groq response"
         mock_openrouter.return_value = "OpenRouter response"
         mock_cloudflare.return_value = "Cloudflare response"
-        
+
         result = complete_with_providers(system_message, messages)
-        
+
         assert result == "Groq response"
         mock_groq.assert_called_once()
         mock_openrouter.assert_not_called()
@@ -3568,24 +3582,24 @@ def test_complete_with_providers_fallback_sequence():
     """Test complete_with_providers fallback sequence"""
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
-    
+
     with patch('api.index.get_groq_ai_response') as mock_groq, \
          patch('api.index.get_ai_response') as mock_openrouter, \
          patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
          patch('os.environ.get') as mock_env, \
          patch('api.index.OpenAI') as mock_openai:
-        
+
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None  # Groq fails
         mock_openrouter.return_value = "OpenRouter response"
         mock_cloudflare.return_value = "Cloudflare response"
-        
+
         # Mock OpenAI client creation
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
-        
+
         result = complete_with_providers(system_message, messages)
-        
+
         assert result == "OpenRouter response"
         assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
@@ -3596,24 +3610,24 @@ def test_complete_with_providers_all_fail():
     """Test complete_with_providers when all providers fail"""
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
-    
+
     with patch('api.index.get_groq_ai_response') as mock_groq, \
          patch('api.index.get_ai_response') as mock_openrouter, \
          patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
          patch('os.environ.get') as mock_env, \
          patch('api.index.OpenAI') as mock_openai:
-        
+
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None
         mock_openrouter.return_value = None
         mock_cloudflare.return_value = None
-        
+
         # Mock OpenAI client creation
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
-        
+
         result = complete_with_providers(system_message, messages)
-        
+
         assert result is None
         assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
