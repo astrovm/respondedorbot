@@ -3375,8 +3375,8 @@ def test_web_search_success():
     """Test web_search with successful DuckDuckGo response"""
     mock_html = '''
     <html>
-    <a href="https://example.com/test1">Test Result 1</a>
-    <a href="https://example.com/test2">Test Result 2</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest1">Test Result 1</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest2">Test Result 2</a>
     </html>
     '''
     
@@ -3426,11 +3426,11 @@ def test_web_search_limit_parameter():
     """Test web_search respects the limit parameter"""
     mock_html = '''
     <html>
-    <a href="https://example.com/1">Result 1</a>
-    <a href="https://example.com/2">Result 2</a>
-    <a href="https://example.com/3">Result 3</a>
-    <a href="https://example.com/4">Result 4</a>
-    <a href="https://example.com/5">Result 5</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F1">Result 1</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F2">Result 2</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F3">Result 3</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F4">Result 4</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F5">Result 5</a>
     </html>
     '''
     
