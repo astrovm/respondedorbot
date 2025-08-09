@@ -31,27 +31,27 @@ _bot_config = None
 def load_bot_config():
     """Load bot configuration from environment variables"""
     global _bot_config
-    
+
     if _bot_config is not None:
         return _bot_config
-    
+
     # Get required configuration from environment variables
     system_prompt = environ.get('BOT_SYSTEM_PROMPT')
     trigger_words_str = environ.get('BOT_TRIGGER_WORDS')
-    
+
     if not system_prompt:
         raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
-    
+
     if not trigger_words_str:
         raise ValueError("BOT_TRIGGER_WORDS environment variable is required")
-    
+
     trigger_words = [word.strip() for word in trigger_words_str.split(',')]
-    
+
     _bot_config = {
         "trigger_words": trigger_words,
         "system_prompt": system_prompt
     }
-    
+
     return _bot_config
 
 
@@ -1322,7 +1322,7 @@ def complete_with_providers(
     system_message: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
     """Try Groq, then OpenRouter, then Cloudflare with retries and return the first response."""
-    
+
     # Try Groq first with retries
     for attempt in range(2):
         groq_response = get_groq_ai_response(system_message, messages)
@@ -1398,16 +1398,16 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
 
     try:
         from ddgs import DDGS
-        
+
         # Use DDGS for robust DuckDuckGo search
         ddgs = DDGS(timeout=8)
         raw_results = ddgs.text(
             query=query,
-            region="ar-es", 
+            region="ar-es",
             safesearch="off",
             max_results=limit
         )
-        
+
         # Convert to our expected format
         results = []
         for result in raw_results:
@@ -1416,7 +1416,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
                 "url": result.get("href", ""),
                 "snippet": result.get("body", "")[:500]  # More text for better context
             })
-        
+
         return results
     except Exception:
         return []
@@ -1730,7 +1730,7 @@ def build_system_message(context: Dict, include_tools: bool = False) -> Dict[str
 
     # Build the complete system prompt with context
     base_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
-    
+
     contextual_info = f"""
 
 FECHA ACTUAL:
@@ -2658,20 +2658,20 @@ def verify_webhook() -> bool:
     token = environ.get("TELEGRAM_TOKEN")
     if not token:
         return False
-        
+
     webhook_key = environ.get("WEBHOOK_AUTH_KEY")
     function_url = environ.get("FUNCTION_URL")
-    
+
     if not function_url or not webhook_key:
         return False
-        
+
     webhook_info = get_telegram_webhook_info(token)
     if "error" in webhook_info:
         return False
 
     expected_webhook_url = f"{function_url}?key={webhook_key}"
     current_webhook_url = webhook_info.get("url")
-    
+
     return current_webhook_url == expected_webhook_url
 
 
