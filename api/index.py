@@ -1499,6 +1499,22 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
     query = query.strip()
     limit = max(1, min(int(limit), 15))
 
+    # Try cache first
+    cache_key = None
+    redis_client = None
+    try:
+        # Cache key prefix: 'web_search'
+        cache_key = f"web_search:{hashlib.md5(json.dumps({'q': query, 'limit': limit}).encode()).hexdigest()}"
+        redis_client = config_redis()
+        cached = redis_client.get(cache_key)
+        if cached:
+            parsed = json.loads(str(cached))
+            if isinstance(parsed, list):
+                return parsed
+    except Exception:
+        # Cache unavailable or invalid; continue without failing
+        redis_client = None
+
     try:
         from ddgs import DDGS
 
@@ -1517,8 +1533,15 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
             results.append({
                 "title": result.get("title", ""),
                 "url": result.get("href", ""),
-                "snippet": result.get("body", "")[:500]  # More text for better context
+                "snippet": result.get("body", "")[:500]
             })
+
+        # Store in cache for 5 minutes
+        try:
+            if redis_client and cache_key:
+                redis_client.setex(cache_key, 300, json.dumps(results))
+        except Exception:
+            pass
 
         return results
     except Exception:
