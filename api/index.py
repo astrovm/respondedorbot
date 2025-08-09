@@ -1272,15 +1272,19 @@ def ask_ai(
         # Continue with normal AI flow (for both image and text).
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
+        if initial:
+            print(f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'")
 
     # If the model asked to call a tool, execute and do a second pass
         tool_call = parse_tool_call(initial) if initial else None
         if tool_call:
             tool_name, tool_args = tool_call
             try:
+                print(f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}")
                 tool_output = execute_tool(tool_name, tool_args)
             except Exception as tool_err:
                 tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+                print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
 
             # Feed tool result back into the conversation and get final answer
             tool_context = {
@@ -1301,7 +1305,10 @@ def ask_ai(
 
             final = complete_with_providers(system_message, messages)
             if final:
-                return sanitize_tool_artifacts(final)
+                print(f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'")
+                return final
+            else:
+                print("ask_ai: second pass returned None; falling back to tool-output formatting")
 
             # If the second pass failed, synthesize a response from the tool output
             try:
@@ -1330,8 +1337,7 @@ def ask_ai(
 
         # If no tool call or second pass failed, return the best we had
         if initial:
-            safe_initial = sanitize_tool_artifacts(initial)
-            return safe_initial or get_fallback_response(messages)
+            return initial or get_fallback_response(messages)
 
         # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
@@ -1354,6 +1360,7 @@ def complete_with_providers(
     for attempt in range(2):
         groq_response = get_groq_ai_response(system_message, messages)
         if groq_response:
+            print("complete_with_providers: got response from Groq")
             return groq_response
         if attempt == 0:
             print(f"Groq attempt {attempt + 1} failed, retrying...")
@@ -1366,12 +1373,14 @@ def complete_with_providers(
     )
     response = get_ai_response(openrouter, system_message, messages)
     if response:
+        print("complete_with_providers: got response from OpenRouter")
         return response
 
     # Fallback to Cloudflare Workers AI with retries
     for attempt in range(2):
         cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
+            print("complete_with_providers: got response from Cloudflare AI")
             return cloudflare_response
         if attempt == 0:
             print(f"Cloudflare attempt {attempt + 1} failed, retrying...")
@@ -1455,9 +1464,11 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
                 try:
                     args = ast.literal_eval(json_text)
                 except Exception:
+                    print(f"parse_tool_call: failed to parse args after [TOOL] {name}: '{json_text[:200]}'")
                     args = None
 
             if isinstance(args, dict) and name:
+                print(f"parse_tool_call: detected tool '{name}' with args keys={list(args.keys())}")
                 return name, args
 
             i += 1
@@ -1475,6 +1486,10 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if not query:
             return "query vacío"
         results = web_search(query, limit=limit)
+        try:
+            print(f"execute_tool:web_search: q='{query}' results={len(results)}")
+        except Exception:
+            pass
         return json.dumps({"query": query, "results": results})
     return f"herramienta desconocida: {name}"
 
@@ -1891,6 +1906,7 @@ CONTEXTO POLITICO:
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
         )
 
+    print(f"build_system_message: include_tools={include_tools}")
     return {
         "role": "system",
         "content": [
@@ -2743,14 +2759,20 @@ def handle_ai_response(
         and hasattr(handler_func, "__name__")
         and handler_func.__name__ == "ask_ai"
     ):
+        print("handle_ai_response: calling ask_ai with image context")
         response = handler_func(
             messages, image_data=image_data, image_file_id=image_file_id
         )
     else:
+        print(f"handle_ai_response: calling {getattr(handler_func,'__name__','<callable>')} (text-only)")
         response = handler_func(messages)
 
     # Clean any duplicate text
     cleaned_response = clean_duplicate_response(response)
+    try:
+        print(f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'")
+    except Exception:
+        pass
 
     return cleaned_response
 
