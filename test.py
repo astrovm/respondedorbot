@@ -10,6 +10,11 @@ from api.index import (
     format_user_message,
     should_gordo_respond,
     truncate_text,
+    web_search,
+    search_command,
+    parse_tool_call,
+    execute_tool,
+    complete_with_providers,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -1156,6 +1161,12 @@ def test_initialize_commands():
     assert commands["/prices"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
+    # Test search commands
+    assert "/buscar" in commands
+    assert "/search" in commands
+    from api.index import search_command as _search_command
+    assert commands["/buscar"][0] == _search_command
+    assert commands["/search"][0] == _search_command
 
 
 def test_config_redis_with_env_vars():
@@ -3352,3 +3363,243 @@ def test_transcribe_audio_cloudflare_network_error():
         result = transcribe_audio_cloudflare(b"audio_data")
 
         assert result is None
+
+
+# Tests for web search functionality
+def test_web_search_success():
+    """Test web_search with successful DuckDuckGo response"""
+    mock_html = '''
+    <html>
+    <a href="https://example.com/test1">Test Result 1</a>
+    <a href="https://example.com/test2">Test Result 2</a>
+    </html>
+    '''
+    
+    with patch('requests.get') as mock_get:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
+        results = web_search("test query", limit=3)
+        
+        assert len(results) == 2
+        assert results[0]["title"] == "Test Result 1"
+        assert results[0]["url"] == "https://example.com/test1"
+        assert results[1]["title"] == "Test Result 2"
+        assert results[1]["url"] == "https://example.com/test2"
+
+
+def test_web_search_no_results():
+    """Test web_search when no results are found"""
+    mock_html = '<html><body>No results</body></html>'
+    
+    with patch('requests.get') as mock_get:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
+        results = web_search("nonexistent query")
+        
+        assert len(results) == 0
+
+
+def test_web_search_network_error():
+    """Test web_search when network error occurs"""
+    with patch('requests.get') as mock_get:
+        mock_get.side_effect = requests.exceptions.RequestException("Network error")
+        
+        results = web_search("test query")
+        
+        assert len(results) == 0
+
+
+def test_web_search_limit_parameter():
+    """Test web_search respects the limit parameter"""
+    mock_html = '''
+    <html>
+    <a href="https://example.com/1">Result 1</a>
+    <a href="https://example.com/2">Result 2</a>
+    <a href="https://example.com/3">Result 3</a>
+    <a href="https://example.com/4">Result 4</a>
+    <a href="https://example.com/5">Result 5</a>
+    </html>
+    '''
+    
+    with patch('requests.get') as mock_get:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
+        results = web_search("test query", limit=2)
+        
+        assert len(results) == 2
+        assert results[0]["title"] == "Result 1"
+        assert results[1]["title"] == "Result 2"
+
+
+# Tests for search command
+def test_search_command_success():
+    """Test search_command with successful results"""
+    with patch('api.index.web_search') as mock_search:
+        mock_search.return_value = [
+            {"title": "Test Result", "url": "https://example.com", "snippet": ""},
+            {"title": "Another Result", "url": "https://test.com", "snippet": "Test snippet"}
+        ]
+        
+        result = search_command("python programming")
+        
+        assert "🔎 Resultados para: python programming" in result
+        assert "Test Result" in result
+        assert "https://example.com" in result
+        assert "Another Result" in result
+        assert "Test snippet" in result
+
+
+def test_search_command_empty_query():
+    """Test search_command with empty query"""
+    result = search_command("")
+    assert result == "decime qué querés buscar capo"
+    
+    result = search_command(None)
+    assert result == "decime qué querés buscar capo"
+
+
+def test_search_command_no_results():
+    """Test search_command when no results found"""
+    with patch('api.index.web_search') as mock_search:
+        mock_search.return_value = []
+        
+        result = search_command("nonexistent query")
+        
+        assert result == "no encontré resultados ahora con duckduckgo"
+
+
+# Tests for tool calling functionality
+def test_parse_tool_call_valid():
+    """Test parse_tool_call with valid tool call"""
+    text = 'Some text\n[TOOL] web_search {"query": "test", "limit": 3}\nMore text'
+    
+    result = parse_tool_call(text)
+    
+    assert result is not None
+    tool_name, args = result
+    assert tool_name == "web_search"
+    assert args == {"query": "test", "limit": 3}
+
+
+def test_parse_tool_call_invalid():
+    """Test parse_tool_call with invalid inputs"""
+    # No tool call
+    assert parse_tool_call("Just normal text") is None
+    
+    # Malformed JSON
+    text = '[TOOL] web_search {"query": invalid json}'
+    assert parse_tool_call(text) is None
+    
+    # Missing arguments
+    text = '[TOOL] web_search'
+    assert parse_tool_call(text) is None
+    
+    # None input
+    assert parse_tool_call(None) is None
+
+
+def test_execute_tool_web_search():
+    """Test execute_tool with web_search tool"""
+    with patch('api.index.web_search') as mock_search:
+        mock_search.return_value = [{"title": "Test", "url": "https://test.com", "snippet": ""}]
+        
+        result = execute_tool("web_search", {"query": "test", "limit": 3})
+        
+        import json
+        parsed_result = json.loads(result)
+        assert parsed_result["query"] == "test"
+        assert len(parsed_result["results"]) == 1
+
+
+def test_execute_tool_empty_query():
+    """Test execute_tool with empty query"""
+    result = execute_tool("web_search", {"query": "", "limit": 3})
+    
+    assert result == "query vacío"
+
+
+def test_execute_tool_unknown():
+    """Test execute_tool with unknown tool"""
+    result = execute_tool("unknown_tool", {})
+    
+    assert result == "herramienta desconocida: unknown_tool"
+
+
+# Tests for complete_with_providers function
+def test_complete_with_providers_groq_success():
+    """Test complete_with_providers when Groq succeeds"""
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+    
+    with patch('api.index.get_groq_ai_response') as mock_groq, \
+         patch('api.index.get_ai_response') as mock_openrouter, \
+         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare:
+        
+        mock_groq.return_value = "Groq response"
+        mock_openrouter.return_value = "OpenRouter response"
+        mock_cloudflare.return_value = "Cloudflare response"
+        
+        result = complete_with_providers(system_message, messages)
+        
+        assert result == "Groq response"
+        mock_groq.assert_called_once()
+        mock_openrouter.assert_not_called()
+        mock_cloudflare.assert_not_called()
+
+
+def test_complete_with_providers_fallback_sequence():
+    """Test complete_with_providers fallback sequence"""
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+    
+    with patch('api.index.get_groq_ai_response') as mock_groq, \
+         patch('api.index.get_ai_response') as mock_openrouter, \
+         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
+         patch('os.environ.get') as mock_env:
+        
+        mock_env.return_value = "test_api_key"
+        mock_groq.return_value = None  # Groq fails
+        mock_openrouter.return_value = "OpenRouter response"
+        mock_cloudflare.return_value = "Cloudflare response"
+        
+        result = complete_with_providers(system_message, messages)
+        
+        assert result == "OpenRouter response"
+        mock_groq.assert_called_once()
+        mock_openrouter.assert_called_once()
+        mock_cloudflare.assert_not_called()
+
+
+def test_complete_with_providers_all_fail():
+    """Test complete_with_providers when all providers fail"""
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+    
+    with patch('api.index.get_groq_ai_response') as mock_groq, \
+         patch('api.index.get_ai_response') as mock_openrouter, \
+         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
+         patch('os.environ.get') as mock_env:
+        
+        mock_env.return_value = "test_api_key"
+        mock_groq.return_value = None
+        mock_openrouter.return_value = None
+        mock_cloudflare.return_value = None
+        
+        result = complete_with_providers(system_message, messages)
+        
+        assert result is None
+        mock_groq.assert_called_once()
+        mock_openrouter.assert_called_once()
+        mock_cloudflare.assert_called_once()
