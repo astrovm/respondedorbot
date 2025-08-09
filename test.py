@@ -17,6 +17,7 @@ from api.index import (
     parse_tool_call,
     execute_tool,
     complete_with_providers,
+    handle_ai_response,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -3554,6 +3555,20 @@ def test_execute_tool_unknown():
     result = execute_tool("unknown_tool", {})
 
     assert result == "herramienta desconocida: unknown_tool"
+
+
+def test_handle_ai_response_sanitizes_tool_lines(monkeypatch):
+    """handle_ai_response should strip visible tool call lines"""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    def fake_handler(_messages):
+        return "Hola\n[TOOL] web_search {\"query\": \"test\"}\nChau"
+
+    result = handle_ai_response("123", fake_handler, [])
+
+    assert "[TOOL]" not in result
+    assert result == "Hola\nChau"
 
 
 # Tests for complete_with_providers function

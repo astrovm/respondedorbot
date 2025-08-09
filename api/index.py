@@ -2790,8 +2790,11 @@ def handle_ai_response(
         print(f"handle_ai_response: calling {getattr(handler_func,'__name__','<callable>')} (text-only)")
         response = handler_func(messages)
 
+    # Remove any internal tool call lines before further processing
+    sanitized_response = sanitize_tool_artifacts(response)
+
     # Clean any duplicate text
-    cleaned_response = clean_duplicate_response(response)
+    cleaned_response = clean_duplicate_response(sanitized_response)
     try:
         print(f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'")
     except Exception:
