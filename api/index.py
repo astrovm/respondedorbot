@@ -1322,13 +1322,17 @@ def ask_ai(
 def complete_with_providers(
     system_message: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
-    # Try Groq first
-    groq_response = get_groq_ai_response(system_message, messages)
-    if groq_response:
-        return groq_response
+    """Try Groq, then OpenRouter, then Cloudflare with retries and return the first response."""
+    
+    # Try Groq first with retries
+    for attempt in range(2):
+        groq_response = get_groq_ai_response(system_message, messages)
+        if groq_response:
+            return groq_response
+        if attempt == 0:
+            print(f"Groq attempt {attempt + 1} failed, retrying...")
 
-    # Try OpenRouter second (OpenAI-compatible via OpenRouter)
+    # Try OpenRouter second (already has internal retries with model rotation)
     openrouter = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=environ.get("OPENROUTER_API_KEY"),
@@ -1337,10 +1341,13 @@ def complete_with_providers(
     if response:
         return response
 
-    # Fallback to Cloudflare Workers AI third
-    cloudflare_response = get_cloudflare_ai_response(system_message, messages)
-    if cloudflare_response:
-        return cloudflare_response
+    # Fallback to Cloudflare Workers AI with retries
+    for attempt in range(2):
+        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
+        if cloudflare_response:
+            return cloudflare_response
+        if attempt == 0:
+            print(f"Cloudflare attempt {attempt + 1} failed, retrying...")
 
     return None
 
