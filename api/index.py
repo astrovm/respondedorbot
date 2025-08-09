@@ -1592,7 +1592,7 @@ def sanitize_tool_artifacts(text: Optional[str]) -> str:
     return "\n".join(out_lines).strip()
 
 
-def search_command(msg_text: str) -> str:
+def search_command(msg_text: Optional[str]) -> str:
     """/buscar command: perform a web search and return concise results"""
     q = (msg_text or "").strip()
     if not q:
