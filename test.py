@@ -3372,40 +3372,41 @@ def test_transcribe_audio_cloudflare_network_error():
 
 # Tests for web search functionality
 def test_web_search_success():
-    """Test web_search with successful DuckDuckGo response"""
-    mock_html = '''
-    <html>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest1">Test Result 1</a>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest2">Test Result 2</a>
-    </html>
-    '''
-    
-    with patch('requests.get') as mock_get:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = mock_html
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
+    """Test web_search with successful DDGS response"""
+    with patch('ddgs.DDGS') as mock_ddgs_class:
+        # Mock DDGS instance and its text method
+        mock_ddgs = MagicMock()
+        mock_ddgs_class.return_value = mock_ddgs
+        mock_ddgs.text.return_value = [
+            {
+                "title": "Test Result 1",
+                "href": "https://example.com/test1",
+                "body": "This is test result 1 description"
+            },
+            {
+                "title": "Test Result 2", 
+                "href": "https://example.com/test2",
+                "body": "This is test result 2 description"
+            }
+        ]
         
         results = web_search("test query", limit=3)
         
         assert len(results) == 2
         assert results[0]["title"] == "Test Result 1"
         assert results[0]["url"] == "https://example.com/test1"
+        assert results[0]["snippet"] == "This is test result 1 description"
         assert results[1]["title"] == "Test Result 2"
         assert results[1]["url"] == "https://example.com/test2"
+        assert results[1]["snippet"] == "This is test result 2 description"
 
 
 def test_web_search_no_results():
     """Test web_search when no results are found"""
-    mock_html = '<html><body>No results</body></html>'
-    
-    with patch('requests.get') as mock_get:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = mock_html
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
+    with patch('ddgs.DDGS') as mock_ddgs_class:
+        mock_ddgs = MagicMock()
+        mock_ddgs_class.return_value = mock_ddgs
+        mock_ddgs.text.return_value = []
         
         results = web_search("nonexistent query")
         
@@ -3414,8 +3415,8 @@ def test_web_search_no_results():
 
 def test_web_search_network_error():
     """Test web_search when network error occurs"""
-    with patch('requests.get') as mock_get:
-        mock_get.side_effect = requests.exceptions.RequestException("Network error")
+    with patch('ddgs.DDGS') as mock_ddgs_class:
+        mock_ddgs_class.side_effect = Exception("Network error")
         
         results = web_search("test query")
         
@@ -3424,28 +3425,27 @@ def test_web_search_network_error():
 
 def test_web_search_limit_parameter():
     """Test web_search respects the limit parameter"""
-    mock_html = '''
-    <html>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F1">Result 1</a>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F2">Result 2</a>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F3">Result 3</a>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F4">Result 4</a>
-    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F5">Result 5</a>
-    </html>
-    '''
-    
-    with patch('requests.get') as mock_get:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = mock_html
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
+    with patch('ddgs.DDGS') as mock_ddgs_class:
+        mock_ddgs = MagicMock()
+        mock_ddgs_class.return_value = mock_ddgs
+        mock_ddgs.text.return_value = [
+            {"title": "Result 1", "href": "https://example.com/1", "body": "Description 1"},
+            {"title": "Result 2", "href": "https://example.com/2", "body": "Description 2"}
+        ]
         
         results = web_search("test query", limit=2)
         
         assert len(results) == 2
         assert results[0]["title"] == "Result 1"
         assert results[1]["title"] == "Result 2"
+        
+        # Verify that DDGS was called with the correct limit
+        mock_ddgs.text.assert_called_once_with(
+            query="test query",
+            region="us-en",
+            safesearch="moderate", 
+            max_results=2
+        )
 
 
 # Tests for search command
