@@ -1383,10 +1383,10 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     return f"herramienta desconocida: {name}"
 
 
-def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
+def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
     """Simple web search using DDGS library."""
     query = query.strip()
-    limit = max(1, min(int(limit), 10))
+    limit = max(1, min(int(limit), 15))
 
     try:
         from ddgs import DDGS
@@ -1406,7 +1406,7 @@ def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
             results.append({
                 "title": result.get("title", ""),
                 "url": result.get("href", ""),
-                "snippet": result.get("body", "")[:280]  # Limit snippet length
+                "snippet": result.get("body", "")[:500]  # More text for better context
             })
         
         return results
@@ -1419,7 +1419,7 @@ def search_command(msg_text: str) -> str:
     q = (msg_text or "").strip()
     if not q:
         return "decime qué querés buscar capo"
-    results = web_search(q, limit=5)
+    results = web_search(q, limit=10)
     if not results:
         return "no encontré resultados ahora con duckduckgo"
     lines = [f"🔎 Resultados para: {q}"]
@@ -1428,10 +1428,10 @@ def search_command(msg_text: str) -> str:
         url = r.get("url", "")
         snippet = (r.get("snippet") or "").strip()
         if snippet:
-            lines.append(f"{i}. {title}\n{url}\n{snippet[:180]}")
+            lines.append(f"{i}. {title}\n{url}\n{snippet[:300]}")
         else:
             lines.append(f"{i}. {title}\n{url}")
-    return "\n\n".join(lines[:6])
+    return "\n\n".join(lines[:10])
 
 
 def get_market_context() -> Dict:
