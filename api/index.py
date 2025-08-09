@@ -1331,6 +1331,7 @@ def complete_with_providers(
             return groq_response
         if attempt == 0:
             print(f"Groq attempt {attempt + 1} failed, retrying...")
+            time.sleep(0.5)
 
     # Try OpenRouter second (already has internal retries with model rotation)
     openrouter = OpenAI(
@@ -1348,6 +1349,7 @@ def complete_with_providers(
             return cloudflare_response
         if attempt == 0:
             print(f"Cloudflare attempt {attempt + 1} failed, retrying...")
+            time.sleep(0.5)
 
     return None
 
