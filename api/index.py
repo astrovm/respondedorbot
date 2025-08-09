@@ -1272,7 +1272,7 @@ def ask_ai(
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
 
-        # If the model asked to call a tool, execute and do a second pass
+    # If the model asked to call a tool, execute and do a second pass
         tool_call = parse_tool_call(initial) if initial else None
         if tool_call:
             tool_name, tool_args = tool_call
@@ -1302,9 +1302,40 @@ def ask_ai(
             if final:
                 return final
 
+            # If the second pass failed, synthesize a response from the tool output
+            try:
+                if tool_name == "web_search":
+                    # tool_output is JSON string with {query, results}
+                    data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                    query = data.get("query", "")
+                    results = data.get("results", []) or []
+                    if not results:
+                        return f"no encontré resultados ahora con duckduckgo"
+                    lines = [f"🔎 Resultados para: {query}"]
+                    for i, r in enumerate(results[:5], 1):
+                        title = r.get("title") or r.get("url") or "(sin título)"
+                        url = r.get("url", "")
+                        snippet = (r.get("snippet") or "").strip()
+                        if snippet:
+                            lines.append(f"{i}. {title}\n{url}\n{snippet[:300]}")
+                        else:
+                            lines.append(f"{i}. {title}\n{url}")
+                    return "\n\n".join(lines)
+                # Generic fallback for other tools
+                return f"Resultado de {tool_name}:\n{str(tool_output)[:1500]}"
+            except Exception:
+                # If even formatting fails, return a safe generic message
+                return "tuve un problema usando la herramienta, probá de nuevo más tarde"
+
         # If no tool call or second pass failed, return the best we had
         if initial:
-            return initial
+            # Avoid leaking raw tool-call line to the user
+            cleaned = []
+            for line in initial.splitlines():
+                if not line.strip().startswith("[TOOL]"):
+                    cleaned.append(line)
+            safe_initial = "\n".join(cleaned).strip()
+            return safe_initial or get_fallback_response(messages)
 
         # Final fallback to random response if all AI providers fail
         return get_fallback_response(messages)
