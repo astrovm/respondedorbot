@@ -2475,10 +2475,15 @@ def test_get_market_context_all_fail():
 
     with patch("api.index.cached_requests") as mock_cached, patch(
         "os.environ.get"
-    ) as mock_env:
+    ) as mock_env, patch("api.index.get_cached_bcra_variables") as mock_get_bcra, patch(
+        "api.index.scrape_bcra_variables"
+    ) as mock_scrape_bcra, patch("api.index.cache_bcra_variables") as mock_cache_bcra:
 
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
+        mock_get_bcra.return_value = None
+        mock_scrape_bcra.return_value = None
+        mock_cache_bcra.return_value = None
 
         result = get_market_context()
 
@@ -3567,12 +3572,17 @@ def test_complete_with_providers_fallback_sequence():
     with patch('api.index.get_groq_ai_response') as mock_groq, \
          patch('api.index.get_ai_response') as mock_openrouter, \
          patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
-         patch('os.environ.get') as mock_env:
+         patch('os.environ.get') as mock_env, \
+         patch('api.index.OpenAI') as mock_openai:
         
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None  # Groq fails
         mock_openrouter.return_value = "OpenRouter response"
         mock_cloudflare.return_value = "Cloudflare response"
+        
+        # Mock OpenAI client creation
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
         
         result = complete_with_providers(system_message, messages)
         
@@ -3590,12 +3600,17 @@ def test_complete_with_providers_all_fail():
     with patch('api.index.get_groq_ai_response') as mock_groq, \
          patch('api.index.get_ai_response') as mock_openrouter, \
          patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
-         patch('os.environ.get') as mock_env:
+         patch('os.environ.get') as mock_env, \
+         patch('api.index.OpenAI') as mock_openai:
         
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None
         mock_openrouter.return_value = None
         mock_cloudflare.return_value = None
+        
+        # Mock OpenAI client creation
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
         
         result = complete_with_providers(system_message, messages)
         
