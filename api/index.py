@@ -1395,7 +1395,7 @@ def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
         ddgs = DDGS(timeout=8)
         raw_results = ddgs.text(
             query=query,
-            region="us-en", 
+            region="ar-es", 
             safesearch="moderate",
             max_results=limit
         )
