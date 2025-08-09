@@ -22,7 +22,6 @@ import time
 import traceback
 import unicodedata
 import urllib.request
-import urllib.parse
 
 
 # Global variable to cache bot configuration
