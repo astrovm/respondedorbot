@@ -3442,7 +3442,7 @@ def test_web_search_limit_parameter():
         # Verify that DDGS was called with the correct limit
         mock_ddgs.text.assert_called_once_with(
             query="test query",
-            region="us-en",
+            region="ar-es",
             safesearch="moderate", 
             max_results=2
         )
