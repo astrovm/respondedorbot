@@ -8,6 +8,7 @@ from os import environ
 from PIL import Image
 from requests.exceptions import RequestException
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
+import ast
 import base64
 import emoji
 import hashlib
@@ -1300,7 +1301,7 @@ def ask_ai(
 
             final = complete_with_providers(system_message, messages)
             if final:
-                return final
+                return sanitize_tool_artifacts(final)
 
             # If the second pass failed, synthesize a response from the tool output
             try:
@@ -1329,12 +1330,7 @@ def ask_ai(
 
         # If no tool call or second pass failed, return the best we had
         if initial:
-            # Avoid leaking raw tool-call line to the user
-            cleaned = []
-            for line in initial.splitlines():
-                if not line.strip().startswith("[TOOL]"):
-                    cleaned.append(line)
-            safe_initial = "\n".join(cleaned).strip()
+            safe_initial = sanitize_tool_artifacts(initial)
             return safe_initial or get_fallback_response(messages)
 
         # Final fallback to random response if all AI providers fail
@@ -1389,21 +1385,82 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
     if not text:
         return None
     try:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("[TOOL]"):
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            line = raw.strip()
+
+            # Skip code fence delimiters
+            if line.startswith("```"):
+                i += 1
                 continue
-            # Expected format: [TOOL] name {json}
-            without_prefix = line[len("[TOOL]") :].strip()
+
+            # Normalize common list/code prefixes
+            normalized = line
+            # strip leading bullets or numbering
+            normalized = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", normalized)
+            normalized = normalized.strip().strip("`")
+
+            if not normalized.startswith("[TOOL]"):
+                i += 1
+                continue
+
+            # Expected: [TOOL] name {json...}
+            without_prefix = normalized[len("[TOOL]") :].strip()
             parts = without_prefix.split(" ", 1)
-            if len(parts) != 2:
+            if not parts:
+                i += 1
                 continue
-            name, json_part = parts[0].strip(), parts[1].strip()
-            if not json_part.startswith("{"):
+            name = parts[0].strip()
+            remainder = parts[1].strip() if len(parts) > 1 else ""
+
+            # Gather JSON possibly spanning multiple lines
+            json_candidate = remainder
+            # If we don't have an opening brace yet, try to read next lines
+            if "{" not in json_candidate:
+                # try next lines until we see an opening brace
+                j = i + 1
+                while j < len(lines) and "{" not in json_candidate:
+                    addition = lines[j].strip().strip("`")
+                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
+                    if addition:
+                        json_candidate = (json_candidate + " " + addition).strip()
+                    j += 1
+
+            # Now if we have an opening brace, read until braces balance
+            if "{" in json_candidate:
+                # Start counting from current collected candidate
+                open_count = json_candidate.count("{") - json_candidate.count("}")
+                j = i + 1
+                while open_count > 0 and j < len(lines):
+                    addition = lines[j].strip().strip("`")
+                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
+                    json_candidate = (json_candidate + " " + addition).strip()
+                    open_count += addition.count("{") - addition.count("}")
+                    j += 1
+            else:
+                # Couldn't find JSON
+                i += 1
                 continue
-            args = json.loads(json_part)
-            if isinstance(args, dict):
+
+            # Trim trailing commas or code fence markers
+            json_text = json_candidate.strip().rstrip(",")
+
+            # Try parse as JSON first, then fallback to Python literal
+            args: Any = None
+            try:
+                args = json.loads(json_text)
+            except Exception:
+                try:
+                    args = ast.literal_eval(json_text)
+                except Exception:
+                    args = None
+
+            if isinstance(args, dict) and name:
                 return name, args
+
+            i += 1
     except Exception:
         return None
     return None
@@ -1451,6 +1508,50 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         return results
     except Exception:
         return []
+
+
+def sanitize_tool_artifacts(text: Optional[str]) -> str:
+    """Remove any visible [TOOL] lines or code blocks that contain them from model output."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    out_lines: List[str] = []
+    in_fence = False
+    block_lines: List[str] = []
+    block_has_tool = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if not in_fence:
+                # starting a code fence
+                in_fence = True
+                block_lines = [line]
+                block_has_tool = False
+            else:
+                # closing a code fence
+                block_lines.append(line)
+                if not block_has_tool:
+                    out_lines.extend(block_lines)
+                # reset
+                in_fence = False
+                block_lines = []
+                block_has_tool = False
+            continue
+
+        if in_fence:
+            block_lines.append(line)
+            if "[TOOL]" in line:
+                block_has_tool = True
+        else:
+            # Outside code blocks: drop any line that contains [TOOL]
+            if "[TOOL]" not in line:
+                out_lines.append(line)
+
+    # If an unterminated fence exists, keep it only if it didn't contain [TOOL]
+    if in_fence and not block_has_tool:
+        out_lines.extend(block_lines)
+
+    return "\n".join(out_lines).strip()
 
 
 def search_command(msg_text: str) -> str:
