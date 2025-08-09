@@ -1400,17 +1400,31 @@ def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
         html = resp.text
         results: List[Dict[str, str]] = []
         
-        # Parse lite version results
+        # Parse DuckDuckGo lite results with redirect URLs
         for m in re.finditer(
-            r'<a[^>]*href="(https?://[^"]+)"[^>]*>\s*([^<]+?)\s*</a>',
+            r'<a[^>]*href="//duckduckgo\.com/l/\?uddg=([^"]+)"[^>]*>([^<]+)</a>',
             html,
         ):
-            url = m.group(1)
+            encoded_url = m.group(1)
             title = m.group(2).strip()
-            if url and title and not url.startswith("https://duckduckgo.com"):
-                results.append({"title": title, "url": url, "snippet": ""})
-            if len(results) >= limit:
-                break
+            
+            # Decode the URL from DuckDuckGo's redirect format
+            try:
+                url = urllib.parse.unquote(encoded_url)
+                # Clean up HTML entities in title first
+                title = title.replace("&#x27;", "'").replace("&quot;", '"').replace("&amp;", "&")
+                # Remove tracking parameters (both &amp; and & versions)
+                for param in ["&amp;rut=", "&rut="]:
+                    if param in url:
+                        url = url.split(param)[0]
+                        break
+                
+                if url and title:
+                    results.append({"title": title, "url": url, "snippet": ""})
+                if len(results) >= limit:
+                    break
+            except Exception:
+                continue
         return results
     except Exception:
         return []
