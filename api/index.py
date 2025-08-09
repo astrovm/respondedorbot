@@ -1084,7 +1084,7 @@ comandos disponibles boludo:
 
 - /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
 
-- /buscar algo: te busco en la web (si hay API configurada)
+- /buscar algo: te busco en la web
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
 
