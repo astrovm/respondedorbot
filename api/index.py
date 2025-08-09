@@ -1384,47 +1384,31 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
 
 def web_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
-    """Simple web search using DuckDuckGo lite search."""
+    """Simple web search using DDGS library."""
     query = query.strip()
     limit = max(1, min(int(limit), 10))
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        }
-        params = {"q": query, "kl": "us-en"}
-        resp = requests.get(
-            "https://lite.duckduckgo.com/lite/", params=params, headers=headers, timeout=8
-        )
-        resp.raise_for_status()
-        html = resp.text
-        results: List[Dict[str, str]] = []
+        from ddgs import DDGS
         
-        # Parse DuckDuckGo lite results with redirect URLs
-        for m in re.finditer(
-            r'<a[^>]*href="//duckduckgo\.com/l/\?uddg=([^"]+)"[^>]*>([^<]+)</a>',
-            html,
-        ):
-            encoded_url = m.group(1)
-            title = m.group(2).strip()
-            
-            # Decode the URL from DuckDuckGo's redirect format
-            try:
-                url = urllib.parse.unquote(encoded_url)
-                # Clean up HTML entities in title first
-                title = title.replace("&#x27;", "'").replace("&quot;", '"').replace("&amp;", "&")
-                # Remove tracking parameters (both &amp; and & versions)
-                for param in ["&amp;rut=", "&rut="]:
-                    if param in url:
-                        url = url.split(param)[0]
-                        break
-                
-                if url and title:
-                    results.append({"title": title, "url": url, "snippet": ""})
-                if len(results) >= limit:
-                    break
-            except Exception:
-                continue
+        # Use DDGS for robust DuckDuckGo search
+        ddgs = DDGS(timeout=8)
+        raw_results = ddgs.text(
+            query=query,
+            region="us-en", 
+            safesearch="moderate",
+            max_results=limit
+        )
+        
+        # Convert to our expected format
+        results = []
+        for result in raw_results:
+            results.append({
+                "title": result.get("title", ""),
+                "url": result.get("href", ""),
+                "snippet": result.get("body", "")[:280]  # Limit snippet length
+            })
+        
         return results
     except Exception:
         return []
