@@ -3443,7 +3443,7 @@ def test_web_search_limit_parameter():
         mock_ddgs.text.assert_called_once_with(
             query="test query",
             region="ar-es",
-            safesearch="moderate", 
+            safesearch="off", 
             max_results=2
         )
 
@@ -3587,7 +3587,7 @@ def test_complete_with_providers_fallback_sequence():
         result = complete_with_providers(system_message, messages)
         
         assert result == "OpenRouter response"
-        mock_groq.assert_called_once()
+        assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
         mock_cloudflare.assert_not_called()
 
@@ -3615,6 +3615,6 @@ def test_complete_with_providers_all_fail():
         result = complete_with_providers(system_message, messages)
         
         assert result is None
-        mock_groq.assert_called_once()
+        assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
-        mock_cloudflare.assert_called_once()
+        assert mock_cloudflare.call_count == 2
