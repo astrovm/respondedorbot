@@ -1390,7 +1390,7 @@ def complete_with_providers(
 
 
 def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Detect a tool call line like: [TOOL] web_search {"query": "...", "limit": 3}"""
+    """Detect a tool call line like: [TOOL] web_search {"query": "..."}"""
     if not text:
         return None
     try:
@@ -1482,10 +1482,10 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     name = name.lower()
     if name == "web_search":
         query = str(args.get("query", "")).strip()
-        limit = int(args.get("limit", 3) or 3)
         if not query:
             return "query vacío"
-        results = web_search(query, limit=limit)
+        # Always use a fixed limit so the model can't choose it
+        results = web_search(query, limit=10)
         try:
             print(f"execute_tool:web_search: q='{query}' results={len(results)}")
         except Exception:
@@ -1920,11 +1920,11 @@ CONTEXTO POLITICO:
     if include_tools:
         tools_section = (
             "\n\nHERRAMIENTAS DISPONIBLES:\n"
-            "- web_search: buscador web actual.\n"
+            "- web_search: buscador web actual (devuelve hasta 10 resultados).\n"
             "\nCÓMO LLAMAR HERRAMIENTAS:\n"
             "Escribe exactamente una línea con el formato:\n"
             "[TOOL] <nombre> {JSON}\n"
-            "Ejemplo: [TOOL] web_search {\"query\": \"inflación argentina hoy\", \"limit\": 3}\n"
+            "Ejemplo: [TOOL] web_search {\"query\": \"inflación argentina hoy\"}\n"
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
         )
