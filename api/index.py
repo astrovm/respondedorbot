@@ -1404,7 +1404,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         raw_results = ddgs.text(
             query=query,
             region="ar-es", 
-            safesearch="moderate",
+            safesearch="off",
             max_results=limit
         )
         
