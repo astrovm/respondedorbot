@@ -1581,6 +1581,71 @@ def test_ask_ai_with_image():
         assert len(result) > 0
 
 
+def test_ask_ai_sanitizes_tool_call_before_retry():
+    """ask_ai should sanitize tool responses before retrying provider"""
+    from api.index import ask_ai
+
+    with patch("api.index.get_market_context", return_value={}), patch(
+        "api.index.get_weather_context", return_value={}
+    ), patch("api.index.get_time_context", return_value={}), patch(
+        "api.index.build_system_message", return_value={"role": "system", "content": "sys"}
+    ), patch("api.index.OpenAI") as mock_openai, patch(
+        "api.index.execute_tool", return_value="{}"
+    ):
+        mock_openai.return_value = MagicMock()
+
+        calls = []
+
+        def fake_complete(system_message, msgs):
+            calls.append(msgs)
+            if len(calls) == 1:
+                return '[TOOL] web_search {"query": "test"}'
+            return "respuesta final"
+
+        with patch(
+            "api.index.complete_with_providers", side_effect=fake_complete
+        ):
+            result = ask_ai([{"role": "user", "content": "hola"}])
+
+    assert result == "respuesta final"
+    # second call should contain sanitized assistant message without [TOOL]
+    second_messages = calls[1]
+    assert "[TOOL]" not in second_messages[-2]["content"]
+
+
+def test_ask_ai_handles_repeated_tool_calls():
+    """ask_ai should execute tools repeatedly if providers return new tool calls"""
+    from api.index import ask_ai
+
+    with patch("api.index.get_market_context", return_value={}), patch(
+        "api.index.get_weather_context", return_value={}
+    ), patch("api.index.get_time_context", return_value={}), patch(
+        "api.index.build_system_message", return_value={"role": "system", "content": "sys"}
+    ), patch("api.index.OpenAI") as mock_openai, patch(
+        "api.index.execute_tool"
+    ) as mock_tool:
+        mock_openai.return_value = MagicMock()
+        mock_tool.side_effect = ["res1", "res2"]
+
+        call_count = {"n": 0}
+
+        def fake_complete(system_message, msgs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return '[TOOL] tool1 {}'
+            if call_count["n"] == 2:
+                return '[TOOL] tool2 {}'
+            return "fin"
+
+        with patch(
+            "api.index.complete_with_providers", side_effect=fake_complete
+        ):
+            result = ask_ai([{"role": "user", "content": "hola"}])
+
+    assert result == "fin"
+    assert mock_tool.call_count == 2
+    assert call_count["n"] == 3
+
 def test_get_dollar_rates_basic():
     from api.index import get_dollar_rates
 
@@ -3569,6 +3634,19 @@ def test_handle_ai_response_sanitizes_tool_lines(monkeypatch):
 
     assert "[TOOL]" not in result
     assert result == "Hola\nChau"
+
+
+def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
+    """Empty sanitized responses should return a fallback message"""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    def fake_handler(_messages):
+        return "[TOOL] web_search {\"query\": \"test\"}"
+
+    result = handle_ai_response("123", fake_handler, [])
+
+    assert result == "no pude generar respuesta, intentá de nuevo"
 
 
 # Tests for complete_with_providers function

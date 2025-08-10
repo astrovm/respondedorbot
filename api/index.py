@@ -1295,7 +1295,7 @@ def ask_ai(
             messages = messages + [
                 {
                     "role": "assistant",
-                    "content": initial,
+                    "content": sanitize_tool_artifacts(initial),
                 },
                 {
                     "role": "user",
@@ -1303,18 +1303,63 @@ def ask_ai(
                 },
             ]
 
-            final = complete_with_providers(system_message, messages)
-            if final:
-                print(f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'")
-                return final
-            else:
-                print("ask_ai: second pass returned None; falling back to tool-output formatting")
+            last_tool_name = tool_name
+            last_tool_output = tool_output
 
-            # If the second pass failed, synthesize a response from the tool output
+            attempts = 0
+            final = None
+            while attempts < 3:
+                final = complete_with_providers(system_message, messages)
+                if not final:
+                    print(
+                        "ask_ai: second pass returned None; falling back to tool-output formatting"
+                    )
+                    break
+                print(
+                    f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'"
+                )
+                next_tool_call = parse_tool_call(final)
+                if not next_tool_call:
+                    return final
+
+                tool_name, tool_args = next_tool_call
+                try:
+                    print(
+                        f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+                    )
+                    tool_output = execute_tool(tool_name, tool_args)
+                except Exception as tool_err:
+                    tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+                    print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
+
+                tool_context = {
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result": tool_output,
+                }
+                messages = messages + [
+                    {
+                        "role": "assistant",
+                        "content": sanitize_tool_artifacts(final),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+                    },
+                ]
+                last_tool_name = tool_name
+                last_tool_output = tool_output
+                attempts += 1
+
+            # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
             try:
-                if tool_name == "web_search":
+                if last_tool_name == "web_search":
                     # tool_output is JSON string with {query, results}
-                    data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                    data = (
+                        json.loads(last_tool_output)
+                        if isinstance(last_tool_output, str)
+                        else last_tool_output
+                    )
                     query = data.get("query", "")
                     results = data.get("results", []) or []
                     if not results:
@@ -1330,7 +1375,7 @@ def ask_ai(
                             lines.append(f"{i}. {title}\n{url}")
                     return "\n\n".join(lines)
                 # Generic fallback for other tools
-                return f"Resultado de {tool_name}:\n{str(tool_output)[:1500]}"
+                return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
             except Exception:
                 # If even formatting fails, return a safe generic message
                 return "tuve un problema usando la herramienta, probá de nuevo más tarde"
@@ -2796,9 +2841,15 @@ def handle_ai_response(
     # Clean any duplicate text
     cleaned_response = clean_duplicate_response(sanitized_response)
     try:
-        print(f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'")
+        print(
+            f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'"
+        )
     except Exception:
         pass
+
+    if not cleaned_response.strip():
+        print("handle_ai_response: empty sanitized response")
+        return "no pude generar respuesta, intentá de nuevo"
 
     return cleaned_response
 
