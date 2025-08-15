@@ -106,7 +106,7 @@ Required environment variables are documented in README.md. Critical ones:
 **Audio/Image Transcription (/transcribe):**
 - Must be used as reply to messages containing audio, images, or stickers
 - Audio transcription via Cloudflare Workers AI
-- Image description via LLaVA model
+- Image description via Llama 4 Scout model
 - 7-day Redis caching for both audio and image processing
 - Automatic file download from Telegram servers
 
