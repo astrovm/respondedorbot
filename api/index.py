@@ -1241,14 +1241,14 @@ def ask_ai(
         # Build system message with personality, context and tool instructions
         system_message = build_system_message(context_data, include_tools=True)
 
-        # If we have an image, first describe it with LLaVA then continue normal flow
+        # If we have an image, first describe it with Llama 4 Scout then continue normal flow
         if image_data:
-            print("Processing image with LLaVA model...")
+            print("Processing image with Llama 4 Scout model...")
 
-            # Always use a description prompt for LLaVA, not the user's question
+            # Always use a description prompt for the image model, not the user's question
             user_text = "Describe what you see in this image in detail."
 
-            # Describe the image using LLaVA
+            # Describe the image using Llama 4 Scout
             image_description = describe_image_cloudflare(
                 image_data, user_text, image_file_id
             )
@@ -2387,7 +2387,7 @@ def describe_image_cloudflare(
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Describe image using Cloudflare Workers AI LLaVA model"""
+    """Describe image using Cloudflare Workers AI Llama 4 Scout model"""
     try:
         # Check cache first if file_id is provided
         if file_id:
@@ -2402,18 +2402,21 @@ def describe_image_cloudflare(
             print("Cloudflare Workers AI credentials not configured")
             return None
 
-        url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/llava-hf/llava-1.5-7b-hf"
+        url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/"
+            "@cf/meta/llama-4-scout-17b-16e-instruct"
+        )
         headers = {
             "Authorization": f"Bearer {cloudflare_api_key}",
             "Content-Type": "application/json",
         }
 
-        # Convert bytes to array of integers (0-255) as expected by LLaVA
+        # Convert bytes to array of integers (0-255) as expected by the model
         image_array = list(image_data)
 
         payload = {"prompt": user_text, "image": image_array, "max_tokens": 1024}
 
-        print(f"Describing image with LLaVA model...")
+        print(f"Describing image with Llama 4 Scout model...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
 
         if response.status_code == 200:
@@ -2425,7 +2428,7 @@ def describe_image_cloudflare(
                 elif "description" in result["result"]:
                     description = result["result"]["description"]
                 else:
-                    print(f"Unexpected LLaVA response format: {result}")
+                    print(f"Unexpected image model response format: {result}")
                     return None
 
                 print(f"Image description successful: {description[:100]}...")
@@ -2436,10 +2439,12 @@ def describe_image_cloudflare(
 
                 return description
             else:
-                print(f"Unexpected LLaVA response format: {result}")
+                print(f"Unexpected image model response format: {result}")
         else:
             error_text = response.text
-            print(f"LLaVA API error {response.status_code}: {error_text}")
+            print(
+                f"Llama 4 Scout API error {response.status_code}: {error_text}"
+            )
 
             # Parse error details if available
             try:
@@ -2525,7 +2530,7 @@ def transcribe_audio_cloudflare(
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
-    """Resize image if it's too large for LLaVA processing"""
+    """Resize image if it's too large for model processing"""
     try:
         # Open the image
         image = Image.open(io.BytesIO(image_data))
@@ -2635,7 +2640,7 @@ def handle_msg(message: Dict) -> str:
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
             if image_data:
-                # Resize image if needed for LLaVA compatibility
+                # Resize image if needed for model compatibility
                 resized_image_data = resize_image_if_needed(image_data)
                 image_base64 = encode_image_to_base64(resized_image_data)
                 print(f"Image encoded to base64: {len(image_base64)} chars")
