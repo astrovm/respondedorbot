@@ -2249,15 +2249,29 @@ def should_gordo_respond(
     # Get message context
     message_lower = message_text.lower()
     chat_type = message["chat"]["type"]
-    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+    bot_username = environ.get("TELEGRAM_USERNAME")
+    bot_name = f"@{bot_username}"
+
+    # Ignore replies to link replacement messages
+    reply = message.get("reply_to_message", {})
+    if reply.get("from", {}).get("username") == bot_username:
+        reply_text = reply.get("text") or ""
+        replacement_domains = (
+            "fxtwitter.com",
+            "fixupx.com",
+            "fxbsky.app",
+            "ddinstagram.com",
+            "rxddit.com",
+            "vxtiktok.com",
+        )
+        if any(domain in reply_text for domain in replacement_domains):
+            return False
 
     # Response conditions
     is_command = command in commands
     is_private = chat_type == "private"
     is_mention = bot_name in message_lower
-    is_reply = message.get("reply_to_message", {}).get("from", {}).get(
-        "username", ""
-    ) == environ.get("TELEGRAM_USERNAME")
+    is_reply = reply.get("from", {}).get("username", "") == bot_username
 
     # Check trigger keywords with 10% chance
     config = load_bot_config()
