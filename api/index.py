@@ -2617,20 +2617,48 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
 
 def replace_links(text: str) -> Tuple[str, bool]:
     """Replace social links with alternative frontends"""
-    patterns = {
-        r"(https?://)(?:www\.)?twitter\.com": r"\1fxtwitter.com",
-        r"(https?://)(?:www\.)?x\.com": r"\1fixupx.com",
-        r"(https?://)(?:www\.)?bsky\.app": r"\1fxbsky.app",
-        r"(https?://)(?:www\.)?instagram\.com": r"\1ddinstagram.com",
-        r"(https?://)(?:www\.|old\.)?reddit\.com": r"\1rxddit.com",
-        r"(https?://)(?:[a-zA-Z0-9-]+\.)?tiktok\.com": r"\1vxtiktok.com",
-    }
-    new_text = text
+
+    def can_embed_url(url: str) -> bool:
+        """Return True if URL responds successfully for embed previews"""
+        try:
+            response = requests.head(url, allow_redirects=True, timeout=5)
+            return response.status_code < 400
+        except RequestException:
+            return False
+
+    patterns = [
+        (r"(https?://)(?:www\.)?twitter\.com", r"\1fxtwitter.com"),
+        (r"(https?://)(?:www\.)?x\.com", r"\1fixupx.com"),
+        (r"(https?://)(?:www\.)?bsky\.app", r"\1fxbsky.app"),
+        (r"(https?://)(?:www\.)?instagram\.com", r"\1ddinstagram.com"),
+        (
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com",
+            r"\1\2rxddit.com",
+        ),
+        (
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com",
+            r"\1\2vxtiktok.com",
+        ),
+    ]
+
     changed = False
-    for pattern, repl in patterns.items():
-        new_text, count = re.subn(pattern, repl, new_text, flags=re.IGNORECASE)
-        if count:
-            changed = True
+
+    def make_sub(repl: str):
+        def _sub(match: re.Match) -> str:
+            original = match.group(0)
+            replaced = match.expand(repl)
+            if can_embed_url(replaced):
+                nonlocal changed
+                changed = True
+                return replaced
+            return original
+
+        return _sub
+
+    new_text = text
+    for pattern, repl in patterns:
+        new_text = re.sub(pattern, make_sub(repl), new_text, flags=re.IGNORECASE)
+
     return new_text, changed
 
 
