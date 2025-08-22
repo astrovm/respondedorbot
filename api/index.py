@@ -2619,10 +2619,19 @@ def replace_links(text: str) -> Tuple[str, bool]:
     """Replace social links with alternative frontends"""
 
     def can_embed_url(url: str) -> bool:
-        """Return True if URL responds successfully for embed previews"""
+        """Return True if URL has metadata for embed previews"""
         try:
-            response = requests.head(url, allow_redirects=True, timeout=5)
-            return response.status_code < 400
+            response = requests.get(url, allow_redirects=True, timeout=5)
+            if response.status_code >= 400:
+                return False
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "text/html" not in content_type:
+                return False
+            html = response.text[:20000]
+            return bool(
+                re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
+                or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
+            )
         except RequestException:
             return False
 

@@ -3766,9 +3766,13 @@ def test_complete_with_providers_all_fail():
         assert mock_cloudflare.call_count == 2
 
 
-@patch("api.index.requests.head")
-def test_replace_links(mock_head):
-    mock_head.return_value.status_code = 200
+@patch("api.index.requests.get")
+def test_replace_links(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_get.return_value = mock_response
     text = (
         "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and "
         "https://www.instagram.com/qux and https://www.reddit.com/r/foo and https://old.reddit.com/r/bar and "
@@ -3786,12 +3790,27 @@ def test_replace_links(mock_head):
     assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
 
 
-@patch("api.index.requests.head")
-def test_replace_links_skips_when_embed_fails(mock_head):
-    mock_head.return_value.status_code = 404
+@patch("api.index.requests.get")
+def test_replace_links_skips_when_embed_fails(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_get.return_value = mock_response
     text = "Check https://www.reddit.com/r/foo"
     fixed, changed = replace_links(text)
-    mock_head.assert_called_once()
+    mock_get.assert_called_once()
+    assert not changed
+    assert fixed == text
+
+
+@patch("api.index.requests.get")
+def test_replace_links_skips_when_no_metadata(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<html></html>"
+    mock_get.return_value = mock_response
+    text = "Check https://www.reddit.com/r/foo"
+    fixed, changed = replace_links(text)
     assert not changed
     assert fixed == text
 
@@ -3834,10 +3853,16 @@ def test_handle_msg_link_reply():
         patch("api.index.send_msg") as mock_send, \
         patch("api.index.delete_msg") as mock_delete, \
         patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save:
+        patch("api.index.save_message_to_redis") as mock_save, \
+        patch("api.index.requests.get") as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_response
 
         result = handle_msg(message)
 
@@ -3860,10 +3885,16 @@ def test_handle_msg_link_reply_instagram():
         patch("api.index.send_msg") as mock_send, \
         patch("api.index.delete_msg") as mock_delete, \
         patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save:
+        patch("api.index.save_message_to_redis") as mock_save, \
+        patch("api.index.requests.get") as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_response
 
         result = handle_msg(message)
 
@@ -3886,10 +3917,16 @@ def test_handle_msg_link_delete():
         patch("api.index.send_msg") as mock_send, \
         patch("api.index.delete_msg") as mock_delete, \
         patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save:
+        patch("api.index.save_message_to_redis") as mock_save, \
+        patch("api.index.requests.get") as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "delete"
         mock_redis.return_value = redis_client
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_response
 
         result = handle_msg(message)
 
