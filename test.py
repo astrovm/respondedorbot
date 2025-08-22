@@ -286,6 +286,35 @@ def test_should_gordo_respond():
             assert should_gordo_respond(commands, "", "hey gordo", msg) == True
 
 
+def test_should_gordo_respond_ignores_link_fix_reply():
+    import api.index
+
+    api.index._bot_config = None
+    commands = {"/test": (lambda x: x, False, False)}
+
+    with patch("os.environ.get") as mock_env:
+        def env_side_effect(key):
+            env_vars = {
+                "TELEGRAM_USERNAME": "testbot",
+                "BOT_SYSTEM_PROMPT": "You are a test bot",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
+            }
+            return env_vars.get(key)
+
+        mock_env.side_effect = env_side_effect
+
+        msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+            "reply_to_message": {
+                "from": {"username": "testbot"},
+                "text": "https://fxtwitter.com/foo",
+            },
+        }
+
+        assert should_gordo_respond(commands, "/test", "hello", msg) is False
+
+
 def test_gen_random():
     from api.index import gen_random
 
@@ -1346,7 +1375,13 @@ def test_format_user_message_complex_cases():
 
 
 def test_should_gordo_respond_complex_cases():
+    import api.index
     from api.index import should_gordo_respond
+
+    api.index._bot_config = {
+        "trigger_words": ["gordo", "test", "bot"],
+        "system_prompt": "You are a test bot",
+    }
 
     commands = {
         "/test": (lambda x: x, False, False),
