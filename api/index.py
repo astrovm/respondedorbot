@@ -1092,6 +1092,8 @@ comandos disponibles boludo:
 
 - /instance: te digo donde estoy corriendo
 
+- /links reply|delete|off: te arreglo los links de twitter/x/bsky
+
 - /prices, /precio, /precios, /presio, /presios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
 - /prices 20: top 20 en usd
@@ -2696,7 +2698,7 @@ def handle_msg(message: Dict) -> str:
             if changed:
                 username = message.get("from", {}).get("username")
                 if username:
-                    fixed_text += f"\nShared by @{username}"
+                    fixed_text += f"\n\nShared by @{username}"
                 if link_mode == "delete":
                     delete_msg(chat_id, message_id)
                     send_msg(chat_id, fixed_text)
