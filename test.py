@@ -3733,13 +3733,14 @@ def test_complete_with_providers_all_fail():
 
 def test_replace_links():
     text = (
-        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz"
+        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and https://www.instagram.com/qux"
     )
     fixed, changed = replace_links(text)
     assert changed
     assert "https://fxtwitter.com/foo" in fixed
     assert "http://fixupx.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
+    assert "https://ddinstagram.com/qux" in fixed
 
 
 def test_configure_links_sets_and_disables():
@@ -3790,6 +3791,32 @@ def test_handle_msg_link_reply():
         assert result == "ok"
         expected = "check https://fxtwitter.com/foo\n\nShared by @john"
         mock_send.assert_called_once_with("123", expected, "1")
+        mock_delete.assert_not_called()
+        mock_save.assert_not_called()
+
+
+def test_handle_msg_link_reply_instagram():
+    message = {
+        "message_id": 3,
+        "chat": {"id": 789, "type": "group"},
+        "from": {"first_name": "Lu", "username": "lu"},
+        "text": "mirá https://www.instagram.com/qux",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.delete_msg") as mock_delete, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.save_message_to_redis") as mock_save:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        expected = "mirá https://ddinstagram.com/qux\n\nShared by @lu"
+        mock_send.assert_called_once_with("789", expected, "3")
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
 
