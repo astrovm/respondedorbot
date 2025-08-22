@@ -41,6 +41,23 @@ ALTERNATIVE_FRONTENDS = {
     "vxtiktok.com",
 }
 
+# Original social domains that may need replacement
+ORIGINAL_FRONTENDS = {
+    "twitter.com",
+    "x.com",
+    "bsky.app",
+    "instagram.com",
+    "reddit.com",
+    "tiktok.com",
+}
+
+
+def is_social_frontend(host: str) -> bool:
+    """Return True if host is an original or alternative social frontend"""
+    host = host.lower()
+    frontends = ALTERNATIVE_FRONTENDS | ORIGINAL_FRONTENDS
+    return any(host == d or host.endswith(f".{d}") for d in frontends)
+
 
 def load_bot_config():
     """Load bot configuration from environment variables"""
@@ -2796,10 +2813,10 @@ def handle_msg(message: Dict) -> str:
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
                 cleaned = [u.rstrip('.,!?') for u in urls]
-                remaining = []
+                remaining: List[str] = []
                 for u in cleaned:
                     host = urlparse(u).hostname
-                    if host and host.lower() not in ALTERNATIVE_FRONTENDS:
+                    if host and not is_social_frontend(host):
                         remaining.append(u)
                 if not remaining:
                     return "ok"
