@@ -2812,17 +2812,6 @@ def handle_msg(message: Dict) -> str:
                 return "ok"
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
-                cleaned = [u.rstrip('.,!?') for u in urls]
-                remaining: List[str] = []
-                for u in cleaned:
-                    host = urlparse(u).hostname
-                    if host and not is_social_frontend(host):
-                        remaining.append(u)
-                if not remaining:
-                    return "ok"
-                if all(url_is_embedable(u) for u in remaining):
-                    return "ok"
-                send_msg(chat_id, "no pude ver ese link, boludo", message_id)
                 return "ok"
 
         commands = initialize_commands()
