@@ -3766,7 +3766,9 @@ def test_complete_with_providers_all_fail():
         assert mock_cloudflare.call_count == 2
 
 
-def test_replace_links():
+@patch("api.index.requests.head")
+def test_replace_links(mock_head):
+    mock_head.return_value.status_code = 200
     text = (
         "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and "
         "https://www.instagram.com/qux and https://www.reddit.com/r/foo and https://old.reddit.com/r/bar and "
@@ -3778,10 +3780,20 @@ def test_replace_links():
     assert "http://fixupx.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
     assert "https://ddinstagram.com/qux" in fixed
-    assert "https://rxddit.com/r/foo" in fixed
-    assert "https://rxddit.com/r/bar" in fixed
-    assert "https://vxtiktok.com/@bar" in fixed
-    assert "https://vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+    assert "https://www.rxddit.com/r/foo" in fixed
+    assert "https://old.rxddit.com/r/bar" in fixed
+    assert "https://www.vxtiktok.com/@bar" in fixed
+    assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+
+
+@patch("api.index.requests.head")
+def test_replace_links_skips_when_embed_fails(mock_head):
+    mock_head.return_value.status_code = 404
+    text = "Check https://www.reddit.com/r/foo"
+    fixed, changed = replace_links(text)
+    mock_head.assert_called_once()
+    assert not changed
+    assert fixed == text
 
 
 def test_configure_links_sets_and_disables():
