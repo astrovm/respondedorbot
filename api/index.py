@@ -2609,7 +2609,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
         r"(https?://)(?:www\.)?bsky\.app": r"\1fxbsky.app",
         r"(https?://)(?:www\.)?instagram\.com": r"\1ddinstagram.com",
         r"(https?://)(?:www\.)?reddit\.com": r"\1rxddit.com",
-        r"(https?://)(?:www\.)?tiktok\.com": r"\1vxtiktok.com",
+        r"(https?://)(?:[a-zA-Z0-9-]+\.)?tiktok\.com": r"\1vxtiktok.com",
     }
     new_text = text
     changed = False

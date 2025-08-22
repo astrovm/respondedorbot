@@ -3733,7 +3733,9 @@ def test_complete_with_providers_all_fail():
 
 def test_replace_links():
     text = (
-        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and https://www.instagram.com/qux and https://www.reddit.com/r/foo and https://www.tiktok.com/@bar"
+        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and "
+        "https://www.instagram.com/qux and https://www.reddit.com/r/foo and "
+        "https://www.tiktok.com/@bar and https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/"
     )
     fixed, changed = replace_links(text)
     assert changed
@@ -3743,6 +3745,7 @@ def test_replace_links():
     assert "https://ddinstagram.com/qux" in fixed
     assert "https://rxddit.com/r/foo" in fixed
     assert "https://vxtiktok.com/@bar" in fixed
+    assert "https://vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
 
 
 def test_configure_links_sets_and_disables():
