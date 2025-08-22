@@ -18,6 +18,9 @@ from api.index import (
     execute_tool,
     complete_with_providers,
     handle_ai_response,
+    handle_msg,
+    replace_links,
+    configure_links,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -3725,3 +3728,78 @@ def test_complete_with_providers_all_fail():
         assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
         assert mock_cloudflare.call_count == 2
+
+
+def test_replace_links():
+    text = (
+        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz"
+    )
+    fixed, changed = replace_links(text)
+    assert changed
+    assert "https://fxtwitter.com/foo" in fixed
+    assert "http://fixupx.com/bar" in fixed
+    assert "https://fxbsky.app/baz" in fixed
+
+
+def test_configure_links_sets_and_disables():
+    with patch("api.index.config_redis") as mock_redis:
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+
+        resp = configure_links("123", "reply")
+        redis_client.set.assert_called_with("link_mode:123", "reply")
+        assert "reply" in resp
+
+        resp = configure_links("123", "off")
+        redis_client.delete.assert_called_with("link_mode:123")
+        assert "disabled" in resp
+
+
+def test_handle_msg_link_reply():
+    message = {
+        "message_id": 1,
+        "chat": {"id": 123, "type": "group"},
+        "from": {"first_name": "John", "username": "john"},
+        "text": "check https://twitter.com/foo",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.delete_msg") as mock_delete, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.save_message_to_redis") as mock_save:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_called_once()
+        mock_delete.assert_not_called()
+        mock_save.assert_not_called()
+
+
+def test_handle_msg_link_delete():
+    message = {
+        "message_id": 2,
+        "chat": {"id": 456, "type": "group"},
+        "from": {"first_name": "Ana", "username": "ana"},
+        "text": "look https://x.com/bar",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.delete_msg") as mock_delete, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.save_message_to_redis") as mock_save:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "delete"
+        mock_redis.return_value = redis_client
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_delete.assert_called_once()
+        mock_send.assert_called_once()
+        mock_save.assert_not_called()

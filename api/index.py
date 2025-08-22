@@ -1134,6 +1134,14 @@ def send_msg(chat_id: str, msg: str, msg_id: str = "") -> None:
     requests.get(url, params=parameters, timeout=5)
 
 
+def delete_msg(chat_id: str, msg_id: str) -> None:
+    """Delete a Telegram message"""
+    token = environ.get("TELEGRAM_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/deleteMessage"
+    parameters = {"chat_id": chat_id, "message_id": msg_id}
+    requests.get(url, params=parameters, timeout=5)
+
+
 def admin_report(
     message: str,
     error: Optional[Exception] = None,
@@ -2102,6 +2110,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/instance": (get_instance_name, False, False),
         "/help": (get_help, False, False),
         "/transcribe": (handle_transcribe, False, False),
+        "/links": (lambda params: "", False, True),
         "/bcra": (handle_bcra_variables, False, False),
         "/variables": (handle_bcra_variables, False, False),
     }
@@ -2590,6 +2599,39 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     return command, message_text
 
 
+def replace_links(text: str) -> Tuple[str, bool]:
+    """Replace social links with alternative frontends"""
+    patterns = {
+        r"(https?://)(?:www\.)?twitter\.com": r"\1fxtwitter.com",
+        r"(https?://)(?:www\.)?x\.com": r"\1fixupx.com",
+        r"(https?://)(?:www\.)?bsky\.app": r"\1fxbsky.app",
+    }
+    new_text = text
+    changed = False
+    for pattern, repl in patterns.items():
+        new_text, count = re.subn(pattern, repl, new_text, flags=re.IGNORECASE)
+        if count:
+            changed = True
+    return new_text, changed
+
+
+def configure_links(chat_id: str, params: str) -> str:
+    """Configure automatic link fixing for a chat"""
+    redis_client = config_redis()
+    key = f"link_mode:{chat_id}"
+    mode = params.strip().lower()
+
+    if mode in {"reply", "delete"}:
+        redis_client.set(key, mode)
+        return f"Link fixer set to {mode} mode"
+    if mode == "off" or mode == "":
+        redis_client.delete(key)
+        return "Link fixer disabled"
+
+    current = redis_client.get(key) or "off"
+    return f"Usage: /links reply|delete|off (current: {current})"
+
+
 def format_user_message(message: Dict, message_text: str) -> str:
     """Format message with user info"""
     username = message["from"].get("username", "")
@@ -2647,6 +2689,21 @@ def handle_msg(message: Dict) -> str:
 
         # Initialize Redis and commands
         redis_client = config_redis()
+
+        link_mode = redis_client.get(f"link_mode:{chat_id}")
+        if link_mode and message_text and not message_text.startswith("/"):
+            fixed_text, changed = replace_links(message_text)
+            if changed:
+                username = message.get("from", {}).get("username")
+                if username:
+                    fixed_text += f"\nShared by @{username}"
+                if link_mode == "delete":
+                    delete_msg(chat_id, message_id)
+                    send_msg(chat_id, fixed_text)
+                else:
+                    send_msg(chat_id, fixed_text, message_id)
+                return "ok"
+
         commands = initialize_commands()
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
@@ -2718,6 +2775,8 @@ def handle_msg(message: Dict) -> str:
                 # Special handling for transcribe command which needs the full message
                 if command == "/transcribe":
                     response_msg = handle_transcribe_with_message(message)
+                elif command == "/links":
+                    response_msg = configure_links(chat_id, sanitized_message_text)
                 else:
                     if takes_params:
                         response_msg = handler_func(sanitized_message_text)
