@@ -41,6 +41,23 @@ ALTERNATIVE_FRONTENDS = {
     "vxtiktok.com",
 }
 
+# Original social domains that may need replacement
+ORIGINAL_FRONTENDS = {
+    "twitter.com",
+    "x.com",
+    "bsky.app",
+    "instagram.com",
+    "reddit.com",
+    "tiktok.com",
+}
+
+
+def is_social_frontend(host: str) -> bool:
+    """Return True if host is an original or alternative social frontend"""
+    host = host.lower()
+    frontends = ALTERNATIVE_FRONTENDS | ORIGINAL_FRONTENDS
+    return any(host == d or host.endswith(f".{d}") for d in frontends)
+
 
 def load_bot_config():
     """Load bot configuration from environment variables"""
@@ -2795,17 +2812,6 @@ def handle_msg(message: Dict) -> str:
                 return "ok"
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
-                cleaned = [u.rstrip('.,!?') for u in urls]
-                remaining = []
-                for u in cleaned:
-                    host = urlparse(u).hostname
-                    if host and host.lower() not in ALTERNATIVE_FRONTENDS:
-                        remaining.append(u)
-                if not remaining:
-                    return "ok"
-                if all(url_is_embedable(u) for u in remaining):
-                    return "ok"
-                send_msg(chat_id, "no pude ver ese link, boludo", message_id)
                 return "ok"
 
         commands = initialize_commands()

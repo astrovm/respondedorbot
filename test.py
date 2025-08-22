@@ -3959,8 +3959,7 @@ def test_handle_msg_link_without_preview(mock_redis):
         result = handle_msg(message)
 
         assert result == "ok"
-        mock_send.assert_called_once()
-        assert "no pude ver ese link" in mock_send.call_args[0][1]
+        mock_send.assert_not_called()
         mock_should.assert_not_called()
 
 
@@ -4008,6 +4007,58 @@ def test_handle_msg_link_already_fixed():
         "chat": {"id": 654, "type": "group"},
         "from": {"id": 1},
         "text": "https://fixupx.com/foo",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_not_called()
+        mock_should.assert_not_called()
+        mock_get.assert_not_called()
+
+
+def test_handle_msg_original_link_no_check():
+    message = {
+        "message_id": 7,
+        "chat": {"id": 987, "type": "group"},
+        "from": {"id": 1},
+        "text": "https://vm.tiktok.com/foo",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.replace_links") as mock_replace, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+        mock_replace.return_value = ("https://vm.tiktok.com/foo", False)
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_not_called()
+        mock_should.assert_not_called()
+        mock_get.assert_not_called()
+
+
+def test_handle_msg_link_already_fixed_subdomain():
+    message = {
+        "message_id": 8,
+        "chat": {"id": 999, "type": "group"},
+        "from": {"id": 1},
+        "text": "https://vm.vxtiktok.com/foo",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
         patch("api.index.config_redis") as mock_redis, \
