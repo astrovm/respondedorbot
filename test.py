@@ -3756,6 +3756,18 @@ def test_configure_links_sets_and_disables():
         assert "disabled" in resp
 
 
+def test_configure_links_usage_shows_current():
+    with patch("api.index.config_redis") as mock_redis:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+
+        resp = configure_links("123", "")
+        redis_client.delete.assert_not_called()
+        assert "Usage:" in resp
+        assert "current: reply" in resp
+
+
 def test_handle_msg_link_reply():
     message = {
         "message_id": 1,
