@@ -1843,6 +1843,7 @@ def test_get_help_basic():
     assert "/dolar" in result
     assert "/usd" in result
     assert "/prices" in result
+    assert "/links" in result
 
 
 def test_get_instance_name_basic():
@@ -3775,7 +3776,8 @@ def test_handle_msg_link_reply():
         result = handle_msg(message)
 
         assert result == "ok"
-        mock_send.assert_called_once()
+        expected = "check https://fxtwitter.com/foo\n\nShared by @john"
+        mock_send.assert_called_once_with("123", expected, "1")
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
 
@@ -3800,6 +3802,7 @@ def test_handle_msg_link_delete():
         result = handle_msg(message)
 
         assert result == "ok"
-        mock_delete.assert_called_once()
-        mock_send.assert_called_once()
+        expected = "look https://fixupx.com/bar\n\nShared by @ana"
+        mock_delete.assert_called_once_with("456", "2")
+        mock_send.assert_called_once_with("456", expected)
         mock_save.assert_not_called()
