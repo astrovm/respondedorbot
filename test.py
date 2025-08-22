@@ -3959,8 +3959,7 @@ def test_handle_msg_link_without_preview(mock_redis):
         result = handle_msg(message)
 
         assert result == "ok"
-        mock_send.assert_called_once()
-        assert "no pude ver ese link" in mock_send.call_args[0][1]
+        mock_send.assert_not_called()
         mock_should.assert_not_called()
 
 
