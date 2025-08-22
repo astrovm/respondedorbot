@@ -6,7 +6,9 @@ from math import log
 from openai import OpenAI
 from os import environ
 from PIL import Image
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, SSLError
+from urllib3.exceptions import InsecureRequestWarning
+import warnings
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
 import ast
 import base64
@@ -2622,18 +2624,26 @@ def replace_links(text: str) -> Tuple[str, bool]:
         """Return True if URL has metadata for embed previews"""
         try:
             response = requests.get(url, allow_redirects=True, timeout=5)
-            if response.status_code >= 400:
+        except SSLError:
+            try:
+                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+                response = requests.get(
+                    url, allow_redirects=True, timeout=5, verify=False
+                )
+            except RequestException:
                 return False
-            content_type = response.headers.get("Content-Type", "").lower()
-            if "text/html" not in content_type:
-                return False
-            html = response.text[:20000]
-            return bool(
-                re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
-                or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
-            )
         except RequestException:
             return False
+        if response.status_code >= 400:
+            return False
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" not in content_type:
+            return False
+        html = response.text[:20000]
+        return bool(
+            re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
+            or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
+        )
 
     patterns = [
         (r"(https?://)(?:www\.)?twitter\.com", r"\1fxtwitter.com"),
@@ -2758,6 +2768,9 @@ def handle_msg(message: Dict) -> str:
                     send_msg(chat_id, fixed_text)
                 else:
                     send_msg(chat_id, fixed_text, message_id)
+                return "ok"
+            if re.search(r"https?://", message_text):
+                send_msg(chat_id, "no pude ver ese link, boludo", message_id)
                 return "ok"
 
         commands = initialize_commands()
