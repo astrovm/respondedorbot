@@ -3815,6 +3815,22 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert fixed == text
 
 
+@patch("api.index.requests.get")
+def test_replace_links_retries_on_ssl_error(mock_get):
+    from requests.exceptions import SSLError
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<meta property='og:title'>"
+    mock_get.side_effect = [SSLError("ssl"), mock_response]
+    text = "Check https://twitter.com/foo"
+    fixed, changed = replace_links(text)
+    assert mock_get.call_count == 2
+    assert changed
+    assert "https://fxtwitter.com/foo" in fixed
+
+
 def test_configure_links_sets_and_disables():
     with patch("api.index.config_redis") as mock_redis:
         redis_client = MagicMock()
@@ -3935,3 +3951,28 @@ def test_handle_msg_link_delete():
         mock_delete.assert_called_once_with("456", "2")
         mock_send.assert_called_once_with("456", expected)
         mock_save.assert_not_called()
+
+
+@patch("api.index.config_redis")
+def test_handle_msg_link_without_preview(mock_redis):
+    message = {
+        "message_id": 5,
+        "chat": {"id": 321, "type": "group"},
+        "from": {"id": 1},
+        "text": "https://example.com",
+    }
+    with patch("api.index.send_msg") as mock_send, \
+        patch("api.index.replace_links") as mock_replace, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+        mock_replace.return_value = ("https://example.com", False)
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_called_once()
+        assert "no pude ver ese link" in mock_send.call_args[0][1]
+        mock_should.assert_not_called()
