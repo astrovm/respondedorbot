@@ -1092,7 +1092,7 @@ comandos disponibles boludo:
 
 - /instance: te digo donde estoy corriendo
 
-- /links reply|delete|off: te arreglo los links de twitter/x/bsky
+- /links reply|delete|off: te arreglo los links de twitter/x/bsky/instagram
 
 - /prices, /precio, /precios, /presio, /presios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
@@ -2607,6 +2607,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
         r"(https?://)(?:www\.)?twitter\.com": r"\1fxtwitter.com",
         r"(https?://)(?:www\.)?x\.com": r"\1fixupx.com",
         r"(https?://)(?:www\.)?bsky\.app": r"\1fxbsky.app",
+        r"(https?://)(?:www\.)?instagram\.com": r"\1ddinstagram.com",
     }
     new_text = text
     changed = False
