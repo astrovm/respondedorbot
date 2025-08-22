@@ -2626,7 +2626,7 @@ def configure_links(chat_id: str, params: str) -> str:
     if mode in {"reply", "delete"}:
         redis_client.set(key, mode)
         return f"Link fixer set to {mode} mode"
-    if mode == "off" or mode == "":
+    if mode == "off":
         redis_client.delete(key)
         return "Link fixer disabled"
 
