@@ -3975,6 +3975,21 @@ def test_replace_links_checks_preview(monkeypatch):
     mock_can.assert_called_once_with("https://fixupx.com")
 
 
+def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<html></html>"
+    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+
+    result = can_embed_url("http://example.com")
+    assert result is False
+    captured = capsys.readouterr().out
+    assert "missing og/twitter meta tags" in captured
+
+
 def test_handle_msg_link_already_fixed():
     message = {
         "message_id": 6,
