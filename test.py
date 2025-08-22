@@ -3972,8 +3972,20 @@ def test_replace_links_checks_preview(monkeypatch):
     text, changed = replace_links("https://x.com/foo")
     assert text == "https://fixupx.com/foo"
     assert changed is True
-    mock_can.assert_called_once_with("https://fixupx.com")
+    mock_can.assert_called_once_with("https://fixupx.com/foo")
 
+
+@patch("api.index.requests.get")
+def test_xcom_link_replacement_with_metadata(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_get.return_value = mock_response
+    fixed, changed = replace_links("https://x.com/foo")
+    assert changed is True
+    assert fixed == "https://fixupx.com/foo"
+    mock_get.assert_called_once_with("https://fixupx.com/foo", allow_redirects=True, timeout=5)
 
 def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     from api.index import can_embed_url
