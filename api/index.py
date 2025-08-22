@@ -2636,20 +2636,27 @@ def can_embed_url(url: str) -> bool:
         try:
             warnings.filterwarnings("ignore", category=InsecureRequestWarning)
             response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
-        except RequestException:
+        except RequestException as e:
+            print(f"[EMBED] {url} request failed after SSL error: {e}")
             return False
-    except RequestException:
+    except RequestException as e:
+        print(f"[EMBED] {url} request failed: {e}")
         return False
     if response.status_code >= 400:
+        print(f"[EMBED] {url} returned status {response.status_code}")
         return False
     content_type = response.headers.get("Content-Type", "").lower()
     if "text/html" not in content_type:
+        print(f"[EMBED] {url} content-type {content_type} not embeddable")
         return False
     html = response.text[:20000]
-    return bool(
+    has_meta = bool(
         re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
         or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
     )
+    if not has_meta:
+        print(f"[EMBED] {url} missing og/twitter meta tags")
+    return has_meta
 
 
 def url_is_embedable(url: str) -> bool:
@@ -2685,6 +2692,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
                 nonlocal changed
                 changed = True
                 return replaced
+            print(f"[LINK] cannot embed {replaced}, keeping {original}")
             return original
 
         return _sub
