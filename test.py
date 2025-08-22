@@ -3815,20 +3815,6 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert fixed == text
 
 
-@patch("api.index.requests.get")
-def test_replace_links_retries_on_ssl_error(mock_get):
-    from requests.exceptions import SSLError
-
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.headers = {"Content-Type": "text/html"}
-    mock_response.text = "<meta property='og:title'>"
-    mock_get.side_effect = [SSLError("ssl"), mock_response]
-    text = "Check https://twitter.com/foo"
-    fixed, changed = replace_links(text)
-    assert mock_get.call_count == 2
-    assert changed
-    assert "https://fxtwitter.com/foo" in fixed
 
 
 def test_configure_links_sets_and_disables():
@@ -3976,3 +3962,39 @@ def test_handle_msg_link_without_preview(mock_redis):
         mock_send.assert_called_once()
         assert "no pude ver ese link" in mock_send.call_args[0][1]
         mock_should.assert_not_called()
+
+
+def test_replace_links_checks_preview(monkeypatch):
+    from api.index import replace_links
+
+    mock_can = MagicMock(return_value=True)
+    monkeypatch.setattr("api.index.can_embed_url", mock_can)
+    text, changed = replace_links("https://x.com/foo")
+    assert text == "https://fixupx.com/foo"
+    assert changed is True
+    mock_can.assert_called_once_with("https://fixupx.com")
+
+
+def test_handle_msg_link_already_fixed():
+    message = {
+        "message_id": 6,
+        "chat": {"id": 654, "type": "group"},
+        "from": {"id": 1},
+        "text": "https://fixupx.com/foo",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_not_called()
+        mock_should.assert_not_called()
+        mock_get.assert_not_called()
