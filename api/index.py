@@ -25,10 +25,21 @@ import time
 import traceback
 import unicodedata
 import urllib.request
+from urllib.parse import urlparse
 
 
 # Global variable to cache bot configuration
 _bot_config = None
+
+# Known alternative frontends that users may already provide
+ALTERNATIVE_FRONTENDS = {
+    "fxtwitter.com",
+    "fixupx.com",
+    "fxbsky.app",
+    "ddinstagram.com",
+    "rxddit.com",
+    "vxtiktok.com",
+}
 
 
 def load_bot_config():
@@ -2617,33 +2628,37 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     return command, message_text
 
 
-def replace_links(text: str) -> Tuple[str, bool]:
-    """Replace social links with alternative frontends"""
-
-    def can_embed_url(url: str) -> bool:
-        """Return True if URL has metadata for embed previews"""
+def can_embed_url(url: str) -> bool:
+    """Return True if URL has metadata for embed previews"""
+    try:
+        response = requests.get(url, allow_redirects=True, timeout=5)
+    except SSLError:
         try:
-            response = requests.get(url, allow_redirects=True, timeout=5)
-        except SSLError:
-            try:
-                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                response = requests.get(
-                    url, allow_redirects=True, timeout=5, verify=False
-                )
-            except RequestException:
-                return False
+            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+            response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
         except RequestException:
             return False
-        if response.status_code >= 400:
-            return False
-        content_type = response.headers.get("Content-Type", "").lower()
-        if "text/html" not in content_type:
-            return False
-        html = response.text[:20000]
-        return bool(
-            re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
-            or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
-        )
+    except RequestException:
+        return False
+    if response.status_code >= 400:
+        return False
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "text/html" not in content_type:
+        return False
+    html = response.text[:20000]
+    return bool(
+        re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
+        or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
+    )
+
+
+def url_is_embedable(url: str) -> bool:
+    """Check if a URL is likely to produce an embed preview"""
+    return can_embed_url(url)
+
+
+def replace_links(text: str) -> Tuple[str, bool]:
+    """Replace social links with alternative frontends"""
 
     patterns = [
         (r"(https?://)(?:www\.)?twitter\.com", r"\1fxtwitter.com"),
@@ -2666,7 +2681,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
         def _sub(match: re.Match) -> str:
             original = match.group(0)
             replaced = match.expand(repl)
-            if can_embed_url(replaced):
+            if url_is_embedable(replaced):
                 nonlocal changed
                 changed = True
                 return replaced
@@ -2769,7 +2784,18 @@ def handle_msg(message: Dict) -> str:
                 else:
                     send_msg(chat_id, fixed_text, message_id)
                 return "ok"
-            if re.search(r"https?://", message_text):
+            urls = re.findall(r"https?://\S+", message_text)
+            if urls:
+                cleaned = [u.rstrip('.,!?') for u in urls]
+                remaining = []
+                for u in cleaned:
+                    host = urlparse(u).hostname
+                    if host and host.lower() not in ALTERNATIVE_FRONTENDS:
+                        remaining.append(u)
+                if not remaining:
+                    return "ok"
+                if all(url_is_embedable(u) for u in remaining):
+                    return "ok"
                 send_msg(chat_id, "no pude ver ese link, boludo", message_id)
                 return "ok"
 
