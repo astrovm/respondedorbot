@@ -2668,17 +2668,17 @@ def replace_links(text: str) -> Tuple[str, bool]:
     """Replace social links with alternative frontends"""
 
     patterns = [
-        (r"(https?://)(?:www\.)?twitter\.com", r"\1fxtwitter.com"),
-        (r"(https?://)(?:www\.)?x\.com", r"\1fixupx.com"),
-        (r"(https?://)(?:www\.)?bsky\.app", r"\1fxbsky.app"),
-        (r"(https?://)(?:www\.)?instagram\.com", r"\1ddinstagram.com"),
+        (r"(https?://)(?:www\.)?twitter\.com([^\s]*)", r"\1fxtwitter.com\2"),
+        (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
+        (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
+        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1ddinstagram.com\2"),
         (
-            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com",
-            r"\1\2rxddit.com",
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
+            r"\1\2rxddit.com\3",
         ),
         (
-            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com",
-            r"\1\2vxtiktok.com",
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com([^\s]*)",
+            r"\1\2vxtiktok.com\3",
         ),
     ]
 
@@ -2688,11 +2688,12 @@ def replace_links(text: str) -> Tuple[str, bool]:
         def _sub(match: re.Match) -> str:
             original = match.group(0)
             replaced = match.expand(repl)
-            if url_is_embedable(replaced):
+            replaced_full = replaced
+            if url_is_embedable(replaced_full):
                 nonlocal changed
                 changed = True
-                return replaced
-            print(f"[LINK] cannot embed {replaced}, keeping {original}")
+                return replaced_full
+            print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
             return original
 
         return _sub
