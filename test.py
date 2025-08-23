@@ -3820,20 +3820,21 @@ def test_replace_links(mock_get):
     mock_response.text = "<meta property='og:title' content='foo'>"
     mock_get.return_value = mock_response
     text = (
-        "Check https://twitter.com/foo and http://x.com/bar and https://bsky.app/baz and "
-        "https://www.instagram.com/qux and https://www.reddit.com/r/foo and https://old.reddit.com/r/bar and "
-        "https://www.tiktok.com/@bar and https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/"
+        "Check https://twitter.com/foo?utm_source=share and http://x.com/bar?s=20 and https://bsky.app/baz?share=1 and "
+        "https://www.instagram.com/qux?igsh=abc123 and https://www.reddit.com/r/foo?st=abc and https://old.reddit.com/r/bar?utm_name=bar and "
+        "https://www.tiktok.com/@bar?lang=en and https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/?share=copy"
     )
     fixed, changed = replace_links(text)
     assert changed
     assert "https://fxtwitter.com/foo" in fixed
     assert "http://fixupx.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
-    assert "https://ddinstagram.com/qux" in fixed
+    assert "https://kkinstagram.com/qux" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.vxtiktok.com/@bar" in fixed
     assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+    assert "?" not in fixed
 
 
 @patch("api.index.requests.get")
@@ -3926,7 +3927,7 @@ def test_handle_msg_link_reply_instagram():
         "message_id": 3,
         "chat": {"id": 789, "type": "group"},
         "from": {"first_name": "Lu", "username": "lu"},
-        "text": "mirá https://www.instagram.com/qux",
+        "text": "mirá https://www.instagram.com/qux?igsh=abc",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
         patch("api.index.config_redis") as mock_redis, \
@@ -3947,7 +3948,7 @@ def test_handle_msg_link_reply_instagram():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "mirá https://ddinstagram.com/qux\n\nShared by @lu"
+        expected = "mirá https://kkinstagram.com/qux\n\nShared by @lu"
         mock_send.assert_called_once_with("789", expected, "3")
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
