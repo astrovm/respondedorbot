@@ -1951,6 +1951,29 @@ def test_send_msg_basic():
         )
 
 
+def test_send_msg_with_buttons():
+    from api.index import send_msg
+
+    with patch("requests.get") as mock_get, patch("os.environ.get") as mock_env:
+        mock_env.return_value = "test_token"
+        send_msg("12345", "hello", buttons=["https://twitter.com/foo"])
+        mock_get.assert_called_once_with(
+            "https://api.telegram.org/bottest_token/sendMessage",
+            params={
+                "chat_id": "12345",
+                "text": "hello",
+                "reply_markup": json.dumps(
+                    {
+                        "inline_keyboard": [
+                            [{"text": "Open in app", "url": "https://twitter.com/foo"}]
+                        ]
+                    }
+                ),
+            },
+            timeout=5,
+        )
+
+
 def test_admin_report_basic():
     from api.index import admin_report
 
@@ -3824,7 +3847,7 @@ def test_replace_links(mock_get):
         "https://www.instagram.com/qux?igsh=abc123 and https://www.reddit.com/r/foo?st=abc and https://old.reddit.com/r/bar?utm_name=bar and "
         "https://www.tiktok.com/@bar?lang=en and https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/?share=copy"
     )
-    fixed, changed = replace_links(text)
+    fixed, changed, originals = replace_links(text)
     assert changed
     assert "https://fxtwitter.com/foo" in fixed
     assert "http://fixupx.com/bar" in fixed
@@ -3835,6 +3858,18 @@ def test_replace_links(mock_get):
     assert "https://www.vxtiktok.com/@bar" in fixed
     assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
     assert "?" not in fixed
+    expected = {
+        "https://twitter.com/foo",
+        "http://x.com/bar",
+        "https://bsky.app/baz",
+        "https://www.instagram.com/qux",
+        "https://www.reddit.com/r/foo",
+        "https://old.reddit.com/r/bar",
+        "https://www.tiktok.com/@bar",
+        "https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/",
+    }
+    assert set(originals) == expected
+    assert all("?" not in url and "#" not in url for url in originals)
 
 
 @patch("api.index.requests.get")
@@ -3843,10 +3878,11 @@ def test_replace_links_skips_when_embed_fails(mock_get):
     mock_response.status_code = 404
     mock_get.return_value = mock_response
     text = "Check https://www.reddit.com/r/foo"
-    fixed, changed = replace_links(text)
+    fixed, changed, originals = replace_links(text)
     mock_get.assert_called_once()
     assert not changed
     assert fixed == text
+    assert originals == []
 
 
 @patch("api.index.requests.get")
@@ -3857,9 +3893,10 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     mock_response.text = "<html></html>"
     mock_get.return_value = mock_response
     text = "Check https://www.reddit.com/r/foo"
-    fixed, changed = replace_links(text)
+    fixed, changed, originals = replace_links(text)
     assert not changed
     assert fixed == text
+    assert originals == []
 
 
 
@@ -3917,7 +3954,9 @@ def test_handle_msg_link_reply():
 
         assert result == "ok"
         expected = "check https://fxtwitter.com/foo\n\nShared by @john"
-        mock_send.assert_called_once_with("123", expected, "1")
+        mock_send.assert_called_once_with(
+            "123", expected, "1", ["https://twitter.com/foo"]
+        )
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
 
@@ -3949,7 +3988,9 @@ def test_handle_msg_link_reply_instagram():
 
         assert result == "ok"
         expected = "mirá https://kkinstagram.com/qux\n\nShared by @lu"
-        mock_send.assert_called_once_with("789", expected, "3")
+        mock_send.assert_called_once_with(
+            "789", expected, "3", ["https://www.instagram.com/qux"]
+        )
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
 
@@ -3982,7 +4023,9 @@ def test_handle_msg_link_delete():
         assert result == "ok"
         expected = "look https://fixupx.com/bar\n\nShared by @ana"
         mock_delete.assert_called_once_with("456", "2")
-        mock_send.assert_called_once_with("456", expected)
+        mock_send.assert_called_once_with(
+            "456", expected, buttons=["https://x.com/bar"]
+        )
         mock_save.assert_not_called()
 
 
@@ -4001,7 +4044,7 @@ def test_handle_msg_link_without_preview(mock_redis):
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
-        mock_replace.return_value = ("https://example.com", False)
+        mock_replace.return_value = ("https://example.com", False, [])
 
         result = handle_msg(message)
 
@@ -4015,9 +4058,10 @@ def test_replace_links_checks_preview(monkeypatch):
 
     mock_can = MagicMock(return_value=True)
     monkeypatch.setattr("api.index.can_embed_url", mock_can)
-    text, changed = replace_links("https://x.com/foo")
+    text, changed, originals = replace_links("https://x.com/foo")
     assert text == "https://fixupx.com/foo"
     assert changed is True
+    assert originals == ["https://x.com/foo"]
     mock_can.assert_called_once_with("https://fixupx.com/foo")
 
 
@@ -4028,9 +4072,10 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<meta property='og:title' content='foo'>"
     mock_get.return_value = mock_response
-    fixed, changed = replace_links("https://x.com/foo")
+    fixed, changed, originals = replace_links("https://x.com/foo")
     assert changed is True
     assert fixed == "https://fixupx.com/foo"
+    assert originals == ["https://x.com/foo"]
     mock_get.assert_called_once_with(
         "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
     )
@@ -4109,7 +4154,7 @@ def test_handle_msg_original_link_no_check():
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
-        mock_replace.return_value = ("https://vm.tiktok.com/foo", False)
+        mock_replace.return_value = ("https://vm.tiktok.com/foo", False, [])
 
         result = handle_msg(message)
 
@@ -4142,3 +4187,34 @@ def test_handle_msg_link_already_fixed_subdomain():
         mock_send.assert_not_called()
         mock_should.assert_not_called()
         mock_get.assert_not_called()
+
+
+def test_handle_msg_replaced_link_adds_button():
+    message = {
+        "message_id": 9,
+        "chat": {"id": 111, "type": "group"},
+        "from": {"id": 1},
+        "text": "https://x.com/foo?utm_source=bar",
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "text/html"}
+        mock_resp.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_resp
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_called_once_with(
+            "111", "https://fixupx.com/foo", "9", ["https://x.com/foo"]
+        )
+        mock_should.assert_not_called()
