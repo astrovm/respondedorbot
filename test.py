@@ -182,6 +182,43 @@ def test_config_redis():
             assert str(e) == "Connection failed"
 
 
+def test_load_bot_config_caches_and_parses(monkeypatch):
+    from api import index
+
+    index._bot_config = None
+    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
+    monkeypatch.setenv("BOT_TRIGGER_WORDS", "bot, amigo")
+
+    cfg_first = index.load_bot_config()
+    assert cfg_first == {
+        "trigger_words": ["bot", "amigo"],
+        "system_prompt": "hola",
+    }
+
+    # Change env vars; function should return cached config
+    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "changed")
+    monkeypatch.setenv("BOT_TRIGGER_WORDS", "foo,bar")
+    cfg_second = index.load_bot_config()
+    assert cfg_second is cfg_first
+
+
+def test_load_bot_config_missing_env(monkeypatch):
+    from api import index
+
+    index._bot_config = None
+    monkeypatch.delenv("BOT_SYSTEM_PROMPT", raising=False)
+    monkeypatch.setenv("BOT_TRIGGER_WORDS", "foo")
+
+    with pytest.raises(ValueError):
+        index.load_bot_config()
+
+    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
+    monkeypatch.delenv("BOT_TRIGGER_WORDS", raising=False)
+
+    with pytest.raises(ValueError):
+        index.load_bot_config()
+
+
 def test_check_rate_limit():
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -3764,6 +3801,15 @@ def test_complete_with_providers_all_fail():
         assert mock_groq.call_count == 2
         mock_openrouter.assert_called_once()
         assert mock_cloudflare.call_count == 2
+
+
+def test_is_social_frontend():
+    from api.index import is_social_frontend
+
+    assert is_social_frontend("twitter.com")
+    assert is_social_frontend("mobile.twitter.com")
+    assert is_social_frontend("vxtiktok.com")
+    assert not is_social_frontend("example.com")
 
 
 @patch("api.index.requests.get")
