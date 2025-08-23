@@ -1157,11 +1157,19 @@ def send_typing(token: str, chat_id: str) -> None:
     requests.get(url, params=parameters, timeout=5)
 
 
-def send_msg(chat_id: str, msg: str, msg_id: str = "") -> None:
+def send_msg(
+    chat_id: str,
+    msg: str,
+    msg_id: str = "",
+    buttons: Optional[List[str]] = None,
+) -> None:
     token = environ.get("TELEGRAM_TOKEN")
     parameters = {"chat_id": chat_id, "text": msg}
     if msg_id != "":
         parameters["reply_to_message_id"] = msg_id
+    if buttons:
+        keyboard = [[{"text": "Open in app", "url": url}] for url in buttons]
+        parameters["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.get(url, params=parameters, timeout=5)
 
@@ -2707,7 +2715,7 @@ def url_is_embedable(url: str) -> bool:
     return can_embed_url(url)
 
 
-def replace_links(text: str) -> Tuple[str, bool]:
+def replace_links(text: str) -> Tuple[str, bool, List[str]]:
     """Replace social links with alternative frontends"""
 
     patterns = [
@@ -2726,6 +2734,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
     ]
 
     changed = False
+    original_links: List[str] = []
 
     def make_sub(repl: str):
         def _sub(match: re.Match) -> str:
@@ -2737,6 +2746,9 @@ def replace_links(text: str) -> Tuple[str, bool]:
             if url_is_embedable(replaced_full):
                 nonlocal changed
                 changed = True
+                parsed_original = urlparse(original)
+                cleaned_original = parsed_original._replace(query="", fragment="")
+                original_links.append(urlunparse(cleaned_original))
                 print(f"[LINK] replacing {original} with {replaced_full}")
                 return replaced_full
             print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
@@ -2760,7 +2772,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
 
     new_text = url_pattern.sub(strip_tracking, new_text)
 
-    return new_text, changed
+    return new_text, changed, original_links
 
 
 def configure_links(chat_id: str, params: str) -> str:
@@ -2840,16 +2852,16 @@ def handle_msg(message: Dict) -> str:
 
         link_mode = redis_client.get(f"link_mode:{chat_id}")
         if link_mode and message_text and not message_text.startswith("/"):
-            fixed_text, changed = replace_links(message_text)
+            fixed_text, changed, original_links = replace_links(message_text)
             if changed:
                 username = message.get("from", {}).get("username")
                 if username:
                     fixed_text += f"\n\nShared by @{username}"
                 if link_mode == "delete":
                     delete_msg(chat_id, message_id)
-                    send_msg(chat_id, fixed_text)
+                    send_msg(chat_id, fixed_text, buttons=original_links)
                 else:
-                    send_msg(chat_id, fixed_text, message_id)
+                    send_msg(chat_id, fixed_text, message_id, original_links)
                 return "ok"
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
