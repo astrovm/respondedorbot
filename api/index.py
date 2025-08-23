@@ -25,7 +25,7 @@ import time
 import traceback
 import unicodedata
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 # Global variable to cache bot configuration
@@ -36,7 +36,7 @@ ALTERNATIVE_FRONTENDS = {
     "fxtwitter.com",
     "fixupx.com",
     "fxbsky.app",
-    "ddinstagram.com",
+    "kkinstagram.com",
     "rxddit.com",
     "vxtiktok.com",
 }
@@ -2290,7 +2290,7 @@ def should_gordo_respond(
             "fxtwitter.com",
             "fixupx.com",
             "fxbsky.app",
-            "ddinstagram.com",
+            "kkinstagram.com",
             "rxddit.com",
             "vxtiktok.com",
         )
@@ -2708,7 +2708,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
         (r"(https?://)(?:www\.)?twitter\.com([^\s]*)", r"\1fxtwitter.com\2"),
         (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1ddinstagram.com\2"),
+        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
         (
             r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
             r"\1\2rxddit.com\3",
@@ -2725,7 +2725,9 @@ def replace_links(text: str) -> Tuple[str, bool]:
         def _sub(match: re.Match) -> str:
             original = match.group(0)
             replaced = match.expand(repl)
-            replaced_full = replaced
+            parsed = urlparse(replaced)
+            cleaned = parsed._replace(query="", fragment="")
+            replaced_full = urlunparse(cleaned)
             if url_is_embedable(replaced_full):
                 nonlocal changed
                 changed = True
@@ -2739,6 +2741,18 @@ def replace_links(text: str) -> Tuple[str, bool]:
     new_text = text
     for pattern, repl in patterns:
         new_text = re.sub(pattern, make_sub(repl), new_text, flags=re.IGNORECASE)
+
+    url_pattern = re.compile(r"(https?://[^\s]+)")
+
+    def strip_tracking(match: re.Match) -> str:
+        url = match.group(0)
+        parsed = urlparse(url)
+        if is_social_frontend(parsed.netloc):
+            cleaned = parsed._replace(query="", fragment="")
+            return urlunparse(cleaned)
+        return url
+
+    new_text = url_pattern.sub(strip_tracking, new_text)
 
     return new_text, changed
 
