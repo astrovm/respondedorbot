@@ -2647,12 +2647,15 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
 
 def can_embed_url(url: str) -> bool:
     """Return True if URL has metadata for embed previews"""
+    headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
-        response = requests.get(url, allow_redirects=True, timeout=5)
+        response = requests.get(url, allow_redirects=True, timeout=5, headers=headers)
     except SSLError:
         try:
             warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-            response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
+            response = requests.get(
+                url, allow_redirects=True, timeout=5, verify=False, headers=headers
+            )
         except RequestException as e:
             print(f"[EMBED] {url} request failed after SSL error: {e}")
             return False
@@ -2663,6 +2666,9 @@ def can_embed_url(url: str) -> bool:
         print(f"[EMBED] {url} returned status {response.status_code}")
         return False
     content_type = response.headers.get("Content-Type", "").lower()
+    if content_type.startswith(("image/", "video/", "audio/")):
+        print(f"[EMBED] {url} served direct media type {content_type}")
+        return True
     if "text/html" not in content_type:
         print(f"[EMBED] {url} content-type {content_type} not embeddable")
         return False
