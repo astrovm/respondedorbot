@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 import os
 import pytest
 from flask import Flask, request
@@ -4031,7 +4031,9 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     fixed, changed = replace_links("https://x.com/foo")
     assert changed is True
     assert fixed == "https://fixupx.com/foo"
-    mock_get.assert_called_once_with("https://fixupx.com/foo", allow_redirects=True, timeout=5)
+    mock_get.assert_called_once_with(
+        "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
+    )
 
 def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     from api.index import can_embed_url
@@ -4046,6 +4048,23 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     assert result is False
     captured = capsys.readouterr().out
     assert "missing og/twitter meta tags" in captured
+
+
+@patch("api.index.requests.get")
+def test_can_embed_url_allows_direct_media(mock_get):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "video/mp4"}
+    mock_response.text = ""
+    mock_get.return_value = mock_response
+
+    result = can_embed_url("http://example.com/video")
+    assert result is True
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["headers"]["User-Agent"] == "TelegramBot (like TwitterBot)"
 
 
 def test_handle_msg_link_already_fixed():
