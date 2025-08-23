@@ -43,6 +43,14 @@ This bot is configured entirely through environment variables, making it easy to
   `[TOOL] web_search {"query": "inflación argentina hoy"}`
   y luego responderá usando los resultados.
 
+## Testing
+
+Run the unit test suite to verify functionality:
+
+```bash
+pytest test.py -q
+```
+
 ## Deployment
 
 ### Required Environment Variables:
