@@ -2667,12 +2667,32 @@ def can_embed_url(url: str) -> bool:
         print(f"[EMBED] {url} content-type {content_type} not embeddable")
         return False
     html = response.text[:20000]
-    has_meta = bool(
-        re.search(r"<meta[^>]+property=['\"]og:", html, re.IGNORECASE)
-        or re.search(r"<meta[^>]+name=['\"]twitter:", html, re.IGNORECASE)
-    )
+
+    class MetaParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "meta":
+                return
+            attrs_dict = dict(attrs)
+            key = attrs_dict.get("property") or attrs_dict.get("name")
+            if not key:
+                return
+            key_lower = key.lower()
+            if key_lower.startswith("og:") or key_lower.startswith("twitter:"):
+                self.tags.append((key, attrs_dict.get("content", "")))
+
+    parser = MetaParser()
+    parser.feed(html)
+    meta_tags = parser.tags
+    has_meta = bool(meta_tags)
     if not has_meta:
         print(f"[EMBED] {url} missing og/twitter meta tags")
+    else:
+        detail = ", ".join(f"{k}={v[:80]}" for k, v in meta_tags)
+        print(f"[EMBED] {url} has embed metadata: {detail}")
     return has_meta
 
 
@@ -2709,6 +2729,7 @@ def replace_links(text: str) -> Tuple[str, bool]:
             if url_is_embedable(replaced_full):
                 nonlocal changed
                 changed = True
+                print(f"[LINK] replacing {original} with {replaced_full}")
                 return replaced_full
             print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
             return original
