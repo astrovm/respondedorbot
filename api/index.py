@@ -2857,11 +2857,22 @@ def handle_msg(message: Dict) -> str:
                 username = message.get("from", {}).get("username")
                 if username:
                     fixed_text += f"\n\nShared by @{username}"
+                reply_id = message.get("reply_to_message", {}).get("message_id")
+                if reply_id is not None:
+                    reply_id = str(reply_id)
                 if link_mode == "delete":
                     delete_msg(chat_id, message_id)
-                    send_msg(chat_id, fixed_text, buttons=original_links)
+                    if reply_id:
+                        send_msg(chat_id, fixed_text, reply_id, original_links)
+                    else:
+                        send_msg(chat_id, fixed_text, buttons=original_links)
                 else:
-                    send_msg(chat_id, fixed_text, message_id, original_links)
+                    send_msg(
+                        chat_id,
+                        fixed_text,
+                        reply_id or message_id,
+                        original_links,
+                    )
                 return "ok"
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
