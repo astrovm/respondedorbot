@@ -4218,3 +4218,75 @@ def test_handle_msg_replaced_link_adds_button():
             "111", "https://fixupx.com/foo", "9", ["https://x.com/foo"]
         )
         mock_should.assert_not_called()
+
+
+def test_handle_msg_replaced_link_replies_to_original_message():
+    message = {
+        "message_id": 10,
+        "chat": {"id": 222, "type": "group"},
+        "from": {"id": 1, "username": "user"},
+        "text": "https://x.com/foo",
+        "reply_to_message": {"message_id": 1},
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "reply"
+        mock_redis.return_value = redis_client
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "text/html"}
+        mock_resp.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_resp
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_send.assert_called_once_with(
+            "222",
+            "https://fixupx.com/foo\n\nShared by @user",
+            "1",
+            ["https://x.com/foo"],
+        )
+        mock_should.assert_not_called()
+
+
+def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
+    message = {
+        "message_id": 11,
+        "chat": {"id": 333, "type": "group"},
+        "from": {"id": 1, "username": "user"},
+        "text": "https://x.com/foo",
+        "reply_to_message": {"message_id": 2},
+    }
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
+        patch("api.index.config_redis") as mock_redis, \
+        patch("api.index.send_msg") as mock_send, \
+        patch("api.index.delete_msg") as mock_delete, \
+        patch("api.index.initialize_commands", return_value={}), \
+        patch("api.index.should_gordo_respond") as mock_should, \
+        patch("api.index.requests.get") as mock_get:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "delete"
+        mock_redis.return_value = redis_client
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "text/html"}
+        mock_resp.text = "<meta property='og:title'>"
+        mock_get.return_value = mock_resp
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_delete.assert_called_once_with("333", "11")
+        mock_send.assert_called_once_with(
+            "333",
+            "https://fixupx.com/foo\n\nShared by @user",
+            "2",
+            ["https://x.com/foo"],
+        )
+        mock_should.assert_not_called()
