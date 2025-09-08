@@ -224,7 +224,8 @@ def bcra_list_variables(
     category: Optional[str] = "Principales Variables",
 ) -> Optional[List[Dict[str, Any]]]:
     """Return list of variables. If `category` is provided, filter client-side."""
-    data = bcra_api_get("/monetarias", {"limit": "1000"})
+    # Server defaults limit to 1000; omit category/limit for compatibility
+    data = bcra_api_get("/monetarias", None)
     try:
         if not data:
             return None
@@ -1273,12 +1274,18 @@ def get_latest_itcrm_value_and_date() -> Optional[Tuple[float, str]]:
 
 
 def format_bcra_variables(variables: Dict) -> str:
-    """Format BCRA variables for display"""
+    """Format BCRA variables for display (robust to naming changes)."""
     if not variables:
         return "No se pudieron obtener las variables del BCRA"
 
+    def norm(s: str) -> str:
+        try:
+            import unicodedata as _ud
+            return _ud.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii").lower()
+        except Exception:
+            return (s or "").lower()
+
     def format_value(value_str: str, is_percentage: bool = False) -> str:
-        """Format numbers and percentages"""
         try:
             clean_value = (
                 value_str.replace(".", "").replace(",", ".")
@@ -1286,53 +1293,50 @@ def format_bcra_variables(variables: Dict) -> str:
                 else value_str.replace(",", ".")
             )
             num = float(clean_value)
-
             if is_percentage:
                 return f"{num:.1f}%" if num >= 10 else f"{num:.2f}%"
-            elif num >= 1000000:
+            elif num >= 1_000_000:
                 return f"{num/1000:,.0f}".replace(",", ".")
             elif num >= 1000:
                 return f"{num:,.0f}".replace(",", ".")
             else:
                 return f"{num:.2f}".replace(".", ",")
-        except:
+        except Exception:
             return f"{value_str}%" if is_percentage else value_str
 
+    # Patterns over normalized (accent-free, lowercase) names
     specs = [
-        (
-            "base.*monetaria.*total",
-            lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos",
-        ),
-        (
-            "inflación.*mensual",
-            lambda v: f"📈 Inflación mensual: {format_value(v, True)}",
-        ),
-        (
-            "inflación.*interanual",
-            lambda v: f"📊 Inflación interanual: {format_value(v, True)}",
-        ),
-        (
-            "inflación.*esperada.*rem",
-            lambda v: f"🔮 Inflación esperada: {format_value(v, True)}",
-        ),
-        ("tamar.*n\\.a\\.", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
-        ("badlar.*n\\.a\\.", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
-        ("tasa.*interés.*justicia", lambda v: f"⚖️ Tasa justicia: {v}%"),
-        ("tipo.*cambio.*minorista", lambda v: f"💵 Dólar minorista: ${v}"),
-        ("tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
-        ("unidad.*valor.*adquisitivo.*uva", lambda v: f"💰 UVA: ${v}"),
-        ("cer.*base.*2002", lambda v: f"📊 CER: {v}"),
-        (
-            "reservas.*internacionales",
-            lambda v: f"🏛️ Reservas: USD {format_value(v)} millones",
-        ),
+        # Base monetaria
+        (r"base\s*monetaria", lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos"),
+        # Inflación mensual: "Variación mensual del índice de precios al consumidor"
+        (r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
+         lambda v: f"📈 Inflación mensual: {format_value(v, True)}"),
+        # Inflación interanual: "Variación interanual del índice de precios al consumidor"
+        (r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
+         lambda v: f"📊 Inflación interanual: {format_value(v, True)}"),
+        # Inflación esperada (REM)
+        (r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
+         lambda v: f"🔮 Inflación esperada: {format_value(v, True)}"),
+        # Tasas
+        (r"tamar", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
+        (r"badlar", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
+        (r"tasa.*interes.*justicia", lambda v: f"⚖️ Tasa justicia: {v}%"),
+        # Tipo de cambio
+        (r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor", lambda v: f"💵 Dólar minorista: ${v}"),
+        (r"tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
+        # UVA/CER
+        (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"💰 UVA: ${v}"),
+        (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"📊 CER: {v}"),
+        # Reservas
+        (r"reservas.*internacionales", lambda v: f"🏛️ Reservas: USD {format_value(v)} millones"),
     ]
 
     lines = ["📊 Variables principales BCRA\n"]
     for pattern, formatter in specs:
+        compiled = re.compile(pattern)
         for key, data in variables.items():
-            if re.search(pattern, key.lower()):
-                value, date = data["value"], data.get("date", "")
+            if compiled.search(norm(key)):
+                value, date = data.get("value", ""), data.get("date", "")
                 line = formatter(value)
                 if date and date != value:
                     line += f" ({date.replace('/2025', '/25')})"
