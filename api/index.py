@@ -1055,6 +1055,39 @@ def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
         return None
 
 
+def get_latest_itcrm_value_and_date() -> Optional[Tuple[float, str]]:
+    """Cached wrapper returning latest TCRM value and its date.
+
+    Caches both value and date in Redis for 30 minutes.
+    """
+    try:
+        redis_client = config_redis()
+        cached = redis_get_json(redis_client, "latest_itcrm_details")
+        if isinstance(cached, dict) and "value" in cached:
+            try:
+                return float(cached["value"]), str(cached.get("date", ""))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    details = get_latest_itcrm_details()
+    if not details:
+        return None
+    value, date_str = details
+    try:
+        redis_client = config_redis()
+        redis_setex_json(
+            redis_client,
+            "latest_itcrm_details",
+            1800,
+            {"value": value, "date": date_str},
+        )
+    except Exception:
+        pass
+    return value, date_str
+
+
 def format_bcra_variables(variables: Dict) -> str:
     """Format BCRA variables for display"""
     if not variables:
@@ -1122,9 +1155,9 @@ def format_bcra_variables(variables: Dict) -> str:
                 lines.append(line)
                 break
 
-    # Append current TCRM value with its sheet date
+    # Append current TCRM value with its sheet date (cached)
     try:
-        details = get_latest_itcrm_details()
+        details = get_latest_itcrm_value_and_date()
         if details:
             itcrm_value, date_str = details
             lines.append(f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}" + (f" ({date_str})" if date_str else ""))
