@@ -40,7 +40,7 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 RATE_LIMIT_GLOBAL_MAX = 1024
 RATE_LIMIT_CHAT_MAX = 128
 TTL_RATE_GLOBAL = 3600  # 1 hour
-TTL_RATE_CHAT = 600     # 10 minutes
+TTL_RATE_CHAT = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
 
 # Global variable to cache bot configuration
@@ -61,6 +61,7 @@ def fmt_signed_pct(value: float, decimals: int = 2) -> str:
         return f"{value:+.{decimals}f}".rstrip("0").rstrip(".")
     except Exception:
         return str(value)
+
 
 # Known alternative frontends that users may already provide
 ALTERNATIVE_FRONTENDS = {
@@ -98,8 +99,8 @@ def load_bot_config():
         return _bot_config
 
     # Get required configuration from environment variables
-    system_prompt = environ.get('BOT_SYSTEM_PROMPT')
-    trigger_words_str = environ.get('BOT_TRIGGER_WORDS')
+    system_prompt = environ.get("BOT_SYSTEM_PROMPT")
+    trigger_words_str = environ.get("BOT_TRIGGER_WORDS")
 
     if not system_prompt:
         raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
@@ -107,12 +108,9 @@ def load_bot_config():
     if not trigger_words_str:
         raise ValueError("BOT_TRIGGER_WORDS environment variable is required")
 
-    trigger_words = [word.strip() for word in trigger_words_str.split(',')]
+    trigger_words = [word.strip() for word in trigger_words_str.split(",")]
 
-    _bot_config = {
-        "trigger_words": trigger_words,
-        "system_prompt": system_prompt
-    }
+    _bot_config = {"trigger_words": trigger_words, "system_prompt": system_prompt}
 
     return _bot_config
 
@@ -178,7 +176,9 @@ def parse_monetary_number(value: Union[str, float, int, Decimal]) -> Optional[fl
 # -----------------------------
 # BCRA v4.0 API helpers
 # -----------------------------
-def bcra_api_get(path: str, params: Optional[Dict[str, Any]] = None, ttl: int = TTL_BCRA) -> Optional[Dict[str, Any]]:
+def bcra_api_get(
+    path: str, params: Optional[Dict[str, Any]] = None, ttl: int = TTL_BCRA
+) -> Optional[Dict[str, Any]]:
     """Call BCRA Estadísticas Monetarias v4.0 API via cached_requests.
 
     Returns the parsed JSON dict (not wrapped) or None on failure.
@@ -186,7 +186,15 @@ def bcra_api_get(path: str, params: Optional[Dict[str, Any]] = None, ttl: int = 
     try:
         base_url = "https://api.bcra.gob.ar/estadisticas/v4.0"
         url = base_url + (path if path.startswith("/") else "/" + path)
-        resp = cached_requests(url, params, None, ttl, hourly_cache=False, get_history=False, verify_ssl=True)
+        resp = cached_requests(
+            url,
+            params,
+            None,
+            ttl,
+            hourly_cache=False,
+            get_history=False,
+            verify_ssl=True,
+        )
         if not resp or "data" not in resp:
             return None
         data = resp["data"]
@@ -197,7 +205,9 @@ def bcra_api_get(path: str, params: Optional[Dict[str, Any]] = None, ttl: int = 
         return None
 
 
-def bcra_list_variables(category: str = "Principales Variables") -> Optional[List[Dict[str, Any]]]:
+def bcra_list_variables(
+    category: str = "Principales Variables",
+) -> Optional[List[Dict[str, Any]]]:
     """Return list of variables for a given category (default Principales Variables)."""
     data = bcra_api_get("/monetarias", {"categoria": category, "limit": "1000"})
     try:
@@ -259,7 +269,11 @@ def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
             return None
 
         def norm(s: str) -> str:
-            s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+            s = (
+                unicodedata.normalize("NFKD", s or "")
+                .encode("ascii", "ignore")
+                .decode("ascii")
+            )
             return s.lower()
 
         target = norm(desc_substr)
@@ -276,7 +290,10 @@ def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
         if var_id is None:
             return None
 
-        data = bcra_api_get(f"/monetarias/{var_id}", {"desde": date_iso, "hasta": date_iso, "limit": "1"})
+        data = bcra_api_get(
+            f"/monetarias/{var_id}",
+            {"desde": date_iso, "hasta": date_iso, "limit": "1"},
+        )
         if not data:
             return None
         results = data.get("results")
@@ -375,7 +392,9 @@ def get_cached_description(file_id: str) -> Optional[str]:
         return None
 
 
-def cache_description(file_id: str, description: str, ttl: int = TTL_MEDIA_CACHE) -> None:
+def cache_description(
+    file_id: str, description: str, ttl: int = TTL_MEDIA_CACHE
+) -> None:
     """Cache image description in Redis (default 7 days)"""
     try:
         redis_client = config_redis()
@@ -920,9 +939,6 @@ $1 ARS = {sats_per_peso:.3f} sats"""
         return "no pude conseguir el precio de btc boludo"
 
 
- 
-
-
 def get_cached_bcra_variables() -> Optional[Dict]:
     """Get cached BCRA variables from Redis"""
     try:
@@ -986,6 +1002,7 @@ def get_or_refresh_bcra_variables() -> Optional[Dict]:
         except Exception as e:
             print(f"Error caching BCRA variables: {e}")
     return variables
+
 
 def get_latest_itcrm_value() -> Optional[float]:
     """Return latest TCRM value using the cached value+date function."""
@@ -1054,9 +1071,7 @@ def get_cached_tcrm_100(
         redis_client = config_redis()
         redis_response = redis_get_json(redis_client, cache_key)
         history_data = (
-            get_cache_history(hours_ago, cache_key, redis_client)
-            if hours_ago
-            else None
+            get_cache_history(hours_ago, cache_key, redis_client) if hours_ago else None
         )
         history_value = history_data["data"] if history_data else None
         timestamp = int(time.time())
@@ -1075,13 +1090,17 @@ def get_cached_tcrm_100(
             dt = parse_date_string(itcrm_date_str or "")
             if dt is not None:
                 date_key = dt.date().isoformat()
-                mayorista_cached = redis_get_json(redis_client, f"bcra_mayorista:{date_key}")
+                mayorista_cached = redis_get_json(
+                    redis_client, f"bcra_mayorista:{date_key}"
+                )
                 if isinstance(mayorista_cached, dict) and "value" in mayorista_cached:
                     if parse_monetary_number(mayorista_cached["value"]) is not None:
                         same_day_ok = True
                 # If not cached, attempt a one-shot API fetch to populate cache
                 if not same_day_ok:
-                    fetched_val = bcra_get_value_for_date("tipo de cambio mayorista", date_key)
+                    fetched_val = bcra_get_value_for_date(
+                        "tipo de cambio mayorista", date_key
+                    )
                     if fetched_val is not None:
                         same_day_ok = True
         except Exception:
@@ -1145,10 +1164,10 @@ def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
         def parse_date_cell(v: Any) -> Optional[str]:
             # If it's a datetime/date, format directly
             try:
-                if hasattr(v, 'strftime'):
+                if hasattr(v, "strftime"):
                     # Normalize to date then format as DD/MM/YY
                     try:
-                        d = v.date() if hasattr(v, 'date') else v
+                        d = v.date() if hasattr(v, "date") else v
                         return f"{d.day:02d}/{d.month:02d}/{d.year % 100:02d}"
                     except Exception:
                         pass
@@ -1300,7 +1319,10 @@ def format_bcra_variables(variables: Dict) -> str:
         details = get_latest_itcrm_value_and_date()
         if details:
             itcrm_value, date_str = details
-            lines.append(f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}" + (f" ({date_str})" if date_str else ""))
+            lines.append(
+                f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}"
+                + (f" ({date_str})" if date_str else "")
+            )
     except Exception:
         pass
 
@@ -1750,14 +1772,18 @@ def ask_ai(
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
         if initial:
-            print(f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'")
+            print(
+                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'"
+            )
 
-    # If the model asked to call a tool, execute and do a second pass
+        # If the model asked to call a tool, execute and do a second pass
         tool_call = parse_tool_call(initial) if initial else None
         if tool_call:
             tool_name, tool_args = tool_call
             try:
-                print(f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}")
+                print(
+                    f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+                )
                 tool_output = execute_tool(tool_name, tool_args)
             except Exception as tool_err:
                 tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
@@ -1806,7 +1832,9 @@ def ask_ai(
                     )
                     tool_output = execute_tool(tool_name, tool_args)
                 except Exception as tool_err:
-                    tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+                    tool_output = (
+                        f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+                    )
                     print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
 
                 tool_context = {
@@ -1855,7 +1883,9 @@ def ask_ai(
                 return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
             except Exception:
                 # If even formatting fails, return a safe generic message
-                return "tuve un problema usando la herramienta, probá de nuevo más tarde"
+                return (
+                    "tuve un problema usando la herramienta, probá de nuevo más tarde"
+                )
 
         # If no tool call or second pass failed, return the best we had
         if initial:
@@ -1986,11 +2016,15 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
                 try:
                     args = ast.literal_eval(json_text)
                 except Exception:
-                    print(f"parse_tool_call: failed to parse args after [TOOL] {name}: '{json_text[:200]}'")
+                    print(
+                        f"parse_tool_call: failed to parse args after [TOOL] {name}: '{json_text[:200]}'"
+                    )
                     args = None
 
             if isinstance(args, dict) and name:
-                print(f"parse_tool_call: detected tool '{name}' with args keys={list(args.keys())}")
+                print(
+                    f"parse_tool_call: detected tool '{name}' with args keys={list(args.keys())}"
+                )
                 return name, args
 
             i += 1
@@ -2046,10 +2080,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         for attempt in range(2):
             try:
                 raw_results = ddgs.text(
-                    query=query,
-                    region="ar-es",
-                    safesearch="off",
-                    max_results=limit
+                    query=query, region="ar-es", safesearch="off", max_results=limit
                 )
                 break
             except Exception as e:
@@ -2062,11 +2093,13 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         # Convert to our expected format
         results = []
         for result in raw_results:
-            results.append({
-                "title": result.get("title", ""),
-                "url": result.get("href", ""),
-                "snippet": result.get("body", "")[:500]
-            })
+            results.append(
+                {
+                    "title": result.get("title", ""),
+                    "url": result.get("href", ""),
+                    "snippet": result.get("body", "")[:500],
+                }
+            )
 
         # Store in cache for 5 minutes
         try:
@@ -2443,7 +2476,7 @@ CONTEXTO POLITICO:
             "\nCÓMO LLAMAR HERRAMIENTAS:\n"
             "Escribe exactamente una línea con el formato:\n"
             "[TOOL] <nombre> {JSON}\n"
-            "Ejemplo: [TOOL] web_search {\"query\": \"inflación argentina hoy\"}\n"
+            'Ejemplo: [TOOL] web_search {"query": "inflación argentina hoy"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
         )
@@ -3012,7 +3045,9 @@ def transcribe_audio_cloudflare(
     return None
 
 
-def transcribe_file_by_id(file_id: str, use_cache: bool = True) -> Tuple[Optional[str], Optional[str]]:
+def transcribe_file_by_id(
+    file_id: str, use_cache: bool = True
+) -> Tuple[Optional[str], Optional[str]]:
     """Fetch transcription for a Telegram file_id with cache and retries.
 
     Returns (text, error):
@@ -3039,7 +3074,9 @@ def transcribe_file_by_id(file_id: str, use_cache: bool = True) -> Tuple[Optiona
         return None, "transcribe"
 
 
-def describe_media_by_id(file_id: str, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+def describe_media_by_id(
+    file_id: str, prompt: str
+) -> Tuple[Optional[str], Optional[str]]:
     """Fetch description for an image/sticker by Telegram file_id using LLaVA.
 
     Returns (description, error):
@@ -3064,6 +3101,7 @@ def describe_media_by_id(file_id: str, prompt: str) -> Tuple[Optional[str], Opti
     except Exception as e:
         print(f"Error in describe_media_by_id: {e}")
         return None, "describe"
+
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
     """Resize image if it's too large for LLaVA processing"""
@@ -3541,7 +3579,9 @@ def handle_ai_response(
             messages, image_data=image_data, image_file_id=image_file_id
         )
     else:
-        print(f"handle_ai_response: calling {getattr(handler_func,'__name__','<callable>')} (text-only)")
+        print(
+            f"handle_ai_response: calling {getattr(handler_func,'__name__','<callable>')} (text-only)"
+        )
         response = handler_func(messages)
 
     # Remove any internal tool call lines before further processing

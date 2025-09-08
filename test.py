@@ -291,7 +291,7 @@ def test_should_gordo_respond():
             env_vars = {
                 "TELEGRAM_USERNAME": "testbot",
                 "BOT_SYSTEM_PROMPT": "You are a test bot",
-                "BOT_TRIGGER_WORDS": "gordo,test,bot"
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
             }
             return env_vars.get(key)
 
@@ -331,6 +331,7 @@ def test_should_gordo_respond_ignores_link_fix_reply():
     commands = {"/test": (lambda x: x, False, False)}
 
     with patch("os.environ.get") as mock_env:
+
         def env_side_effect(key):
             env_vars = {
                 "TELEGRAM_USERNAME": "testbot",
@@ -491,9 +492,7 @@ def test_process_request_parameters():
             "os.environ.get"
         ) as mock_env:
             mock_set.return_value = True
-            mock_env.return_value = (
-                "https://example.com/webhook"  # Mock FUNCTION_URL
-            )
+            mock_env.return_value = "https://example.com/webhook"  # Mock FUNCTION_URL
             response, status = process_request_parameters(request)
             assert status == 200
             assert "Webhook updated" in response
@@ -1250,6 +1249,7 @@ def test_initialize_commands():
     assert "/buscar" in commands
     assert "/search" in commands
     from api.index import search_command as _search_command
+
     assert commands["/buscar"][0] == _search_command
     assert commands["/search"][0] == _search_command
 
@@ -1664,8 +1664,11 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_time_context", return_value={}), patch(
-        "api.index.build_system_message", return_value={"role": "system", "content": "sys"}
-    ), patch("api.index.OpenAI") as mock_openai, patch(
+        "api.index.build_system_message",
+        return_value={"role": "system", "content": "sys"},
+    ), patch(
+        "api.index.OpenAI"
+    ) as mock_openai, patch(
         "api.index.execute_tool", return_value="{}"
     ):
         mock_openai.return_value = MagicMock()
@@ -1678,9 +1681,7 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
                 return '[TOOL] web_search {"query": "test"}'
             return "respuesta final"
 
-        with patch(
-            "api.index.complete_with_providers", side_effect=fake_complete
-        ):
+        with patch("api.index.complete_with_providers", side_effect=fake_complete):
             result = ask_ai([{"role": "user", "content": "hola"}])
 
     assert result == "respuesta final"
@@ -1696,8 +1697,11 @@ def test_ask_ai_handles_repeated_tool_calls():
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_time_context", return_value={}), patch(
-        "api.index.build_system_message", return_value={"role": "system", "content": "sys"}
-    ), patch("api.index.OpenAI") as mock_openai, patch(
+        "api.index.build_system_message",
+        return_value={"role": "system", "content": "sys"},
+    ), patch(
+        "api.index.OpenAI"
+    ) as mock_openai, patch(
         "api.index.execute_tool"
     ) as mock_tool:
         mock_openai.return_value = MagicMock()
@@ -1708,19 +1712,18 @@ def test_ask_ai_handles_repeated_tool_calls():
         def fake_complete(system_message, msgs):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                return '[TOOL] tool1 {}'
+                return "[TOOL] tool1 {}"
             if call_count["n"] == 2:
-                return '[TOOL] tool2 {}'
+                return "[TOOL] tool2 {}"
             return "fin"
 
-        with patch(
-            "api.index.complete_with_providers", side_effect=fake_complete
-        ):
+        with patch("api.index.complete_with_providers", side_effect=fake_complete):
             result = ask_ai([{"role": "user", "content": "hola"}])
 
     assert result == "fin"
     assert mock_tool.call_count == 2
     assert call_count["n"] == 3
+
 
 def test_get_dollar_rates_basic():
     from api.index import get_dollar_rates
@@ -2606,9 +2609,11 @@ def test_calculate_tcrm_100_success():
     from api.index import calculate_tcrm_100
     from unittest.mock import MagicMock
 
-    with patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm_details, patch(
-        "api.index.config_redis"
-    ) as mock_cfg, patch("api.index.redis_get_json") as mock_redis_get:
+    with patch(
+        "api.index.get_latest_itcrm_value_and_date"
+    ) as mock_itcrm_details, patch("api.index.config_redis") as mock_cfg, patch(
+        "api.index.redis_get_json"
+    ) as mock_redis_get:
         mock_itcrm_details.return_value = (120.0, "01/01/24")
 
         # Simulate cached mayorista for 2024-01-01
@@ -2622,9 +2627,6 @@ def test_calculate_tcrm_100_success():
 
         result = calculate_tcrm_100()
         assert result == 1000.0 * 100 / 120.0
-
-
-    
 
 
 def test_get_market_context_success():
@@ -2696,7 +2698,9 @@ def test_get_market_context_all_fail():
         "os.environ.get"
     ) as mock_env, patch("api.index.get_cached_bcra_variables") as mock_get_bcra, patch(
         "api.index.scrape_bcra_variables"
-    ) as mock_scrape_bcra, patch("api.index.cache_bcra_variables") as mock_cache_bcra:
+    ) as mock_scrape_bcra, patch(
+        "api.index.cache_bcra_variables"
+    ) as mock_cache_bcra:
 
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
@@ -2811,7 +2815,7 @@ def test_build_system_message():
         def env_side_effect(key):
             env_vars = {
                 "BOT_SYSTEM_PROMPT": "Sos el gordo, un bot argentino de prueba.",
-                "BOT_TRIGGER_WORDS": "gordo,test,bot"
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
             }
             return env_vars.get(key)
 
@@ -2842,7 +2846,7 @@ def test_build_system_message_empty_context():
         def env_side_effect(key):
             env_vars = {
                 "BOT_SYSTEM_PROMPT": "You are a test bot assistant.",
-                "BOT_TRIGGER_WORDS": "test,bot"
+                "BOT_TRIGGER_WORDS": "test,bot",
             }
             return env_vars.get(key)
 
@@ -3621,7 +3625,7 @@ def test_transcribe_audio_cloudflare_network_error():
 # Tests for web search functionality
 def test_web_search_success():
     """Test web_search with successful DDGS response"""
-    with patch('ddgs.DDGS') as mock_ddgs_class:
+    with patch("ddgs.DDGS") as mock_ddgs_class:
         # Mock DDGS instance and its text method
         mock_ddgs = MagicMock()
         mock_ddgs_class.return_value = mock_ddgs
@@ -3629,13 +3633,13 @@ def test_web_search_success():
             {
                 "title": "Test Result 1",
                 "href": "https://example.com/test1",
-                "body": "This is test result 1 description"
+                "body": "This is test result 1 description",
             },
             {
                 "title": "Test Result 2",
                 "href": "https://example.com/test2",
-                "body": "This is test result 2 description"
-            }
+                "body": "This is test result 2 description",
+            },
         ]
 
         results = web_search("test query", limit=3)
@@ -3651,7 +3655,7 @@ def test_web_search_success():
 
 def test_web_search_no_results():
     """Test web_search when no results are found"""
-    with patch('ddgs.DDGS') as mock_ddgs_class:
+    with patch("ddgs.DDGS") as mock_ddgs_class:
         mock_ddgs = MagicMock()
         mock_ddgs_class.return_value = mock_ddgs
         mock_ddgs.text.return_value = []
@@ -3663,7 +3667,7 @@ def test_web_search_no_results():
 
 def test_web_search_network_error():
     """Test web_search when network error occurs"""
-    with patch('ddgs.DDGS') as mock_ddgs_class:
+    with patch("ddgs.DDGS") as mock_ddgs_class:
         mock_ddgs_class.side_effect = Exception("Network error")
 
         results = web_search("test query")
@@ -3673,12 +3677,20 @@ def test_web_search_network_error():
 
 def test_web_search_limit_parameter():
     """Test web_search respects the limit parameter"""
-    with patch('ddgs.DDGS') as mock_ddgs_class:
+    with patch("ddgs.DDGS") as mock_ddgs_class:
         mock_ddgs = MagicMock()
         mock_ddgs_class.return_value = mock_ddgs
         mock_ddgs.text.return_value = [
-            {"title": "Result 1", "href": "https://example.com/1", "body": "Description 1"},
-            {"title": "Result 2", "href": "https://example.com/2", "body": "Description 2"}
+            {
+                "title": "Result 1",
+                "href": "https://example.com/1",
+                "body": "Description 1",
+            },
+            {
+                "title": "Result 2",
+                "href": "https://example.com/2",
+                "body": "Description 2",
+            },
         ]
 
         results = web_search("test query", limit=2)
@@ -3689,20 +3701,21 @@ def test_web_search_limit_parameter():
 
         # Verify that DDGS was called with the correct limit
         mock_ddgs.text.assert_called_once_with(
-            query="test query",
-            region="ar-es",
-            safesearch="off",
-            max_results=2
+            query="test query", region="ar-es", safesearch="off", max_results=2
         )
 
 
 # Tests for search command
 def test_search_command_success():
     """Test search_command with successful results"""
-    with patch('api.index.web_search') as mock_search:
+    with patch("api.index.web_search") as mock_search:
         mock_search.return_value = [
             {"title": "Test Result", "url": "https://example.com", "snippet": ""},
-            {"title": "Another Result", "url": "https://test.com", "snippet": "Test snippet"}
+            {
+                "title": "Another Result",
+                "url": "https://test.com",
+                "snippet": "Test snippet",
+            },
         ]
 
         result = search_command("python programming")
@@ -3725,7 +3738,7 @@ def test_search_command_empty_query():
 
 def test_search_command_no_results():
     """Test search_command when no results found"""
-    with patch('api.index.web_search') as mock_search:
+    with patch("api.index.web_search") as mock_search:
         mock_search.return_value = []
 
         result = search_command("nonexistent query")
@@ -3756,7 +3769,7 @@ def test_parse_tool_call_invalid():
     assert parse_tool_call(text) is None
 
     # Missing arguments
-    text = '[TOOL] web_search'
+    text = "[TOOL] web_search"
     assert parse_tool_call(text) is None
 
     # None input
@@ -3765,12 +3778,15 @@ def test_parse_tool_call_invalid():
 
 def test_execute_tool_web_search():
     """Test execute_tool with web_search tool"""
-    with patch('api.index.web_search') as mock_search:
-        mock_search.return_value = [{"title": "Test", "url": "https://test.com", "snippet": ""}]
+    with patch("api.index.web_search") as mock_search:
+        mock_search.return_value = [
+            {"title": "Test", "url": "https://test.com", "snippet": ""}
+        ]
 
         result = execute_tool("web_search", {"query": "test", "limit": 3})
 
         import json
+
         parsed_result = json.loads(result)
         assert parsed_result["query"] == "test"
         assert len(parsed_result["results"]) == 1
@@ -3796,7 +3812,7 @@ def test_handle_ai_response_sanitizes_tool_lines(monkeypatch):
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handler(_messages):
-        return "Hola\n[TOOL] web_search {\"query\": \"test\"}\nChau"
+        return 'Hola\n[TOOL] web_search {"query": "test"}\nChau'
 
     result = handle_ai_response("123", fake_handler, [])
 
@@ -3810,7 +3826,7 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handler(_messages):
-        return "[TOOL] web_search {\"query\": \"test\"}"
+        return '[TOOL] web_search {"query": "test"}'
 
     result = handle_ai_response("123", fake_handler, [])
 
@@ -3823,9 +3839,11 @@ def test_complete_with_providers_groq_success():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch('api.index.get_groq_ai_response') as mock_groq, \
-         patch('api.index.get_ai_response') as mock_openrouter, \
-         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare:
+    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
+        "api.index.get_ai_response"
+    ) as mock_openrouter, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_cloudflare:
 
         mock_groq.return_value = "Groq response"
         mock_openrouter.return_value = "OpenRouter response"
@@ -3844,11 +3862,15 @@ def test_complete_with_providers_fallback_sequence():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch('api.index.get_groq_ai_response') as mock_groq, \
-         patch('api.index.get_ai_response') as mock_openrouter, \
-         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
-         patch('os.environ.get') as mock_env, \
-         patch('api.index.OpenAI') as mock_openai:
+    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
+        "api.index.get_ai_response"
+    ) as mock_openrouter, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_cloudflare, patch(
+        "os.environ.get"
+    ) as mock_env, patch(
+        "api.index.OpenAI"
+    ) as mock_openai:
 
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None  # Groq fails
@@ -3872,11 +3894,15 @@ def test_complete_with_providers_all_fail():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch('api.index.get_groq_ai_response') as mock_groq, \
-         patch('api.index.get_ai_response') as mock_openrouter, \
-         patch('api.index.get_cloudflare_ai_response') as mock_cloudflare, \
-         patch('os.environ.get') as mock_env, \
-         patch('api.index.OpenAI') as mock_openai:
+    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
+        "api.index.get_ai_response"
+    ) as mock_openrouter, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_cloudflare, patch(
+        "os.environ.get"
+    ) as mock_env, patch(
+        "api.index.OpenAI"
+    ) as mock_openai:
 
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None
@@ -3968,8 +3994,6 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert originals == []
 
 
-
-
 def test_configure_links_sets_and_disables():
     with patch("api.index.config_redis") as mock_redis:
         redis_client = MagicMock()
@@ -4003,13 +4027,17 @@ def test_handle_msg_link_reply():
         "from": {"first_name": "John", "username": "john"},
         "text": "check https://twitter.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.delete_msg") as mock_delete, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.delete_msg"
+    ) as mock_delete, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.save_message_to_redis"
+    ) as mock_save, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4037,13 +4065,17 @@ def test_handle_msg_link_reply_instagram():
         "from": {"first_name": "Lu", "username": "lu"},
         "text": "mirá https://www.instagram.com/qux?igsh=abc",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.delete_msg") as mock_delete, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.delete_msg"
+    ) as mock_delete, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.save_message_to_redis"
+    ) as mock_save, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4071,13 +4103,17 @@ def test_handle_msg_link_delete():
         "from": {"first_name": "Ana", "username": "ana"},
         "text": "look https://x.com/bar",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.delete_msg") as mock_delete, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.save_message_to_redis") as mock_save, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.delete_msg"
+    ) as mock_delete, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.save_message_to_redis"
+    ) as mock_save, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "delete"
         mock_redis.return_value = redis_client
@@ -4106,10 +4142,11 @@ def test_handle_msg_link_without_preview(mock_redis):
         "from": {"id": 1},
         "text": "https://example.com",
     }
-    with patch("api.index.send_msg") as mock_send, \
-        patch("api.index.replace_links") as mock_replace, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should:
+    with patch("api.index.send_msg") as mock_send, patch(
+        "api.index.replace_links"
+    ) as mock_replace, patch("api.index.initialize_commands", return_value={}), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4148,6 +4185,7 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     mock_get.assert_called_once_with(
         "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
     )
+
 
 def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     from api.index import can_embed_url
@@ -4188,12 +4226,15 @@ def test_handle_msg_link_already_fixed():
         "from": {"id": 1},
         "text": "https://fixupx.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4213,13 +4254,17 @@ def test_handle_msg_original_link_no_check():
         "from": {"id": 1},
         "text": "https://vm.tiktok.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.replace_links") as mock_replace, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.replace_links"
+    ) as mock_replace, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4240,12 +4285,15 @@ def test_handle_msg_link_already_fixed_subdomain():
         "from": {"id": 1},
         "text": "https://vm.vxtiktok.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4265,12 +4313,15 @@ def test_handle_msg_replaced_link_adds_button():
         "from": {"id": 1},
         "text": "https://x.com/foo?utm_source=bar",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4297,12 +4348,15 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         "text": "https://x.com/foo",
         "reply_to_message": {"message_id": 1},
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "reply"
         mock_redis.return_value = redis_client
@@ -4332,13 +4386,17 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         "text": "https://x.com/foo",
         "reply_to_message": {"message_id": 2},
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), \
-        patch("api.index.config_redis") as mock_redis, \
-        patch("api.index.send_msg") as mock_send, \
-        patch("api.index.delete_msg") as mock_delete, \
-        patch("api.index.initialize_commands", return_value={}), \
-        patch("api.index.should_gordo_respond") as mock_should, \
-        patch("api.index.requests.get") as mock_get:
+    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
+        "api.index.config_redis"
+    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.delete_msg"
+    ) as mock_delete, patch(
+        "api.index.initialize_commands", return_value={}
+    ), patch(
+        "api.index.should_gordo_respond"
+    ) as mock_should, patch(
+        "api.index.requests.get"
+    ) as mock_get:
         redis_client = MagicMock()
         redis_client.get.return_value = "delete"
         mock_redis.return_value = redis_client
@@ -4359,6 +4417,8 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
             ["https://x.com/foo"],
         )
         mock_should.assert_not_called()
+
+
 def test_cached_requests_retries_on_failure(monkeypatch):
     from api.index import cached_requests
 
@@ -4373,7 +4433,9 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
+    def fake_get(
+        url, params=None, headers=None, timeout=5, verify=True
+    ):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] == 1:
             raise requests.RequestException("boom")
@@ -4415,6 +4477,7 @@ def test_web_search_uses_ttl_constant(monkeypatch):
 
     # Fake Redis with setex spy
     with patch("api.index.config_redis") as mock_redis:
+
         class R:
             def __init__(self):
                 self.calls = []
