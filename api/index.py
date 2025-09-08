@@ -38,6 +38,13 @@ TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 
+# Rate limiting and timezone constants
+RATE_LIMIT_GLOBAL_MAX = 1024
+RATE_LIMIT_CHAT_MAX = 128
+TTL_RATE_GLOBAL = 3600  # 1 hour
+TTL_RATE_CHAT = 600     # 10 minutes
+BA_TZ = timezone(timedelta(hours=-3))
+
 # Global variable to cache bot configuration
 _bot_config = None
 
@@ -1552,7 +1559,7 @@ def get_weather() -> dict:
             hourly = response["data"]["hourly"]
 
             # Get current time in Buenos Aires
-            current_time = datetime.now(timezone(timedelta(hours=-3)))
+            current_time = datetime.now(BA_TZ)
 
             # Find the current hour index by matching with timestamps
             current_index = None
@@ -2084,8 +2091,7 @@ def get_weather_context() -> Optional[Dict]:
 
 def get_time_context() -> Dict:
     """Get current time in Buenos Aires"""
-    buenos_aires_tz = timezone(timedelta(hours=-3))
-    current_time = datetime.now(buenos_aires_tz)
+    current_time = datetime.now(BA_TZ)
     return {"datetime": current_time, "formatted": current_time.strftime("%A %d/%m/%Y")}
 
 
@@ -2650,15 +2656,15 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     try:
         pipe = redis_client.pipeline()
 
-        # Check global rate limit (1024 requests/hour)
+        # Check global rate limit (requests/hour)
         hour_key = "rate_limit:global:hour"
         pipe.incr(hour_key)
-        pipe.expire(hour_key, 3600, nx=True)
+        pipe.expire(hour_key, TTL_RATE_GLOBAL, nx=True)
 
-        # Check individual chat rate limit (128 requests/10 minutes)
+        # Check individual chat rate limit (requests/10 minutes)
         chat_key = f"rate_limit:chat:{chat_id}"
         pipe.incr(chat_key)
-        pipe.expire(chat_key, 600, nx=True)
+        pipe.expire(chat_key, TTL_RATE_CHAT, nx=True)
 
         # Execute all commands atomically
         results = pipe.execute()
@@ -2667,7 +2673,7 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
         hour_count = results[0] or 0  # Convert None to 0
         chat_count = results[2] or 0  # Convert None to 0
 
-        return hour_count <= 1024 and chat_count <= 128
+        return hour_count <= RATE_LIMIT_GLOBAL_MAX and chat_count <= RATE_LIMIT_CHAT_MAX
     except redis.RedisError:
         return False
 
