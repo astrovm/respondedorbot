@@ -20,13 +20,11 @@ import random
 import re
 import redis
 import requests
-import ssl
 import time
 import traceback
 from openpyxl import load_workbook
 from decimal import Decimal
 import unicodedata
-import urllib.request
 from urllib.parse import urlparse, urlunparse
 
 
@@ -922,12 +920,7 @@ $1 ARS = {sats_per_peso:.3f} sats"""
         return "no pude conseguir el precio de btc boludo"
 
 
-def scrape_bcra_variables() -> Optional[Dict]:
-    """Fetch BCRA Principales Variables via official API (replaces HTML scraping)."""
-    variables = bcra_fetch_latest_variables()
-    if variables:
-        return variables
-    return None
+ 
 
 
 def get_cached_bcra_variables() -> Optional[Dict]:
@@ -947,15 +940,12 @@ def get_cached_bcra_variables() -> Optional[Dict]:
 def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     """Cache BCRA variables in Redis.
 
-    - Stores the last fetched set under `bcra_variables` with TTL (backwards compatible)
-    - Additionally, if a "tipo de cambio mayorista" entry contains a date, stores its
-      numeric value under a stable per-date key: `bcra_mayorista:YYYY-MM-DD` (no TTL)
-      to support later lookups aligned to the ITCRM date without refetching.
+    - Stores the latest set under `bcra_variables` with TTL
+    - Persists Dólar Mayorista by date at `bcra_mayorista:YYYY-MM-DD` (no TTL)
     """
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
-        # Keep the original behavior
         redis_setex_json(redis_client, cache_key, ttl, variables)
 
         # Also persist the mayorista value by its own date for future lookups
@@ -981,15 +971,15 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
 
 
 def get_or_refresh_bcra_variables() -> Optional[Dict]:
-    """Return BCRA variables using cache or scraping, propagating fetch errors.
+    """Return BCRA variables using cache or the BCRA API, propagating fetch errors.
 
     - Tries cache first; lets exceptions propagate to caller
-    - If cache misses, scrapes and caches (caching errors are logged but ignored)
+    - If cache misses, fetches via API and caches (caching errors are logged but ignored)
     """
     variables = get_cached_bcra_variables()  # may raise; callers handle
     if variables:
         return variables
-    variables = scrape_bcra_variables()  # may raise; callers handle
+    variables = bcra_fetch_latest_variables()  # may raise; callers handle
     if variables:
         try:
             cache_bcra_variables(variables)
@@ -1320,7 +1310,7 @@ def format_bcra_variables(variables: Dict) -> str:
 def handle_bcra_variables() -> str:
     """Handle BCRA economic variables command"""
     try:
-        # Use unified cache/scrape helper
+        # Use unified cache/API helper
         variables = get_or_refresh_bcra_variables()
 
         if not variables:
