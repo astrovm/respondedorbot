@@ -30,6 +30,14 @@ import urllib.request
 from urllib.parse import urlparse, urlunparse
 
 
+# TTL constants (seconds)
+TTL_PRICE = 300  # 5 minutes
+TTL_DOLLAR = 300  # 5 minutes
+TTL_BCRA = 300  # 5 minutes
+TTL_WEATHER = 1800  # 30 minutes
+TTL_WEB_SEARCH = 300  # 5 minutes
+TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
+
 # Global variable to cache bot configuration
 _bot_config = None
 
@@ -125,7 +133,7 @@ def get_cached_transcription(file_id: str) -> Optional[str]:
         return None
 
 
-def cache_transcription(file_id: str, text: str, ttl: int = 604800) -> None:
+def cache_transcription(file_id: str, text: str, ttl: int = TTL_MEDIA_CACHE) -> None:
     """Cache audio transcription in Redis (default 7 days)"""
     try:
         redis_client = config_redis()
@@ -149,7 +157,7 @@ def get_cached_description(file_id: str) -> Optional[str]:
         return None
 
 
-def cache_description(file_id: str, description: str, ttl: int = 604800) -> None:
+def cache_description(file_id: str, description: str, ttl: int = TTL_MEDIA_CACHE) -> None:
     """Cache image description in Redis (default 7 days)"""
     try:
         redis_client = config_redis()
@@ -295,7 +303,7 @@ def select_random(msg_text: str) -> str:
     return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
 
-def get_api_or_cache_prices(convert_to):
+def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {"start": "1", "limit": "100", "convert": convert_to}
@@ -304,8 +312,11 @@ def get_api_or_cache_prices(convert_to):
         "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
     }
 
-    cache_expiration_time = 300
-    response = cached_requests(api_url, parameters, headers, cache_expiration_time)
+    # Allow callers to limit the page size directly (dedupe across features)
+    if isinstance(limit, int) and limit > 0:
+        parameters["limit"] = str(limit)
+
+    response = cached_requests(api_url, parameters, headers, TTL_PRICE)
 
     return response["data"] if response else None
 
@@ -560,7 +571,7 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
 
 
 def get_dollar_rates() -> Optional[str]:
-    cache_expiration_time = 300
+    cache_expiration_time = TTL_DOLLAR
     api_url = "https://criptoya.com/api/dolar"
 
     dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
@@ -588,7 +599,7 @@ def get_devo(msg_text: str) -> str:
         if fee != fee or fee > 1 or compra != compra or compra < 0:
             return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a positive number."
 
-        cache_expiration_time = 300
+        cache_expiration_time = TTL_DOLLAR
 
         api_url = "https://criptoya.com/api/dolar"
 
@@ -765,7 +776,7 @@ def get_cached_bcra_variables() -> Optional[Dict]:
         return None
 
 
-def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
+def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     """Cache BCRA variables in Redis (default 5 minutes)"""
     try:
         redis_client = config_redis()
@@ -1466,7 +1477,7 @@ def get_weather() -> dict:
         }
 
         response = cached_requests(
-            weather_url, parameters, None, 1800
+            weather_url, parameters, None, TTL_WEATHER
         )  # Cache por 30 minutos
         if response and "data" in response:
             hourly = response["data"]["hourly"]
@@ -1871,7 +1882,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         # Store in cache for 5 minutes
         try:
             if redis_client and cache_key:
-                redis_client.setex(cache_key, 300, json.dumps(results))
+                redis_client.setex(cache_key, TTL_WEB_SEARCH, json.dumps(results))
         except Exception:
             pass
 
@@ -1949,18 +1960,10 @@ def get_market_context() -> Dict:
     market_data = {}
 
     try:
-        # Get crypto prices (reuse 5-minute cache)
-        crypto_response = cached_requests(
-            "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
-            {"start": "1", "limit": "5", "convert": "USD"},
-            {
-                "Accepts": "application/json",
-                "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
-            },
-            300,
-        )
-        if crypto_response and "data" in crypto_response:
-            market_data["crypto"] = clean_crypto_data(crypto_response["data"]["data"])
+        # Get crypto prices (reuse unified helper and 5-minute cache)
+        api_data = get_api_or_cache_prices("USD", limit=5)
+        if api_data and "data" in api_data:
+            market_data["crypto"] = clean_crypto_data(api_data["data"])
     except Exception as e:
         print(f"Error fetching crypto data: {e}")
 
@@ -1970,7 +1973,7 @@ def get_market_context() -> Dict:
             "https://criptoya.com/api/dolar",
             None,
             None,
-            300,
+            TTL_DOLLAR,
         )
         if dollar_response and "data" in dollar_response:
             market_data["dollar"] = dollar_response["data"]
