@@ -2512,6 +2512,7 @@ def test_format_bcra_variables_empty():
 
 def test_format_bcra_variables_with_data():
     from api.index import format_bcra_variables
+    from unittest.mock import patch
 
     variables = {
         "base_monetaria_total": {"value": "5.000.000,50", "date": "15/01/2025"},
@@ -2529,9 +2530,12 @@ def test_format_bcra_variables_with_data():
         "reservas_int": {"value": "25.000", "date": "15/01/2025"},
     }
 
-    result = format_bcra_variables(variables)
+    with patch("api.index.get_latest_itcrm_value") as mock_itcrm:
+        mock_itcrm.return_value = 123.45
+        result = format_bcra_variables(variables)
     assert "📊 Variables principales BCRA" in result
     assert "15/01/25" in result  # Date should be formatted
+    assert "ITCRM" in result  # Should include current ITCRM line
 
 
 def test_handle_bcra_variables_cached():
