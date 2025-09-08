@@ -776,7 +776,14 @@ def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
 
 
 def get_latest_itcrm_value() -> Optional[float]:
-    """Fetch latest ITCRM index value from BCRA spreadsheet with caching"""
+    """Fetch latest ITCRM index value from BCRA spreadsheet with caching.
+
+    Caching policy (Buenos Aires, UTC-3):
+    - If the spreadsheet already contains the value for the expected latest
+      labor day (today after 15:00, otherwise the previous business day),
+      cache until 15:00 of the next business day.
+    - Otherwise cache for 30 minutes to retry soon.
+    """
     cache_key = "latest_itcrm"
     redis_client = None
 
@@ -804,32 +811,102 @@ def get_latest_itcrm_value() -> Optional[float]:
         if sheet_like is None:
             return None
         sheet = cast(Any, sheet_like)
-        for row in range(sheet.max_row, 0, -1):
-            cell_value = sheet.cell(row=row, column=2).value
-            if cell_value is not None:
-                # Store as string to satisfy Redis typing and avoid ambiguity
-                try:
-                    if redis_client is not None:
-                        redis_client.setex(cache_key, 43200, str(cell_value))
-                except Exception as e:
-                    print(f"Error caching ITCRM value: {e}")
 
-                # Convert to float robustly
-                if isinstance(cell_value, (int, float, Decimal)):
-                    return float(cell_value)
-                # Handle possible locale formatting
-                text_val = str(cell_value)
+        # Helpers for business-day calculations in Buenos Aires (UTC-3)
+        ba_tz = timezone(timedelta(hours=-3))
+
+        def is_business_day(d: Any) -> bool:
+            try:
+                wd = d.weekday()
+                return 0 <= wd <= 4  # Mon-Fri
+            except Exception:
+                return False
+
+        def previous_business_day(d: Any) -> Any:
+            prev = d
+            while True:
+                prev = prev - timedelta(days=1)
+                if is_business_day(prev):
+                    return prev
+
+        def next_business_day(d: Any) -> Any:
+            nxt = d
+            while True:
+                nxt = nxt + timedelta(days=1)
+                if is_business_day(nxt):
+                    return nxt
+
+        def parse_date_cell(v: Any) -> Optional[Any]:
+            # Try datetime/date directly
+            if hasattr(v, 'date') and callable(getattr(v, 'date')):
                 try:
-                    # Try raw conversion first
-                    return float(text_val)
-                except ValueError:
-                    # Fallback: normalize decimal/thousands separators
+                    return v.date()
+                except Exception:
+                    pass
+            # Try common string formats
+            try:
+                s = str(v).strip()
+                for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
                     try:
-                        normalized = text_val.replace(".", "").replace(",", ".")
-                        return float(normalized)
+                        return datetime.strptime(s, fmt).date()
                     except Exception:
-                        # Keep scanning previous rows on parse failure
                         continue
+            except Exception:
+                pass
+            return None
+
+        # Determine the expected latest business day based on current time
+        now_ba = datetime.now(ba_tz)
+        today_ba = now_ba.date()
+        if is_business_day(today_ba) and now_ba.hour >= 15:
+            expected_latest = today_ba
+        else:
+            expected_latest = previous_business_day(today_ba)
+
+        for row in range(sheet.max_row, 0, -1):
+            date_cell = sheet.cell(row=row, column=1).value
+            cell_value = sheet.cell(row=row, column=2).value
+            if cell_value is None:
+                continue
+
+            latest_row_date = parse_date_cell(date_cell)
+
+            # Decide TTL based on whether we "already have the update"
+            have_expected_update = latest_row_date == expected_latest
+            if have_expected_update:
+                next_bd = next_business_day(today_ba)
+                next_update_ba = datetime(
+                    next_bd.year, next_bd.month, next_bd.day, 15, 0, 0, tzinfo=ba_tz
+                )
+                ttl_seconds = int((next_update_ba - now_ba).total_seconds())
+                if ttl_seconds <= 0:
+                    ttl_seconds = 1800
+            else:
+                ttl_seconds = 1800  # 30 minutes
+
+            # Store as string to satisfy Redis typing and avoid ambiguity
+            try:
+                if redis_client is not None:
+                    redis_client.setex(cache_key, ttl_seconds, str(cell_value))
+            except Exception as e:
+                print(f"Error caching ITCRM value: {e}")
+
+            # Convert to float robustly
+            if isinstance(cell_value, (int, float, Decimal)):
+                return float(cell_value)
+            # Handle possible locale formatting
+            text_val = str(cell_value)
+            try:
+                # Try raw conversion first
+                return float(text_val)
+            except ValueError:
+                # Fallback: normalize decimal/thousands separators
+                try:
+                    normalized = text_val.replace(".", "").replace(",", ".")
+                    return float(normalized)
+                except Exception:
+                    # Keep scanning previous rows on parse failure
+                    continue
         return None
     except Exception as e:
         print(f"Error fetching ITCRM value: {e}")
