@@ -1909,6 +1909,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         # Use DDGS for robust DuckDuckGo search
         ddgs = DDGS(timeout=8)
         # Light retry on transient errors
+        raw_results: List[Dict[str, Any]] = []
         last_err: Optional[Exception] = None
         for attempt in range(2):
             try:
