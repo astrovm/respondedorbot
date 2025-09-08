@@ -2530,12 +2530,13 @@ def test_format_bcra_variables_with_data():
         "reservas_int": {"value": "25.000", "date": "15/01/2025"},
     }
 
-    with patch("api.index.get_latest_itcrm_value") as mock_itcrm:
-        mock_itcrm.return_value = 123.45
+    with patch("api.index.get_latest_itcrm_details") as mock_itcrm:
+        mock_itcrm.return_value = (123.45, "01/02/25")
         result = format_bcra_variables(variables)
     assert "📊 Variables principales BCRA" in result
     assert "15/01/25" in result  # Date should be formatted
     assert "TCRM" in result  # Should include current TCRM line
+    assert "01/02/25" in result  # Should include TCRM date from sheet
 
 
 def test_handle_bcra_variables_cached():
@@ -2611,10 +2612,10 @@ def test_calculate_tcrm_100_success():
     with patch("api.index.get_cached_bcra_variables") as mock_get, patch(
         "api.index.scrape_bcra_variables"
     ) as mock_scrape, patch("api.index.cache_bcra_variables") as mock_cache, patch(
-        "api.index.get_latest_itcrm_value"
+        "api.index.get_latest_itcrm_details"
     ) as mock_itcrm:
         mock_get.return_value = bcra_vars
-        mock_itcrm.return_value = 120.0
+        mock_itcrm.return_value = (120.0, "01/01/24")
 
         result = calculate_tcrm_100()
         assert result == 1000.0 * 100 / 120.0
