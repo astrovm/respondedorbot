@@ -195,6 +195,21 @@ def bcra_api_get(
             get_history=False,
             verify_ssl=True,
         )
+        # Fallback to insecure verification if strict SSL fails in this environment
+        if not resp:
+            try:
+                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+                resp = cached_requests(
+                    url,
+                    params,
+                    None,
+                    ttl,
+                    hourly_cache=False,
+                    get_history=False,
+                    verify_ssl=False,
+                )
+            except Exception:
+                resp = None
         if not resp or "data" not in resp:
             return None
         data = resp["data"]
