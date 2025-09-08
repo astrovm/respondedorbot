@@ -875,30 +875,12 @@ def get_or_refresh_bcra_variables() -> Optional[Dict]:
     return variables
 
 def get_latest_itcrm_value() -> Optional[float]:
-    """Simplified: return the latest TCRM value, optionally cached.
-
-    Keeps old signature for callers; caching policy simplified to 30 minutes.
-    """
-    cache_key = "latest_itcrm"
+    """Return latest TCRM value using the cached value+date function."""
     try:
-        redis_client = config_redis()
-        cached = redis_client.get(cache_key)
-        if cached is not None:
-            return float(str(cached))
-    except Exception as e:
-        print(f"Error getting cached ITCRM value: {e}")
-
-    details = get_latest_itcrm_details()
-    if not details:
+        details = get_latest_itcrm_value_and_date()
+        return details[0] if details else None
+    except Exception:
         return None
-    value, _date = details
-    try:
-        redis_client = config_redis()
-        # Cache for 30 minutes
-        redis_client.setex(cache_key, 1800, str(value))
-    except Exception as e:
-        print(f"Error caching ITCRM value: {e}")
-    return value
 
 
 def calculate_tcrm_100() -> Optional[float]:
