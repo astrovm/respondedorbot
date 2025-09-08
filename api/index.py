@@ -1004,6 +1004,29 @@ def get_cached_tcrm_100(
         history_value = history_data["data"] if history_data else None
         timestamp = int(time.time())
 
+        # Determine if we have a same-day mayorista value for the current ITCRM date
+        same_day_ok = False
+        try:
+            itcrm_cached = redis_get_json(redis_client, "latest_itcrm_details")
+            itcrm_date_str = None
+            if isinstance(itcrm_cached, dict) and "date" in itcrm_cached:
+                itcrm_date_str = str(itcrm_cached.get("date", ""))
+            else:
+                details = get_latest_itcrm_value_and_date()
+                if details:
+                    itcrm_date_str = details[1]
+            dt = parse_date_string(itcrm_date_str or "")
+            if dt is not None:
+                date_key = dt.date().isoformat()
+                mayorista_cached = redis_get_json(
+                    redis_client, f"bcra_mayorista:{date_key}"
+                )
+                if isinstance(mayorista_cached, dict) and "value" in mayorista_cached:
+                    if parse_monetary_number(mayorista_cached["value"]) is not None:
+                        same_day_ok = True
+        except Exception:
+            same_day_ok = False
+
         def compute_and_store() -> Optional[float]:
             value = calculate_tcrm_100()
             if value is None:
@@ -1014,17 +1037,17 @@ def get_cached_tcrm_100(
             redis_set_json(redis_client, current_hour + cache_key, redis_value)
             return value
 
-        if redis_response is None:
+        if not same_day_ok:
+            current_value = None
+        elif redis_response is None:
             current_value = compute_and_store()
         else:
             cached_data = cast(Dict, redis_response)
             cache_age = timestamp - int(cached_data["timestamp"])
             if cache_age > expiration_time:
                 current_value = compute_and_store()
-                if current_value is None:
-                    current_value = cached_data["data"]
             else:
-                current_value = cached_data["data"]
+                current_value = cached_data.get("data")
 
         change = None
         if current_value is not None and history_value:
