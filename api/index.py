@@ -1160,11 +1160,11 @@ def format_bcra_variables(variables: Dict) -> str:
                 lines.append(line)
                 break
 
-    # Append current ITCRM value if available
+    # Append current TCRM value if available
     try:
         itcrm_value = get_latest_itcrm_value()
         if isinstance(itcrm_value, (int, float)):
-            lines.append(f"📐 ITCRM: {fmt_num(float(itcrm_value), 2)}")
+            lines.append(f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}")
     except Exception:
         pass
 

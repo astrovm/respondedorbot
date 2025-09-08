@@ -2535,7 +2535,7 @@ def test_format_bcra_variables_with_data():
         result = format_bcra_variables(variables)
     assert "📊 Variables principales BCRA" in result
     assert "15/01/25" in result  # Date should be formatted
-    assert "ITCRM" in result  # Should include current ITCRM line
+    assert "TCRM" in result  # Should include current TCRM line
 
 
 def test_handle_bcra_variables_cached():
