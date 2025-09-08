@@ -1191,94 +1191,54 @@ def handle_transcribe_with_message(message: Dict) -> str:
         # Check for audio in replied message
         if "voice" in replied_msg and replied_msg["voice"]:
             audio_file_id = replied_msg["voice"]["file_id"]
-
-            # Check cache first
-            cached_transcription = get_cached_transcription(audio_file_id)
-            if cached_transcription:
-                return f"🎵 Transcripción: {cached_transcription}"
-
-            # Download and transcribe
-            audio_data = download_telegram_file(audio_file_id)
-            if audio_data:
-                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
-                if transcription:
-                    return f"🎵 Transcripción: {transcription}"
-                else:
-                    return "No pude transcribir el audio, intentá más tarde"
-            else:
-                return "No pude descargar el audio"
+            text, err = transcribe_file_by_id(audio_file_id)
+            if text:
+                return f"🎵 Transcripción: {text}"
+            return (
+                "No pude descargar el audio"
+                if err == "download"
+                else "No pude transcribir el audio, intentá más tarde"
+            )
 
         # Check for regular audio
         elif "audio" in replied_msg and replied_msg["audio"]:
             audio_file_id = replied_msg["audio"]["file_id"]
-
-            # Check cache first
-            cached_transcription = get_cached_transcription(audio_file_id)
-            if cached_transcription:
-                return f"🎵 Transcripción: {cached_transcription}"
-
-            # Download and transcribe
-            audio_data = download_telegram_file(audio_file_id)
-            if audio_data:
-                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
-                if transcription:
-                    return f"🎵 Transcripción: {transcription}"
-                else:
-                    return "No pude transcribir el audio, intentá más tarde"
-            else:
-                return "No pude descargar el audio"
+            text, err = transcribe_file_by_id(audio_file_id)
+            if text:
+                return f"🎵 Transcripción: {text}"
+            return (
+                "No pude descargar el audio"
+                if err == "download"
+                else "No pude transcribir el audio, intentá más tarde"
+            )
 
         # Check for photo in replied message
         elif "photo" in replied_msg and replied_msg["photo"]:
             photo_file_id = replied_msg["photo"][-1]["file_id"]
-
-            # Check cache first
-            cached_description = get_cached_description(photo_file_id)
-            if cached_description:
-                return f"🖼️ Descripción: {cached_description}"
-
-            # Download and describe
-            image_data = download_telegram_file(photo_file_id)
-            if image_data:
-                # Resize image if needed
-                resized_image_data = resize_image_if_needed(image_data)
-                description = describe_image_cloudflare(
-                    resized_image_data,
-                    "Describe what you see in this image in detail.",
-                    photo_file_id,
-                )
-                if description:
-                    return f"🖼️ Descripción: {description}"
-                else:
-                    return "No pude describir la imagen, intentá más tarde"
-            else:
-                return "No pude descargar la imagen"
+            desc, err = describe_media_by_id(
+                photo_file_id, "Describe what you see in this image in detail."
+            )
+            if desc:
+                return f"🖼️ Descripción: {desc}"
+            return (
+                "No pude descargar la imagen"
+                if err == "download"
+                else "No pude describir la imagen, intentá más tarde"
+            )
 
         # Check for sticker in replied message
         elif "sticker" in replied_msg and replied_msg["sticker"]:
             sticker_file_id = replied_msg["sticker"]["file_id"]
-
-            # Check cache first
-            cached_description = get_cached_description(sticker_file_id)
-            if cached_description:
-                return f"🎨 Descripción del sticker: {cached_description}"
-
-            # Download and describe
-            image_data = download_telegram_file(sticker_file_id)
-            if image_data:
-                # Resize image if needed
-                resized_image_data = resize_image_if_needed(image_data)
-                description = describe_image_cloudflare(
-                    resized_image_data,
-                    "Describe what you see in this sticker in detail.",
-                    sticker_file_id,
-                )
-                if description:
-                    return f"🎨 Descripción del sticker: {description}"
-                else:
-                    return "No pude describir el sticker, intentá más tarde"
-            else:
-                return "No pude descargar el sticker"
+            desc, err = describe_media_by_id(
+                sticker_file_id, "Describe what you see in this sticker in detail."
+            )
+            if desc:
+                return f"🎨 Descripción del sticker: {desc}"
+            return (
+                "No pude descargar el sticker"
+                if err == "download"
+                else "No pude describir el sticker, intentá más tarde"
+            )
 
         else:
             return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
@@ -2411,8 +2371,7 @@ def build_ai_messages(
     username = message["from"].get("username", "")
     chat_type = message["chat"]["type"]
     chat_title = message["chat"].get("title", "") if chat_type != "private" else ""
-    buenos_aires_tz = timezone(timedelta(hours=-3))
-    current_time = datetime.now(buenos_aires_tz)
+    current_time = datetime.now(BA_TZ)
 
     # Build context sections
     context_parts = [
@@ -2910,6 +2869,59 @@ def transcribe_audio_cloudflare(
     return None
 
 
+def transcribe_file_by_id(file_id: str, use_cache: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch transcription for a Telegram file_id with cache and retries.
+
+    Returns (text, error):
+    - On success: (transcription, None)
+    - If download failed: (None, "download")
+    - If transcription failed: (None, "transcribe")
+    """
+    try:
+        if use_cache:
+            cached = get_cached_transcription(file_id)
+            if cached:
+                return str(cached), None
+
+        audio_data = download_telegram_file(file_id)
+        if not audio_data:
+            return None, "download"
+
+        text = transcribe_audio_cloudflare(audio_data, file_id)
+        if text:
+            return text, None
+        return None, "transcribe"
+    except Exception as e:
+        print(f"Error in transcribe_file_by_id: {e}")
+        return None, "transcribe"
+
+
+def describe_media_by_id(file_id: str, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch description for an image/sticker by Telegram file_id using LLaVA.
+
+    Returns (description, error):
+    - On success: (description, None)
+    - If download failed: (None, "download")
+    - If description failed: (None, "describe")
+    """
+    try:
+        cached = get_cached_description(file_id)
+        if cached:
+            return str(cached), None
+
+        image_data = download_telegram_file(file_id)
+        if not image_data:
+            return None, "download"
+
+        resized = resize_image_if_needed(image_data)
+        desc = describe_image_cloudflare(resized, prompt, file_id)
+        if desc:
+            return desc, None
+        return None, "describe"
+    except Exception as e:
+        print(f"Error in describe_media_by_id: {e}")
+        return None, "describe"
+
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
     """Resize image if it's too large for LLaVA processing"""
     try:
@@ -3140,18 +3152,16 @@ def handle_msg(message: Dict) -> str:
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
             print(f"Processing audio message: {audio_file_id}")
-            audio_data = download_telegram_file(audio_file_id)
-            if audio_data:
-                transcription = transcribe_audio_cloudflare(audio_data, audio_file_id)
-                if transcription:
-                    # Use transcription as message text
-                    message_text = transcription
-                    print(f"Audio transcribed: {message_text[:100]}...")
-                else:
-                    # Fallback message if transcription fails
-                    message_text = "mandame texto que no soy alexa, boludo"
+            transcription, err = transcribe_file_by_id(audio_file_id, use_cache=False)
+            if transcription:
+                message_text = transcription
+                print(f"Audio transcribed: {message_text[:100]}...")
             else:
-                message_text = "no pude bajar tu audio, mandalo de vuelta"
+                message_text = (
+                    "no pude bajar tu audio, mandalo de vuelta"
+                    if err == "download"
+                    else "mandame texto que no soy alexa, boludo"
+                )
 
         # Download image if present
         image_base64 = None
