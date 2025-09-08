@@ -481,7 +481,9 @@ def get_prices(msg_text: str) -> Optional[str]:
     return msg
 
 
-def sort_dollar_rates(dollar_rates, tcrm_100: Optional[float] = None):
+def sort_dollar_rates(
+    dollar_rates, tcrm_100: Optional[float] = None, tcrm_history: Optional[float] = None
+):
     dollars = dollar_rates["data"]
 
     sorted_dollar_rates = [
@@ -529,7 +531,7 @@ def sort_dollar_rates(dollar_rates, tcrm_100: Optional[float] = None):
 
     if tcrm_100 is not None:
         sorted_dollar_rates.append(
-            {"name": "TCRM 100", "price": tcrm_100, "history": None}
+            {"name": "TCRM 100", "price": tcrm_100, "history": tcrm_history}
         )
 
     sorted_dollar_rates.sort(key=lambda x: x["price"])
@@ -557,9 +559,9 @@ def get_dollar_rates() -> Optional[str]:
 
     dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
-    tcrm_100 = calculate_tcrm_100()
+    tcrm_100, tcrm_history = get_cached_tcrm_100()
 
-    sorted_dollar_rates = sort_dollar_rates(dollars, tcrm_100)
+    sorted_dollar_rates = sort_dollar_rates(dollars, tcrm_100, tcrm_history)
 
     return format_dollar_rates(sorted_dollar_rates, 24)
 
@@ -768,7 +770,18 @@ def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
 
 
 def get_latest_itcrm_value() -> Optional[float]:
-    """Fetch latest ITCRM index value from BCRA spreadsheet"""
+    """Fetch latest ITCRM index value from BCRA spreadsheet with caching"""
+    cache_key = "latest_itcrm"
+    redis_client = None
+
+    try:
+        redis_client = config_redis()
+        cached = redis_client.get(cache_key)
+        if cached is not None:
+            return float(cached)
+    except Exception as e:
+        print(f"Error getting cached ITCRM value: {e}")
+
     try:
         warnings.filterwarnings("ignore", category=InsecureRequestWarning)
         response = requests.get(
@@ -781,6 +794,11 @@ def get_latest_itcrm_value() -> Optional[float]:
         for row in range(sheet.max_row, 0, -1):
             value = sheet.cell(row=row, column=2).value
             if value is not None:
+                try:
+                    if redis_client is not None:
+                        redis_client.setex(cache_key, 43200, value)
+                except Exception as e:
+                    print(f"Error caching ITCRM value: {e}")
                 return float(value)
         return None
     except Exception as e:
@@ -819,6 +837,58 @@ def calculate_tcrm_100() -> Optional[float]:
     except Exception as e:
         print(f"Error calculating TCRM 100: {e}")
         return None
+
+
+def get_cached_tcrm_100(
+    hours_ago: int = 24, expiration_time: int = 300
+) -> Tuple[Optional[float], Optional[float]]:
+    """Get cached TCRM 100 value with optional historical change"""
+    cache_key = "tcrm_100"
+
+    try:
+        redis_client = config_redis()
+        redis_response = redis_client.get(cache_key)
+        history_data = (
+            get_cache_history(hours_ago, cache_key, redis_client)
+            if hours_ago
+            else None
+        )
+        history_value = history_data["data"] if history_data else None
+        timestamp = int(time.time())
+
+        def compute_and_store() -> Optional[float]:
+            value = calculate_tcrm_100()
+            if value is None:
+                return None
+            redis_value = {"timestamp": timestamp, "data": value}
+            redis_client.set(cache_key, json.dumps(redis_value))
+            current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+            redis_client.set(current_hour + cache_key, json.dumps(redis_value))
+            return value
+
+        if redis_response is None:
+            current_value = compute_and_store()
+        else:
+            cached_data = json.loads(str(redis_response))
+            cache_age = timestamp - int(cached_data["timestamp"])
+            if cache_age > expiration_time:
+                current_value = compute_and_store()
+                if current_value is None:
+                    current_value = cached_data["data"]
+            else:
+                current_value = cached_data["data"]
+
+        change = None
+        if current_value is not None and history_value:
+            try:
+                change = ((current_value / history_value) - 1) * 100
+            except ZeroDivisionError:
+                change = None
+
+        return current_value, change
+    except Exception as e:
+        print(f"Error getting cached TCRM 100: {e}")
+        return None, None
 
 
 def format_bcra_variables(variables: Dict) -> str:
