@@ -177,6 +177,141 @@ def parse_monetary_number(value: Union[str, float, int, Decimal]) -> Optional[fl
         return None
 
 
+# -----------------------------
+# BCRA v4.0 API helpers
+# -----------------------------
+def bcra_api_get(path: str, params: Optional[Dict[str, Any]] = None, ttl: int = TTL_BCRA) -> Optional[Dict[str, Any]]:
+    """Call BCRA Estadísticas Monetarias v4.0 API via cached_requests.
+
+    Returns the parsed JSON dict (not wrapped) or None on failure.
+    """
+    try:
+        base_url = "https://api.bcra.gob.ar/estadisticas/v4.0"
+        url = base_url + (path if path.startswith("/") else "/" + path)
+        resp = cached_requests(url, params, None, ttl, hourly_cache=False, get_history=False, verify_ssl=True)
+        if not resp or "data" not in resp:
+            return None
+        data = resp["data"]
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception:
+        return None
+
+
+def bcra_list_variables(category: str = "Principales Variables") -> Optional[List[Dict[str, Any]]]:
+    """Return list of variables for a given category (default Principales Variables)."""
+    data = bcra_api_get("/monetarias", {"categoria": category, "limit": "1000"})
+    try:
+        if not data:
+            return None
+        results = data.get("results")
+        if isinstance(results, list):
+            return results
+        return None
+    except Exception:
+        return None
+
+
+def to_es_number(n: Union[float, int]) -> str:
+    try:
+        s = f"{float(n):,.2f}"
+        return s.replace(",", "_").replace(".", ",").replace("_", ".")
+    except Exception:
+        return str(n)
+
+
+def to_ddmmyy(date_iso: str) -> str:
+    dt = parse_date_string(date_iso)
+    if not dt:
+        return str(date_iso)
+    return f"{dt.day:02d}/{dt.month:02d}/{dt.year % 100:02d}"
+
+
+def bcra_fetch_latest_variables() -> Optional[Dict[str, Dict[str, str]]]:
+    """Fetch latest Principales Variables via BCRA API and map to {name: {value, date}}"""
+    try:
+        vars_list = bcra_list_variables("Principales Variables")
+        if not vars_list:
+            return None
+        variables: Dict[str, Dict[str, str]] = {}
+        for v in vars_list:
+            name = str(v.get("descripcion", "")).strip()
+            date_iso = str(v.get("ultFechaInformada", "")).strip()
+            val = v.get("ultValorInformado", None)
+            if not name or val is None or not date_iso:
+                continue
+            variables[name] = {"value": to_es_number(val), "date": to_ddmmyy(date_iso)}
+        return variables
+    except Exception as e:
+        print(f"Error fetching BCRA variables via API: {e}")
+        return None
+
+
+def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
+    """Get numeric value for the variable whose description contains desc_substr on date_iso.
+
+    - Looks through Principales Variables for a matching description (accent-insensitive)
+    - Requests the series for that exact date (desde=hasta=date_iso)
+    - Caches mayorista by date if applicable
+    """
+    try:
+        vars_list = bcra_list_variables("Principales Variables")
+        if not vars_list:
+            return None
+
+        def norm(s: str) -> str:
+            s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+            return s.lower()
+
+        target = norm(desc_substr)
+        var_id: Optional[int] = None
+        var_name: Optional[str] = None
+        for v in vars_list:
+            desc = str(v.get("descripcion", ""))
+            if target in norm(desc):
+                vid = v.get("idVariable")
+                if isinstance(vid, int):
+                    var_id = vid
+                    var_name = desc
+                    break
+        if var_id is None:
+            return None
+
+        data = bcra_api_get(f"/monetarias/{var_id}", {"desde": date_iso, "hasta": date_iso, "limit": "1"})
+        if not data:
+            return None
+        results = data.get("results")
+        if not isinstance(results, list) or not results:
+            return None
+        detalle = results[0].get("detalle")
+        if not isinstance(detalle, list) or not detalle:
+            return None
+        row = detalle[0]
+        valor = row.get("valor")
+        if valor is None:
+            return None
+        try:
+            val_f = float(valor)
+        except Exception:
+            return None
+
+        # If this is mayorista, persist by date
+        try:
+            if var_name and re.search("tipo.*cambio.*mayorista", norm(var_name)):
+                redis_client = config_redis()
+                redis_set_json(
+                    redis_client,
+                    f"bcra_mayorista:{date_iso}",
+                    {"value": val_f, "date": to_ddmmyy(date_iso)},
+                )
+        except Exception:
+            pass
+        return val_f
+    except Exception:
+        return None
+
+
 def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
     """Get a JSON value from Redis, parsed into Python or None."""
     try:
@@ -788,84 +923,11 @@ $1 ARS = {sats_per_peso:.3f} sats"""
 
 
 def scrape_bcra_variables() -> Optional[Dict]:
-    """Scrape BCRA economic variables from the official page"""
-    try:
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
-        class BCRAParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.in_table = self.in_td = self.in_th = False
-                self.current_data = ""
-                self.table_data = []
-                self.row_data = []
-
-            def handle_starttag(self, tag, attrs):
-                if tag == "table":
-                    self.in_table = True
-                elif tag in ["td", "th"] and self.in_table:
-                    self.in_td = tag == "td"
-                    self.in_th = tag == "th"
-
-            def handle_endtag(self, tag):
-                if tag == "table":
-                    self.in_table = False
-                elif tag in ["td", "th"]:
-                    self.in_td = self.in_th = False
-                    if self.current_data.strip():
-                        self.row_data.append(self.current_data.strip())
-                    self.current_data = ""
-                elif tag == "tr" and self.in_table and self.row_data:
-                    self.table_data.append(self.row_data)
-                    self.row_data = []
-
-            def handle_data(self, data):
-                if self.in_td or self.in_th:
-                    self.current_data += data
-
-        req = urllib.request.Request(
-            "https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp"
-        )
-        req.add_header(
-            "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-
-        with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
-            content = response.read().decode("iso-8859-1")
-
-        parser = BCRAParser()
-        parser.feed(content)
-
-        variables = {}
-        for row in parser.table_data:
-            if len(row) < 2:
-                continue
-
-            # Special case: reservas in 5-column header format
-            if len(row) == 5 and row[0] == "Fecha" and row[1] == "Valor":
-                var_name, date, value = row[2].strip(), row[3].strip(), row[4].strip()
-            # Standard 3-column format - skip headers
-            elif len(row) >= 3 and row[0] not in ["Fecha", "Valor"] and row[0].strip():
-                var_name, date, value = row[0].strip(), row[1].strip(), row[2].strip()
-            else:
-                continue
-
-            var_name = (
-                var_name.replace("\xa0", " ")
-                .replace("\n", " ")
-                .replace("�", "ó")
-                .strip()
-            )
-            if var_name and value:
-                variables[var_name] = {"value": value, "date": date}
-
+    """Fetch BCRA Principales Variables via official API (replaces HTML scraping)."""
+    variables = bcra_fetch_latest_variables()
+    if variables:
         return variables
-
-    except Exception as e:
-        print(f"Error scraping BCRA variables: {e}")
-        return None
+    return None
 
 
 def get_cached_bcra_variables() -> Optional[Dict]:
@@ -979,7 +1041,12 @@ def calculate_tcrm_100() -> Optional[float]:
             wholesale_value = None
 
         if wholesale_value is None:
-            return None
+            # Try to fetch from BCRA API for this exact date
+            fetched = bcra_get_value_for_date("tipo de cambio mayorista", date_key)
+            if fetched is not None:
+                wholesale_value = float(fetched)
+            else:
+                return None
 
         return wholesale_value * 100 / itcrm_value
     except Exception as e:
@@ -1018,11 +1085,14 @@ def get_cached_tcrm_100(
             dt = parse_date_string(itcrm_date_str or "")
             if dt is not None:
                 date_key = dt.date().isoformat()
-                mayorista_cached = redis_get_json(
-                    redis_client, f"bcra_mayorista:{date_key}"
-                )
+                mayorista_cached = redis_get_json(redis_client, f"bcra_mayorista:{date_key}")
                 if isinstance(mayorista_cached, dict) and "value" in mayorista_cached:
                     if parse_monetary_number(mayorista_cached["value"]) is not None:
+                        same_day_ok = True
+                # If not cached, attempt a one-shot API fetch to populate cache
+                if not same_day_ok:
+                    fetched_val = bcra_get_value_for_date("tipo de cambio mayorista", date_key)
+                    if fetched_val is not None:
                         same_day_ok = True
         except Exception:
             same_day_ok = False
