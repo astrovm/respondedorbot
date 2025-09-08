@@ -89,3 +89,20 @@ Set the webhook URL:
 
 Check webhook status:
 `{function_url}/?check_webhook=true&key={webhook_auth_key}`
+## Cache TTLs
+
+The bot caches data to reduce latency and API usage. Default TTLs:
+
+- Prices (CoinMarketCap): 5 minutes
+- Dollar rates (CriptoYa): 5 minutes
+- BCRA variables: 5 minutes
+- ITCRM (BCRA spreadsheet):
+  - If latest business-day value present: cache until 15:00 next business day (UTC-3)
+  - Otherwise: 30 minutes
+- Weather (Open-Meteo): 30 minutes
+- Web search: 5 minutes
+- Media (audio/image transcriptions/descriptions): 7 days
+
+Notes:
+- `cached_requests` stores a JSON payload with an internal timestamp and refreshes when the cache age exceeds the configured expiration. It also writes optional hourly snapshots for some endpoints.
+- Redis JSON convenience helpers are used to read/write JSON consistently.
