@@ -24,6 +24,7 @@ import ssl
 import time
 import traceback
 from openpyxl import load_workbook
+from decimal import Decimal
 import unicodedata
 import urllib.request
 from urllib.parse import urlparse, urlunparse
@@ -783,7 +784,8 @@ def get_latest_itcrm_value() -> Optional[float]:
         redis_client = config_redis()
         cached = redis_client.get(cache_key)
         if cached is not None:
-            return float(cached)
+            # decode_responses=True so this should be a str; convert safely
+            return float(str(cached))
     except Exception as e:
         print(f"Error getting cached ITCRM value: {e}")
 
@@ -795,16 +797,39 @@ def get_latest_itcrm_value() -> Optional[float]:
             verify=False,
         )
         workbook = load_workbook(io.BytesIO(response.content), data_only=True)
-        sheet = workbook.active
+        # openpyxl typing: .active can be Worksheet|Chartsheet|None; pick a sheet defensively
+        sheet_like = getattr(workbook, "active", None) or (
+            workbook.worksheets[0] if getattr(workbook, "worksheets", None) else None
+        )
+        if sheet_like is None:
+            return None
+        sheet = cast(Any, sheet_like)
         for row in range(sheet.max_row, 0, -1):
-            value = sheet.cell(row=row, column=2).value
-            if value is not None:
+            cell_value = sheet.cell(row=row, column=2).value
+            if cell_value is not None:
+                # Store as string to satisfy Redis typing and avoid ambiguity
                 try:
                     if redis_client is not None:
-                        redis_client.setex(cache_key, 43200, value)
+                        redis_client.setex(cache_key, 43200, str(cell_value))
                 except Exception as e:
                     print(f"Error caching ITCRM value: {e}")
-                return float(value)
+
+                # Convert to float robustly
+                if isinstance(cell_value, (int, float, Decimal)):
+                    return float(cell_value)
+                # Handle possible locale formatting
+                text_val = str(cell_value)
+                try:
+                    # Try raw conversion first
+                    return float(text_val)
+                except ValueError:
+                    # Fallback: normalize decimal/thousands separators
+                    try:
+                        normalized = text_val.replace(".", "").replace(",", ".")
+                        return float(normalized)
+                    except Exception:
+                        # Keep scanning previous rows on parse failure
+                        continue
         return None
     except Exception as e:
         print(f"Error fetching ITCRM value: {e}")
