@@ -142,6 +142,41 @@ def config_redis(host=None, port=None, password=None):
         raise  # Re-raise to prevent silent failure
 
 
+# -----------------------------
+# Small parsing helpers (reused)
+# -----------------------------
+def parse_date_string(value: str) -> Optional[datetime]:
+    """Parse common date formats into a datetime (date at midnight).
+
+    Accepts: DD/MM/YYYY, DD/MM/YY, YYYY-MM-DD, DD-MM-YYYY
+    Returns None on failure.
+    """
+    try:
+        s = (value or "").strip().split()[0]
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def parse_monetary_number(value: Union[str, float, int, Decimal]) -> Optional[float]:
+    """Parse localized monetary strings like "1.234,56" to float.
+
+    Returns float or None on failure. If already number-like, casts to float.
+    """
+    try:
+        if isinstance(value, (int, float, Decimal)):
+            return float(value)
+        s = str(value)
+        return float(s.replace(".", "").replace(",", "."))
+    except Exception:
+        return None
+
+
 def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
     """Get a JSON value from Redis, parsed into Python or None."""
     try:
@@ -865,30 +900,15 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
         try:
             for key, data in (variables or {}).items():
                 if re.search("tipo.*cambio.*mayorista", str(key).lower()):
-                    value_str = str(data.get("value", ""))
-                    date_str = str(data.get("date", "")).strip()
-                    # Parse date to YYYY-MM-DD
-                    parsed_dt = None
-                    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
-                        try:
-                            parsed_dt = datetime.strptime(date_str.split()[0], fmt)
-                            break
-                        except Exception:
-                            continue
-                    if not parsed_dt:
+                    value_num = parse_monetary_number(data.get("value", ""))
+                    parsed_dt = parse_date_string(str(data.get("date", "")))
+                    if value_num is None or not parsed_dt:
                         continue
                     date_key = parsed_dt.date().isoformat()
-
-                    # Normalize numeric (e.g., "1.234,56" -> 1234.56)
-                    try:
-                        value_num = float(value_str.replace(".", "").replace(",", "."))
-                    except Exception:
-                        continue
-
                     redis_set_json(
                         redis_client,
                         f"bcra_mayorista:{date_key}",
-                        {"value": value_num, "date": date_str},
+                        {"value": value_num, "date": str(data.get("date", ""))},
                     )
                     break
         except Exception:
@@ -943,16 +963,7 @@ def calculate_tcrm_100() -> Optional[float]:
 
         # Parse ITCRM date → YYYY-MM-DD
         parsed_dt = None
-        try:
-            s = (itcrm_date_str or "").strip().split()[0]
-            for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
-                try:
-                    parsed_dt = datetime.strptime(s, fmt)
-                    break
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        parsed_dt = parse_date_string(itcrm_date_str)
         if not parsed_dt:
             return None
         date_key = parsed_dt.date().isoformat()
@@ -963,7 +974,7 @@ def calculate_tcrm_100() -> Optional[float]:
             redis_client = config_redis()
             cached = redis_get_json(redis_client, f"bcra_mayorista:{date_key}")
             if isinstance(cached, dict) and "value" in cached:
-                wholesale_value = float(cached["value"])
+                wholesale_value = parse_monetary_number(cached["value"])  # robust cast
         except Exception:
             wholesale_value = None
 
