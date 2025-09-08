@@ -361,6 +361,26 @@ def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
     return response["data"] if response else None
 
 
+def get_btc_price(convert_to: str = "USD") -> Optional[float]:
+    """Return BTC price in the requested currency using CoinMarketCap cache.
+
+    Uses the unified prices helper with limit=1 and extracts the first row.
+    """
+    try:
+        # Keep call signature compatible with tests that patch this helper
+        data = get_api_or_cache_prices(convert_to)
+        if not data or "data" not in data or not data["data"]:
+            return None
+        first = data["data"][0]
+        quote = first.get("quote", {})
+        price_info = quote.get(convert_to)
+        if not price_info:
+            return None
+        return float(price_info.get("price"))
+    except Exception:
+        return None
+
+
 # get crypto pices from coinmarketcap
 def get_prices(msg_text: str) -> Optional[str]:
     prices_number = 0
@@ -682,25 +702,13 @@ Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{co
 def satoshi() -> str:
     """Calculate the value of 1 satoshi in USD and ARS"""
     try:
-        # Get Bitcoin price in USD and ARS
-        api_response_usd = get_api_or_cache_prices("USD")
-        api_response_ars = get_api_or_cache_prices("ARS")
+        btc_price_usd = get_btc_price("USD")
+        btc_price_ars = get_btc_price("ARS")
 
-        if (
-            not api_response_usd
-            or "data" not in api_response_usd
-            or len(api_response_usd["data"]) == 0
-        ):
+        if btc_price_usd is None:
             return "Error getting BTC USD price"
-        if (
-            not api_response_ars
-            or "data" not in api_response_ars
-            or len(api_response_ars["data"]) == 0
-        ):
+        if btc_price_ars is None:
             return "Error getting BTC ARS price"
-
-        btc_price_usd = api_response_usd["data"][0]["quote"]["USD"]["price"]
-        btc_price_ars = api_response_ars["data"][0]["quote"]["ARS"]["price"]
 
         # Calculate satoshi value (1 BTC = 100,000,000 sats)
         sat_value_usd = btc_price_usd / 100_000_000
@@ -1271,10 +1279,9 @@ def powerlaw() -> str:
     # Formula: 1.0117e-17 * (days since genesis block)^5.82
     value = 1.0117e-17 * (days_since**5.82)
 
-    api_response = get_api_or_cache_prices("USD")
-    if not api_response or "data" not in api_response or len(api_response["data"]) == 0:
+    price = get_btc_price("USD")
+    if price is None:
         return "Error getting BTC price for power law calculation"
-    price = api_response["data"][0]["quote"]["USD"]["price"]
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
@@ -1292,10 +1299,9 @@ def rainbow() -> str:
     days_since = (today - since).days
     value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
 
-    api_response = get_api_or_cache_prices("USD")
-    if not api_response or "data" not in api_response or len(api_response["data"]) == 0:
+    price = get_btc_price("USD")
+    if price is None:
         return "Error getting BTC price for rainbow calculation"
-    price = api_response["data"][0]["quote"]["USD"]["price"]
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
