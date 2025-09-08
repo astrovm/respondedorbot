@@ -827,21 +827,21 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
 
 
 def get_or_refresh_bcra_variables() -> Optional[Dict]:
-    """Return BCRA variables, using cache or scraping and caching as needed.
+    """Return BCRA variables using cache or scraping, propagating fetch errors.
 
-    Deduplicates the common pattern: try cache -> scrape -> cache -> return.
+    - Tries cache first; lets exceptions propagate to caller
+    - If cache misses, scrapes and caches (caching errors are logged but ignored)
     """
-    try:
-        variables = get_cached_bcra_variables()
-        if variables:
-            return variables
-        variables = scrape_bcra_variables()
-        if variables:
-            cache_bcra_variables(variables)
+    variables = get_cached_bcra_variables()  # may raise; callers handle
+    if variables:
         return variables
-    except Exception as e:
-        print(f"Error retrieving BCRA variables: {e}")
-        return None
+    variables = scrape_bcra_variables()  # may raise; callers handle
+    if variables:
+        try:
+            cache_bcra_variables(variables)
+        except Exception as e:
+            print(f"Error caching BCRA variables: {e}")
+    return variables
 
 def get_latest_itcrm_value() -> Optional[float]:
     """Fetch latest ITCRM index value from BCRA spreadsheet with caching.
@@ -1908,12 +1908,23 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
 
         # Use DDGS for robust DuckDuckGo search
         ddgs = DDGS(timeout=8)
-        raw_results = ddgs.text(
-            query=query,
-            region="ar-es",
-            safesearch="off",
-            max_results=limit
-        )
+        # Light retry on transient errors
+        last_err: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                raw_results = ddgs.text(
+                    query=query,
+                    region="ar-es",
+                    safesearch="off",
+                    max_results=limit
+                )
+                break
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                raw_results = []
 
         # Convert to our expected format
         results = []
