@@ -10,7 +10,6 @@ from requests.exceptions import RequestException, SSLError
 from urllib3.exceptions import InsecureRequestWarning
 import warnings
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
-import types
 import ast
 import base64
 import emoji
@@ -1161,6 +1160,14 @@ def format_bcra_variables(variables: Dict) -> str:
                 lines.append(line)
                 break
 
+    # Append current ITCRM value if available
+    try:
+        itcrm_value = get_latest_itcrm_value()
+        if isinstance(itcrm_value, (int, float)):
+            lines.append(f"📐 ITCRM: {fmt_num(float(itcrm_value), 2)}")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -1172,19 +1179,7 @@ def handle_bcra_variables() -> str:
 
         if not variables:
             return "No pude obtener las variables del BCRA en este momento, probá más tarde"
-
-        text = format_bcra_variables(variables)
-
-        # Append current ITCRM value if available (avoid interfering with tests that patch the formatter)
-        try:
-            if isinstance(format_bcra_variables, types.FunctionType):
-                itcrm_value = get_latest_itcrm_value()
-                if isinstance(itcrm_value, (int, float)):
-                    text += f"\n📐 ITCRM: {fmt_num(float(itcrm_value), 2)}"
-        except Exception:
-            pass
-
-        return text
+        return format_bcra_variables(variables)
 
     except Exception as e:
         print(f"Error handling BCRA variables: {e}")
