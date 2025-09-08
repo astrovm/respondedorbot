@@ -2604,21 +2604,27 @@ def test_handle_bcra_variables_exception():
 
 def test_calculate_tcrm_100_success():
     from api.index import calculate_tcrm_100
+    from unittest.mock import MagicMock
 
-    bcra_vars = {
-        "Tipo de cambio mayorista": {"value": "1.000,00", "date": "01/01/2024"}
-    }
+    with patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm_details, patch(
+        "api.index.config_redis"
+    ) as mock_cfg, patch("api.index.redis_get_json") as mock_redis_get:
+        mock_itcrm_details.return_value = (120.0, "01/01/24")
 
-    with patch("api.index.get_cached_bcra_variables") as mock_get, patch(
-        "api.index.scrape_bcra_variables"
-    ) as mock_scrape, patch("api.index.cache_bcra_variables") as mock_cache, patch(
-        "api.index.get_latest_itcrm_value"
-    ) as mock_itcrm:
-        mock_get.return_value = bcra_vars
-        mock_itcrm.return_value = 120.0
+        # Simulate cached mayorista for 2024-01-01
+        def redis_side_effect(_client, key):  # noqa: ARG001
+            if key == "bcra_mayorista:2024-01-01":
+                return {"value": 1000.0}
+            return None
+
+        mock_cfg.return_value = MagicMock()
+        mock_redis_get.side_effect = redis_side_effect
 
         result = calculate_tcrm_100()
         assert result == 1000.0 * 100 / 120.0
+
+
+    
 
 
 def test_get_market_context_success():
