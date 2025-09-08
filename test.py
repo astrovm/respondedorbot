@@ -1725,7 +1725,7 @@ def test_get_dollar_rates_basic():
     from api.index import get_dollar_rates
 
     with patch("api.index.cached_requests") as mock_cached_requests, patch(
-        "api.index.calculate_tcrm_100"
+        "api.index.get_cached_tcrm_100"
     ) as mock_tcrm:
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
@@ -1742,7 +1742,7 @@ def test_get_dollar_rates_basic():
                 },
             }
         }
-        mock_tcrm.return_value = 130.0
+        mock_tcrm.return_value = (130.0, 1.0)
 
         result = get_dollar_rates()
         assert result is not None
@@ -1754,7 +1754,7 @@ def test_get_dollar_rates_basic():
         assert "Bitcoin: 230" in result
         assert "USDC: 235" in result
         assert "USDT: 240" in result
-        assert "TCRM 100: 130" in result
+        assert "TCRM 100: 130 (+1% 24hs)" in result
 
 
 def test_get_dollar_rates_api_failure():
@@ -1762,11 +1762,11 @@ def test_get_dollar_rates_api_failure():
     import pytest
 
     with patch("api.index.cached_requests") as mock_cached_requests, patch(
-        "api.index.calculate_tcrm_100"
+        "api.index.get_cached_tcrm_100"
     ) as mock_tcrm:
         # Mock API failure
         mock_cached_requests.return_value = None
-        mock_tcrm.return_value = None
+        mock_tcrm.return_value = (None, None)
 
         # The function should raise an exception when API fails
         with pytest.raises(TypeError):
@@ -3007,9 +3007,12 @@ def test_sort_dollar_rates_with_tcrm():
         }
     }
 
-    result = sort_dollar_rates(dollar_rates, 160.0)
+    result = sort_dollar_rates(dollar_rates, 160.0, 0.5)
 
-    assert any(r["name"] == "TCRM 100" and r["price"] == 160.0 for r in result)
+    assert any(
+        r["name"] == "TCRM 100" and r["price"] == 160.0 and r["history"] == 0.5
+        for r in result
+    )
 
 
 def test_format_dollar_rates_with_positive_variations():
