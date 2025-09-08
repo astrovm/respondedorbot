@@ -786,6 +786,23 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
         print(f"Error caching BCRA variables: {e}")
 
 
+def get_or_refresh_bcra_variables() -> Optional[Dict]:
+    """Return BCRA variables, using cache or scraping and caching as needed.
+
+    Deduplicates the common pattern: try cache -> scrape -> cache -> return.
+    """
+    try:
+        variables = get_cached_bcra_variables()
+        if variables:
+            return variables
+        variables = scrape_bcra_variables()
+        if variables:
+            cache_bcra_variables(variables)
+        return variables
+    except Exception as e:
+        print(f"Error retrieving BCRA variables: {e}")
+        return None
+
 def get_latest_itcrm_value() -> Optional[float]:
     """Fetch latest ITCRM index value from BCRA spreadsheet with caching.
 
@@ -927,11 +944,7 @@ def get_latest_itcrm_value() -> Optional[float]:
 def calculate_tcrm_100() -> Optional[float]:
     """Calculate nominal exchange rate that sets ITCRM to 100"""
     try:
-        bcra_variables = get_cached_bcra_variables()
-        if not bcra_variables:
-            bcra_variables = scrape_bcra_variables()
-            if bcra_variables:
-                cache_bcra_variables(bcra_variables)
+        bcra_variables = get_or_refresh_bcra_variables()
 
         if not bcra_variables:
             return None
@@ -1082,14 +1095,8 @@ def format_bcra_variables(variables: Dict) -> str:
 def handle_bcra_variables() -> str:
     """Handle BCRA economic variables command"""
     try:
-        # Check cache first
-        variables = get_cached_bcra_variables()
-
-        if not variables:
-            # Scrape fresh data
-            variables = scrape_bcra_variables()
-            if variables:
-                cache_bcra_variables(variables)
+        # Use unified cache/scrape helper
+        variables = get_or_refresh_bcra_variables()
 
         if not variables:
             return "No pude obtener las variables del BCRA en este momento, probá más tarde"
@@ -1982,11 +1989,7 @@ def get_market_context() -> Dict:
 
     try:
         # Get BCRA variables
-        bcra_variables = get_cached_bcra_variables()
-        if not bcra_variables:
-            bcra_variables = scrape_bcra_variables()
-            if bcra_variables:
-                cache_bcra_variables(bcra_variables)
+        bcra_variables = get_or_refresh_bcra_variables()
         if bcra_variables:
             market_data["bcra"] = bcra_variables
     except Exception as e:
