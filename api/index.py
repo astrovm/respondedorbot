@@ -41,6 +41,22 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 # Global variable to cache bot configuration
 _bot_config = None
 
+
+def fmt_num(value: float, decimals: int = 2) -> str:
+    """Format a number with up to `decimals` decimals, trimming trailing zeros."""
+    try:
+        return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(value)
+
+
+def fmt_signed_pct(value: float, decimals: int = 2) -> str:
+    """Format a signed percentage with trimmed trailing zeros."""
+    try:
+        return f"{value:+.{decimals}f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(value)
+
 # Known alternative frontends that users may already provide
 ALTERNATIVE_FRONTENDS = {
     "fxtwitter.com",
@@ -619,11 +635,11 @@ def sort_dollar_rates(
 def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
     msg_lines = []
     for dollar in dollar_rates:
-        price_formatted = f"{dollar['price']:.2f}".rstrip("0").rstrip(".")
+        price_formatted = fmt_num(dollar["price"], 2)
         line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
             percentage = dollar["history"]
-            formatted_percentage = f"{percentage:+.2f}".rstrip("0").rstrip(".")
+            formatted_percentage = fmt_signed_pct(percentage, 2)
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
 
@@ -676,21 +692,21 @@ def get_devo(msg_text: str) -> str:
 
         profit = -(fee * usdt + oficial - usdt) / tarjeta
 
-        msg = f"""Profit: {f"{profit * 100:.2f}".rstrip("0").rstrip(".")}%
+        msg = f"""Profit: {fmt_num(profit * 100, 2)}%
 
-Fee: {f"{fee * 100:.2f}".rstrip("0").rstrip(".")}%
-Oficial: {f"{oficial:.2f}".rstrip("0").rstrip(".")}
-USDT: {f"{usdt:.2f}".rstrip("0").rstrip(".")}
-Tarjeta: {f"{tarjeta:.2f}".rstrip("0").rstrip(".")}"""
+Fee: {fmt_num(fee * 100, 2)}%
+Oficial: {fmt_num(oficial, 2)}
+USDT: {fmt_num(usdt, 2)}
+Tarjeta: {fmt_num(tarjeta, 2)}"""
 
         if compra > 0:
             compra_ars = compra * tarjeta
             compra_usdt = compra_ars / usdt
             ganancia_ars = compra_ars * profit
             ganancia_usdt = ganancia_ars / usdt
-            msg = f"""{f"{compra:.2f}".rstrip("0").rstrip(".")} USD Tarjeta = {f"{compra_ars:.2f}".rstrip("0").rstrip(".")} ARS = {f"{compra_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-Ganarias {f"{ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
-Total: {f"{compra_ars + ganancia_ars:.2f}".rstrip("0").rstrip(".")} ARS / {f"{compra_usdt + ganancia_usdt:.2f}".rstrip("0").rstrip(".")} USDT
+            msg = f"""{fmt_num(compra, 2)} USD Tarjeta = {fmt_num(compra_ars, 2)} ARS = {fmt_num(compra_usdt, 2)} USDT
+Ganarias {fmt_num(ganancia_ars, 2)} ARS / {fmt_num(ganancia_usdt, 2)} USDT
+Total: {fmt_num(compra_ars + ganancia_ars, 2)} ARS / {fmt_num(compra_usdt + ganancia_usdt, 2)} USDT
 
 {msg}"""
 
