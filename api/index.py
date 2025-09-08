@@ -119,6 +119,33 @@ def config_redis(host=None, port=None, password=None):
         raise  # Re-raise to prevent silent failure
 
 
+def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
+    """Get a JSON value from Redis, parsed into Python or None."""
+    try:
+        data = redis_client.get(key)
+        if not data:
+            return None
+        return json.loads(str(data))
+    except Exception:
+        return None
+
+
+def redis_setex_json(redis_client: redis.Redis, key: str, ttl: int, value: Any) -> bool:
+    """Set a JSON value with TTL in Redis; returns True on success."""
+    try:
+        return bool(redis_client.setex(key, ttl, json.dumps(value)))
+    except Exception:
+        return False
+
+
+def redis_set_json(redis_client: redis.Redis, key: str, value: Any) -> bool:
+    """Set a JSON value (no TTL) in Redis; returns True on success."""
+    try:
+        return bool(redis_client.set(key, json.dumps(value)))
+    except Exception:
+        return False
+
+
 def get_cached_transcription(file_id: str) -> Optional[str]:
     """Get cached audio transcription from Redis"""
     try:
@@ -767,9 +794,9 @@ def get_cached_bcra_variables() -> Optional[Dict]:
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
-        cached_data = redis_client.get(cache_key)
-        if cached_data:
-            return json.loads(str(cached_data))
+        cached = redis_get_json(redis_client, cache_key)
+        if cached:
+            return cast(Dict, cached)
         return None
     except Exception as e:
         print(f"Error getting cached BCRA variables: {e}")
@@ -781,7 +808,7 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
-        redis_client.setex(cache_key, ttl, json.dumps(variables))
+        redis_setex_json(redis_client, cache_key, ttl, variables)
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
 
@@ -978,7 +1005,7 @@ def get_cached_tcrm_100(
 
     try:
         redis_client = config_redis()
-        redis_response = redis_client.get(cache_key)
+        redis_response = redis_get_json(redis_client, cache_key)
         history_data = (
             get_cache_history(hours_ago, cache_key, redis_client)
             if hours_ago
@@ -992,15 +1019,15 @@ def get_cached_tcrm_100(
             if value is None:
                 return None
             redis_value = {"timestamp": timestamp, "data": value}
-            redis_client.set(cache_key, json.dumps(redis_value))
+            redis_set_json(redis_client, cache_key, redis_value)
             current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-            redis_client.set(current_hour + cache_key, json.dumps(redis_value))
+            redis_set_json(redis_client, current_hour + cache_key, redis_value)
             return value
 
         if redis_response is None:
             current_value = compute_and_store()
         else:
-            cached_data = json.loads(str(redis_response))
+            cached_data = cast(Dict, redis_response)
             cache_age = timestamp - int(cached_data["timestamp"])
             if cache_age > expiration_time:
                 current_value = compute_and_store()
@@ -1856,11 +1883,9 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         # Cache key prefix: 'web_search'
         cache_key = f"web_search:{hashlib.md5(json.dumps({'q': query, 'limit': limit}).encode()).hexdigest()}"
         redis_client = config_redis()
-        cached = redis_client.get(cache_key)
-        if cached:
-            parsed = json.loads(str(cached))
-            if isinstance(parsed, list):
-                return parsed
+        cached = redis_get_json(redis_client, cache_key)
+        if isinstance(cached, list):
+            return cached
     except Exception:
         # Cache unavailable or invalid; continue without failing
         redis_client = None
@@ -1889,7 +1914,7 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         # Store in cache for 5 minutes
         try:
             if redis_client and cache_key:
-                redis_client.setex(cache_key, TTL_WEB_SEARCH, json.dumps(results))
+                redis_setex_json(redis_client, cache_key, TTL_WEB_SEARCH, results)
         except Exception:
             pass
 
