@@ -1466,8 +1466,8 @@ def get_weather() -> dict:
         }
 
         response = cached_requests(
-            weather_url, parameters, None, 7200
-        )  # Cache por 2 horas
+            weather_url, parameters, None, 1800
+        )  # Cache por 30 minutos
         if response and "data" in response:
             hourly = response["data"]["hourly"]
 
@@ -1949,7 +1949,7 @@ def get_market_context() -> Dict:
     market_data = {}
 
     try:
-        # Get crypto prices
+        # Get crypto prices (reuse 5-minute cache)
         crypto_response = cached_requests(
             "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
             {"start": "1", "limit": "5", "convert": "USD"},
@@ -1957,7 +1957,7 @@ def get_market_context() -> Dict:
                 "Accepts": "application/json",
                 "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
             },
-            3600,
+            300,
         )
         if crypto_response and "data" in crypto_response:
             market_data["crypto"] = clean_crypto_data(crypto_response["data"]["data"])
@@ -1965,12 +1965,12 @@ def get_market_context() -> Dict:
         print(f"Error fetching crypto data: {e}")
 
     try:
-        # Get dollar rates
+        # Get dollar rates (reuse 5-minute cache)
         dollar_response = cached_requests(
             "https://criptoya.com/api/dolar",
             None,
             None,
-            3600,
+            300,
         )
         if dollar_response and "data" in dollar_response:
             market_data["dollar"] = dollar_response["data"]
