@@ -232,7 +232,7 @@ def cached_requests(
         ).hexdigest()
 
         redis_client = config_redis()
-        redis_response = redis_client.get(request_hash)
+        redis_response = redis_get_json(redis_client, request_hash)
         cache_history = (
             get_cache_history(get_history, request_hash, redis_client)
             if get_history
@@ -241,24 +241,37 @@ def cached_requests(
         timestamp = int(time.time())
 
         def make_request():
-            response = requests.get(
-                api_url,
-                params=parameters,
-                headers=headers,
-                timeout=5,
-                verify=verify_ssl,
-            )
-            response.raise_for_status()
-            redis_value = {"timestamp": timestamp, "data": json.loads(response.text)}
-            redis_client.set(request_hash, json.dumps(redis_value))
-
-            if hourly_cache:
-                current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                redis_client.set(current_hour + request_hash, json.dumps(redis_value))
-
-            if cache_history is not None:
-                redis_value["history"] = cache_history
-            return redis_value
+            last_err: Optional[Exception] = None
+            for attempt in range(2):  # try once, then one retry
+                try:
+                    response = requests.get(
+                        api_url,
+                        params=parameters,
+                        headers=headers,
+                        timeout=5,
+                        verify=verify_ssl,
+                    )
+                    response.raise_for_status()
+                    redis_value = {
+                        "timestamp": timestamp,
+                        "data": json.loads(response.text),
+                    }
+                    redis_set_json(redis_client, request_hash, redis_value)
+                    if hourly_cache:
+                        current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+                        redis_set_json(
+                            redis_client, current_hour + request_hash, redis_value
+                        )
+                    if cache_history is not None:
+                        redis_value["history"] = cache_history
+                    return redis_value
+                except Exception as e:
+                    last_err = e
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
+            # If both attempts failed
+            raise last_err if last_err else Exception("request failed")
 
         if redis_response is None:
             try:
@@ -267,7 +280,7 @@ def cached_requests(
                 print(f"[CACHE] Error requesting {api_url}: {str(e)}")
                 return None
         else:
-            cached_data = json.loads(str(redis_response))
+            cached_data = cast(Dict[str, Any], redis_response)
             cache_age = timestamp - int(cached_data["timestamp"])
 
             if cache_history is not None:

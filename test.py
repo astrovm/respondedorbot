@@ -1,4 +1,5 @@
 from unittest.mock import patch, MagicMock, ANY
+import sys
 import os
 import pytest
 from flask import Flask, request
@@ -4347,3 +4348,77 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
             ["https://x.com/foo"],
         )
         mock_should.assert_not_called()
+def test_cached_requests_retries_on_failure(monkeypatch):
+    from api.index import cached_requests
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.RequestException("boom")
+        return FakeResp(text=json.dumps({"ok": True}))
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    with patch("api.index.config_redis") as mock_redis:
+        # Fake Redis client that stores in dict
+        store = {}
+
+        class R:
+            def get(self, k):
+                return store.get(k)
+
+            def set(self, k, v):
+                store[k] = v
+                return True
+
+        mock_redis.return_value = R()
+
+        out = cached_requests("https://ex", {"a": 1}, None, 60)
+        assert out is not None
+        assert calls["n"] == 2  # one failure + one retry
+
+
+def test_web_search_uses_ttl_constant(monkeypatch):
+    from api.index import web_search, TTL_WEB_SEARCH
+
+    # Fake DDGS
+    class FakeDDGS:
+        def __init__(self, timeout=8):  # noqa: ARG001
+            pass
+
+        def text(self, query, region, safesearch, max_results):  # noqa: ARG001
+            return [{"title": "A", "href": "http://a", "body": "aa"}]
+
+    monkeypatch.setitem(sys.modules, "ddgs", MagicMock(DDGS=FakeDDGS))
+
+    # Fake Redis with setex spy
+    with patch("api.index.config_redis") as mock_redis:
+        class R:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, k):
+                return None
+
+            def setex(self, k, ttl, v):
+                self.calls.append((k, ttl))
+                return True
+
+        r = R()
+        mock_redis.return_value = r
+
+        results = web_search("algo", limit=1)
+        assert results and isinstance(results, list)
+        # Ensure TTL constant is used
+        assert any(ttl == TTL_WEB_SEARCH for (_k, ttl) in r.calls)
