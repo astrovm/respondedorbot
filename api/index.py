@@ -848,11 +848,52 @@ def get_cached_bcra_variables() -> Optional[Dict]:
 
 
 def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
-    """Cache BCRA variables in Redis (default 5 minutes)"""
+    """Cache BCRA variables in Redis.
+
+    - Stores the last fetched set under `bcra_variables` with TTL (backwards compatible)
+    - Additionally, if a "tipo de cambio mayorista" entry contains a date, stores its
+      numeric value under a stable per-date key: `bcra_mayorista:YYYY-MM-DD` (no TTL)
+      to support later lookups aligned to the ITCRM date without refetching.
+    """
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
+        # Keep the original behavior
         redis_setex_json(redis_client, cache_key, ttl, variables)
+
+        # Also persist the mayorista value by its own date for future lookups
+        try:
+            for key, data in (variables or {}).items():
+                if re.search("tipo.*cambio.*mayorista", str(key).lower()):
+                    value_str = str(data.get("value", ""))
+                    date_str = str(data.get("date", "")).strip()
+                    # Parse date to YYYY-MM-DD
+                    parsed_dt = None
+                    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
+                        try:
+                            parsed_dt = datetime.strptime(date_str.split()[0], fmt)
+                            break
+                        except Exception:
+                            continue
+                    if not parsed_dt:
+                        continue
+                    date_key = parsed_dt.date().isoformat()
+
+                    # Normalize numeric (e.g., "1.234,56" -> 1234.56)
+                    try:
+                        value_num = float(value_str.replace(".", "").replace(",", "."))
+                    except Exception:
+                        continue
+
+                    redis_set_json(
+                        redis_client,
+                        f"bcra_mayorista:{date_key}",
+                        {"value": value_num, "date": date_str},
+                    )
+                    break
+        except Exception:
+            # Never break caching if enrichment fails
+            pass
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
 
@@ -884,29 +925,52 @@ def get_latest_itcrm_value() -> Optional[float]:
 
 
 def calculate_tcrm_100() -> Optional[float]:
-    """Calculate nominal exchange rate that sets ITCRM to 100"""
+    """Calculate nominal exchange rate that sets ITCRM to 100.
+
+    Uses the ITCRM sheet date to look up a pre-cached Dólar Mayorista value stored
+    by date via `cache_bcra_variables`. If not found in cache, does not compute.
+    """
     try:
-        bcra_variables = get_or_refresh_bcra_variables()
-
-        if not bcra_variables:
+        # Get ITCRM latest value and its date from the official sheet
+        details = get_latest_itcrm_value_and_date()
+        if not details:
+            return None
+        itcrm_value, itcrm_date_str = details
+        try:
+            itcrm_value = float(itcrm_value)
+        except Exception:
             return None
 
-        wholesale_str = None
-        for key, data in bcra_variables.items():
-            if re.search("tipo.*cambio.*mayorista", key.lower()):
-                wholesale_str = data["value"]
-                break
+        # Parse ITCRM date → YYYY-MM-DD
+        parsed_dt = None
+        try:
+            s = (itcrm_date_str or "").strip().split()[0]
+            for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    parsed_dt = datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if not parsed_dt:
+            return None
+        date_key = parsed_dt.date().isoformat()
 
-        if not wholesale_str:
+        # Lookup mayorista value by date from Redis
+        wholesale_value: Optional[float] = None
+        try:
+            redis_client = config_redis()
+            cached = redis_get_json(redis_client, f"bcra_mayorista:{date_key}")
+            if isinstance(cached, dict) and "value" in cached:
+                wholesale_value = float(cached["value"])
+        except Exception:
+            wholesale_value = None
+
+        if wholesale_value is None:
             return None
 
-        wholesale = float(wholesale_str.replace(".", "").replace(",", "."))
-
-        itcrm_value = get_latest_itcrm_value()
-        if not itcrm_value:
-            return None
-
-        return wholesale * 100 / itcrm_value
+        return wholesale_value * 100 / itcrm_value
     except Exception as e:
         print(f"Error calculating TCRM 100: {e}")
         return None
