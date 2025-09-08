@@ -1724,7 +1724,9 @@ def test_ask_ai_handles_repeated_tool_calls():
 def test_get_dollar_rates_basic():
     from api.index import get_dollar_rates
 
-    with patch("api.index.cached_requests") as mock_cached_requests:
+    with patch("api.index.cached_requests") as mock_cached_requests, patch(
+        "api.index.calculate_tcrm_100"
+    ) as mock_tcrm:
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
             "data": {
@@ -1740,6 +1742,7 @@ def test_get_dollar_rates_basic():
                 },
             }
         }
+        mock_tcrm.return_value = 130.0
 
         result = get_dollar_rates()
         assert result is not None
@@ -1751,15 +1754,19 @@ def test_get_dollar_rates_basic():
         assert "Bitcoin: 230" in result
         assert "USDC: 235" in result
         assert "USDT: 240" in result
+        assert "TCRM 100: 130" in result
 
 
 def test_get_dollar_rates_api_failure():
     from api.index import get_dollar_rates
     import pytest
 
-    with patch("api.index.cached_requests") as mock_cached_requests:
+    with patch("api.index.cached_requests") as mock_cached_requests, patch(
+        "api.index.calculate_tcrm_100"
+    ) as mock_tcrm:
         # Mock API failure
         mock_cached_requests.return_value = None
+        mock_tcrm.return_value = None
 
         # The function should raise an exception when API fails
         with pytest.raises(TypeError):
@@ -2587,6 +2594,25 @@ def test_handle_bcra_variables_exception():
         assert result == "Error al obtener las variables del BCRA"
 
 
+def test_calculate_tcrm_100_success():
+    from api.index import calculate_tcrm_100
+
+    bcra_vars = {
+        "Tipo de cambio mayorista": {"value": "1.000,00", "date": "01/01/2024"}
+    }
+
+    with patch("api.index.get_cached_bcra_variables") as mock_get, patch(
+        "api.index.scrape_bcra_variables"
+    ) as mock_scrape, patch("api.index.cache_bcra_variables") as mock_cache, patch(
+        "api.index.get_latest_itcrm_value"
+    ) as mock_itcrm:
+        mock_get.return_value = bcra_vars
+        mock_itcrm.return_value = 120.0
+
+        result = calculate_tcrm_100()
+        assert result == 1000.0 * 100 / 120.0
+
+
 def test_get_market_context_success():
     from api.index import get_market_context
 
@@ -2961,6 +2987,29 @@ def test_sort_dollar_rates_with_none_variations():
     assert len(result) == 8
     for rate in result:
         assert rate["history"] is None
+
+
+def test_sort_dollar_rates_with_tcrm():
+    from api.index import sort_dollar_rates
+
+    dollar_rates = {
+        "data": {
+            "oficial": {"price": 100.0, "variation": 0.5},
+            "tarjeta": {"price": 150.0, "variation": 0.5},
+            "mep": {"al30": {"ci": {"price": 120.0, "variation": 0.5}}},
+            "ccl": {"al30": {"ci": {"price": 130.0, "variation": 0.5}}},
+            "blue": {"ask": 140.0, "variation": 0.5},
+            "cripto": {
+                "ccb": {"ask": 145.0, "variation": 0.5},
+                "usdc": {"ask": 146.0, "variation": 0.5},
+                "usdt": {"ask": 147.0, "variation": 0.5},
+            },
+        }
+    }
+
+    result = sort_dollar_rates(dollar_rates, 160.0)
+
+    assert any(r["name"] == "TCRM 100" and r["price"] == 160.0 for r in result)
 
 
 def test_format_dollar_rates_with_positive_variations():

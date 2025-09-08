@@ -23,6 +23,7 @@ import requests
 import ssl
 import time
 import traceback
+from openpyxl import load_workbook
 import unicodedata
 import urllib.request
 from urllib.parse import urlparse, urlunparse
@@ -480,7 +481,7 @@ def get_prices(msg_text: str) -> Optional[str]:
     return msg
 
 
-def sort_dollar_rates(dollar_rates):
+def sort_dollar_rates(dollar_rates, tcrm_100: Optional[float] = None):
     dollars = dollar_rates["data"]
 
     sorted_dollar_rates = [
@@ -526,6 +527,11 @@ def sort_dollar_rates(dollar_rates):
         },
     ]
 
+    if tcrm_100 is not None:
+        sorted_dollar_rates.append(
+            {"name": "TCRM 100", "price": tcrm_100, "history": None}
+        )
+
     sorted_dollar_rates.sort(key=lambda x: x["price"])
 
     return sorted_dollar_rates
@@ -551,7 +557,9 @@ def get_dollar_rates() -> Optional[str]:
 
     dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
-    sorted_dollar_rates = sort_dollar_rates(dollars)
+    tcrm_100 = calculate_tcrm_100()
+
+    sorted_dollar_rates = sort_dollar_rates(dollars, tcrm_100)
 
     return format_dollar_rates(sorted_dollar_rates, 24)
 
@@ -757,6 +765,60 @@ def cache_bcra_variables(variables: Dict, ttl: int = 300) -> None:
         redis_client.setex(cache_key, ttl, json.dumps(variables))
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
+
+
+def get_latest_itcrm_value() -> Optional[float]:
+    """Fetch latest ITCRM index value from BCRA spreadsheet"""
+    try:
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        response = requests.get(
+            "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx",
+            timeout=10,
+            verify=False,
+        )
+        workbook = load_workbook(io.BytesIO(response.content), data_only=True)
+        sheet = workbook.active
+        for row in range(sheet.max_row, 0, -1):
+            value = sheet.cell(row=row, column=2).value
+            if value is not None:
+                return float(value)
+        return None
+    except Exception as e:
+        print(f"Error fetching ITCRM value: {e}")
+        return None
+
+
+def calculate_tcrm_100() -> Optional[float]:
+    """Calculate nominal exchange rate that sets ITCRM to 100"""
+    try:
+        bcra_variables = get_cached_bcra_variables()
+        if not bcra_variables:
+            bcra_variables = scrape_bcra_variables()
+            if bcra_variables:
+                cache_bcra_variables(bcra_variables)
+
+        if not bcra_variables:
+            return None
+
+        wholesale_str = None
+        for key, data in bcra_variables.items():
+            if re.search("tipo.*cambio.*mayorista", key.lower()):
+                wholesale_str = data["value"]
+                break
+
+        if not wholesale_str:
+            return None
+
+        wholesale = float(wholesale_str.replace(".", "").replace(",", "."))
+
+        itcrm_value = get_latest_itcrm_value()
+        if not itcrm_value:
+            return None
+
+        return wholesale * 100 / itcrm_value
+    except Exception as e:
+        print(f"Error calculating TCRM 100: {e}")
+        return None
 
 
 def format_bcra_variables(variables: Dict) -> str:
