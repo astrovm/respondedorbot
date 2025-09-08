@@ -2562,18 +2562,18 @@ def test_handle_bcra_variables_scrape_fresh():
     from api.index import handle_bcra_variables
 
     with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
-        "api.index.scrape_bcra_variables"
-    ) as mock_scrape, patch("api.index.cache_bcra_variables") as mock_cache, patch(
+        "api.index.bcra_fetch_latest_variables"
+    ) as mock_fetch, patch("api.index.cache_bcra_variables") as mock_cache, patch(
         "api.index.format_bcra_variables"
     ) as mock_format:
 
         mock_cached.return_value = None
-        mock_scrape.return_value = {"scraped": "data"}
+        mock_fetch.return_value = {"scraped": "data"}
         mock_format.return_value = "formatted scraped data"
 
         result = handle_bcra_variables()
         assert result == "formatted scraped data"
-        mock_scrape.assert_called_once()
+        mock_fetch.assert_called_once()
         mock_cache.assert_called_once_with({"scraped": "data"})
         mock_format.assert_called_once_with({"scraped": "data"})
 
@@ -2582,11 +2582,11 @@ def test_handle_bcra_variables_no_data():
     from api.index import handle_bcra_variables
 
     with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
-        "api.index.scrape_bcra_variables"
-    ) as mock_scrape:
+        "api.index.bcra_fetch_latest_variables"
+    ) as mock_fetch:
 
         mock_cached.return_value = None
-        mock_scrape.return_value = None
+        mock_fetch.return_value = None
 
         result = handle_bcra_variables()
         assert (
@@ -2697,15 +2697,15 @@ def test_get_market_context_all_fail():
     with patch("api.index.cached_requests") as mock_cached, patch(
         "os.environ.get"
     ) as mock_env, patch("api.index.get_cached_bcra_variables") as mock_get_bcra, patch(
-        "api.index.scrape_bcra_variables"
-    ) as mock_scrape_bcra, patch(
+        "api.index.bcra_fetch_latest_variables"
+    ) as mock_fetch_bcra, patch(
         "api.index.cache_bcra_variables"
     ) as mock_cache_bcra:
 
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
         mock_get_bcra.return_value = None
-        mock_scrape_bcra.return_value = None
+        mock_fetch_bcra.return_value = None
         mock_cache_bcra.return_value = None
 
         result = get_market_context()
