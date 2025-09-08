@@ -221,17 +221,27 @@ def bcra_api_get(
 
 
 def bcra_list_variables(
-    category: str = "Principales Variables",
+    category: Optional[str] = "Principales Variables",
 ) -> Optional[List[Dict[str, Any]]]:
-    """Return list of variables for a given category (default Principales Variables)."""
-    data = bcra_api_get("/monetarias", {"categoria": category, "limit": "1000"})
+    """Return list of variables. If `category` is provided, filter client-side."""
+    data = bcra_api_get("/monetarias", {"limit": "1000"})
     try:
         if not data:
             return None
         results = data.get("results")
-        if isinstance(results, list):
+        if not isinstance(results, list):
+            return None
+        if not category:
             return results
-        return None
+
+        # Filter by category locally to avoid server-side incompatibilities
+        def norm(s: str) -> str:
+            return (
+                unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+            ).lower()
+
+        cat = norm(category)
+        return [r for r in results if cat in norm(str(r.get("categoria", "")))]
     except Exception:
         return None
 
