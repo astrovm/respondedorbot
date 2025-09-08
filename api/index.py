@@ -1164,7 +1164,29 @@ def format_bcra_variables(variables: Dict) -> str:
     try:
         itcrm_value = get_latest_itcrm_value()
         if isinstance(itcrm_value, (int, float)):
-            lines.append(f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}")
+            # Compute expected latest business date in Buenos Aires (UTC-3)
+            now_ba = datetime.now(BA_TZ)
+            today_ba = now_ba.date()
+
+            def _is_bd(d):
+                try:
+                    return 0 <= d.weekday() <= 4
+                except Exception:
+                    return True
+
+            def _prev_bd(d):
+                prev = d
+                while True:
+                    prev = prev - timedelta(days=1)
+                    if _is_bd(prev):
+                        return prev
+
+            if _is_bd(today_ba) and now_ba.hour >= 15:
+                date_ba = today_ba
+            else:
+                date_ba = _prev_bd(today_ba)
+            date_str = f"{date_ba.day:02d}/{date_ba.month:02d}/{date_ba.year % 100:02d}"
+            lines.append(f"📐 TCRM: {fmt_num(float(itcrm_value), 2)} ({date_str})")
     except Exception:
         pass
 
