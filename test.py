@@ -1730,6 +1730,7 @@ def test_get_dollar_rates_basic():
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
             "data": {
+                "mayorista": {"price": 90.0, "variation": 0.25},
                 "oficial": {"price": 100.0, "variation": 0.5},
                 "tarjeta": {"price": 150.0, "variation": 0.75},
                 "mep": {"al30": {"ci": {"price": 200.0, "variation": 1.25}}},
@@ -1746,6 +1747,7 @@ def test_get_dollar_rates_basic():
 
         result = get_dollar_rates()
         assert result is not None
+        assert "Mayorista: 90" in result
         assert "Oficial: 100" in result
         assert "Tarjeta: 150" in result
         assert "MEP: 200" in result
@@ -2938,6 +2940,7 @@ def test_sort_dollar_rates_success():
 
     dollar_rates = {
         "data": {
+            "mayorista": {"price": 900.00, "variation": 1.0},
             "oficial": {"price": 1000.50, "variation": 1.2},
             "tarjeta": {"price": 1600.75, "variation": -0.8},
             "mep": {"al30": {"ci": {"price": 1050.25, "variation": 0.5}}},
@@ -2953,9 +2956,9 @@ def test_sort_dollar_rates_success():
 
     result = sort_dollar_rates(dollar_rates)
 
-    assert len(result) == 8
-    assert result[0]["name"] == "Oficial"
-    assert result[0]["price"] == 1000.50
+    assert len(result) == 9
+    assert result[0]["name"] == "Mayorista"
+    assert result[0]["price"] == 900.00
     assert result[-1]["name"] == "Tarjeta"
     assert result[-1]["price"] == 1600.75
     # Verify sorting by price
@@ -2969,6 +2972,7 @@ def test_sort_dollar_rates_with_none_variations():
 
     dollar_rates = {
         "data": {
+            "mayorista": {"price": 900.00, "variation": None},
             "oficial": {"price": 1000.50, "variation": None},
             "tarjeta": {"price": 1600.75, "variation": None},
             "mep": {"al30": {"ci": {"price": 1050.25, "variation": None}}},
@@ -2984,7 +2988,7 @@ def test_sort_dollar_rates_with_none_variations():
 
     result = sort_dollar_rates(dollar_rates)
 
-    assert len(result) == 8
+    assert len(result) == 9
     for rate in result:
         assert rate["history"] is None
 
@@ -2994,6 +2998,7 @@ def test_sort_dollar_rates_with_tcrm():
 
     dollar_rates = {
         "data": {
+            "mayorista": {"price": 90.0, "variation": 0.5},
             "oficial": {"price": 100.0, "variation": 0.5},
             "tarjeta": {"price": 150.0, "variation": 0.5},
             "mep": {"al30": {"ci": {"price": 120.0, "variation": 0.5}}},

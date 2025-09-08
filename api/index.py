@@ -488,6 +488,11 @@ def sort_dollar_rates(
 
     sorted_dollar_rates = [
         {
+            "name": "Mayorista",
+            "price": dollars["mayorista"]["price"],
+            "history": dollars["mayorista"]["variation"],
+        },
+        {
             "name": "Oficial",
             "price": dollars["oficial"]["price"],
             "history": dollars["oficial"]["variation"],
