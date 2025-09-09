@@ -1320,7 +1320,6 @@ def format_bcra_variables(variables: Dict) -> str:
         # Tasas
         (r"tamar", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
         (r"badlar", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
-        (r"tasa.*interes.*justicia", lambda v: f"⚖️ Tasa justicia: {v}%"),
         # Tipo de cambio
         (r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor", lambda v: f"💵 Dólar minorista: ${v}"),
         (r"tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),

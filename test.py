@@ -2524,7 +2524,6 @@ def test_format_bcra_variables_with_data():
         "inflacion_esperada": {"value": "3,1", "date": "15/01/2025"},
         "tasa_tamar": {"value": "45,0", "date": "15/01/2025"},
         "tasa_badlar": {"value": "40,5", "date": "15/01/2025"},
-        "tasa_justicia": {"value": "50,0", "date": "15/01/2025"},
         "dolar_minorista_compra": {"value": "1.200,50", "date": "15/01/2025"},
         "dolar_minorista_venta": {"value": "1.250,75", "date": "15/01/2025"},
         "dolar_mayorista": {"value": "1.180,25", "date": "15/01/2025"},

@@ -7,6 +7,7 @@
 - `requirements.txt`: Python runtime dependencies.
 - `.env.example` / `.env`: Configuration template and local overrides (do not commit secrets).
 - `README.md`, `CLAUDE.md`: Usage and personality guidance.
+- BCRA economic variables are retrieved via the official BCRA API (helpers in `api/index.py`); avoid web scraping.
 
 ## Build, Test, and Development Commands
 - Create env: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`.
