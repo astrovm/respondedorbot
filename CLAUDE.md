@@ -42,7 +42,7 @@ python -m pytest test.py::test_handle_msg -v
 - `handle_msg()` - Main message processing pipeline at api/index.py:2166
 - `ask_ai()` - AI conversation handler at api/index.py:1184
 - `cached_requests()` - Generic API caching wrapper at api/index.py:115
-- `scrape_bcra_variables()` - BCRA economic data scraper at api/index.py:595
+- `get_or_refresh_bcra_variables()` - Fetches BCRA economic data via official API at api/index.py:1015
 - `handle_transcribe_with_message()` - Audio/image transcription handler at api/index.py:792
 
 ### Data Flow
@@ -64,7 +64,7 @@ python -m pytest test.py::test_handle_msg -v
 - **CriptoYa**: Argentine peso exchange rates
 - **OpenRouter**: AI model access (requires `OPENROUTER_API_KEY`)
 - **Cloudflare Workers AI**: Fallback AI and image/audio processing
-- **BCRA**: Economic variables web scraping from official page
+- **BCRA**: Economic variables retrieved through the official API (https://api.bcra.gob.ar/estadisticas/v4.0)
 - **Open-Meteo**: Weather data for Buenos Aires
 
 ### Environment Variables
@@ -97,11 +97,9 @@ Required environment variables are documented in README.md. Critical ones:
 ### Recent Major Features
 
 **BCRA Economic Data (/bcra, /variables):**
-- Web scraping from official BCRA website (https://www.bcra.gob.ar/PublicacionesEstadisticas/Principales_variables.asp)
-- Extracts 12 specific economic variables in precise order: Base monetaria, Inflación (mensual/interanual/esperada), TAMAR, BADLAR, Tasa justicia, Dólar (minorista/mayorista), UVA, CER, Reservas
-- Handles special HTML table formats including 5-column header rows for reservas data
-- 5-minute Redis caching for performance
-- SSL certificate bypass and encoding handling (iso-8859-1)
+- Uses the official BCRA statistics API (https://api.bcra.gob.ar/estadisticas/v4.0)
+- Extracts 11 key variables: Base monetaria, Inflación (mensual/interanual/esperada), TAMAR, BADLAR, Dólar (minorista/mayorista), UVA, CER, Reservas
+- Caches responses in Redis for 5 minutes and persists Dólar Mayorista history
 
 **Audio/Image Transcription (/transcribe):**
 - Must be used as reply to messages containing audio, images, or stickers
