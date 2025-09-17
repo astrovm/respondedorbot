@@ -28,6 +28,7 @@ from api.index import (
     build_agent_retry_prompt,
     build_agent_fallback_entry,
     summarize_recent_agent_topics,
+    agent_sections_are_valid,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -5009,3 +5010,21 @@ def test_build_agent_fallback_entry_avoids_recursive_quote():
 
     assert "loop" in fallback
     assert previous not in fallback
+
+
+def test_agent_sections_are_valid_accepts_accented_headers():
+    text = (
+        "HALLAZGOS: repasé ligas europeas de fútbol femenino.\n"
+        "PRÓXIMO PASO: buscar calendario local"
+    )
+
+    assert agent_sections_are_valid(text)
+
+
+def test_agent_sections_are_valid_accepts_unaccented_headers():
+    text = (
+        "HALLAZGOS: repasé ligas europeas de fútbol femenino.\n"
+        "PROXIMO PASO: buscar calendario local"
+    )
+
+    assert agent_sections_are_valid(text)
