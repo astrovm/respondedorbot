@@ -10,7 +10,7 @@ from PIL import Image
 from requests.exceptions import RequestException, SSLError
 from urllib3.exceptions import InsecureRequestWarning
 import warnings
-from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
+from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set, Iterable
 from difflib import SequenceMatcher
 import ast
 import base64
@@ -47,6 +47,7 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 AGENT_THOUGHTS_KEY = "agent:thoughts"
 MAX_AGENT_THOUGHTS = 10
 AGENT_THOUGHT_CHAR_LIMIT = 500
+AGENT_RECENT_THOUGHT_WINDOW = 5
 AGENT_REQUIRED_SECTIONS = ("HALLAZGOS", "PRÓXIMO PASO")
 AGENT_EMPTY_RESPONSE_FALLBACK = (
     "HALLAZGOS: no se me ocurrió nada nuevo, pintó el vacío.\n"
@@ -531,14 +532,10 @@ def normalize_agent_text(text: str) -> str:
     return collapsed.strip()
 
 
-def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
-    """Return True when the new thought is effectively a repeat of the last one."""
-
-    if not new_text or not previous_text:
-        return False
-
-    normalized_new = normalize_agent_text(new_text)
-    normalized_prev = normalize_agent_text(previous_text)
+def _normalized_texts_are_repetitive(
+    normalized_new: str, normalized_prev: str
+) -> bool:
+    """Compare normalized agent texts to determine repetitive content."""
 
     if not normalized_new or not normalized_prev:
         return False
@@ -561,6 +558,38 @@ def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
 
     overlap = len(new_tokens & prev_tokens) / union_len
     return overlap >= 0.75
+
+
+def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
+    """Return True when the new thought is effectively a repeat of the last one."""
+
+    if not new_text or not previous_text:
+        return False
+
+    normalized_new = normalize_agent_text(new_text)
+    normalized_prev = normalize_agent_text(previous_text)
+
+    return _normalized_texts_are_repetitive(normalized_new, normalized_prev)
+
+
+def find_repetitive_recent_thought(
+    new_text: str, previous_texts: Iterable[str]
+) -> Optional[str]:
+    """Return the first recent thought that matches the new text too closely."""
+
+    normalized_new = normalize_agent_text(new_text)
+    if not normalized_new:
+        return None
+
+    for candidate in previous_texts:
+        sanitized = str(candidate or "").strip()
+        if not sanitized:
+            continue
+        normalized_prev = normalize_agent_text(sanitized)
+        if _normalized_texts_are_repetitive(normalized_new, normalized_prev):
+            return sanitized
+
+    return None
 
 
 def extract_agent_section_content(text: str, header: str) -> Optional[str]:
@@ -682,11 +711,14 @@ def run_agent_cycle() -> Dict[str, Any]:
     """Trigger the autonomous agent, persist its thought and return metadata."""
 
     recent_thoughts = get_agent_thoughts()
-    last_entry_text = None
+    recent_entry_texts: List[str] = []
     if recent_thoughts:
-        candidate = str(recent_thoughts[0].get("text", "")).strip()
-        if candidate:
-            last_entry_text = candidate
+        for thought in recent_thoughts[:AGENT_RECENT_THOUGHT_WINDOW]:
+            candidate = str(thought.get("text", "")).strip()
+            if candidate:
+                recent_entry_texts.append(candidate)
+
+    last_entry_text = recent_entry_texts[0] if recent_entry_texts else None
 
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
@@ -771,8 +803,11 @@ def run_agent_cycle() -> Dict[str, Any]:
         if not agent_sections_are_valid(cleaned):
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
-    if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
-        corrective_prompt = build_agent_retry_prompt(last_entry_text)
+    matching_recent_text = find_repetitive_recent_thought(
+        cleaned, recent_entry_texts
+    )
+    if matching_recent_text:
+        corrective_prompt = build_agent_retry_prompt(matching_recent_text)
         retry_messages = messages + [
             {
                 "role": "assistant",
@@ -795,9 +830,12 @@ def run_agent_cycle() -> Dict[str, Any]:
         if not cleaned:
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
-        if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
+        matching_recent_text = find_repetitive_recent_thought(
+            cleaned, recent_entry_texts
+        )
+        if matching_recent_text:
             fallback = clean_duplicate_response(
-                build_agent_fallback_entry(last_entry_text)
+                build_agent_fallback_entry(matching_recent_text)
             ).strip()
             cleaned = fallback or AGENT_EMPTY_RESPONSE_FALLBACK
 
