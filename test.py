@@ -792,6 +792,54 @@ def test_run_agent_cycle_breaks_loop_with_retry():
     assert result["timestamp"] == 1_700_000_100
 
 
+def test_run_agent_cycle_persists_loop_fallback_when_stuck():
+    from api.index import (
+        AGENT_LOOP_FALLBACK_PREFIX,
+        AGENT_REPETITION_RETRY_LIMIT,
+        run_agent_cycle,
+    )
+
+    repeated_text = (
+        "HALLAZGOS: seguí leyendo lo mismo de siempre.\n"
+        "PRÓXIMO PASO: insistir con la misma nota otra vez."
+    )
+
+    responses = [repeated_text] * (AGENT_REPETITION_RETRY_LIMIT + 1)
+
+    def fake_ask(_):
+        return responses.pop(0)
+
+    previous_entries = [{"text": repeated_text, "timestamp": 1_700_000_000}]
+
+    with patch("api.index.ask_ai", side_effect=fake_ask) as mock_ask, patch(
+        "api.index.sanitize_tool_artifacts", side_effect=lambda x: x
+    ), patch(
+        "api.index.clean_duplicate_response", side_effect=lambda x: x
+    ), patch(
+        "api.index.get_hacker_news_context", return_value=[]
+    ), patch(
+        "api.index.get_agent_thoughts", return_value=previous_entries
+    ), patch(
+        "api.index.save_agent_thought"
+    ) as mock_save:
+
+        def capture_save(text):
+            return {"text": text, "timestamp": 1_700_000_200}
+
+        mock_save.side_effect = capture_save
+        result = run_agent_cycle()
+
+    assert mock_ask.call_count == AGENT_REPETITION_RETRY_LIMIT + 1
+    mock_save.assert_called_once()
+    saved_text = mock_save.call_args[0][0]
+    assert isinstance(saved_text, str)
+    assert saved_text.startswith(AGENT_LOOP_FALLBACK_PREFIX)
+    assert "pintó el vacío" not in saved_text
+    assert result["text"] == saved_text
+    assert result["timestamp"] == 1_700_000_200
+    assert not responses
+
+
 def test_is_secret_token_valid():
     from api.index import is_secret_token_valid
 
