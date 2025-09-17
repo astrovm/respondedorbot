@@ -13,6 +13,7 @@ from api.index import (
     format_user_message,
     should_gordo_respond,
     truncate_text,
+    fetch_url_content,
     web_search,
     search_command,
     parse_tool_call,
@@ -3789,6 +3790,44 @@ def test_transcribe_audio_cloudflare_network_error():
 
 
 # Tests for web search functionality
+def test_fetch_url_content_success_html():
+    html_body = """
+    <html>
+        <head><title>Example Site</title></head>
+        <body>
+            <article><p>Hola mundo desde la web.</p></article>
+        </body>
+    </html>
+    """
+
+    mock_response = MagicMock()
+    mock_response.iter_content.return_value = [html_body.encode("utf-8")]
+    mock_response.headers = {"Content-Type": "text/html; charset=utf-8"}
+    mock_response.encoding = "utf-8"
+    mock_response.apparent_encoding = "utf-8"
+    mock_response.status_code = 200
+    mock_response.raise_for_status.return_value = None
+    mock_response.url = "https://example.com/articulo"
+    mock_response.close = MagicMock()
+
+    with patch("api.index.config_redis", side_effect=Exception("redis down")), patch(
+        "api.index.requests.get", return_value=mock_response
+    ):
+        result = fetch_url_content("https://example.com/articulo")
+
+    assert result["url"] == "https://example.com/articulo"
+    assert "Hola mundo" in result["content"]
+    assert result["status"] == 200
+    assert "text/html" in result["content_type"]
+    assert result["title"] == "Example Site"
+    assert result["truncated"] is False
+
+
+def test_fetch_url_content_invalid_url():
+    result = fetch_url_content("nota sin protocolo")
+    assert result == {"error": "url inválida"}
+
+
 def test_web_search_success():
     """Test web_search with successful DDGS response"""
     with patch("ddgs.DDGS") as mock_ddgs_class:
@@ -3988,6 +4027,31 @@ def test_execute_tool_web_search():
         parsed_result = json.loads(result)
         assert parsed_result["query"] == "test"
         assert len(parsed_result["results"]) == 1
+
+
+def test_execute_tool_fetch_url():
+    with patch("api.index.fetch_url_content") as mock_fetch:
+        mock_fetch.side_effect = [
+            {"url": "https://example.com", "content": "hola", "truncated": False},
+            {"error": "url inválida"},
+        ]
+
+        first = execute_tool(
+            "fetch_url", {"url": "https://example.com", "max_chars": 1234}
+        )
+        import json
+
+        parsed_first = json.loads(first)
+        assert parsed_first["url"] == "https://example.com"
+        assert parsed_first["content"] == "hola"
+
+        first_call = mock_fetch.call_args_list[0]
+        assert first_call.args[0] == "https://example.com"
+        assert first_call.kwargs["max_chars"] == 1234
+
+        second = execute_tool("fetch_url", {"url": ""})
+        parsed_second = json.loads(second)
+        assert parsed_second["error"] == "url inválida"
 
 
 def test_execute_tool_empty_query():
