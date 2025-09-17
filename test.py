@@ -24,6 +24,7 @@ from api.index import (
     replace_links,
     configure_links,
     is_repetitive_thought,
+    find_repetitive_recent_thought,
     build_agent_retry_prompt,
     build_agent_fallback_entry,
 )
@@ -711,10 +712,13 @@ def test_run_agent_cycle_returns_result():
 
         result = run_agent_cycle()
 
-    mock_ask.assert_called_once()
-    mock_sanitize.assert_called_once()
-    mock_clean.assert_called_once()
-    mock_save.assert_called_once_with("pensé en bonos")
+    assert mock_ask.call_count >= 1
+    assert mock_sanitize.call_count == mock_ask.call_count
+    assert mock_clean.call_count == mock_ask.call_count
+    mock_save.assert_called_once()
+    saved_text = mock_save.call_args[0][0]
+    assert "HALLAZGOS:" in saved_text
+    assert "PRÓXIMO PASO:" in saved_text
     assert result["text"] == "pensé en bonos"
     assert result["timestamp"] == 1_700_000_000
     assert result["iso_time"].endswith("-03:00")
@@ -4776,6 +4780,29 @@ def test_is_repetitive_thought_allows_new_data():
     )
 
     assert not is_repetitive_thought(updated, previous)
+
+
+def test_find_repetitive_recent_thought_returns_match():
+    stored = [
+        "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias frescas",
+        "miré balances corporativos y anoté pendientes",
+    ]
+    repeated = "Estaba analizando que BTC rompió 116k pero ETH baja, voy a buscar noticias frescas"
+
+    match = find_repetitive_recent_thought(repeated, stored)
+    assert match == stored[0]
+
+
+def test_find_repetitive_recent_thought_allows_unique_note():
+    stored = [
+        "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias",
+        "miré calendario y hay datos de inflación en dos días",
+    ]
+    new_entry = (
+        "escaneé titulares y encontré una nota de coindesk sobre flujos asiáticos, próximo paso: revisar volúmenes"
+    )
+
+    assert find_repetitive_recent_thought(new_entry, stored) is None
 
 
 def test_build_agent_retry_prompt_mentions_previous_text():
