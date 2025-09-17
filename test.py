@@ -22,6 +22,9 @@ from api.index import (
     handle_msg,
     replace_links,
     configure_links,
+    is_repetitive_thought,
+    build_agent_retry_prompt,
+    build_agent_fallback_entry,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -4691,3 +4694,38 @@ def test_web_search_uses_ttl_constant(monkeypatch):
         assert results and isinstance(results, list)
         # Ensure TTL constant is used
         assert any(ttl == TTL_WEB_SEARCH for (_k, ttl) in r.calls)
+
+
+def test_is_repetitive_thought_detects_loop():
+    previous = (
+        "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias frescas"
+    )
+    repeated = "Estaba analizando que BTC rompió 116k pero ETH baja, voy a buscar noticias frescas"
+
+    assert is_repetitive_thought(repeated, previous)
+
+
+def test_is_repetitive_thought_allows_new_data():
+    previous = "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias"
+    updated = (
+        "escaneé titulares y encontré una nota de coindesk sobre flujos asiáticos, próximo paso: revisar volúmenes"
+    )
+
+    assert not is_repetitive_thought(updated, previous)
+
+
+def test_build_agent_retry_prompt_mentions_previous_text():
+    long_text = "a" * 200
+    prompt = build_agent_retry_prompt(long_text)
+
+    expected_preview = long_text[:157] + "..."
+    assert expected_preview in prompt
+    assert "web_search" in prompt
+
+
+def test_build_agent_fallback_entry_mentions_loop_and_previous():
+    previous = "divergencia btc eth"
+    fallback = build_agent_fallback_entry(previous)
+
+    assert "loop" in fallback
+    assert previous in fallback

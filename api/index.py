@@ -10,6 +10,7 @@ from requests.exceptions import RequestException, SSLError
 from urllib3.exceptions import InsecureRequestWarning
 import warnings
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set
+from difflib import SequenceMatcher
 import ast
 import base64
 import emoji
@@ -508,6 +509,71 @@ def format_agent_thoughts(thoughts: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def normalize_agent_text(text: str) -> str:
+    """Normalize agent text for similarity comparisons."""
+
+    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    without_accents = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    collapsed = re.sub(r"[^a-z0-9]+", " ", without_accents)
+    return collapsed.strip()
+
+
+def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
+    """Return True when the new thought is effectively a repeat of the last one."""
+
+    if not new_text or not previous_text:
+        return False
+
+    normalized_new = normalize_agent_text(new_text)
+    normalized_prev = normalize_agent_text(previous_text)
+
+    if not normalized_new or not normalized_prev:
+        return False
+
+    if normalized_new == normalized_prev:
+        return True
+
+    similarity = SequenceMatcher(None, normalized_new, normalized_prev).ratio()
+    if similarity >= 0.88:
+        return True
+
+    new_tokens = set(normalized_new.split())
+    prev_tokens = set(normalized_prev.split())
+    if not new_tokens or not prev_tokens:
+        return False
+
+    union_len = len(new_tokens | prev_tokens)
+    if union_len == 0:
+        return False
+
+    overlap = len(new_tokens & prev_tokens) / union_len
+    return overlap >= 0.75
+
+
+def build_agent_retry_prompt(previous_text: str) -> str:
+    """Create a corrective prompt so the agent avoids looping."""
+
+    preview = truncate_text(previous_text, 160)
+    return (
+        "Te repetiste igual que la última memoria y no trajiste datos nuevos. "
+        "Antes de escribir otra vez, completá el pendiente y contá resultados concretos. "
+        "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. "
+        f"Esto fue lo último guardado: \"{preview}\". "
+        "Escribí ahora una nota distinta con hechos puntuales y luego marcá el próximo paso."
+    )
+
+
+def build_agent_fallback_entry(previous_text: str) -> str:
+    """Generate a non-repetitive fallback entry when the agent keeps looping."""
+
+    preview = truncate_text(previous_text, 120)
+    return (
+        "registré que estaba en un loop repitiendo \""
+        + preview
+        + "\" sin hacer avances. dejé anotado que tengo que ejecutar una búsqueda web urgente, resumir los datos concretos que salgan y recién después definir el próximo paso."
+    )
+
+
 def save_agent_thought(
     thought_text: str, redis_client: Optional[redis.Redis] = None
 ) -> Optional[Dict[str, Any]]:
@@ -555,9 +621,26 @@ def show_agent_thoughts() -> str:
 def run_agent_cycle() -> Dict[str, Any]:
     """Trigger the autonomous agent, persist its thought and return metadata."""
 
+    recent_thoughts = get_agent_thoughts()
+    last_entry_text = None
+    if recent_thoughts:
+        candidate = str(recent_thoughts[0].get("text", "")).strip()
+        if candidate:
+            last_entry_text = candidate
+
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
-        "Dejá registrado en primera persona qué estuviste pensando o haciendo y cuál es el próximo paso. "
+        "Registrá en primera persona qué investigaste, qué encontraste y recién después el próximo paso."
+    )
+    if last_entry_text:
+        agent_prompt += (
+            "\n\nÚLTIMA MEMORIA GUARDADA:\n"
+            f"{truncate_text(last_entry_text, 220)}\n"
+            "Resolvé ese pendiente ahora mismo y deja asentado el resultado concreto antes de planear otra cosa."
+        )
+    agent_prompt += (
+        "\nIncluí datos específicos (números, titulares, fuentes) de lo que investigues y evitá repetir entradas previas. "
+        "Si necesitás info fresca, llamá a la herramienta web_search con un query puntual y resumí el hallazgo. "
         "Máximo 500 caracteres, sin saludar a nadie: es un apunte privado."
     )
 
@@ -573,16 +656,49 @@ def run_agent_cycle() -> Dict[str, Any]:
         }
     ]
 
+    def generate_response(current_messages: List[Dict[str, Any]]) -> str:
+        raw = ask_ai(current_messages)
+        sanitized_response = sanitize_tool_artifacts(raw)
+        return clean_duplicate_response(sanitized_response).strip()
+
     try:
-        response = ask_ai(messages)
+        cleaned = generate_response(messages)
     except Exception as ai_error:
         admin_report("Autonomous agent execution failed", ai_error)
         raise
 
-    sanitized = sanitize_tool_artifacts(response)
-    cleaned = clean_duplicate_response(sanitized).strip()
     if not cleaned:
         cleaned = "no se me ocurrió nada nuevo, pintó el vacío."
+
+    if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
+        corrective_prompt = build_agent_retry_prompt(last_entry_text)
+        retry_messages = messages + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": cleaned}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": corrective_prompt}],
+            },
+        ]
+
+        try:
+            retry_cleaned = generate_response(retry_messages)
+        except Exception as ai_error:
+            admin_report("Autonomous agent execution failed (retry)", ai_error)
+            raise
+
+        if retry_cleaned:
+            cleaned = retry_cleaned
+        if not cleaned:
+            cleaned = "no se me ocurrió nada nuevo, pintó el vacío."
+
+        if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
+            fallback = clean_duplicate_response(
+                build_agent_fallback_entry(last_entry_text)
+            ).strip()
+            cleaned = fallback or "no se me ocurrió nada nuevo, pintó el vacío."
 
     entry = save_agent_thought(cleaned)
     if not entry:
