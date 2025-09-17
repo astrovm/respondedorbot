@@ -3922,6 +3922,38 @@ def test_parse_tool_call_valid():
     assert args == {"query": "test", "limit": 3}
 
 
+def test_parse_tool_call_multiline():
+    """parse_tool_call should handle tool name and JSON on separate lines"""
+    text = """
+    [TOOL]
+    web_search
+    {"query": "btc asia news"}
+    """
+
+    result = parse_tool_call(text)
+
+    assert result == ("web_search", {"query": "btc asia news"})
+
+
+def test_parse_tool_call_with_colon():
+    """parse_tool_call should handle optional colon after [TOOL] marker"""
+    text = """
+    [TOOL]: web_search
+    {
+        "query": "eth dump motivos",
+        "limit": 4
+    }
+    """
+
+    result = parse_tool_call(text)
+
+    assert result is not None
+    name, args = result
+    assert name == "web_search"
+    assert args["query"] == "eth dump motivos"
+    assert args["limit"] == 4
+
+
 def test_parse_tool_call_invalid():
     """Test parse_tool_call with invalid inputs"""
     # No tool call
