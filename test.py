@@ -722,6 +722,8 @@ def test_run_agent_cycle_returns_result():
     ) as mock_sanitize, patch(
         "api.index.clean_duplicate_response", side_effect=lambda x: x
     ) as mock_clean, patch(
+        "api.index.get_hacker_news_context", return_value=[]
+    ), patch(
         "api.index.save_agent_thought"
     ) as mock_save:
         mock_save.return_value = {"text": "pensé en bonos", "timestamp": 1_700_000_000}
@@ -1728,6 +1730,8 @@ def test_ask_ai_with_openrouter_success():
     with patch("api.index.get_market_context") as mock_get_market_context, patch(
         "api.index.get_weather_context"
     ) as mock_get_weather_context, patch(
+        "api.index.get_hacker_news_context"
+    ) as mock_get_hn_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
         "api.index.get_agent_memory_context"
@@ -1738,6 +1742,7 @@ def test_ask_ai_with_openrouter_success():
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
@@ -1757,6 +1762,8 @@ def test_ask_ai_with_cloudflare_fallback():
     with patch("api.index.get_market_context") as mock_get_market_context, patch(
         "api.index.get_weather_context"
     ) as mock_get_weather_context, patch(
+        "api.index.get_hacker_news_context"
+    ) as mock_get_hn_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
         "api.index.get_agent_memory_context"
@@ -1767,6 +1774,7 @@ def test_ask_ai_with_cloudflare_fallback():
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
@@ -1786,6 +1794,8 @@ def test_ask_ai_with_all_failures():
     with patch("api.index.get_market_context") as mock_get_market_context, patch(
         "api.index.get_weather_context"
     ) as mock_get_weather_context, patch(
+        "api.index.get_hacker_news_context"
+    ) as mock_get_hn_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
         "api.index.get_agent_memory_context"
@@ -1796,6 +1806,7 @@ def test_ask_ai_with_all_failures():
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
+        mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
@@ -1847,8 +1858,9 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
 
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
-    ), patch("api.index.get_time_context", return_value={}), patch(
-        "api.index.get_agent_memory_context", return_value=None
+    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
+        "api.index.get_time_context", return_value={}
+    ), patch("api.index.get_agent_memory_context", return_value=None
     ), patch(
         "api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
@@ -1882,8 +1894,9 @@ def test_ask_ai_handles_repeated_tool_calls():
 
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
-    ), patch("api.index.get_time_context", return_value={}), patch(
-        "api.index.get_agent_memory_context", return_value=None
+    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
+        "api.index.get_time_context", return_value={}
+    ), patch("api.index.get_agent_memory_context", return_value=None
     ), patch(
         "api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
@@ -2961,6 +2974,102 @@ def test_get_time_context():
         assert result["datetime"] == fixed_time_ba
 
 
+def test_get_hacker_news_context_success():
+    from api.index import get_hacker_news_context
+
+    sample_xml = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+    <rss version=\"2.0\">
+      <channel>
+        <item>
+          <title>Historia Uno</title>
+          <link>https://example.com/uno</link>
+          <description><![CDATA[
+            <p>Article URL: <a href=\"https://example.com/uno\">https://example.com/uno</a></p>
+            <p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=1\">https://news.ycombinator.com/item?id=1</a></p>
+            <p>Points: 123</p>
+            <p># Comments: 45</p>
+          ]]></description>
+        </item>
+        <item>
+          <title>Historia Dos</title>
+          <link>https://example.com/dos</link>
+          <description><![CDATA[
+            <p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=2\">https://news.ycombinator.com/item?id=2</a></p>
+            <p>Points: 456</p>
+            <p># Comments: 78</p>
+          ]]></description>
+        </item>
+      </channel>
+    </rss>"""
+
+    class DummyResponse:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    with patch("api.index.config_redis", side_effect=RuntimeError("no redis")), patch(
+        "api.index.requests.get", return_value=DummyResponse(sample_xml)
+    ) as mock_get:
+        items = get_hacker_news_context(limit=2)
+
+    assert len(items) == 2
+    assert items[0]["title"] == "Historia Uno"
+    assert items[0]["points"] == 123
+    assert items[0]["comments"] == 45
+    assert items[0]["comments_url"].endswith("id=1")
+    assert items[1]["title"] == "Historia Dos"
+    assert items[1]["points"] == 456
+    assert items[1]["comments"] == 78
+    mock_get.assert_called_once()
+
+
+def test_get_hacker_news_context_uses_cache():
+    from api.index import get_hacker_news_context
+
+    cached_items = [
+        {
+            "title": "Cacheada",
+            "url": "https://cached.example",
+            "points": 50,
+            "comments": 5,
+            "comments_url": "https://news.ycombinator.com/item?id=3",
+        }
+    ]
+
+    with patch("api.index.config_redis", return_value=object()), patch(
+        "api.index.redis_get_json", return_value=cached_items
+    ) as mock_cache, patch("api.index.requests.get") as mock_get:
+        items = get_hacker_news_context(limit=1)
+
+    assert items == cached_items[:1]
+    mock_cache.assert_called_once()
+    mock_get.assert_not_called()
+
+
+def test_format_hacker_news_info_variants():
+    from api.index import format_hacker_news_info
+
+    stories = [
+        {
+            "title": "Historia Tres",
+            "url": "https://example.com/tres",
+            "points": 99,
+            "comments": 12,
+            "comments_url": "https://news.ycombinator.com/item?id=4",
+        }
+    ]
+
+    with_discussion = format_hacker_news_info(stories)
+    assert "Historia Tres" in with_discussion
+    assert "99 pts" in with_discussion
+    assert "HN:" in with_discussion
+
+    without_discussion = format_hacker_news_info(stories, include_discussion=False)
+    assert "HN:" not in without_discussion
+
+
 def test_get_fallback_response():
     from api.index import get_fallback_response
 
@@ -2995,6 +3104,15 @@ def test_build_system_message():
             "visibility": 10000,
         },
         "time": {"formatted": "Monday 15/01/2024"},
+        "hacker_news": [
+            {
+                "title": "Nueva feature",
+                "url": "https://example.com/hn",
+                "points": 321,
+                "comments": 42,
+                "comments_url": "https://news.ycombinator.com/item?id=1",
+            }
+        ],
     }
 
     with patch("os.environ.get") as mock_env:
@@ -3017,6 +3135,7 @@ def test_build_system_message():
         content_text = result["content"][0]["text"]
         assert "argentina" in content_text.lower()
         assert "gordo" in content_text.lower()
+        assert "hacker news" in content_text.lower()
 
 
 def test_build_system_message_empty_context():
@@ -3026,7 +3145,12 @@ def test_build_system_message_empty_context():
     # Reset global cache to ensure clean state
     api.index._bot_config = None
 
-    context = {"market": {}, "weather": None, "time": {"formatted": "Monday"}}
+    context = {
+        "market": {},
+        "weather": None,
+        "time": {"formatted": "Monday"},
+        "hacker_news": [],
+    }
 
     with patch("os.environ.get") as mock_env:
         # Mock environment variables

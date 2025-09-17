@@ -27,6 +27,7 @@ import traceback
 from openpyxl import load_workbook
 from decimal import Decimal
 import unicodedata
+from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
 
 
@@ -42,6 +43,11 @@ WEB_FETCH_MIN_CHARS = 500
 WEB_FETCH_MAX_CHARS = 8000
 WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
+TTL_HACKER_NEWS = 600  # 10 minutes
+
+HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
+HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
+HACKER_NEWS_MAX_ITEMS = 5
 
 # Autonomous agent thought logging
 AGENT_THOUGHTS_KEY = "agent:thoughts"
@@ -899,6 +905,7 @@ def run_agent_cycle() -> Dict[str, Any]:
     recent_topic_summaries = summarize_recent_agent_topics(
         recent_thoughts[:AGENT_RECENT_THOUGHT_WINDOW]
     )
+    hacker_news_items = get_hacker_news_context(limit=3)
 
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
@@ -917,6 +924,15 @@ def run_agent_cycle() -> Dict[str, Any]:
             "\nEstos fueron los últimos temas que trabajaste:\n"
             f"{topics_lines}\n"
             "Solo repetí uno si apareció un dato nuevo y específico; si no, cambiá a otro interés del gordo."
+        )
+    if hacker_news_items:
+        hn_lines = format_hacker_news_info(
+            hacker_news_items, include_discussion=False
+        )
+        agent_prompt += (
+            "\n\nHACKER NEWS HOY:\n"
+            f"{hn_lines}\n"
+            "Si alguna nota trae datos frescos que sumen, citá la fuente y metela en los hallazgos."
         )
     agent_prompt += (
         "\nIncluí datos específicos (números, titulares, fuentes) de lo que investigues y evitá repetir entradas previas. "
@@ -2431,6 +2447,7 @@ def ask_ai(
             "market": get_market_context(),
             "weather": get_weather_context(),
             "time": get_time_context(),
+            "hacker_news": get_hacker_news_context(),
         }
 
         # Create OpenAI client
@@ -3291,6 +3308,125 @@ def search_command(msg_text: Optional[str]) -> str:
     return "\n\n".join(lines[:10])
 
 
+def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
+    """Return top Hacker News stories from the best RSS feed (cached)."""
+
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = HACKER_NEWS_MAX_ITEMS
+
+    if limit < 1:
+        limit = 1
+    if limit > HACKER_NEWS_MAX_ITEMS:
+        limit = HACKER_NEWS_MAX_ITEMS
+
+    redis_client: Optional[redis.Redis]
+    try:
+        redis_client = config_redis()
+    except Exception:
+        redis_client = None
+
+    cached_items: Optional[List[Dict[str, Any]]] = None
+    if redis_client:
+        cached = redis_get_json(redis_client, HACKER_NEWS_CACHE_KEY)
+        if isinstance(cached, list):
+            cached_items = cached
+            if cached_items:
+                return cached_items[:limit]
+
+    response_text: Optional[str] = None
+    try:
+        response = requests.get(HACKER_NEWS_RSS_URL, timeout=5)
+        response.raise_for_status()
+        response_text = response.text
+    except SSLError:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+                response = requests.get(
+                    HACKER_NEWS_RSS_URL, timeout=5, verify=False
+                )
+                response.raise_for_status()
+                response_text = response.text
+        except Exception as ssl_error:
+            print(f"Error fetching Hacker News RSS (SSL fallback): {ssl_error}")
+            return (cached_items or [])[:limit]
+    except RequestException as request_error:
+        print(f"Error fetching Hacker News RSS: {request_error}")
+        return (cached_items or [])[:limit]
+
+    if not response_text:
+        return (cached_items or [])[:limit]
+
+    try:
+        root = ET.fromstring(response_text)
+        channel = root.find("channel")
+        if channel is None:
+            return (cached_items or [])[:limit]
+
+        items: List[Dict[str, Any]] = []
+        for item_el in channel.findall("item"):
+            title_raw = item_el.findtext("title", "")
+            title = unescape(str(title_raw or "")).strip()
+            if not title:
+                continue
+
+            link = str(item_el.findtext("link", "") or "").strip()
+            description = item_el.findtext("description", "") or ""
+
+            points_val: Optional[int] = None
+            points_match = re.search(r"Points:\s*(\d+)", description)
+            if points_match:
+                try:
+                    points_val = int(points_match.group(1))
+                except Exception:
+                    points_val = None
+
+            comments_val: Optional[int] = None
+            comments_match = re.search(r"# Comments:\s*(\d+)", description)
+            if comments_match:
+                try:
+                    comments_val = int(comments_match.group(1))
+                except Exception:
+                    comments_val = None
+
+            comments_url_match = re.search(
+                r"Comments URL: <a href=\"([^\"]+)\"", description
+            )
+            comments_url = (
+                comments_url_match.group(1).strip()
+                if comments_url_match
+                else ""
+            )
+
+            items.append(
+                {
+                    "title": title,
+                    "url": link,
+                    "points": points_val,
+                    "comments": comments_val,
+                    "comments_url": comments_url,
+                }
+            )
+
+            if len(items) >= HACKER_NEWS_MAX_ITEMS:
+                break
+
+        if redis_client and items:
+            try:
+                redis_setex_json(
+                    redis_client, HACKER_NEWS_CACHE_KEY, TTL_HACKER_NEWS, items
+                )
+            except Exception:
+                pass
+
+        return items[:limit] if items else (cached_items or [])[:limit]
+    except Exception as parse_error:
+        print(f"Error parsing Hacker News RSS: {parse_error}")
+        return (cached_items or [])[:limit]
+
+
 def get_market_context() -> Dict:
     """Get crypto, dollar and BCRA market data"""
     market_data = {}
@@ -3561,8 +3697,12 @@ def build_system_message(context: Dict, include_tools: bool = False) -> Dict[str
     so the model can request a tool in plain text (provider-agnostic).
     """
     config = load_bot_config()
-    market_info = format_market_info(context["market"])
-    weather_info = format_weather_info(context["weather"]) if context["weather"] else ""
+    market_info = format_market_info(context.get("market") or {})
+    weather_source = context.get("weather")
+    weather_info = format_weather_info(weather_source) if weather_source else ""
+    news_info = format_hacker_news_info(context.get("hacker_news"))
+    time_context = context.get("time") or {}
+    formatted_time = str(time_context.get("formatted", "")).strip()
 
     # Build the complete system prompt with context
     base_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
@@ -3570,13 +3710,16 @@ def build_system_message(context: Dict, include_tools: bool = False) -> Dict[str
     contextual_info = f"""
 
 FECHA ACTUAL:
-{context["time"]["formatted"]}
+{formatted_time}
 
 CONTEXTO DEL MERCADO:
 {market_info}
 
 CLIMA EN BUENOS AIRES:
 {weather_info}
+
+NOTICIAS DE HACKER NEWS:
+{news_info}
 
 CONTEXTO POLITICO:
 - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
@@ -3607,6 +3750,46 @@ CONTEXTO POLITICO:
             }
         ],
     }
+
+
+def format_hacker_news_info(
+    news: Optional[Iterable[Dict[str, Any]]], include_discussion: bool = True
+) -> str:
+    """Format Hacker News context for system or agent prompts."""
+
+    if not news:
+        return "- sin datos por ahora"
+
+    lines: List[str] = []
+    for item in news:
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "(sin título)").strip()
+        url = str(item.get("url") or "").strip()
+
+        stats: List[str] = []
+        points_val = item.get("points")
+        if isinstance(points_val, int):
+            stats.append(f"{points_val} pts")
+        comments_val = item.get("comments")
+        if isinstance(comments_val, int):
+            stats.append(f"{comments_val} coms")
+
+        stats_text = f" ({', '.join(stats)})" if stats else ""
+        entry = f"- {title}{stats_text}"
+
+        if url:
+            entry += f" → {url}"
+
+        if include_discussion:
+            hn_url = str(item.get("comments_url") or "").strip()
+            if hn_url:
+                entry += f" (HN: {hn_url})"
+
+        lines.append(entry)
+
+    return "\n".join(lines) if lines else "- sin datos por ahora"
 
 
 def format_market_info(market: Dict) -> str:
