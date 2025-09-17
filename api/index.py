@@ -4799,9 +4799,23 @@ def handle_msg(message: Dict) -> str:
         if link_mode and message_text and not message_text.startswith("/"):
             fixed_text, changed, original_links = replace_links(message_text)
             if changed:
-                username = message.get("from", {}).get("username")
+                user_info = message.get("from", {})
+                username = user_info.get("username")
                 if username:
-                    fixed_text += f"\n\nShared by @{username}"
+                    shared_by = f"@{username}"
+                else:
+                    name_parts = [
+                        part
+                        for part in (
+                            user_info.get("first_name"),
+                            user_info.get("last_name"),
+                        )
+                        if part
+                    ]
+                    shared_by = " ".join(name_parts)
+
+                if shared_by:
+                    fixed_text += f"\n\nShared by {shared_by}"
                 reply_id = message.get("reply_to_message", {}).get("message_id")
                 if reply_id is not None:
                     reply_id = str(reply_id)
