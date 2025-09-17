@@ -725,6 +725,8 @@ def test_run_agent_cycle_returns_result():
     ) as mock_clean, patch(
         "api.index.get_hacker_news_context", return_value=[]
     ), patch(
+        "api.index.get_agent_thoughts", return_value=[]
+    ), patch(
         "api.index.save_agent_thought"
     ) as mock_save:
         mock_save.return_value = {"text": "pensé en bonos", "timestamp": 1_700_000_000}
@@ -741,6 +743,53 @@ def test_run_agent_cycle_returns_result():
     assert result["text"] == "pensé en bonos"
     assert result["timestamp"] == 1_700_000_000
     assert result["iso_time"].endswith("-03:00")
+
+
+def test_run_agent_cycle_breaks_loop_with_retry():
+    from api.index import (
+        AGENT_LOOP_FALLBACK_PREFIX,
+        AGENT_REPETITION_RETRY_LIMIT,
+        run_agent_cycle,
+    )
+
+    repeated_text = (
+        "HALLAZGOS: seguí leyendo la nota de Bonos AL30.\n"
+        "PRÓXIMO PASO: repasar qué dijo el BCRA sobre los AL30."
+    )
+    fresh_text = (
+        "HALLAZGOS: el INDEC marcó inflación de agosto en 12,4%.\n"
+        "PRÓXIMO PASO: buscar reacciones políticas a ese dato."
+    )
+
+    responses = ([repeated_text] * AGENT_REPETITION_RETRY_LIMIT) + [fresh_text]
+
+    def fake_ask(_):
+        return responses.pop(0)
+
+    previous_entries = [{"text": repeated_text, "timestamp": 1_700_000_000}]
+
+    with patch("api.index.ask_ai", side_effect=fake_ask) as mock_ask, patch(
+        "api.index.sanitize_tool_artifacts", side_effect=lambda x: x
+    ), patch(
+        "api.index.clean_duplicate_response", side_effect=lambda x: x
+    ), patch(
+        "api.index.get_hacker_news_context", return_value=[]
+    ), patch(
+        "api.index.get_agent_thoughts", return_value=previous_entries
+    ), patch(
+        "api.index.save_agent_thought"
+    ) as mock_save:
+        mock_save.return_value = {"text": fresh_text, "timestamp": 1_700_000_100}
+
+        result = run_agent_cycle()
+
+    assert mock_ask.call_count == AGENT_REPETITION_RETRY_LIMIT + 1
+    mock_save.assert_called_once()
+    saved_text = mock_save.call_args[0][0]
+    assert saved_text == fresh_text
+    assert not saved_text.startswith(AGENT_LOOP_FALLBACK_PREFIX)
+    assert result["text"] == fresh_text
+    assert result["timestamp"] == 1_700_000_100
 
 
 def test_is_secret_token_valid():
