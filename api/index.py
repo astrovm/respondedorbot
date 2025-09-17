@@ -814,9 +814,24 @@ def build_agent_retry_prompt(previous_text: Optional[str]) -> str:
 def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
     """Generate a non-repetitive fallback entry when the agent keeps looping."""
 
-    preview = truncate_text(previous_text or "", 120)
+    sanitized_previous = (previous_text or "").strip()
+    normalized_previous = normalize_agent_text(sanitized_previous)
+    fallback_marker = normalize_agent_text(
+        "HALLAZGOS: registré que estaba en un loop repitiendo"
+    )
+
+    preview = truncate_text(sanitized_previous, 120)
     preview_single_line = preview.replace("\n", " ").strip()
-    loop_fragment = f' "{preview_single_line}"' if preview_single_line else ""
+
+    include_fragment = True
+    if normalized_previous and fallback_marker and normalized_previous.startswith(
+        fallback_marker
+    ):
+        include_fragment = False
+
+    loop_fragment = (
+        f' "{preview_single_line}"' if include_fragment and preview_single_line else ""
+    )
     return (
         "HALLAZGOS: registré que estaba en un loop repitiendo"
         f"{loop_fragment} sin generar avances reales.\n"
