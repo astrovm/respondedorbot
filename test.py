@@ -4873,3 +4873,15 @@ def test_build_agent_fallback_entry_mentions_loop_and_previous():
 
     assert "loop" in fallback
     assert previous in fallback
+
+
+def test_build_agent_fallback_entry_avoids_recursive_quote():
+    previous = (
+        "HALLAZGOS: registré que estaba en un loop repitiendo \"algo viejo\" sin generar avances reales.\n"
+        "PRÓXIMO PASO: hacer una búsqueda web urgente, anotar los datos específicos que salgan y recién después planear el próximo paso."
+    )
+
+    fallback = build_agent_fallback_entry(previous)
+
+    assert "loop" in fallback
+    assert previous not in fallback
