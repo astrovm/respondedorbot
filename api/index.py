@@ -3723,7 +3723,7 @@ def get_groq_ai_response(
         final_messages = [system_msg] + messages
 
         response = groq_client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct",
+            model="moonshotai/kimi-k2-instruct-0905",
             messages=cast(Any, final_messages),
             max_tokens=1024,
         )
