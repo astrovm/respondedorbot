@@ -603,15 +603,11 @@ def normalize_agent_text(text: str) -> str:
     return collapsed.strip()
 
 
-def extract_agent_keywords(text: str) -> Set[str]:
-    """Return relevant lowercase keywords to detect repeated topics."""
-
-    normalized = normalize_agent_text(text)
-    if not normalized:
-        return set()
+def _extract_keywords_from_normalized(normalized_text: str) -> Set[str]:
+    """Return keyword candidates from an already-normalized agent text."""
 
     keywords: Set[str] = set()
-    for token in normalized.split():
+    for token in normalized_text.split():
         if len(token) < 4:
             continue
         if token in AGENT_KEYWORD_STOPWORDS:
@@ -622,6 +618,23 @@ def extract_agent_keywords(text: str) -> Set[str]:
             continue
         keywords.add(token)
 
+    return keywords
+
+
+def get_agent_text_features(text: str) -> Tuple[str, Set[str]]:
+    """Return normalized text plus keywords for repetition checks."""
+
+    normalized = normalize_agent_text(text)
+    if not normalized:
+        return "", set()
+
+    return normalized, _extract_keywords_from_normalized(normalized)
+
+
+def extract_agent_keywords(text: str) -> Set[str]:
+    """Return relevant lowercase keywords to detect repeated topics."""
+
+    _, keywords = get_agent_text_features(text)
     return keywords
 
 
@@ -682,14 +695,14 @@ def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
     if not new_text or not previous_text:
         return False
 
-    normalized_new = normalize_agent_text(new_text)
-    normalized_prev = normalize_agent_text(previous_text)
+    normalized_new, new_keywords = get_agent_text_features(new_text)
+    normalized_prev, prev_keywords = get_agent_text_features(previous_text)
+
+    if not normalized_new or not normalized_prev:
+        return False
 
     if _normalized_texts_are_repetitive(normalized_new, normalized_prev):
         return True
-
-    new_keywords = extract_agent_keywords(new_text)
-    prev_keywords = extract_agent_keywords(previous_text)
 
     return _agent_keywords_are_repetitive(new_keywords, prev_keywords)
 
@@ -699,8 +712,7 @@ def find_repetitive_recent_thought(
 ) -> Optional[str]:
     """Return the first recent thought that matches the new text too closely."""
 
-    normalized_new = normalize_agent_text(new_text)
-    new_keywords = extract_agent_keywords(new_text)
+    normalized_new, new_keywords = get_agent_text_features(new_text)
     if not normalized_new:
         return None
 
@@ -708,10 +720,11 @@ def find_repetitive_recent_thought(
         sanitized = str(candidate or "").strip()
         if not sanitized:
             continue
-        normalized_prev = normalize_agent_text(sanitized)
+        normalized_prev, previous_keywords = get_agent_text_features(sanitized)
+        if not normalized_prev:
+            continue
         if _normalized_texts_are_repetitive(normalized_new, normalized_prev):
             return sanitized
-        previous_keywords = extract_agent_keywords(sanitized)
         if _agent_keywords_are_repetitive(new_keywords, previous_keywords):
             return sanitized
 
@@ -845,6 +858,48 @@ def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
     )
 
 
+def ensure_agent_response_text(text: Optional[str]) -> str:
+    """Return a trimmed agent response or fall back to a canned entry."""
+
+    sanitized = str(text or "").strip()
+    return sanitized or AGENT_EMPTY_RESPONSE_FALLBACK
+
+
+def build_agent_retry_messages(
+    base_messages: List[Dict[str, Any]],
+    assistant_text: str,
+    corrective_prompt: str,
+) -> List[Dict[str, Any]]:
+    """Compose retry messages while keeping the original conversation intact."""
+
+    return base_messages + [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": assistant_text or ""}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": corrective_prompt}],
+        },
+    ]
+
+
+def request_agent_response(
+    generator: Callable[[List[Dict[str, Any]]], str],
+    messages: List[Dict[str, Any]],
+    error_context: str,
+) -> str:
+    """Invoke the agent generator while reporting failures consistently."""
+
+    try:
+        response = generator(messages)
+    except Exception as ai_error:
+        admin_report(error_context, ai_error)
+        raise
+
+    return ensure_agent_response_text(response)
+
+
 def save_agent_thought(
     thought_text: str, redis_client: Optional[redis.Redis] = None
 ) -> Optional[Dict[str, Any]]:
@@ -958,14 +1013,9 @@ def run_agent_cycle() -> Dict[str, Any]:
         sanitized_response = sanitize_tool_artifacts(raw)
         return clean_duplicate_response(sanitized_response).strip()
 
-    try:
-        cleaned = generate_response(messages)
-    except Exception as ai_error:
-        admin_report("Autonomous agent execution failed", ai_error)
-        raise
-
-    if not cleaned:
-        cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
+    cleaned = request_agent_response(
+        generate_response, messages, "Autonomous agent execution failed"
+    )
 
     if not agent_sections_are_valid(cleaned):
         original_attempt = cleaned
@@ -981,28 +1031,14 @@ def run_agent_cycle() -> Dict[str, Any]:
                 f" La nota anterior no tenía contenido en: {section_list}. "
                 "Respetá ambas secciones con información concreta."
             )
-        retry_messages = messages + [
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": original_attempt}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": corrective_prompt}],
-            },
-        ]
-
-        try:
-            retry_cleaned = generate_response(retry_messages)
-        except Exception as ai_error:
-            admin_report("Autonomous agent execution failed (structure retry)", ai_error)
-            raise
-
-        if retry_cleaned:
-            cleaned = retry_cleaned
-        if not cleaned:
-            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-
+        retry_messages = build_agent_retry_messages(
+            messages, original_attempt, corrective_prompt
+        )
+        cleaned = request_agent_response(
+            generate_response,
+            retry_messages,
+            "Autonomous agent execution failed (structure retry)",
+        )
         if not agent_sections_are_valid(cleaned):
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
@@ -1011,36 +1047,22 @@ def run_agent_cycle() -> Dict[str, Any]:
     )
     if matching_recent_text:
         corrective_prompt = build_agent_retry_prompt(matching_recent_text)
-        retry_messages = messages + [
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": cleaned}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": corrective_prompt}],
-            },
-        ]
-
-        try:
-            retry_cleaned = generate_response(retry_messages)
-        except Exception as ai_error:
-            admin_report("Autonomous agent execution failed (retry)", ai_error)
-            raise
-
-        if retry_cleaned:
-            cleaned = retry_cleaned
-        if not cleaned:
-            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-
+        retry_messages = build_agent_retry_messages(
+            messages, cleaned, corrective_prompt
+        )
+        cleaned = request_agent_response(
+            generate_response,
+            retry_messages,
+            "Autonomous agent execution failed (retry)",
+        )
         matching_recent_text = find_repetitive_recent_thought(
             cleaned, recent_entry_texts
         )
         if matching_recent_text:
             fallback = clean_duplicate_response(
                 build_agent_fallback_entry(matching_recent_text)
-            ).strip()
-            cleaned = fallback or AGENT_EMPTY_RESPONSE_FALLBACK
+            )
+            cleaned = ensure_agent_response_text(fallback)
 
     if not agent_sections_are_valid(cleaned):
         cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
