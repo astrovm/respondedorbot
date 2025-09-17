@@ -36,6 +36,11 @@ TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 
+# Autonomous agent thought logging
+AGENT_THOUGHTS_KEY = "agent:thoughts"
+MAX_AGENT_THOUGHTS = 10
+AGENT_THOUGHT_CHAR_LIMIT = 500
+
 # Rate limiting and timezone constants
 RATE_LIMIT_GLOBAL_MAX = 1024
 RATE_LIMIT_CHAT_MAX = 128
@@ -379,6 +384,223 @@ def redis_set_json(redis_client: redis.Redis, key: str, value: Any) -> bool:
     except Exception:
         return False
 
+
+def get_agent_thoughts(
+    redis_client: Optional[redis.Redis] = None,
+) -> List[Dict[str, Any]]:
+    """Return persisted autonomous agent thoughts (newest first)."""
+    if redis_client is None:
+        try:
+            redis_client = config_redis()
+        except Exception:
+            return []
+
+    try:
+        raw_items = cast(
+            List[str],
+            redis_client.lrange(AGENT_THOUGHTS_KEY, 0, MAX_AGENT_THOUGHTS - 1),
+        )
+    except Exception as redis_error:
+        admin_report(
+            "Error retrieving agent thoughts",
+            redis_error,
+            {"operation": "lrange", "key": AGENT_THOUGHTS_KEY},
+        )
+        return []
+
+    thoughts: List[Dict[str, Any]] = []
+    for raw in raw_items:
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        text_value = str(payload.get("text", "")).strip()
+        if not text_value:
+            continue
+
+        timestamp_value: Optional[int]
+        timestamp_raw = payload.get("timestamp")
+        if isinstance(timestamp_raw, (int, float)):
+            timestamp_value = int(timestamp_raw)
+        elif isinstance(timestamp_raw, str) and timestamp_raw.isdigit():
+            timestamp_value = int(timestamp_raw)
+        else:
+            timestamp_value = None
+
+        thought_entry: Dict[str, Any] = {"text": text_value}
+        if timestamp_value is not None:
+            thought_entry["timestamp"] = timestamp_value
+        thoughts.append(thought_entry)
+
+    return thoughts
+
+
+def build_agent_thoughts_context_message(
+    thoughts: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Return a system message describing recent agent thoughts for the model."""
+
+    lines: List[str] = []
+    for thought in thoughts:
+        text = str(thought.get("text", "")).strip()
+        if not text:
+            continue
+        timestamp_value = thought.get("timestamp")
+        if isinstance(timestamp_value, (int, float)):
+            dt = datetime.fromtimestamp(int(timestamp_value), tz=BA_TZ)
+            time_label = dt.strftime("%d/%m %H:%M")
+            lines.append(f"- [{time_label}] {text}")
+        else:
+            lines.append(f"- {text}")
+
+    if not lines:
+        return None
+
+    context_text = (
+        "MEMORIA AUTÓNOMA (más reciente primero):\n"
+        + "\n".join(lines)
+        + "\nUsá esta memoria cuando charles con humanos o cuando generes nuevos pensamientos autónomos."
+    )
+
+    return {
+        "role": "system",
+        "content": [{"type": "text", "text": context_text}],
+    }
+
+
+def get_agent_memory_context() -> Optional[Dict[str, Any]]:
+    """Fetch persisted thoughts and build a message for ask_ai."""
+
+    thoughts = get_agent_thoughts()
+    return build_agent_thoughts_context_message(thoughts)
+
+
+def format_agent_thoughts(thoughts: List[Dict[str, Any]]) -> str:
+    """Render thoughts for human consumption."""
+
+    if not thoughts:
+        return "todavía no tengo pensamientos guardados, dejame que labure un toque."
+
+    lines = ["🧠 Pensamientos recientes del gordo autónomo:"]
+    index = 1
+    for thought in thoughts:
+        text = str(thought.get("text", "")).strip()
+        if not text:
+            continue
+
+        timestamp_value = thought.get("timestamp")
+        if isinstance(timestamp_value, (int, float)):
+            dt = datetime.fromtimestamp(int(timestamp_value), tz=BA_TZ)
+            time_label = dt.strftime("%d/%m %H:%M")
+            lines.append(f"{index}. [{time_label}] {text}")
+        else:
+            lines.append(f"{index}. {text}")
+        index += 1
+
+    if len(lines) == 1:
+        return "todavía no tengo pensamientos guardados, dejame que labure un toque."
+
+    return "\n".join(lines)
+
+
+def save_agent_thought(
+    thought_text: str, redis_client: Optional[redis.Redis] = None
+) -> Optional[Dict[str, Any]]:
+    """Persist a new agent thought, trimming to the configured limits."""
+
+    sanitized = (thought_text or "").strip()
+    if not sanitized:
+        return None
+
+    truncated = truncate_text(sanitized, AGENT_THOUGHT_CHAR_LIMIT)
+
+    if redis_client is None:
+        try:
+            redis_client = config_redis()
+        except Exception:
+            return None
+
+    timestamp_value = int(time.time())
+    entry = {"text": truncated, "timestamp": timestamp_value}
+
+    try:
+        payload = json.dumps(entry, ensure_ascii=False)
+        pipeline = redis_client.pipeline()
+        pipeline.lpush(AGENT_THOUGHTS_KEY, payload)
+        pipeline.ltrim(AGENT_THOUGHTS_KEY, 0, MAX_AGENT_THOUGHTS - 1)
+        pipeline.execute()
+    except Exception as redis_error:
+        admin_report(
+            "Error saving agent thought",
+            redis_error,
+            {"thought_preview": truncated[:80]},
+        )
+        return None
+
+    return entry
+
+
+def show_agent_thoughts() -> str:
+    """Expose stored thoughts through the /agent command."""
+
+    thoughts = get_agent_thoughts()
+    return format_agent_thoughts(thoughts)
+
+
+def run_agent_cycle() -> Dict[str, Any]:
+    """Trigger the autonomous agent, persist its thought and return metadata."""
+
+    agent_prompt = (
+        "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
+        "Dejá registrado en primera persona qué estuviste pensando o haciendo y cuál es el próximo paso. "
+        "Máximo 500 caracteres, sin saludar a nadie: es un apunte privado."
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": agent_prompt,
+                }
+            ],
+        }
+    ]
+
+    try:
+        response = ask_ai(messages)
+    except Exception as ai_error:
+        admin_report("Autonomous agent execution failed", ai_error)
+        raise
+
+    sanitized = sanitize_tool_artifacts(response)
+    cleaned = clean_duplicate_response(sanitized).strip()
+    if not cleaned:
+        cleaned = "no se me ocurrió nada nuevo, pintó el vacío."
+
+    entry = save_agent_thought(cleaned)
+    if not entry:
+        admin_report(
+            "Autonomous agent could not persist thought",
+            None,
+            {"thought_preview": cleaned[:80]},
+        )
+        raise RuntimeError("Failed to persist autonomous agent thought")
+
+    result: Dict[str, Any] = {"text": entry.get("text", cleaned)}
+    timestamp_value = entry.get("timestamp")
+    if isinstance(timestamp_value, (int, float)):
+        ts_int = int(timestamp_value)
+        result["timestamp"] = ts_int
+        result["iso_time"] = datetime.fromtimestamp(ts_int, tz=BA_TZ).isoformat()
+
+    return result
 
 def get_cached_transcription(file_id: str) -> Optional[str]:
     """Get cached audio transcription from Redis"""
@@ -1752,6 +1974,13 @@ def ask_ai(
     image_file_id: Optional[str] = None,
 ) -> str:
     try:
+        messages = list(messages or [])
+
+        # Prepend autonomous agent memory so the model can reference past thoughts
+        agent_memory = get_agent_memory_context()
+        if agent_memory:
+            messages = [agent_memory] + messages
+
         # Build context with market and weather data
         context_data = {
             "market": get_market_context(),
@@ -2611,6 +2840,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/pregunta": (ask_ai, True, True),
         "/che": (ask_ai, True, True),
         "/gordo": (ask_ai, True, True),
+        "/agent": (show_agent_thoughts, False, False),
         # Regular commands
         "/convertbase": (convert_base, False, True),
         "/random": (select_random, False, True),
@@ -3719,6 +3949,18 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         if update_dollars:
             get_dollar_rates()
             return "Dollars updated", 200
+
+        run_agent = request.args.get("run_agent") == "true"
+        if run_agent:
+            try:
+                thought_result = run_agent_cycle()
+                return (
+                    json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False),
+                    200,
+                )
+            except Exception as agent_error:
+                admin_report("Agent run failed", agent_error)
+                return "Agent run failed", 500
 
         # Validate secret token
         if not is_secret_token_valid(request):
