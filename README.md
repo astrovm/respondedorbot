@@ -38,11 +38,11 @@ This bot is configured entirely through environment variables, making it easy to
 
 ### Web Search and Tools
 
-- `/buscar <consulta>` or `/search <query>`: búsquedas web rápidas usando DuckDuckGo. No requiere API keys. Devuelve hasta 10 resultados con títulos y links.
-- En conversaciones de IA, el bot puede decidir usar la herramienta `web_search` cuando necesita datos actuales. El modelo pedirá la herramienta escribiendo una línea como:
-  `[TOOL] web_search {"query": "inflación argentina hoy"}`
-  y luego responderá usando los resultados.
-- También puede pedir leer una página puntual con la herramienta `fetch_url`, que descarga cualquier URL http/https y devuelve el texto plano para que el bot cite fragmentos en sus respuestas o cuando opera como agente autónomo.
+- `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
+- In AI conversations, the bot may decide to use the `web_search` tool when it needs current data. The model will request the tool by writing a line such as:
+  `[TOOL] web_search {"query": "argentina inflation today"}`
+  and will then respond using the results.
+- It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses or when operating as an autonomous agent.
 
 ## Testing
 
