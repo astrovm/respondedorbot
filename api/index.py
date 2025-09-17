@@ -1146,10 +1146,24 @@ def run_agent_cycle() -> Dict[str, Any]:
             build_agent_fallback_entry(matching_recent_text)
         )
         fallback_entry = ensure_agent_response_text(fallback)
+
+        comparison_texts: Iterable[str]
+        if recent_entry_texts:
+            filtered_recent_texts: List[str] = []
+            skip_match = False
+            for candidate_text in recent_entry_texts:
+                if not skip_match and candidate_text == matching_recent_text:
+                    skip_match = True
+                    continue
+                filtered_recent_texts.append(candidate_text)
+            comparison_texts = filtered_recent_texts
+        else:
+            comparison_texts = recent_entry_texts
+
         if (
             is_loop_fallback_text(fallback_entry)
             and find_repetitive_recent_thought(
-                fallback_entry, recent_entry_texts
+                fallback_entry, comparison_texts
             )
         ):
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
