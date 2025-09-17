@@ -47,6 +47,11 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 AGENT_THOUGHTS_KEY = "agent:thoughts"
 MAX_AGENT_THOUGHTS = 10
 AGENT_THOUGHT_CHAR_LIMIT = 500
+AGENT_REQUIRED_SECTIONS = ("HALLAZGOS", "PRÓXIMO PASO")
+AGENT_EMPTY_RESPONSE_FALLBACK = (
+    "HALLAZGOS: no se me ocurrió nada nuevo, pintó el vacío.\n"
+    "PRÓXIMO PASO: meter una búsqueda puntual para traer un dato real y salir de la fiaca."
+)
 
 # Rate limiting and timezone constants
 RATE_LIMIT_GLOBAL_MAX = 1024
@@ -500,13 +505,15 @@ def format_agent_thoughts(thoughts: List[Dict[str, Any]]) -> str:
         if not text:
             continue
 
+        formatted_text = text.replace("\r\n", "\n").replace("\r", "\n")
+        formatted_text = formatted_text.replace("\n", "\n   ")
         timestamp_value = thought.get("timestamp")
         if isinstance(timestamp_value, (int, float)):
             dt = datetime.fromtimestamp(int(timestamp_value), tz=BA_TZ)
             time_label = dt.strftime("%d/%m %H:%M")
-            lines.append(f"{index}. [{time_label}] {text}")
+            lines.append(f"{index}. [{time_label}] {formatted_text}")
         else:
-            lines.append(f"{index}. {text}")
+            lines.append(f"{index}. {formatted_text}")
         index += 1
 
     if len(lines) == 1:
@@ -556,27 +563,74 @@ def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
     return overlap >= 0.75
 
 
-def build_agent_retry_prompt(previous_text: str) -> str:
+def extract_agent_section_content(text: str, header: str) -> Optional[str]:
+    """Extract the content of a structured agent section."""
+
+    sanitized = (text or "").strip()
+    if not sanitized:
+        return None
+
+    header_pattern = re.compile(rf"(?im)^{re.escape(header)}:\s*", re.UNICODE)
+    match = header_pattern.search(sanitized)
+    if not match:
+        return None
+
+    start = match.end()
+    other_headers = [value for value in AGENT_REQUIRED_SECTIONS if value != header]
+    end = len(sanitized)
+    if other_headers:
+        combined_headers = "|".join(re.escape(value) for value in other_headers)
+        next_pattern = re.compile(rf"(?im)^(?:{combined_headers}):\s*", re.UNICODE)
+        next_match = next_pattern.search(sanitized, start)
+        if next_match:
+            end = next_match.start()
+
+    content = sanitized[start:end].strip()
+    return content or None
+
+
+def agent_sections_are_valid(text: str) -> bool:
+    """Check that the agent response includes the required structured sections."""
+
+    if not text:
+        return False
+
+    for header in AGENT_REQUIRED_SECTIONS:
+        if not extract_agent_section_content(text, header):
+            return False
+
+    return True
+
+
+def build_agent_retry_prompt(previous_text: Optional[str]) -> str:
     """Create a corrective prompt so the agent avoids looping."""
 
-    preview = truncate_text(previous_text, 160)
+    preview = truncate_text(previous_text or "", 160)
+    preview_single_line = preview.replace("\n", " ").strip()
     return (
-        "Te repetiste igual que la última memoria y no trajiste datos nuevos. "
+        "La última nota no sirvió: te repetiste igual que la memoria anterior o no respetaste la estructura obligatoria. "
         "Antes de escribir otra vez, completá el pendiente y contá resultados concretos. "
         "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. "
-        f"Esto fue lo último guardado: \"{preview}\". "
-        "Escribí ahora una nota distinta con hechos puntuales y luego marcá el próximo paso."
+        + (
+            f"Esto fue lo último guardado o la nota fallida: \"{preview_single_line}\". "
+            if preview_single_line
+            else ""
+        )
+        + "Escribí ahora una nota distinta con hechos puntuales y cerrala en dos secciones claras: "
+        "\"HALLAZGOS:\" con los datos específicos que obtuviste y \"PRÓXIMO PASO:\" con la siguiente acción directa."
     )
 
 
-def build_agent_fallback_entry(previous_text: str) -> str:
+def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
     """Generate a non-repetitive fallback entry when the agent keeps looping."""
 
-    preview = truncate_text(previous_text, 120)
+    preview = truncate_text(previous_text or "", 120)
+    preview_single_line = preview.replace("\n", " ").strip()
+    loop_fragment = f' "{preview_single_line}"' if preview_single_line else ""
     return (
-        "registré que estaba en un loop repitiendo \""
-        + preview
-        + "\" sin hacer avances. dejé anotado que tengo que ejecutar una búsqueda web urgente, resumir los datos concretos que salgan y recién después definir el próximo paso."
+        "HALLAZGOS: registré que estaba en un loop repitiendo"
+        f"{loop_fragment} sin generar avances reales.\n"
+        "PRÓXIMO PASO: hacer una búsqueda web urgente, anotar los datos específicos que salgan y recién después planear el próximo paso."
     )
 
 
@@ -636,7 +690,8 @@ def run_agent_cycle() -> Dict[str, Any]:
 
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
-        "Registrá en primera persona qué investigaste, qué encontraste y recién después el próximo paso."
+        "Registrá en primera persona qué investigaste, qué encontraste y recién después el próximo paso. "
+        "Devolvé la nota en dos secciones en mayúsculas: \"HALLAZGOS:\" con los datos concretos y \"PRÓXIMO PASO:\" con la acción puntual."
     )
     if last_entry_text:
         agent_prompt += (
@@ -675,7 +730,46 @@ def run_agent_cycle() -> Dict[str, Any]:
         raise
 
     if not cleaned:
-        cleaned = "no se me ocurrió nada nuevo, pintó el vacío."
+        cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
+
+    if not agent_sections_are_valid(cleaned):
+        original_attempt = cleaned
+        corrective_prompt = build_agent_retry_prompt(original_attempt)
+        missing_sections = [
+            header
+            for header in AGENT_REQUIRED_SECTIONS
+            if not extract_agent_section_content(original_attempt, header)
+        ]
+        if missing_sections:
+            section_list = ", ".join(missing_sections)
+            corrective_prompt += (
+                f" La nota anterior no tenía contenido en: {section_list}. "
+                "Respetá ambas secciones con información concreta."
+            )
+        retry_messages = messages + [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": original_attempt}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": corrective_prompt}],
+            },
+        ]
+
+        try:
+            retry_cleaned = generate_response(retry_messages)
+        except Exception as ai_error:
+            admin_report("Autonomous agent execution failed (structure retry)", ai_error)
+            raise
+
+        if retry_cleaned:
+            cleaned = retry_cleaned
+        if not cleaned:
+            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
+
+        if not agent_sections_are_valid(cleaned):
+            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
     if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
         corrective_prompt = build_agent_retry_prompt(last_entry_text)
@@ -699,13 +793,16 @@ def run_agent_cycle() -> Dict[str, Any]:
         if retry_cleaned:
             cleaned = retry_cleaned
         if not cleaned:
-            cleaned = "no se me ocurrió nada nuevo, pintó el vacío."
+            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
         if last_entry_text and is_repetitive_thought(cleaned, last_entry_text):
             fallback = clean_duplicate_response(
                 build_agent_fallback_entry(last_entry_text)
             ).strip()
-            cleaned = fallback or "no se me ocurrió nada nuevo, pintó el vacío."
+            cleaned = fallback or AGENT_EMPTY_RESPONSE_FALLBACK
+
+    if not agent_sections_are_valid(cleaned):
+        cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
     entry = save_agent_thought(cleaned)
     if not entry:
