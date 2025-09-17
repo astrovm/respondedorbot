@@ -2205,65 +2205,100 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
     try:
         lines = text.splitlines()
         i = 0
+        in_fence = False
         while i < len(lines):
             raw = lines[i]
             line = raw.strip()
 
-            # Skip code fence delimiters
+            # Toggle code fence context so [TOOL] inside code blocks is ignored
             if line.startswith("```"):
+                in_fence = not in_fence
+                i += 1
+                continue
+
+            if in_fence:
                 i += 1
                 continue
 
             # Normalize common list/code prefixes
             normalized = line
-            # strip leading bullets or numbering
             normalized = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", normalized)
             normalized = normalized.strip().strip("`")
 
-            if not normalized.startswith("[TOOL]"):
+            marker_index = normalized.find("[TOOL]")
+            if marker_index == -1:
                 i += 1
                 continue
 
+            normalized = normalized[marker_index:]
+
             # Expected: [TOOL] name {json...}
             without_prefix = normalized[len("[TOOL]") :].strip()
+            if without_prefix.startswith(":"):
+                without_prefix = without_prefix[1:].strip()
+
+            name_source_index = i
+            if not without_prefix:
+                j = i + 1
+                while j < len(lines):
+                    addition = lines[j].strip().strip("`")
+                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
+                    addition = addition.strip()
+                    if addition:
+                        without_prefix = addition
+                        name_source_index = j
+                        break
+                    j += 1
+                if not without_prefix:
+                    i += 1
+                    continue
+
             parts = without_prefix.split(" ", 1)
             if not parts:
                 i += 1
                 continue
-            name = parts[0].strip()
-            remainder = parts[1].strip() if len(parts) > 1 else ""
 
-            # Gather JSON possibly spanning multiple lines
-            json_candidate = remainder
-            # If we don't have an opening brace yet, try to read next lines
-            if "{" not in json_candidate:
-                # try next lines until we see an opening brace
-                j = i + 1
-                while j < len(lines) and "{" not in json_candidate:
-                    addition = lines[j].strip().strip("`")
-                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
-                    if addition:
-                        json_candidate = (json_candidate + " " + addition).strip()
-                    j += 1
-
-            # Now if we have an opening brace, read until braces balance
-            if "{" in json_candidate:
-                # Start counting from current collected candidate
-                open_count = json_candidate.count("{") - json_candidate.count("}")
-                j = i + 1
-                while open_count > 0 and j < len(lines):
-                    addition = lines[j].strip().strip("`")
-                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
-                    json_candidate = (json_candidate + " " + addition).strip()
-                    open_count += addition.count("{") - addition.count("}")
-                    j += 1
-            else:
-                # Couldn't find JSON
+            name = parts[0].strip().strip(":")
+            if not name:
                 i += 1
                 continue
 
-            # Trim trailing commas or code fence markers
-            json_text = json_candidate.strip().rstrip(",")
+            remainder = parts[1].strip() if len(parts) > 1 else ""
+            if remainder.startswith(":"):
+                remainder = remainder[1:].strip()
+
+            # Gather JSON possibly spanning multiple lines
+            json_candidate = remainder
+            j = name_source_index + 1
+
+            while "{" not in json_candidate and j < len(lines):
+                addition = lines[j].strip().strip("`")
+                addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
+                addition = addition.strip()
+                if addition:
+                    json_candidate = (json_candidate + " " + addition).strip()
+                j += 1
+
+            if "{" not in json_candidate:
+                i += 1
+                continue
+
+            open_count = json_candidate.count("{") - json_candidate.count("}")
+            while open_count > 0 and j < len(lines):
+                addition = lines[j].strip().strip("`")
+                addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
+                addition = addition.strip()
+                if addition:
+                    json_candidate = (json_candidate + " " + addition).strip()
+                    open_count += addition.count("{") - addition.count("}")
+                j += 1
+
+            closing_index = json_candidate.rfind("}")
+            if closing_index == -1:
+                i += 1
+                continue
+
+            json_text = json_candidate[: closing_index + 1].strip().rstrip(",")
 
             # Try parse as JSON first, then fallback to Python literal
             args: Any = None
