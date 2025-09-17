@@ -46,6 +46,7 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 # Autonomous agent thought logging
 AGENT_THOUGHTS_KEY = "agent:thoughts"
 MAX_AGENT_THOUGHTS = 10
+AGENT_THOUGHT_DISPLAY_LIMIT = 5
 AGENT_THOUGHT_CHAR_LIMIT = 500
 AGENT_RECENT_THOUGHT_WINDOW = 5
 AGENT_REQUIRED_SECTIONS = ("HALLAZGOS", "PRÓXIMO PASO")
@@ -704,7 +705,8 @@ def show_agent_thoughts() -> str:
     """Expose stored thoughts through the /agent command."""
 
     thoughts = get_agent_thoughts()
-    return format_agent_thoughts(thoughts)
+    visible_thoughts = thoughts[:AGENT_THOUGHT_DISPLAY_LIMIT]
+    return format_agent_thoughts(visible_thoughts)
 
 
 def run_agent_cycle() -> Dict[str, Any]:
