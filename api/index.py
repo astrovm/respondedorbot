@@ -55,6 +55,70 @@ AGENT_EMPTY_RESPONSE_FALLBACK = (
     "PRÓXIMO PASO: meter una búsqueda puntual para traer un dato real y salir de la fiaca."
 )
 
+# Common filler words that shouldn't count as keywords when checking topic overlap
+AGENT_KEYWORD_STOPWORDS: Set[str] = {
+    "ante",
+    "aqui",
+    "aquel",
+    "aquella",
+    "aquello",
+    "asi",
+    "busque",
+    "cada",
+    "como",
+    "con",
+    "contra",
+    "cual",
+    "cuando",
+    "cuyo",
+    "datos",
+    "donde",
+    "durante",
+    "entre",
+    "este",
+    "esta",
+    "estas",
+    "esto",
+    "estos",
+    "gordo",
+    "hallazgos",
+    "hacer",
+    "hice",
+    "investigue",
+    "investigando",
+    "investigar",
+    "luego",
+    "mientras",
+    "mismo",
+    "mucha",
+    "mucho",
+    "nada",
+    "para",
+    "pendiente",
+    "pero",
+    "porque",
+    "proximo",
+    "queda",
+    "seguir",
+    "sigue",
+    "sobre",
+    "solo",
+    "todas",
+    "todos",
+    "todavia",
+    "tema",
+    "teni",
+    "tenemos",
+    "tener",
+    "tenes",
+    "tenia",
+    "teniendo",
+    "tengo",
+    "unas",
+    "unos",
+    "voy",
+}
+
 # Rate limiting and timezone constants
 RATE_LIMIT_GLOBAL_MAX = 1024
 RATE_LIMIT_CHAT_MAX = 128
@@ -533,6 +597,51 @@ def normalize_agent_text(text: str) -> str:
     return collapsed.strip()
 
 
+def extract_agent_keywords(text: str) -> Set[str]:
+    """Return relevant lowercase keywords to detect repeated topics."""
+
+    normalized = normalize_agent_text(text)
+    if not normalized:
+        return set()
+
+    keywords: Set[str] = set()
+    for token in normalized.split():
+        if len(token) < 4:
+            continue
+        if token in AGENT_KEYWORD_STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        if not any(ch.isalpha() for ch in token):
+            continue
+        keywords.add(token)
+
+    return keywords
+
+
+def _agent_keywords_are_repetitive(
+    new_keywords: Set[str], previous_keywords: Set[str]
+) -> bool:
+    """Decide if two keyword sets point to the same topic."""
+
+    if not new_keywords or not previous_keywords:
+        return False
+
+    overlap = new_keywords & previous_keywords
+    if len(overlap) >= 3:
+        return True
+
+    min_len = min(len(new_keywords), len(previous_keywords))
+    if min_len <= 1:
+        return False
+
+    if len(overlap) >= 2 and min_len <= 5:
+        return True
+
+    overlap_ratio = len(overlap) / min_len
+    return overlap_ratio >= 0.6
+
+
 def _normalized_texts_are_repetitive(
     normalized_new: str, normalized_prev: str
 ) -> bool:
@@ -570,7 +679,13 @@ def is_repetitive_thought(new_text: str, previous_text: Optional[str]) -> bool:
     normalized_new = normalize_agent_text(new_text)
     normalized_prev = normalize_agent_text(previous_text)
 
-    return _normalized_texts_are_repetitive(normalized_new, normalized_prev)
+    if _normalized_texts_are_repetitive(normalized_new, normalized_prev):
+        return True
+
+    new_keywords = extract_agent_keywords(new_text)
+    prev_keywords = extract_agent_keywords(previous_text)
+
+    return _agent_keywords_are_repetitive(new_keywords, prev_keywords)
 
 
 def find_repetitive_recent_thought(
@@ -579,6 +694,7 @@ def find_repetitive_recent_thought(
     """Return the first recent thought that matches the new text too closely."""
 
     normalized_new = normalize_agent_text(new_text)
+    new_keywords = extract_agent_keywords(new_text)
     if not normalized_new:
         return None
 
@@ -589,8 +705,52 @@ def find_repetitive_recent_thought(
         normalized_prev = normalize_agent_text(sanitized)
         if _normalized_texts_are_repetitive(normalized_new, normalized_prev):
             return sanitized
+        previous_keywords = extract_agent_keywords(sanitized)
+        if _agent_keywords_are_repetitive(new_keywords, previous_keywords):
+            return sanitized
 
     return None
+
+
+def summarize_recent_agent_topics(
+    thoughts: Iterable[Dict[str, Any]], limit: int = 4
+) -> List[str]:
+    """Extract short summaries of recent topics from stored thoughts."""
+
+    summaries: List[str] = []
+    seen: Set[str] = set()
+
+    for thought in thoughts:
+        if len(summaries) >= limit:
+            break
+
+        text = ""
+        if isinstance(thought, dict):
+            text = str(thought.get("text", "")).strip()
+        else:
+            text = str(thought or "").strip()
+
+        if not text:
+            continue
+
+        section_content = extract_agent_section_content(text, "HALLAZGOS")
+        snippet_source = section_content or text
+        snippet_source = re.sub(r"\s+", " ", snippet_source).strip()
+        if not snippet_source:
+            continue
+
+        first_sentence_parts = re.split(r"(?<=[.!?])\s+", snippet_source, maxsplit=1)
+        first_sentence = first_sentence_parts[0].strip() if first_sentence_parts else ""
+        snippet = truncate_text(first_sentence or snippet_source, 120)
+        snippet_key = snippet.lower()
+
+        if not snippet or snippet_key in seen:
+            continue
+
+        summaries.append(snippet)
+        seen.add(snippet_key)
+
+    return summaries
 
 
 def extract_agent_section_content(text: str, header: str) -> Optional[str]:
@@ -640,7 +800,7 @@ def build_agent_retry_prompt(previous_text: Optional[str]) -> str:
     return (
         "La última nota no sirvió: te repetiste igual que la memoria anterior o no respetaste la estructura obligatoria. "
         "Antes de escribir otra vez, completá el pendiente y contá resultados concretos. "
-        "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. "
+        "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. Si ya cerraste ese tema, cambiá a otro interés fuerte del gordo en vez de seguir clavado en lo mismo. "
         + (
             f"Esto fue lo último guardado o la nota fallida: \"{preview_single_line}\". "
             if preview_single_line
@@ -721,6 +881,9 @@ def run_agent_cycle() -> Dict[str, Any]:
                 recent_entry_texts.append(candidate)
 
     last_entry_text = recent_entry_texts[0] if recent_entry_texts else None
+    recent_topic_summaries = summarize_recent_agent_topics(
+        recent_thoughts[:AGENT_RECENT_THOUGHT_WINDOW]
+    )
 
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
@@ -732,6 +895,13 @@ def run_agent_cycle() -> Dict[str, Any]:
             "\n\nÚLTIMA MEMORIA GUARDADA:\n"
             f"{truncate_text(last_entry_text, 220)}\n"
             "Resolvé ese pendiente ahora mismo y deja asentado el resultado concreto antes de planear otra cosa."
+        )
+    if recent_topic_summaries:
+        topics_lines = "\n".join(f"- {value}" for value in recent_topic_summaries)
+        agent_prompt += (
+            "\nEstos fueron los últimos temas que trabajaste:\n"
+            f"{topics_lines}\n"
+            "Solo repetí uno si apareció un dato nuevo y específico; si no, cambiá a otro interés del gordo."
         )
     agent_prompt += (
         "\nIncluí datos específicos (números, titulares, fuentes) de lo que investigues y evitá repetir entradas previas. "

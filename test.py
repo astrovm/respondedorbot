@@ -27,6 +27,7 @@ from api.index import (
     find_repetitive_recent_thought,
     build_agent_retry_prompt,
     build_agent_fallback_entry,
+    summarize_recent_agent_topics,
 )
 from datetime import datetime, timezone, timedelta
 import json
@@ -4818,6 +4819,43 @@ def test_find_repetitive_recent_thought_allows_unique_note():
     )
 
     assert find_repetitive_recent_thought(new_entry, stored) is None
+
+
+def test_is_repetitive_thought_detects_same_topic_keywords():
+    previous = (
+        "seguí la rotación institucional ether bitcoin en etfs spot de estados unidos para ver flujos"
+    )
+    repeated = (
+        "investigué rotación institucional ether bitcoin en etfs europeos y anoté que siguen los mismos flujos"
+    )
+
+    assert is_repetitive_thought(repeated, previous)
+
+
+def test_find_repetitive_recent_thought_flags_keyword_overlap():
+    stored = [
+        "seguí la rotación institucional ether bitcoin en etfs spot de estados unidos",
+        "miré balances corporativos yankees",
+    ]
+    repeated = "volví sobre rotación institucional ether bitcoin y etfs spot para comparar con europa"
+
+    assert find_repetitive_recent_thought(repeated, stored) == stored[0]
+
+
+def test_summarize_recent_agent_topics_uses_hallazgos_section():
+    thoughts = [
+        {
+            "text": "HALLAZGOS: miré la curva de bonos CER y cayó el tramo largo.\nPRÓXIMO PASO: revisar el Boncer 2026",
+        },
+        {
+            "text": "HALLAZGOS: repasé ligas europeas de fútbol femenino.\nPRÓXIMO PASO: buscar calendario local",
+        },
+    ]
+
+    summaries = summarize_recent_agent_topics(thoughts, limit=3)
+
+    assert summaries[0].startswith("miré la curva de bonos")
+    assert len(summaries) == 2
 
 
 def test_build_agent_retry_prompt_mentions_previous_text():
