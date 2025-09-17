@@ -779,20 +779,62 @@ def extract_agent_section_content(text: str, header: str) -> Optional[str]:
     if not sanitized:
         return None
 
-    header_pattern = re.compile(rf"(?im)^{re.escape(header)}:\s*", re.UNICODE)
-    match = header_pattern.search(sanitized)
+    def normalize_value(value: str) -> str:
+        """Return a normalized representation without diacritics for matching."""
+
+        normalized = unicodedata.normalize("NFD", value)
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+    def normalize_with_mapping(value: str) -> Tuple[str, List[int]]:
+        """Normalize text while tracking original indices for slicing."""
+
+        normalized_chars: List[str] = []
+        index_map: List[int] = []
+        for idx, char in enumerate(value):
+            for component in unicodedata.normalize("NFD", char):
+                if not unicodedata.combining(component):
+                    normalized_chars.append(component)
+                    index_map.append(idx)
+        return "".join(normalized_chars), index_map
+
+    normalized_text, index_map = normalize_with_mapping(sanitized)
+
+    normalized_sections = {
+        value: normalize_value(value) for value in AGENT_REQUIRED_SECTIONS
+    }
+    normalized_header = normalized_sections.get(header, normalize_value(header))
+
+    header_pattern = re.compile(
+        rf"(?im)^{re.escape(normalized_header)}:\s*", re.UNICODE
+    )
+    match = header_pattern.search(normalized_text)
     if not match:
         return None
 
-    start = match.end()
-    other_headers = [value for value in AGENT_REQUIRED_SECTIONS if value != header]
+    def original_index(normalized_index: int) -> int:
+        if normalized_index <= 0:
+            return 0
+        if normalized_index >= len(index_map):
+            return len(sanitized)
+        return index_map[normalized_index]
+
+    start = original_index(match.end())
+    other_headers_normalized = [
+        normalized_sections[value]
+        for value in AGENT_REQUIRED_SECTIONS
+        if value != header
+    ]
     end = len(sanitized)
-    if other_headers:
-        combined_headers = "|".join(re.escape(value) for value in other_headers)
-        next_pattern = re.compile(rf"(?im)^(?:{combined_headers}):\s*", re.UNICODE)
-        next_match = next_pattern.search(sanitized, start)
+    combined_headers = "|".join(
+        re.escape(value) for value in other_headers_normalized if value
+    )
+    if combined_headers:
+        next_pattern = re.compile(
+            rf"(?im)^(?:{combined_headers}):\s*", re.UNICODE
+        )
+        next_match = next_pattern.search(normalized_text, match.end())
         if next_match:
-            end = next_match.start()
+            end = original_index(next_match.start())
 
     content = sanitized[start:end].strip()
     return content or None
