@@ -4361,7 +4361,10 @@ def transcribe_audio_cloudflare(
     print("Transcribing audio with Cloudflare Whisper...")
 
     # Use direct API call to Cloudflare Workers AI for Whisper
-    url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/openai/whisper"
+    url = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{cloudflare_account_id}/ai/run/@cf/openai/whisper-large-v3-turbo"
+    )
     headers = {
         "Authorization": f"Bearer {cloudflare_api_key}",
         "Content-Type": "application/octet-stream",
