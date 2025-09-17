@@ -4996,6 +4996,21 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     return gen_random(message["from"]["first_name"])
 
 
+GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
+
+
+def remove_gordo_prefix(text: Optional[str]) -> str:
+    """Strip leading 'gordo:' persona prefix from each line of a response."""
+    if not text:
+        return ""
+
+    cleaned_lines: List[str] = []
+    for line in text.splitlines():
+        cleaned_lines.append(GORDO_PREFIX_PATTERN.sub("", line, count=1))
+
+    return "\n".join(cleaned_lines).strip()
+
+
 def clean_duplicate_response(response: str) -> str:
     """Remove duplicate consecutive text in AI responses"""
     if not response:
@@ -5061,8 +5076,11 @@ def handle_ai_response(
     # Remove any internal tool call lines before further processing
     sanitized_response = sanitize_tool_artifacts(response)
 
+    # Strip persona prefixes that sometimes leak into completions
+    persona_stripped_response = remove_gordo_prefix(sanitized_response)
+
     # Clean any duplicate text
-    cleaned_response = clean_duplicate_response(sanitized_response)
+    cleaned_response = clean_duplicate_response(persona_stripped_response)
     try:
         print(
             f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'"
