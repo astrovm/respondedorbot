@@ -19,6 +19,7 @@ from api.index import (
     parse_tool_call,
     execute_tool,
     complete_with_providers,
+    remove_gordo_prefix,
     handle_ai_response,
     handle_msg,
     replace_links,
@@ -385,6 +386,15 @@ def test_gen_random():
             2,
         ]  # First call returns 0 (no), second call returns 2 (name)
         assert gen_random("astro") == "no astro"
+
+
+def test_remove_gordo_prefix():
+    sample = "gordo: hola capo\n  Gordo : me fui a dormir\nsin prefijo"
+    expected = "hola capo\nme fui a dormir\nsin prefijo"
+    assert remove_gordo_prefix(sample) == expected
+
+    assert remove_gordo_prefix("sin etiqueta") == "sin etiqueta"
+    assert remove_gordo_prefix(None) == ""
 
 
 def test_select_random():
