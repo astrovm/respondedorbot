@@ -698,6 +698,21 @@ def test_show_agent_thoughts_no_entries():
     assert "no tengo pensamientos" in response
 
 
+def test_show_agent_thoughts_limits_entries():
+    from api.index import show_agent_thoughts, AGENT_THOUGHT_DISPLAY_LIMIT
+
+    sample = [{"text": f"nota {i}"} for i in range(1, AGENT_THOUGHT_DISPLAY_LIMIT + 3)]
+
+    with patch("api.index.get_agent_thoughts", return_value=sample):
+        response = show_agent_thoughts()
+
+    for i in range(1, AGENT_THOUGHT_DISPLAY_LIMIT + 1):
+        assert f"nota {i}" in response
+
+    assert f"nota {AGENT_THOUGHT_DISPLAY_LIMIT + 1}" not in response
+    assert f"nota {AGENT_THOUGHT_DISPLAY_LIMIT + 2}" not in response
+
+
 def test_run_agent_cycle_returns_result():
     from api.index import run_agent_cycle
 
