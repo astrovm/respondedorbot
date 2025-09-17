@@ -29,6 +29,7 @@ from decimal import Decimal
 import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
+from functools import lru_cache
 
 
 # TTL constants (seconds)
@@ -59,6 +60,13 @@ AGENT_REQUIRED_SECTIONS = ("HALLAZGOS", "PRÓXIMO PASO")
 AGENT_EMPTY_RESPONSE_FALLBACK = (
     "HALLAZGOS: no se me ocurrió nada nuevo, pintó el vacío.\n"
     "PRÓXIMO PASO: meter una búsqueda puntual para traer un dato real y salir de la fiaca."
+)
+AGENT_REPETITION_RETRY_LIMIT = 3
+AGENT_LOOP_FALLBACK_PREFIX = "HALLAZGOS: registré que estaba en un loop repitiendo"
+AGENT_REPETITION_ESCALATION_HINT = (
+    "No escribas que estás trabado o en un loop. Ejecutá de inmediato una herramienta "
+    "(web_search o fetch_url) con un tema distinto y registrá datos nuevos "
+    "(números, titulares, precios). Si el tema anterior no se mueve, cambiá a otro interés fuerte del gordo."
 )
 
 # Common filler words that shouldn't count as keywords when checking topic overlap
@@ -603,6 +611,27 @@ def normalize_agent_text(text: str) -> str:
     return collapsed.strip()
 
 
+@lru_cache(maxsize=1)
+def _loop_fallback_marker() -> str:
+    """Cache the normalized marker for loop fallback detection."""
+
+    return normalize_agent_text(AGENT_LOOP_FALLBACK_PREFIX)
+
+
+def is_loop_fallback_text(text: str) -> bool:
+    """Return True when the text matches the loop fallback template."""
+
+    normalized_marker = _loop_fallback_marker()
+    if not normalized_marker:
+        return False
+
+    normalized_text = normalize_agent_text(text)
+    if not normalized_text:
+        return False
+
+    return normalized_text.startswith(normalized_marker)
+
+
 def _extract_keywords_from_normalized(normalized_text: str) -> Set[str]:
     """Return keyword candidates from an already-normalized agent text."""
 
@@ -877,9 +906,7 @@ def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
 
     sanitized_previous = (previous_text or "").strip()
     normalized_previous = normalize_agent_text(sanitized_previous)
-    fallback_marker = normalize_agent_text(
-        "HALLAZGOS: registré que estaba en un loop repitiendo"
-    )
+    fallback_marker = _loop_fallback_marker()
 
     preview = truncate_text(sanitized_previous, 120)
     preview_single_line = preview.replace("\n", " ").strip()
@@ -894,8 +921,7 @@ def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
         f' "{preview_single_line}"' if include_fragment and preview_single_line else ""
     )
     return (
-        "HALLAZGOS: registré que estaba en un loop repitiendo"
-        f"{loop_fragment} sin generar avances reales.\n"
+        f"{AGENT_LOOP_FALLBACK_PREFIX}{loop_fragment} sin generar avances reales.\n"
         "PRÓXIMO PASO: hacer una búsqueda web urgente, anotar los datos específicos que salgan y recién después planear el próximo paso."
     )
 
@@ -1087,8 +1113,15 @@ def run_agent_cycle() -> Dict[str, Any]:
     matching_recent_text = find_repetitive_recent_thought(
         cleaned, recent_entry_texts
     )
-    if matching_recent_text:
+    repetition_attempt = 0
+    while (
+        matching_recent_text
+        and repetition_attempt < AGENT_REPETITION_RETRY_LIMIT
+    ):
         corrective_prompt = build_agent_retry_prompt(matching_recent_text)
+        if repetition_attempt == AGENT_REPETITION_RETRY_LIMIT - 1:
+            corrective_prompt += " " + AGENT_REPETITION_ESCALATION_HINT
+
         retry_messages = build_agent_retry_messages(
             messages, cleaned, corrective_prompt
         )
@@ -1097,14 +1130,31 @@ def run_agent_cycle() -> Dict[str, Any]:
             retry_messages,
             "Autonomous agent execution failed (retry)",
         )
+
+        if not agent_sections_are_valid(cleaned):
+            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
+            matching_recent_text = None
+            break
+
+        repetition_attempt += 1
         matching_recent_text = find_repetitive_recent_thought(
             cleaned, recent_entry_texts
         )
-        if matching_recent_text:
-            fallback = clean_duplicate_response(
-                build_agent_fallback_entry(matching_recent_text)
+
+    if matching_recent_text:
+        fallback = clean_duplicate_response(
+            build_agent_fallback_entry(matching_recent_text)
+        )
+        fallback_entry = ensure_agent_response_text(fallback)
+        if (
+            is_loop_fallback_text(fallback_entry)
+            and find_repetitive_recent_thought(
+                fallback_entry, recent_entry_texts
             )
-            cleaned = ensure_agent_response_text(fallback)
+        ):
+            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
+        else:
+            cleaned = fallback_entry
 
     if not agent_sections_are_valid(cleaned):
         cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
