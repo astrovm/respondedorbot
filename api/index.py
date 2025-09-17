@@ -2,6 +2,7 @@ from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone
 from flask import Flask, Request, request
 from html.parser import HTMLParser
+from html import unescape
 from math import log
 from openai import OpenAI
 from os import environ
@@ -35,6 +36,11 @@ TTL_DOLLAR = 300  # 5 minutes
 TTL_BCRA = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
+TTL_WEB_FETCH = 300  # 5 minutes
+WEB_FETCH_MAX_BYTES = 250_000
+WEB_FETCH_MIN_CHARS = 500
+WEB_FETCH_MAX_CHARS = 8000
+WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 
 # Autonomous agent thought logging
@@ -641,6 +647,7 @@ def run_agent_cycle() -> Dict[str, Any]:
     agent_prompt += (
         "\nIncluí datos específicos (números, titulares, fuentes) de lo que investigues y evitá repetir entradas previas. "
         "Si necesitás info fresca, llamá a la herramienta web_search con un query puntual y resumí el hallazgo. "
+        "Si hace falta leer una nota puntual, llamá a fetch_url con la URL (incluí https://) y anotá lo relevante. "
         "Máximo 500 caracteres, sin saludar a nadie: es un apunte privado."
     )
 
@@ -2252,6 +2259,41 @@ def ask_ai(
                         else:
                             lines.append(f"{i}. {title}\n{url}")
                     return "\n\n".join(lines)
+                if last_tool_name == "fetch_url":
+                    data: Any = last_tool_output
+                    if isinstance(data, str):
+                        try:
+                            data = json.loads(data)
+                        except Exception:
+                            return str(last_tool_output)[:1500]
+                    if not isinstance(data, dict):
+                        return str(last_tool_output)[:1500]
+                    url = str(data.get("url") or "").strip()
+                    error_msg = str(data.get("error") or "").strip()
+                    if error_msg:
+                        if url:
+                            return f"no pude leer {url}: {error_msg}"
+                        return f"no pude leer la URL: {error_msg}"
+                    title = str(data.get("title") or "").strip()
+                    content = str(data.get("content") or "").strip()
+                    truncated_flag = bool(data.get("truncated"))
+                    lines: List[str] = []
+                    if title:
+                        lines.append(f"📄 {title}")
+                    if url:
+                        lines.append(url)
+                    if content:
+                        lines.append("")
+                        lines.append(content)
+                    if truncated_flag and content:
+                        lines.append("")
+                        lines.append("(texto recortado)")
+                    formatted = "\n".join(line for line in lines if line).strip()
+                    if formatted:
+                        return formatted
+                    if url:
+                        return f"leí {url} pero no encontré texto para mostrar"
+                    return "no había texto legible en la página"
                 # Generic fallback for other tools
                 return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
             except Exception:
@@ -2441,6 +2483,327 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
     return None
 
 
+def _normalize_http_url(raw_url: str) -> Optional[str]:
+    """Normalize raw URL strings to HTTP/HTTPS form without fragments."""
+
+    if not raw_url:
+        return None
+
+    candidate = str(raw_url).strip()
+    if not candidate:
+        return None
+
+    parsed = urlparse(candidate)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{candidate}")
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    netloc = parsed.netloc
+    if any(char.isspace() for char in netloc):
+        return None
+
+    cleaned = parsed._replace(fragment="")
+    return urlunparse(cleaned)
+
+
+class _VisibleTextExtractor(HTMLParser):
+    """Extract visible text and title from HTML documents."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buffer: List[str] = []
+        self._skip_depth = 0
+        self._title_parts: List[str] = []
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, str]]) -> None:
+        tag_lower = tag.lower()
+        if tag_lower in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if tag_lower == "title":
+            self._in_title = True
+            return
+        if tag_lower in {
+            "p",
+            "div",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "li",
+            "br",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+        }:
+            self._buffer.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+        if tag_lower in {"script", "style", "noscript"}:
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+            return
+        if tag_lower == "title":
+            self._in_title = False
+            return
+        if tag_lower in {
+            "p",
+            "div",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "li",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+        }:
+            self._buffer.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+
+        text = unescape(data)
+        if self._in_title:
+            self._title_parts.append(text)
+
+        cleaned = text.strip()
+        if not cleaned:
+            return
+
+        if self._buffer and not self._buffer[-1].endswith((" ", "\n")):
+            self._buffer.append(" ")
+
+        self._buffer.append(cleaned)
+
+    def get_text(self) -> str:
+        raw = "".join(self._buffer)
+        collapsed_spaces = re.sub(r"[ \t]+", " ", raw)
+        collapsed_lines = re.sub(r"\n\s*", "\n", collapsed_spaces)
+        collapsed_lines = re.sub(r"\n{3,}", "\n\n", collapsed_lines)
+        return collapsed_lines.strip()
+
+    def get_title(self) -> Optional[str]:
+        title = "".join(self._title_parts).strip()
+        title = re.sub(r"\s+", " ", title)
+        return title or None
+
+
+def _extract_text_from_html(html_text: str) -> Tuple[Optional[str], str]:
+    parser = _VisibleTextExtractor()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:
+        pass
+    return parser.get_title(), parser.get_text()
+
+
+def fetch_url_content(
+    raw_url: str, max_chars: Optional[Union[int, str]] = None
+) -> Dict[str, Any]:
+    """Fetch arbitrary HTTP/HTTPS URLs and return sanitized textual content."""
+
+    normalized = _normalize_http_url(raw_url)
+    if not normalized:
+        return {"error": "url inválida"}
+
+    try:
+        requested_max = (
+            int(max_chars)
+            if max_chars is not None
+            else WEB_FETCH_DEFAULT_CHARS
+        )
+    except (TypeError, ValueError):
+        requested_max = WEB_FETCH_DEFAULT_CHARS
+
+    requested_max = max(
+        WEB_FETCH_MIN_CHARS, min(requested_max, WEB_FETCH_MAX_CHARS)
+    )
+
+    cache_key = None
+    redis_client: Optional[redis.Redis] = None
+    try:
+        cache_payload = {"url": normalized, "max": requested_max}
+        cache_key = "fetch_url:" + hashlib.md5(
+            json.dumps(cache_payload, sort_keys=True).encode()
+        ).hexdigest()
+        redis_client = config_redis()
+        cached = redis_get_json(redis_client, cache_key)
+        if isinstance(cached, dict):
+            return cached
+    except Exception:
+        redis_client = None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; RespondedorBot/1.0;"
+            " +https://github.com/gusgusf/RespondedorBot)"
+        ),
+        "Accept": "text/html,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+    }
+
+    response = None
+    try:
+        response = requests.get(
+            normalized,
+            headers=headers,
+            timeout=10,
+            allow_redirects=True,
+            stream=True,
+        )
+        response.raise_for_status()
+    except SSLError:
+        return {"error": "no pude establecer conexión segura", "url": normalized}
+    except RequestException as req_error:
+        error_name = req_error.__class__.__name__
+        return {
+            "error": f"error de red ({error_name})",
+            "url": normalized,
+        }
+
+    final_url = normalized
+    content_type = ""
+    encoding: Optional[str] = None
+    apparent_encoding: Optional[str] = None
+    status_code = None
+    try:
+        if isinstance(getattr(response, "url", None), str):
+            maybe_url = _normalize_http_url(response.url)
+            if maybe_url:
+                final_url = maybe_url
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        encoding = response.encoding
+        apparent_encoding = getattr(response, "apparent_encoding", None)
+        status_code = getattr(response, "status_code", None)
+
+        max_bytes = min(
+            WEB_FETCH_MAX_BYTES, max(requested_max * 6, 20000)
+        )
+        total = 0
+        chunks: List[bytes] = []
+        for chunk in response.iter_content(chunk_size=4096):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= max_bytes:
+                break
+        content_bytes = b"".join(chunks)
+    finally:
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+
+    if not content_bytes:
+        result: Dict[str, Any] = {
+            "url": final_url,
+            "status": status_code,
+            "content_type": content_type or "",
+            "title": None,
+            "content": "",
+            "truncated": False,
+            "char_count": 0,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "max_chars": requested_max,
+        }
+        if redis_client and cache_key:
+            try:
+                redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
+            except Exception:
+                pass
+        return result
+
+    if not encoding:
+        encoding = apparent_encoding or "utf-8"
+
+    try:
+        text_body = content_bytes.decode(encoding or "utf-8", errors="replace")
+    except Exception:
+        text_body = content_bytes.decode("utf-8", errors="replace")
+
+    textual_tokens = (
+        "text",
+        "json",
+        "xml",
+        "javascript",
+        "markdown",
+        "yaml",
+        "csv",
+        "x-www-form-urlencoded",
+    )
+    is_textual = not content_type or any(
+        token in content_type for token in textual_tokens
+    )
+    sample_lower = content_bytes[:400].lower()
+    if not is_textual:
+        if b"<html" in sample_lower or b"<!doctype" in sample_lower:
+            is_textual = True
+
+    if not is_textual:
+        return {
+            "error": (
+                f"el contenido ({content_type or 'desconocido'}) no es texto legible"
+            ),
+            "url": final_url,
+            "status": status_code,
+        }
+
+    html_detected = "html" in content_type or "<html" in text_body[:400].lower()
+    title: Optional[str] = None
+    cleaned_text = text_body
+
+    if html_detected:
+        title, cleaned_text = _extract_text_from_html(text_body)
+    elif "json" in content_type:
+        try:
+            parsed_json = json.loads(text_body)
+            cleaned_text = json.dumps(parsed_json, ensure_ascii=False, indent=2)
+        except Exception:
+            cleaned_text = text_body
+    else:
+        cleaned_text = text_body
+
+    cleaned_text = cleaned_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    truncated_text = truncate_text(cleaned_text, requested_max)
+    truncated_flag = len(cleaned_text) > requested_max
+
+    result = {
+        "url": final_url,
+        "status": status_code,
+        "content_type": content_type or "",
+        "title": title,
+        "content": truncated_text,
+        "truncated": truncated_flag,
+        "char_count": len(cleaned_text),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "max_chars": requested_max,
+    }
+
+    if redis_client and cache_key:
+        try:
+            redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
+        except Exception:
+            pass
+
+    return result
+
+
 def execute_tool(name: str, args: Dict[str, Any]) -> str:
     """Execute a named tool and return a plain-text result string."""
     name = name.lower()
@@ -2455,6 +2818,27 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         except Exception:
             pass
         return json.dumps({"query": query, "results": results})
+    if name == "fetch_url":
+        raw_url = (
+            args.get("url")
+            or args.get("link")
+            or args.get("href")
+            or ""
+        )
+        url = str(raw_url).strip()
+        max_chars_arg = args.get("max_chars") or args.get("chars")
+        result = fetch_url_content(url, max_chars=max_chars_arg)
+        try:
+            status = result.get("status") if isinstance(result, dict) else None
+            err = result.get("error") if isinstance(result, dict) else None
+            log_url = url or (result.get("url") if isinstance(result, dict) else "")
+            print(
+                "execute_tool:fetch_url: url='%s' status=%s error=%s"
+                % (str(log_url)[:200], status, err)
+            )
+        except Exception:
+            pass
+        return json.dumps(result)
     return f"herramienta desconocida: {name}"
 
 
@@ -2881,10 +3265,12 @@ CONTEXTO POLITICO:
         tools_section = (
             "\n\nHERRAMIENTAS DISPONIBLES:\n"
             "- web_search: buscador web actual (devuelve hasta 10 resultados).\n"
+            "- fetch_url: trae el texto plano de una URL http/https para citar fragmentos.\n"
             "\nCÓMO LLAMAR HERRAMIENTAS:\n"
             "Escribe exactamente una línea con el formato:\n"
             "[TOOL] <nombre> {JSON}\n"
-            'Ejemplo: [TOOL] web_search {"query": "inflación argentina hoy"}\n'
+            'Ejemplos:\n  [TOOL] web_search {"query": "inflación argentina hoy"}\n'
+            '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
         )

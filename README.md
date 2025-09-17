@@ -42,6 +42,7 @@ This bot is configured entirely through environment variables, making it easy to
 - En conversaciones de IA, el bot puede decidir usar la herramienta `web_search` cuando necesita datos actuales. El modelo pedirá la herramienta escribiendo una línea como:
   `[TOOL] web_search {"query": "inflación argentina hoy"}`
   y luego responderá usando los resultados.
+- También puede pedir leer una página puntual con la herramienta `fetch_url`, que descarga cualquier URL http/https y devuelve el texto plano para que el bot cite fragmentos en sus respuestas o cuando opera como agente autónomo.
 
 ## Testing
 
