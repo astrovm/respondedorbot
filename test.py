@@ -497,6 +497,17 @@ def test_process_request_parameters():
             assert status == 200
             assert "Webhook updated" in response
 
+    with app.test_request_context("/?run_agent=true"):
+        with patch("api.index.run_agent_cycle") as mock_run_agent:
+            mock_run_agent.return_value = {
+                "text": "pensé solo en la city",
+                "timestamp": 1_700_000_000,
+            }
+            response, status = process_request_parameters(request)
+            assert status == 200
+            assert "pensé solo" in response
+            mock_run_agent.assert_called_once()
+
 
 def test_handle_rate_limit():
     from api.index import handle_rate_limit
@@ -570,6 +581,139 @@ def test_truncate_text():
 
     # Test with default limit
     assert len(truncate_text("a" * 1000)) <= 512
+
+
+def test_save_agent_thought_persists_and_limits():
+    from api.index import (
+        save_agent_thought,
+        get_agent_thoughts,
+        MAX_AGENT_THOUGHTS,
+        AGENT_THOUGHT_CHAR_LIMIT,
+    )
+
+    class FakePipeline:
+        def __init__(self, parent):
+            self.parent = parent
+            self.commands = []
+
+        def lpush(self, key, value):
+            self.commands.append(("lpush", key, value))
+            return self
+
+        def ltrim(self, key, start, end):
+            self.commands.append(("ltrim", key, start, end))
+            return self
+
+        def execute(self):
+            results = []
+            for command, key, *args in self.commands:
+                if command == "lpush":
+                    results.append(self.parent.lpush(key, args[0]))
+                elif command == "ltrim":
+                    results.append(self.parent.ltrim(key, args[0], args[1]))
+            self.commands = []
+            return results
+
+    class FakeRedis:
+        def __init__(self):
+            self.storage = {}
+
+        def pipeline(self):
+            return FakePipeline(self)
+
+        def lpush(self, key, value):
+            values = self.storage.setdefault(key, [])
+            values.insert(0, value)
+            return len(values)
+
+        def ltrim(self, key, start, end):
+            values = self.storage.get(key, [])
+            if end == -1:
+                trimmed = values[start:]
+            else:
+                trimmed = values[start : end + 1]
+            self.storage[key] = trimmed
+            return True
+
+        def lrange(self, key, start, end):
+            values = self.storage.get(key, [])
+            if end == -1:
+                return values[start:]
+            return values[start : end + 1]
+
+    fake_redis = FakeRedis()
+
+    for i in range(MAX_AGENT_THOUGHTS + 2):
+        save_agent_thought(f"pensamiento {i} " + "x" * 600, fake_redis)
+
+    thoughts = get_agent_thoughts(fake_redis)
+
+    assert len(thoughts) == MAX_AGENT_THOUGHTS
+    assert thoughts[0]["text"].startswith(f"pensamiento {MAX_AGENT_THOUGHTS + 1}")
+    assert thoughts[-1]["text"].startswith("pensamiento 2")
+    assert len(thoughts[0]["text"]) <= AGENT_THOUGHT_CHAR_LIMIT
+    assert all("timestamp" in thought for thought in thoughts)
+
+
+def test_format_agent_thoughts_variants():
+    from api.index import format_agent_thoughts, BA_TZ
+
+    empty_output = format_agent_thoughts([])
+    assert "no tengo pensamientos" in empty_output
+
+    sample_ts = int(datetime(2024, 1, 1, 12, 30, tzinfo=BA_TZ).timestamp())
+    formatted = format_agent_thoughts(
+        [{"text": "me clavé un mate y anoté ideas", "timestamp": sample_ts}]
+    )
+
+    assert "me clavé un mate" in formatted
+    assert "01/01" in formatted
+
+
+def test_get_agent_memory_context_builds_message():
+    from api.index import get_agent_memory_context
+
+    sample = [{"text": "armé un plan", "timestamp": 1_700_000_000}]
+
+    with patch("api.index.get_agent_thoughts", return_value=sample):
+        memory_message = get_agent_memory_context()
+
+    assert memory_message is not None
+    assert memory_message["role"] == "system"
+    content = memory_message["content"][0]["text"]
+    assert "armé un plan" in content
+
+
+def test_show_agent_thoughts_no_entries():
+    from api.index import show_agent_thoughts
+
+    with patch("api.index.get_agent_thoughts", return_value=[]):
+        response = show_agent_thoughts()
+
+    assert "no tengo pensamientos" in response
+
+
+def test_run_agent_cycle_returns_result():
+    from api.index import run_agent_cycle
+
+    with patch("api.index.ask_ai", return_value="pensé en bonos") as mock_ask, patch(
+        "api.index.sanitize_tool_artifacts", side_effect=lambda x: x
+    ) as mock_sanitize, patch(
+        "api.index.clean_duplicate_response", side_effect=lambda x: x
+    ) as mock_clean, patch(
+        "api.index.save_agent_thought"
+    ) as mock_save:
+        mock_save.return_value = {"text": "pensé en bonos", "timestamp": 1_700_000_000}
+
+        result = run_agent_cycle()
+
+    mock_ask.assert_called_once()
+    mock_sanitize.assert_called_once()
+    mock_clean.assert_called_once()
+    mock_save.assert_called_once_with("pensé en bonos")
+    assert result["text"] == "pensé en bonos"
+    assert result["timestamp"] == 1_700_000_000
+    assert result["iso_time"].endswith("-03:00")
 
 
 def test_is_secret_token_valid():
@@ -1204,6 +1348,7 @@ def test_initialize_commands():
         select_random,
         get_prices,
         get_dollar_rates as _get_dollar_rates,
+        show_agent_thoughts,
     )
     from api.index import (
         get_devo as _get_devo,  # noqa: F401
@@ -1222,6 +1367,7 @@ def test_initialize_commands():
     assert "/pregunta" in commands
     assert "/che" in commands
     assert "/gordo" in commands
+    assert "/agent" in commands
     assert "/random" in commands
     assert "/prices" in commands
     assert "/dolar" in commands
@@ -1232,6 +1378,7 @@ def test_initialize_commands():
     assert commands["/pregunta"][1] == True
     assert commands["/che"][1] == True
     assert commands["/gordo"][1] == True
+    assert commands["/agent"][1] == False
 
     # Test that non-AI commands are properly marked
     assert commands["/random"][1] == False
@@ -1245,6 +1392,7 @@ def test_initialize_commands():
     assert commands["/prices"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
+    assert commands["/agent"][0] == show_agent_thoughts
     # Test search commands
     assert "/buscar" in commands
     assert "/search" in commands
@@ -1558,6 +1706,8 @@ def test_ask_ai_with_openrouter_success():
     ) as mock_get_weather_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
+        "api.index.get_agent_memory_context"
+    ) as mock_get_memory, patch(
         "os.environ.get"
     ) as mock_env:
 
@@ -1565,6 +1715,7 @@ def test_ask_ai_with_openrouter_success():
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
@@ -1584,6 +1735,8 @@ def test_ask_ai_with_cloudflare_fallback():
     ) as mock_get_weather_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
+        "api.index.get_agent_memory_context"
+    ) as mock_get_memory, patch(
         "os.environ.get"
     ) as mock_env:
 
@@ -1591,6 +1744,7 @@ def test_ask_ai_with_cloudflare_fallback():
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
@@ -1610,6 +1764,8 @@ def test_ask_ai_with_all_failures():
     ) as mock_get_weather_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
+        "api.index.get_agent_memory_context"
+    ) as mock_get_memory, patch(
         "os.environ.get"
     ) as mock_env:
 
@@ -1617,6 +1773,7 @@ def test_ask_ai_with_all_failures():
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
@@ -1636,6 +1793,8 @@ def test_ask_ai_with_image():
     ) as mock_get_weather_context, patch(
         "api.index.get_time_context"
     ) as mock_get_time_context, patch(
+        "api.index.get_agent_memory_context"
+    ) as mock_get_memory, patch(
         "api.index.describe_image_cloudflare"
     ) as mock_describe_image, patch(
         "os.environ.get"
@@ -1645,6 +1804,7 @@ def test_ask_ai_with_image():
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
+        mock_get_memory.return_value = None
         mock_describe_image.return_value = "A beautiful landscape"
         mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
 
@@ -1664,6 +1824,8 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_time_context", return_value={}), patch(
+        "api.index.get_agent_memory_context", return_value=None
+    ), patch(
         "api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
@@ -1697,6 +1859,8 @@ def test_ask_ai_handles_repeated_tool_calls():
     with patch("api.index.get_market_context", return_value={}), patch(
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_time_context", return_value={}), patch(
+        "api.index.get_agent_memory_context", return_value=None
+    ), patch(
         "api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
