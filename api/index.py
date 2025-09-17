@@ -632,6 +632,28 @@ def is_loop_fallback_text(text: str) -> bool:
     return normalized_text.startswith(normalized_marker)
 
 
+@lru_cache(maxsize=1)
+def _empty_fallback_marker() -> str:
+    """Cache the normalized marker for the empty-response fallback."""
+
+    return normalize_agent_text(AGENT_EMPTY_RESPONSE_FALLBACK)
+
+
+def is_empty_agent_thought_text(text: str) -> bool:
+    """Return True when the agent text matches the empty fallback template."""
+
+    sanitized = str(text or "").strip()
+    if not sanitized:
+        return True
+
+    normalized_marker = _empty_fallback_marker()
+    if not normalized_marker:
+        return False
+
+    normalized_text = normalize_agent_text(sanitized)
+    return normalized_text == normalized_marker
+
+
 def _extract_keywords_from_normalized(normalized_text: str) -> Set[str]:
     """Return keyword candidates from an already-normalized agent text."""
 
@@ -1173,6 +1195,10 @@ def run_agent_cycle() -> Dict[str, Any]:
     if not agent_sections_are_valid(cleaned):
         cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
+    if is_empty_agent_thought_text(cleaned):
+        fallback_text = ensure_agent_response_text(cleaned)
+        return {"text": fallback_text, "persisted": False}
+
     entry = save_agent_thought(cleaned)
     if not entry:
         admin_report(
@@ -1182,7 +1208,10 @@ def run_agent_cycle() -> Dict[str, Any]:
         )
         raise RuntimeError("Failed to persist autonomous agent thought")
 
-    result: Dict[str, Any] = {"text": entry.get("text", cleaned)}
+    result: Dict[str, Any] = {
+        "text": entry.get("text", cleaned),
+        "persisted": True,
+    }
     timestamp_value = entry.get("timestamp")
     if isinstance(timestamp_value, (int, float)):
         ts_int = int(timestamp_value)

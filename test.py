@@ -718,7 +718,12 @@ def test_show_agent_thoughts_limits_entries():
 def test_run_agent_cycle_returns_result():
     from api.index import run_agent_cycle
 
-    with patch("api.index.ask_ai", return_value="pensé en bonos") as mock_ask, patch(
+    structured_text = (
+        "HALLAZGOS: el riesgo país cerró en 1.200 puntos.\n"
+        "PRÓXIMO PASO: revisar qué bancos emitieron reportes sobre bonos argentinos."
+    )
+
+    with patch("api.index.ask_ai", return_value=structured_text) as mock_ask, patch(
         "api.index.sanitize_tool_artifacts", side_effect=lambda x: x
     ) as mock_sanitize, patch(
         "api.index.clean_duplicate_response", side_effect=lambda x: x
@@ -729,7 +734,7 @@ def test_run_agent_cycle_returns_result():
     ), patch(
         "api.index.save_agent_thought"
     ) as mock_save:
-        mock_save.return_value = {"text": "pensé en bonos", "timestamp": 1_700_000_000}
+        mock_save.return_value = {"text": structured_text, "timestamp": 1_700_000_000}
 
         result = run_agent_cycle()
 
@@ -738,9 +743,9 @@ def test_run_agent_cycle_returns_result():
     assert mock_clean.call_count == mock_ask.call_count
     mock_save.assert_called_once()
     saved_text = mock_save.call_args[0][0]
-    assert "HALLAZGOS:" in saved_text
-    assert "PRÓXIMO PASO:" in saved_text
-    assert result["text"] == "pensé en bonos"
+    assert saved_text == structured_text
+    assert result["text"] == structured_text
+    assert result["persisted"] is True
     assert result["timestamp"] == 1_700_000_000
     assert result["iso_time"].endswith("-03:00")
 
@@ -789,6 +794,7 @@ def test_run_agent_cycle_breaks_loop_with_retry():
     assert saved_text == fresh_text
     assert not saved_text.startswith(AGENT_LOOP_FALLBACK_PREFIX)
     assert result["text"] == fresh_text
+    assert result["persisted"] is True
     assert result["timestamp"] == 1_700_000_100
 
 
@@ -836,8 +842,35 @@ def test_run_agent_cycle_persists_loop_fallback_when_stuck():
     assert saved_text.startswith(AGENT_LOOP_FALLBACK_PREFIX)
     assert "pintó el vacío" not in saved_text
     assert result["text"] == saved_text
+    assert result["persisted"] is True
     assert result["timestamp"] == 1_700_000_200
     assert not responses
+
+
+def test_run_agent_cycle_skips_empty_fallback():
+    from api.index import AGENT_EMPTY_RESPONSE_FALLBACK, run_agent_cycle
+
+    with patch("api.index.ask_ai", return_value="") as mock_ask, patch(
+        "api.index.sanitize_tool_artifacts", side_effect=lambda x: x
+    ) as mock_sanitize, patch(
+        "api.index.clean_duplicate_response", side_effect=lambda x: x
+    ) as mock_clean, patch(
+        "api.index.get_hacker_news_context", return_value=[]
+    ), patch(
+        "api.index.get_agent_thoughts", return_value=[]
+    ), patch(
+        "api.index.save_agent_thought"
+    ) as mock_save:
+        result = run_agent_cycle()
+
+    mock_ask.assert_called_once()
+    assert mock_sanitize.call_count == 1
+    assert mock_clean.call_count == 1
+    mock_save.assert_not_called()
+    assert result["text"] == AGENT_EMPTY_RESPONSE_FALLBACK
+    assert result["persisted"] is False
+    assert "timestamp" not in result
+    assert "iso_time" not in result
 
 
 def test_is_secret_token_valid():
