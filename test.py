@@ -2970,6 +2970,60 @@ def test_calculate_tcrm_100_success():
         assert result == 1000.0 * 100 / 120.0
 
 
+def test_get_cached_tcrm_100_backfills_missing_history():
+    import pytest
+    from api.index import get_cached_tcrm_100
+    from unittest.mock import MagicMock
+
+    with patch("api.index.config_redis") as mock_cfg, patch(
+        "api.index.redis_get_json"
+    ) as mock_get_json, patch("api.index.redis_set_json") as mock_set_json, patch(
+        "api.index.calculate_tcrm_100"
+    ) as mock_calc, patch("api.index.get_latest_itcrm_value_and_date") as mock_latest:
+        redis_client = MagicMock()
+        redis_client.get.return_value = None
+        mock_cfg.return_value = redis_client
+        mock_set_json.return_value = True
+        mock_latest.return_value = (150.0, "02/01/24")
+
+        def redis_get_json_side_effect(_client, key):  # noqa: ARG001
+            if key == "tcrm_100":
+                return None
+            if key == "latest_itcrm_details":
+                return {"value": 150.0, "date": "2024-01-02"}
+            if key == "bcra_mayorista:2024-01-02":
+                return {"value": 95.0}
+            return None
+
+        mock_get_json.side_effect = redis_get_json_side_effect
+
+        def calc_side_effect(target_date=None):
+            if target_date is None:
+                calc_side_effect.current_calls += 1
+                return 200.0
+            calc_side_effect.history_calls.append(target_date)
+            return 100.0
+
+        calc_side_effect.current_calls = 0
+        calc_side_effect.history_calls = []
+        mock_calc.side_effect = calc_side_effect
+
+        value, change = get_cached_tcrm_100()
+
+        assert value == 200.0
+        assert change is not None
+        assert pytest.approx(change, rel=1e-9) == 100.0
+        assert calc_side_effect.current_calls == 1
+        assert len(calc_side_effect.history_calls) == 1
+
+        history_dt = calc_side_effect.history_calls[0]
+        history_key = history_dt.strftime("%Y-%m-%d-%H") + "tcrm_100"
+
+        assert any(
+            call.args[1] == history_key and call.args[2]["data"] == 100.0
+            for call in mock_set_json.call_args_list
+        )
+
 def test_get_market_context_success():
     from api.index import get_market_context
 
