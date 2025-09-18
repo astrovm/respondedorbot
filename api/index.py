@@ -1,5 +1,5 @@
 from cryptography.fernet import Fernet
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from flask import Flask, Request, request
 from html.parser import HTMLParser
 from html import unescape
@@ -1879,29 +1879,138 @@ def get_latest_itcrm_value() -> Optional[float]:
         return None
 
 
-def calculate_tcrm_100() -> Optional[float]:
+def _get_itcrm_value_for_date(target_dt: datetime) -> Optional[Tuple[float, datetime]]:
+    """Return ITCRM value and sheet date for the closest entry on/before `target_dt`."""
+
+    try:
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        response = requests.get(
+            "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx",
+            timeout=10,
+            verify=False,
+        )
+        workbook = load_workbook(io.BytesIO(response.content), data_only=True)
+        sheet_like = getattr(workbook, "active", None) or (
+            workbook.worksheets[0] if getattr(workbook, "worksheets", None) else None
+        )
+        if sheet_like is None:
+            return None
+        sheet = cast(Any, sheet_like)
+
+        def normalize_date(value: Any) -> Optional[datetime]:
+            try:
+                if isinstance(value, datetime):
+                    return value
+                if isinstance(value, date):
+                    return datetime.combine(value, datetime.min.time())
+                if hasattr(value, "date"):
+                    maybe_date = value.date()
+                    if isinstance(maybe_date, date):
+                        return datetime.combine(maybe_date, datetime.min.time())
+            except Exception:
+                pass
+
+            parsed = parse_date_string(str(value or ""))
+            if parsed:
+                return parsed
+            return None
+
+        def normalize_value(cell_value: Any) -> Optional[float]:
+            if cell_value is None:
+                return None
+            if isinstance(cell_value, (int, float, Decimal)):
+                return float(cell_value)
+            try:
+                text_val = str(cell_value).strip()
+            except Exception:
+                return None
+            if not text_val:
+                return None
+            try:
+                return float(text_val)
+            except ValueError:
+                try:
+                    normalized = text_val.replace(".", "").replace(",", ".")
+                    return float(normalized)
+                except Exception:
+                    return None
+
+        target_date = target_dt.date()
+        for row in range(sheet.max_row, 0, -1):
+            row_date_raw = sheet.cell(row=row, column=1).value
+            row_value_raw = sheet.cell(row=row, column=2).value
+            row_date_dt = normalize_date(row_date_raw)
+            if row_date_dt is None:
+                continue
+            row_date_only = row_date_dt.date()
+            if row_date_only > target_date:
+                continue
+            value = normalize_value(row_value_raw)
+            if value is None:
+                continue
+            normalized_dt = datetime.combine(row_date_only, datetime.min.time())
+            return value, normalized_dt
+
+        return None
+    except Exception as exc:
+        print(f"Error finding ITCRM value for {target_dt.date()}: {exc}")
+        return None
+
+
+def calculate_tcrm_100(
+    target_date: Optional[Union[str, datetime, date]] = None,
+) -> Optional[float]:
     """Calculate nominal exchange rate that sets ITCRM to 100.
 
-    Uses the ITCRM sheet date to look up a pre-cached Dólar Mayorista value stored
-    by date via `cache_bcra_variables`. If not found in cache, does not compute.
+    When `target_date` is provided, the calculation is performed using the ITCRM row
+    closest to (and not after) that date; otherwise, the latest available value is used.
+    Uses the ITCRM sheet date to look up a pre-cached Dólar Mayorista value stored by
+    date via `cache_bcra_variables`. If not found in cache, does not compute.
     """
+
     try:
-        # Get ITCRM latest value and its date from the official sheet
-        details = get_latest_itcrm_value_and_date()
-        if not details:
-            return None
-        itcrm_value, itcrm_date_str = details
-        try:
-            itcrm_value = float(itcrm_value)
-        except Exception:
+        normalized_target: Optional[datetime] = None
+        if target_date is not None:
+            if isinstance(target_date, datetime):
+                normalized_target = target_date
+            elif isinstance(target_date, date):
+                normalized_target = datetime.combine(target_date, datetime.min.time())
+            else:
+                normalized_target = parse_date_string(str(target_date))
+            if normalized_target is None:
+                return None
+
+        itcrm_value: Optional[float]
+        itcrm_dt: Optional[datetime]
+
+        if normalized_target is None:
+            details = get_latest_itcrm_value_and_date()
+            if not details:
+                return None
+            raw_value, raw_date_str = details
+            try:
+                itcrm_value = float(raw_value)
+            except Exception:
+                return None
+            parsed_dt = parse_date_string(raw_date_str)
+            if not parsed_dt:
+                return None
+            itcrm_dt = parsed_dt
+        else:
+            lookup = _get_itcrm_value_for_date(normalized_target)
+            if not lookup:
+                return None
+            value, matched_dt = lookup
+            try:
+                itcrm_value = float(value)
+            except Exception:
+                return None
+            itcrm_dt = matched_dt
+
+        if itcrm_dt is None:
             return None
 
-        # Parse ITCRM date → YYYY-MM-DD
-        parsed_dt = None
-        parsed_dt = parse_date_string(itcrm_date_str)
-        if not parsed_dt:
-            return None
-        date_key = parsed_dt.date().isoformat()
+        date_key = itcrm_dt.date().isoformat()
 
         # Lookup mayorista value by date from Redis
         wholesale_value: Optional[float] = None
@@ -1939,6 +2048,27 @@ def get_cached_tcrm_100(
         history_data = (
             get_cache_history(hours_ago, cache_key, redis_client) if hours_ago else None
         )
+
+        if history_data is None and hours_ago:
+            try:
+                history_dt = datetime.now() - timedelta(hours=hours_ago)
+                history_prefix = history_dt.strftime("%Y-%m-%d-%H")
+                history_key = history_prefix + cache_key
+                existing_slot = redis_client.get(history_key)
+                if not existing_slot:
+                    backfill_value = calculate_tcrm_100(target_date=history_dt)
+                    if backfill_value is not None:
+                        history_timestamp = int(
+                            history_dt.replace(minute=0, second=0, microsecond=0).timestamp()
+                        )
+                        history_data = {
+                            "timestamp": history_timestamp,
+                            "data": backfill_value,
+                        }
+                        redis_set_json(redis_client, history_key, history_data)
+            except Exception:
+                history_data = None
+
         history_value = history_data["data"] if history_data else None
         timestamp = int(time.time())
 
