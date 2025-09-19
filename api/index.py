@@ -387,10 +387,14 @@ class _CurrencyBandTableParser(HTMLParser):
             self._current_cell.append(unescape(data))
 
 
-def _parse_currency_band_rows(rows: Iterable[List[str]]) -> Optional[Dict[str, Any]]:
+def _parse_currency_band_rows(
+    rows: Iterable[List[str]], *, today: Optional[date] = None
+) -> Optional[Dict[str, Any]]:
     """Return latest band row parsed into floats and formatted date."""
 
-    latest: Optional[Tuple[datetime, float, float]] = None
+    effective_today = today or datetime.now(BA_TZ).date()
+    latest_any: Optional[Tuple[datetime, float, float]] = None
+    latest_on_or_before: Optional[Tuple[datetime, float, float]] = None
     for row in rows:
         if len(row) < 3:
             continue
@@ -403,14 +407,23 @@ def _parse_currency_band_rows(rows: Iterable[List[str]]) -> Optional[Dict[str, A
         if lower is None or upper is None:
             continue
         date_only = dt.date()
-        current = (datetime.combine(date_only, datetime.min.time()), float(lower), float(upper))
-        if latest is None or current[0] > latest[0]:
-            latest = current
+        current = (
+            datetime.combine(date_only, datetime.min.time()),
+            float(lower),
+            float(upper),
+        )
+        if latest_any is None or current[0] > latest_any[0]:
+            latest_any = current
+        if date_only <= effective_today:
+            if latest_on_or_before is None or current[0] > latest_on_or_before[0]:
+                latest_on_or_before = current
 
-    if latest is None:
+    chosen = latest_on_or_before or latest_any
+
+    if chosen is None:
         return None
 
-    date_dt, lower_val, upper_val = latest
+    date_dt, lower_val, upper_val = chosen
     date_iso = date_dt.date().isoformat()
     return {
         "date": to_ddmmyy(date_iso),
@@ -451,11 +464,17 @@ def get_currency_band_limits() -> Optional[Dict[str, Any]]:
 
     cache_key = "bcra_currency_band_limits"
     redis_client: Optional[redis.Redis] = None
+    effective_today = datetime.now(BA_TZ).date()
+
     try:
         redis_client = config_redis()
         cached = redis_get_json(redis_client, cache_key)
         if isinstance(cached, dict) and cached.get("lower") and cached.get("upper"):
-            return cast(Dict[str, Any], cached)
+            cached_date = parse_date_string(str(cached.get("date", "")))
+            if cached_date and cached_date.date() > effective_today:
+                cached = None
+            else:
+                return cast(Dict[str, Any], cached)
     except Exception:
         redis_client = None
 
