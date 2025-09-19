@@ -3701,10 +3701,9 @@ def test_format_dollar_rates_includes_currency_band_limits():
     lines = result.splitlines()
     assert lines[0] == "Oficial: 1000.5 (+0.5% 24hs)"
     assert lines[1] == ""
-    expected_line = (
-        f"📏 Banda cambiaria BCRA: piso ${fmt_num(950.12, 2)} / techo ${fmt_num(1460.34, 2)} (15/09/25)"
-    )
-    assert lines[2] == expected_line
+    assert lines[2] == "📏 Banda cambiaria BCRA (15/09/25)"
+    assert lines[3] == f"Banda piso: ${fmt_num(950.12, 2)}"
+    assert lines[4] == f"Banda techo: ${fmt_num(1460.34, 2)}"
 
 
 def test_clean_crypto_data_success():

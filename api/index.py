@@ -1861,12 +1861,11 @@ def format_dollar_rates(
             date_label = band_limits.get("date")
             lower_text = fmt_num(float(lower), 2)
             upper_text = fmt_num(float(upper), 2)
-            line = f"📏 Banda cambiaria BCRA: piso ${lower_text} / techo ${upper_text}"
-            if isinstance(date_label, str) and date_label:
-                line += f" ({date_label})"
             if msg_lines:
                 msg_lines.append("")
-            msg_lines.append(line)
+            msg_lines.append(f"📏 Banda cambiaria BCRA{f' ({date_label})' if isinstance(date_label, str) and date_label else ''}")
+            msg_lines.append(f"Banda piso: ${lower_text}")
+            msg_lines.append(f"Banda techo: ${upper_text}")
 
     return "\n".join(msg_lines)
 
