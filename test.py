@@ -2918,6 +2918,24 @@ def test_format_bcra_variables_includes_currency_bands():
     assert "15/09/25" in result
 
 
+def test_parse_currency_band_rows_skips_future_dates():
+    from api.index import _parse_currency_band_rows
+    from datetime import date
+
+    rows = [
+        ["18/9/2025", "900,00", "1.400,00"],
+        ["19/9/2025", "948,44", "1.475,32"],
+        ["30/9/2025", "944,96", "1.480,72"],
+    ]
+
+    parsed = _parse_currency_band_rows(rows, today=date(2025, 9, 19))
+
+    assert parsed is not None
+    assert parsed["date"] == "19/09/25"
+    assert parsed["lower"] == 948.44
+    assert parsed["upper"] == 1475.32
+
+
 def test_handle_bcra_variables_cached():
     from api.index import handle_bcra_variables
 
