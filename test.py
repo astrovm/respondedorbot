@@ -37,6 +37,7 @@ import json
 import requests
 import redis
 import random
+import re
 
 app = Flask(__name__)
 
@@ -5278,6 +5279,8 @@ def test_build_agent_retry_prompt_adds_dynamic_guidance():
     assert "Marcá como prohibidos" in prompt
     assert "web_search" in prompt
     assert ("dolar" in prompt) or ("dólar" in prompt)
+    assert any(ch.isdigit() for ch in prompt)
+    assert any(keyword in prompt.lower() for keyword in ("inicial", "letra", "empiece"))
 
 
 def test_get_agent_retry_hint_references_previous_keywords():
@@ -5287,6 +5290,8 @@ def test_get_agent_retry_hint_references_previous_keywords():
     assert "btc" in hint or "bitcoin" in hint
     assert "web_search" in hint
     assert hint
+    assert re.search(r"\d", hint)
+    assert re.search(r'"[A-ZÑ]"', hint)
 
 
 def test_get_agent_retry_hint_varies_with_random_seed():
