@@ -2921,6 +2921,7 @@ def test_format_bcra_variables_includes_currency_bands():
 def test_parse_currency_band_rows_skips_future_dates():
     from api.index import _parse_currency_band_rows
     from datetime import date
+    import pytest
 
     rows = [
         ["18/9/2025", "900,00", "1.400,00"],
@@ -2934,6 +2935,8 @@ def test_parse_currency_band_rows_skips_future_dates():
     assert parsed["date"] == "19/09/25"
     assert parsed["lower"] == 948.44
     assert parsed["upper"] == 1475.32
+    assert pytest.approx(parsed["lower_change_pct"], rel=1e-6) == ((948.44 - 900.0) / 900.0) * 100
+    assert pytest.approx(parsed["upper_change_pct"], rel=1e-6) == ((1475.32 - 1400.0) / 1400.0) * 100
 
 
 def test_handle_bcra_variables_cached():
@@ -3694,16 +3697,20 @@ def test_format_dollar_rates_includes_currency_band_limits():
         {"name": "Oficial", "price": 1000.5, "history": 0.5},
     ]
 
-    band_limits = {"lower": 950.12, "upper": 1460.34, "date": "15/09/25"}
+    band_limits = {
+        "lower": 950.12,
+        "upper": 1460.34,
+        "date": "15/09/25",
+        "lower_change_pct": 0.5,
+        "upper_change_pct": -0.25,
+    }
 
     result = format_dollar_rates(dollar_rates, 24, band_limits)
 
     lines = result.splitlines()
     assert lines[0] == "Oficial: 1000.5 (+0.5% 24hs)"
-    assert lines[1] == ""
-    assert lines[2] == "📏 Banda cambiaria BCRA (15/09/25)"
-    assert lines[3] == f"Banda piso: ${fmt_num(950.12, 2)}"
-    assert lines[4] == f"Banda techo: ${fmt_num(1460.34, 2)}"
+    assert lines[1] == "Banda piso: 950.12 (+0.5% 24hs)"
+    assert lines[2] == "Banda techo: 1460.34 (-0.25% 24hs)"
 
 
 def test_clean_crypto_data_success():
