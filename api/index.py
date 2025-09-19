@@ -1134,7 +1134,44 @@ def get_agent_retry_hint(
     )
     follow_up_prompt = rng_instance.choice(follow_up_templates)
 
-    return avoided_fragment + brainstorming_prompt + " " + follow_up_prompt
+    letter_choices = tuple("abcdefghijklmnñopqrstuvwxyz")
+    chosen_letter = rng_instance.choice(letter_choices).upper()
+    alternate_pool = [value for value in letter_choices if value.upper() != chosen_letter]
+    fallback_letter = (
+        rng_instance.choice(alternate_pool).upper() if alternate_pool else chosen_letter
+    )
+
+    numeric_floor = rng_instance.randint(8, 24)
+    numeric_multiplier = rng_instance.randint(3, 9)
+    numeric_target = numeric_floor * numeric_multiplier
+
+    constraint_templates = (
+        "Sumá una restricción creativa: la búsqueda tiene que incluir un protagonista cuya inicial sea \"{letter}\" y una cifra cerca de {value}.",
+        "Obligate a que la consulta nombre algo que empiece con \"{letter}\" y mencione un número alrededor de {value}.",
+        "Forzá el query a combinar un actor que arranque con \"{letter}\" más un dato numérico aproximado a {value}.",
+    )
+
+    pivot_templates = (
+        "Si web_search no trae novedad, generá otra lluvia de ideas reemplazando las palabras prohibidas por categorías nuevas y probá con inicial \"{fallback}\".",
+        "Si la ejecución devuelve humo, descartá la idea y repetí el proceso con términos distintos que comiencen con \"{fallback}\".",
+        "Si no aparecen datos frescos, reseteá las keywords vetadas y buscá una consulta distinta arrancando por \"{fallback}\".",
+    )
+
+    constraint_prompt = rng_instance.choice(constraint_templates).format(
+        letter=chosen_letter, value=numeric_target
+    )
+    pivot_prompt = rng_instance.choice(pivot_templates).format(fallback=fallback_letter)
+
+    return (
+        avoided_fragment
+        + brainstorming_prompt
+        + " "
+        + follow_up_prompt
+        + " "
+        + constraint_prompt
+        + " "
+        + pivot_prompt
+    )
 
 
 def build_agent_retry_prompt(
