@@ -30,11 +30,14 @@ from api.index import (
     build_agent_fallback_entry,
     summarize_recent_agent_topics,
     agent_sections_are_valid,
+    get_agent_retry_hint,
 )
 from datetime import datetime, timezone, timedelta
 import json
 import requests
 import redis
+import random
+import re
 
 app = Flask(__name__)
 
@@ -5265,6 +5268,39 @@ def test_build_agent_retry_prompt_mentions_previous_text():
     expected_preview = long_text[:157] + "..."
     assert expected_preview in prompt
     assert "web_search" in prompt
+
+
+def test_build_agent_retry_prompt_adds_dynamic_guidance():
+    rng = random.Random(0)
+    prompt = build_agent_retry_prompt(
+        "me quedé clavado mirando el dólar blue todo el día", rng=rng
+    )
+
+    assert "Marcá como prohibidos" in prompt
+    assert "web_search" in prompt
+    assert ("dolar" in prompt) or ("dólar" in prompt)
+    assert any(ch.isdigit() for ch in prompt)
+    assert any(keyword in prompt.lower() for keyword in ("inicial", "letra", "empiece"))
+
+
+def test_get_agent_retry_hint_references_previous_keywords():
+    rng = random.Random(1)
+    hint = get_agent_retry_hint("btc bitcoin y etf spot", rng=rng)
+
+    assert "btc" in hint or "bitcoin" in hint
+    assert "web_search" in hint
+    assert hint
+    assert re.search(r"\d", hint)
+    assert re.search(r'"[A-ZÑ]"', hint)
+
+
+def test_get_agent_retry_hint_varies_with_random_seed():
+    hint_a = get_agent_retry_hint("repeti el mismo tema", rng=random.Random(0))
+    hint_b = get_agent_retry_hint("repeti el mismo tema", rng=random.Random(1))
+
+    assert hint_a
+    assert hint_b
+    assert hint_a != hint_b
 
 
 def test_build_agent_fallback_entry_mentions_loop_and_previous():
