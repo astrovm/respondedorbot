@@ -1888,6 +1888,9 @@ def format_dollar_rates(
         if band_entries:
             rates.extend(band_entries)
 
+    # Ensure we keep ascending order when band entries are appended
+    rates.sort(key=lambda item: item.get("price", 0))
+
     msg_lines: List[str] = []
     for dollar in rates:
         price_formatted = fmt_num(dollar["price"], 2)
