@@ -608,6 +608,8 @@ def test_save_agent_thought_persists_and_limits():
         AGENT_THOUGHT_CHAR_LIMIT,
     )
 
+    from typing import cast
+
     class FakePipeline:
         def __init__(self, parent):
             self.parent = parent
@@ -658,7 +660,7 @@ def test_save_agent_thought_persists_and_limits():
                 return values[start:]
             return values[start : end + 1]
 
-    fake_redis = FakeRedis()
+    fake_redis = cast(redis.Redis, FakeRedis())
 
     for i in range(MAX_AGENT_THOUGHTS + 2):
         save_agent_thought(f"pensamiento {i} " + "x" * 600, fake_redis)
@@ -2874,13 +2876,46 @@ def test_format_bcra_variables_with_data():
         "reservas_int": {"value": "25.000", "date": "15/01/2025"},
     }
 
-    with patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm:
+    with patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm, patch(
+        "api.index.get_currency_band_limits"
+    ) as mock_bands:
         mock_itcrm.return_value = (123.45, "01/02/25")
+        mock_bands.return_value = None
         result = format_bcra_variables(variables)
     assert "📊 Variables principales BCRA" in result
     assert "15/01/25" in result  # Date should be formatted
     assert "TCRM" in result  # Should include current TCRM line
     assert "01/02/25" in result  # Should include TCRM date from sheet
+
+
+def test_format_bcra_variables_includes_currency_bands():
+    from api.index import format_bcra_variables, fmt_num
+    from unittest.mock import patch
+
+    variables = {
+        "Tipo de cambio mayorista de referencia": {
+            "value": "1.100,00",
+            "date": "15/09/2025",
+        }
+    }
+
+    with patch("api.index.get_currency_band_limits") as mock_bands, patch(
+        "api.index.get_latest_itcrm_value_and_date"
+    ) as mock_itcrm:
+        mock_bands.return_value = {
+            "lower": 950.12,
+            "upper": 1460.34,
+            "date": "15/09/25",
+        }
+        mock_itcrm.return_value = None
+        result = format_bcra_variables(variables)
+
+    expected_lower = fmt_num(950.12, 2)
+    expected_upper = fmt_num(1460.34, 2)
+    assert "📏 Bandas cambiarias" in result
+    assert f"piso ${expected_lower}" in result
+    assert f"techo ${expected_upper}" in result
+    assert "15/09/25" in result
 
 
 def test_handle_bcra_variables_cached():
@@ -2974,6 +3009,7 @@ def test_get_cached_tcrm_100_backfills_missing_history():
     import pytest
     from api.index import get_cached_tcrm_100
     from unittest.mock import MagicMock
+    from typing import Any, List
 
     with patch("api.index.config_redis") as mock_cfg, patch(
         "api.index.redis_get_json"
@@ -2997,15 +3033,17 @@ def test_get_cached_tcrm_100_backfills_missing_history():
 
         mock_get_json.side_effect = redis_get_json_side_effect
 
+        current_calls = 0
+        history_calls: List[Any] = []
+
         def calc_side_effect(target_date=None):
+            nonlocal current_calls
             if target_date is None:
-                calc_side_effect.current_calls += 1
+                current_calls += 1
                 return 200.0
-            calc_side_effect.history_calls.append(target_date)
+            history_calls.append(target_date)
             return 100.0
 
-        calc_side_effect.current_calls = 0
-        calc_side_effect.history_calls = []
         mock_calc.side_effect = calc_side_effect
 
         value, change = get_cached_tcrm_100()
@@ -3013,10 +3051,9 @@ def test_get_cached_tcrm_100_backfills_missing_history():
         assert value == 200.0
         assert change is not None
         assert pytest.approx(change, rel=1e-9) == 100.0
-        assert calc_side_effect.current_calls == 1
-        assert len(calc_side_effect.history_calls) == 1
-
-        history_dt = calc_side_effect.history_calls[0]
+        assert current_calls == 1
+        assert len(history_calls) == 1
+        history_dt = history_calls[0]
         history_key = history_dt.strftime("%Y-%m-%d-%H") + "tcrm_100"
 
         assert any(
@@ -3630,6 +3667,26 @@ def test_format_dollar_rates_zero_decimal_formatting():
         "Test3: 1500.5 (-2.5% 24hs)",
     ]
     assert result == "\n".join(expected_lines)
+
+
+def test_format_dollar_rates_includes_currency_band_limits():
+    from api.index import format_dollar_rates, fmt_num
+
+    dollar_rates = [
+        {"name": "Oficial", "price": 1000.5, "history": 0.5},
+    ]
+
+    band_limits = {"lower": 950.12, "upper": 1460.34, "date": "15/09/25"}
+
+    result = format_dollar_rates(dollar_rates, 24, band_limits)
+
+    lines = result.splitlines()
+    assert lines[0] == "Oficial: 1000.5 (+0.5% 24hs)"
+    assert lines[1] == ""
+    expected_line = (
+        f"📏 Banda cambiaria BCRA: piso ${fmt_num(950.12, 2)} / techo ${fmt_num(1460.34, 2)} (15/09/25)"
+    )
+    assert lines[2] == expected_line
 
 
 def test_clean_crypto_data_success():
