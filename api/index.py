@@ -393,8 +393,8 @@ def _parse_currency_band_rows(
     """Return latest band row parsed into floats and formatted date."""
 
     effective_today = today or datetime.now(BA_TZ).date()
-    latest_any: Optional[Tuple[datetime, float, float]] = None
-    latest_on_or_before: Optional[Tuple[datetime, float, float]] = None
+    parsed_rows: List[Tuple[date, float, float]] = []
+
     for row in rows:
         if len(row) < 3:
             continue
@@ -406,31 +406,56 @@ def _parse_currency_band_rows(
         upper = parse_monetary_number(upper_raw)
         if lower is None or upper is None:
             continue
-        date_only = dt.date()
-        current = (
-            datetime.combine(date_only, datetime.min.time()),
-            float(lower),
-            float(upper),
-        )
-        if latest_any is None or current[0] > latest_any[0]:
-            latest_any = current
-        if date_only <= effective_today:
-            if latest_on_or_before is None or current[0] > latest_on_or_before[0]:
-                latest_on_or_before = current
+        parsed_rows.append((dt.date(), float(lower), float(upper)))
 
-    chosen = latest_on_or_before or latest_any
-
-    if chosen is None:
+    if not parsed_rows:
         return None
 
-    date_dt, lower_val, upper_val = chosen
-    date_iso = date_dt.date().isoformat()
-    return {
+    parsed_rows.sort(key=lambda item: item[0])
+
+    on_or_before = [item for item in parsed_rows if item[0] <= effective_today]
+    if on_or_before:
+        current = on_or_before[-1]
+        previous = on_or_before[-2] if len(on_or_before) > 1 else None
+    else:
+        current = parsed_rows[-1]
+        previous = parsed_rows[-2] if len(parsed_rows) > 1 else None
+
+    current_date, lower_val, upper_val = current
+
+    def pct_change(
+        curr: float, prev: Optional[Tuple[date, float, float]], index: int
+    ) -> Optional[float]:
+        if prev is None:
+            return None
+        prev_value_raw = prev[index]
+        if not isinstance(prev_value_raw, (int, float)):
+            return None
+        prev_value = float(prev_value_raw)
+        if prev_value == 0:
+            return None
+        try:
+            return ((curr - prev_value) / prev_value) * 100
+        except Exception:
+            return None
+
+    lower_change = pct_change(lower_val, previous, 1)
+    upper_change = pct_change(upper_val, previous, 2)
+
+    date_iso = current_date.isoformat()
+    result: Dict[str, Any] = {
         "date": to_ddmmyy(date_iso),
         "date_iso": date_iso,
         "lower": lower_val,
         "upper": upper_val,
     }
+
+    if lower_change is not None:
+        result["lower_change_pct"] = lower_change
+    if upper_change is not None:
+        result["upper_change_pct"] = upper_change
+
+    return result
 
 
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
@@ -1844,8 +1869,27 @@ def sort_dollar_rates(
 def format_dollar_rates(
     dollar_rates: List[Dict], hours_ago: int, band_limits: Optional[Dict[str, Any]] = None
 ) -> str:
-    msg_lines = []
-    for dollar in dollar_rates:
+    rates = list(dollar_rates)
+
+    if band_limits:
+        band_entries: List[Dict[str, Any]] = []
+        for label, key in (("Banda piso", "lower"), ("Banda techo", "upper")):
+            value = band_limits.get(key)
+            if not isinstance(value, (int, float)):
+                continue
+            history = band_limits.get(f"{key}_change_pct")
+            band_entries.append(
+                {
+                    "name": label,
+                    "price": float(value),
+                    "history": history if isinstance(history, (int, float)) else None,
+                }
+            )
+        if band_entries:
+            rates.extend(band_entries)
+
+    msg_lines: List[str] = []
+    for dollar in rates:
         price_formatted = fmt_num(dollar["price"], 2)
         line = f"{dollar['name']}: {price_formatted}"
         if dollar["history"] is not None:
@@ -1853,19 +1897,6 @@ def format_dollar_rates(
             formatted_percentage = fmt_signed_pct(percentage, 2)
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
-
-    if band_limits:
-        lower = band_limits.get("lower")
-        upper = band_limits.get("upper")
-        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)):
-            date_label = band_limits.get("date")
-            lower_text = fmt_num(float(lower), 2)
-            upper_text = fmt_num(float(upper), 2)
-            if msg_lines:
-                msg_lines.append("")
-            msg_lines.append(f"📏 Banda cambiaria BCRA{f' ({date_label})' if isinstance(date_label, str) and date_label else ''}")
-            msg_lines.append(f"Banda piso: ${lower_text}")
-            msg_lines.append(f"Banda techo: ${upper_text}")
 
     return "\n".join(msg_lines)
 
