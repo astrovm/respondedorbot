@@ -344,6 +344,136 @@ def bcra_list_variables(
         return None
 
 
+class _CurrencyBandTableParser(HTMLParser):
+    """Lightweight HTML table parser tailored to the BCRA bands page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_table = False
+        self._capture_cell = False
+        self._current_cell: List[str] = []
+        self._current_row: List[str] = []
+        self.rows: List[List[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        if tag.lower() == "table":
+            self._in_table = True
+        if not self._in_table:
+            return
+        if tag.lower() in ("td", "th"):
+            self._capture_cell = True
+            self._current_cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "table":
+            self._in_table = False
+            return
+        if not self._in_table:
+            return
+        if tag.lower() in ("td", "th") and self._capture_cell:
+            cell_text = "".join(self._current_cell).strip()
+            if cell_text:
+                self._current_row.append(cell_text)
+            else:
+                self._current_row.append("")
+            self._capture_cell = False
+        elif tag.lower() == "tr":
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._current_row = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture_cell and data:
+            self._current_cell.append(unescape(data))
+
+
+def _parse_currency_band_rows(rows: Iterable[List[str]]) -> Optional[Dict[str, Any]]:
+    """Return latest band row parsed into floats and formatted date."""
+
+    latest: Optional[Tuple[datetime, float, float]] = None
+    for row in rows:
+        if len(row) < 3:
+            continue
+        date_raw, lower_raw, upper_raw = row[0], row[1], row[2]
+        dt = parse_date_string(date_raw)
+        if not dt:
+            continue
+        lower = parse_monetary_number(lower_raw)
+        upper = parse_monetary_number(upper_raw)
+        if lower is None or upper is None:
+            continue
+        date_only = dt.date()
+        current = (datetime.combine(date_only, datetime.min.time()), float(lower), float(upper))
+        if latest is None or current[0] > latest[0]:
+            latest = current
+
+    if latest is None:
+        return None
+
+    date_dt, lower_val, upper_val = latest
+    date_iso = date_dt.date().isoformat()
+    return {
+        "date": to_ddmmyy(date_iso),
+        "date_iso": date_iso,
+        "lower": lower_val,
+        "upper": upper_val,
+    }
+
+
+def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
+    """Fetch latest currency band limits (piso/techo) from BCRA website."""
+
+    url = "https://www.bcra.gob.ar/PublicacionesEstadisticas/bandas-cambiarias-piso-techo.asp"
+    try:
+        try:
+            response = requests.get(url, timeout=10, verify=True)
+            response.raise_for_status()
+        except SSLError:
+            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+            response = requests.get(url, timeout=10, verify=False)
+            response.raise_for_status()
+
+        encoding = response.encoding or "latin-1"
+        html_text = response.content.decode(encoding, errors="ignore")
+        parser = _CurrencyBandTableParser()
+        parser.feed(html_text)
+        parsed = _parse_currency_band_rows(parser.rows)
+        if not parsed:
+            return None
+        return parsed
+    except (RequestException, ValueError) as exc:
+        print(f"Error fetching BCRA currency bands: {exc}")
+        return None
+
+
+def get_currency_band_limits() -> Optional[Dict[str, Any]]:
+    """Return cached currency band limits, fetching and caching if necessary."""
+
+    cache_key = "bcra_currency_band_limits"
+    redis_client: Optional[redis.Redis] = None
+    try:
+        redis_client = config_redis()
+        cached = redis_get_json(redis_client, cache_key)
+        if isinstance(cached, dict) and cached.get("lower") and cached.get("upper"):
+            return cast(Dict[str, Any], cached)
+    except Exception:
+        redis_client = None
+
+    fetched = fetch_currency_band_limits()
+    if not fetched:
+        return None
+
+    try:
+        if redis_client is None:
+            redis_client = config_redis()
+        if redis_client:
+            redis_setex_json(redis_client, cache_key, TTL_BCRA, fetched)
+    except Exception:
+        pass
+
+    return fetched
+
+
 def to_es_number(n: Union[float, int]) -> str:
     try:
         s = f"{float(n):,.2f}"
@@ -1692,7 +1822,9 @@ def sort_dollar_rates(
     return sorted_dollar_rates
 
 
-def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
+def format_dollar_rates(
+    dollar_rates: List[Dict], hours_ago: int, band_limits: Optional[Dict[str, Any]] = None
+) -> str:
     msg_lines = []
     for dollar in dollar_rates:
         price_formatted = fmt_num(dollar["price"], 2)
@@ -1702,6 +1834,20 @@ def format_dollar_rates(dollar_rates: List[Dict], hours_ago: int) -> str:
             formatted_percentage = fmt_signed_pct(percentage, 2)
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
+
+    if band_limits:
+        lower = band_limits.get("lower")
+        upper = band_limits.get("upper")
+        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)):
+            date_label = band_limits.get("date")
+            lower_text = fmt_num(float(lower), 2)
+            upper_text = fmt_num(float(upper), 2)
+            line = f"📏 Banda cambiaria BCRA: piso ${lower_text} / techo ${upper_text}"
+            if isinstance(date_label, str) and date_label:
+                line += f" ({date_label})"
+            if msg_lines:
+                msg_lines.append("")
+            msg_lines.append(line)
 
     return "\n".join(msg_lines)
 
@@ -1716,7 +1862,9 @@ def get_dollar_rates() -> Optional[str]:
 
     sorted_dollar_rates = sort_dollar_rates(dollars, tcrm_100, tcrm_history)
 
-    return format_dollar_rates(sorted_dollar_rates, 24)
+    band_limits = get_currency_band_limits()
+
+    return format_dollar_rates(sorted_dollar_rates, 24, band_limits)
 
 
 def get_devo(msg_text: str) -> str:
@@ -2311,6 +2459,19 @@ def format_bcra_variables(variables: Dict) -> str:
                     line += f" ({date.replace('/2025', '/25')})"
                 lines.append(line)
                 break
+
+    band_limits = get_currency_band_limits()
+    if band_limits:
+        lower = band_limits.get("lower")
+        upper = band_limits.get("upper")
+        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)):
+            date_label = band_limits.get("date")
+            lower_text = fmt_num(float(lower), 2)
+            upper_text = fmt_num(float(upper), 2)
+            line = f"📏 Bandas cambiarias: piso ${lower_text} / techo ${upper_text}"
+            if isinstance(date_label, str) and date_label:
+                line += f" ({date_label})"
+            lines.append(line)
 
     # Append current TCRM value with its sheet date (cached)
     try:
@@ -3144,7 +3305,9 @@ class _VisibleTextExtractor(HTMLParser):
         self._title_parts: List[str] = []
         self._in_title = False
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, str]]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
         tag_lower = tag.lower()
         if tag_lower in {"script", "style", "noscript"}:
             self._skip_depth += 1
