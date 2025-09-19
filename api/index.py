@@ -11,6 +11,7 @@ from requests.exceptions import RequestException, SSLError
 from urllib3.exceptions import InsecureRequestWarning
 import warnings
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set, Iterable
+from collections import Counter
 from difflib import SequenceMatcher
 import ast
 import base64
@@ -1078,12 +1079,72 @@ def agent_sections_are_valid(text: str) -> bool:
     return True
 
 
-def build_agent_retry_prompt(previous_text: Optional[str]) -> str:
+def get_agent_retry_hint(
+    previous_text: Optional[str], rng: Optional[random.Random] = None
+) -> str:
+    """Return a randomized thinking prompt so the agent explores nuevos datos."""
+
+    normalized_previous = normalize_agent_text(previous_text or "")
+    tokens = [token for token in normalized_previous.split() if token]
+
+    filtered_tokens: List[str] = []
+    for token in tokens:
+        if token in AGENT_KEYWORD_STOPWORDS:
+            continue
+        if len(token) < 3:
+            continue
+        if token.isdigit():
+            continue
+        filtered_tokens.append(token)
+
+    keyword_counter = Counter(filtered_tokens)
+    top_keywords: List[str] = [word for word, _ in keyword_counter.most_common(3)]
+
+    if top_keywords:
+        avoided_fragment = (
+            "Marcá como prohibidos estos términos ya gastados: "
+            + ", ".join(top_keywords)
+            + ". "
+        )
+    else:
+        avoided_fragment = "Arrancá desde cero sin reciclar la última búsqueda. "
+
+    rng_instance = rng if rng is not None else random
+
+    option_count = rng_instance.randint(3, 4)
+    ordinal_words = ("primera", "segunda", "tercera", "cuarta", "quinta")
+    ordinal_index = rng_instance.randint(0, option_count - 1)
+    ordinal_word = ordinal_words[min(ordinal_index, len(ordinal_words) - 1)]
+
+    brainstorming_templates = (
+        "Anotá {n} búsquedas frescas en temas distintos. Ejecutá la {ordinal} con web_search.",
+        "Hacé una mini lluvia de ideas con {n} queries nuevos y corré la {ordinal} usando web_search.",
+        "Pensá en {n} consultas posibles que sorprendan al gordo y quedate con la {ordinal} para web_search.",
+    )
+
+    follow_up_templates = (
+        "Traé números, fechas y citá la fuente puntual.",
+        "Resumí el dato clave con cifras concretas y quién lo publicó.",
+        "Documentá resultados verificables (monto, variación, protagonista) y la fuente exacta.",
+    )
+
+    brainstorming_prompt = rng_instance.choice(brainstorming_templates).format(
+        n=option_count,
+        ordinal=ordinal_word,
+    )
+    follow_up_prompt = rng_instance.choice(follow_up_templates)
+
+    return avoided_fragment + brainstorming_prompt + " " + follow_up_prompt
+
+
+def build_agent_retry_prompt(
+    previous_text: Optional[str], rng: Optional[random.Random] = None
+) -> str:
     """Create a corrective prompt so the agent avoids looping."""
 
     preview = truncate_text(previous_text or "", 160)
     preview_single_line = preview.replace("\n", " ").strip()
-    return (
+    base_prompt = (
         "La última nota no sirvió: te repetiste igual que la memoria anterior o no respetaste la estructura obligatoria. "
         "Antes de escribir otra vez, completá el pendiente y contá resultados concretos. "
         "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. Si ya cerraste ese tema, cambiá a otro interés fuerte del gordo en vez de seguir clavado en lo mismo. "
@@ -1095,6 +1156,11 @@ def build_agent_retry_prompt(previous_text: Optional[str]) -> str:
         + "Escribí ahora una nota distinta con hechos puntuales y cerrala en dos secciones claras: "
         "\"HALLAZGOS:\" con los datos específicos que obtuviste y \"PRÓXIMO PASO:\" con la siguiente acción directa."
     )
+
+    hint = get_agent_retry_hint(previous_text, rng=rng)
+    if hint:
+        return f"{base_prompt} {hint}"
+    return base_prompt
 
 
 def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
