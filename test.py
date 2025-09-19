@@ -3614,8 +3614,8 @@ def test_format_dollar_rates_with_positive_variations():
 
     expected_lines = [
         "Oficial: 1000.5 (+1.2% 24hs)",
-        "Blue: 1200 (+2.1% 24hs)",
         "MEP: 1050.25 (+0.5% 24hs)",
+        "Blue: 1200 (+2.1% 24hs)",
     ]
     assert result == "\n".join(expected_lines)
 
@@ -3631,7 +3631,7 @@ def test_format_dollar_rates_with_negative_variations():
 
     result = format_dollar_rates(dollar_rates, 12)
 
-    expected_lines = ["Tarjeta: 1600.75 (-0.8% 12hs)", "CCL: 1075.8 (-1.5% 12hs)"]
+    expected_lines = ["CCL: 1075.8 (-1.5% 12hs)", "Tarjeta: 1600.75 (-0.8% 12hs)"]
     assert result == "\n".join(expected_lines)
 
 
@@ -3708,8 +3708,8 @@ def test_format_dollar_rates_includes_currency_band_limits():
     result = format_dollar_rates(dollar_rates, 24, band_limits)
 
     lines = result.splitlines()
-    assert lines[0] == "Oficial: 1000.5 (+0.5% 24hs)"
-    assert lines[1] == "Banda piso: 950.12 (+0.5% 24hs)"
+    assert lines[0] == "Banda piso: 950.12 (+0.5% 24hs)"
+    assert lines[1] == "Oficial: 1000.5 (+0.5% 24hs)"
     assert lines[2] == "Banda techo: 1460.34 (-0.25% 24hs)"
 
 
