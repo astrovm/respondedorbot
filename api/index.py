@@ -46,6 +46,7 @@ WEB_FETCH_MAX_CHARS = 8000
 WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
+TTL_MAYORISTA_MISSING = 300  # 5 minutes sentinel for missing mayorista values
 
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
@@ -2260,6 +2261,26 @@ def _get_itcrm_value_for_date(target_dt: datetime) -> Optional[Tuple[float, date
         return None
 
 
+def cache_mayorista_missing(
+    date_key: str, redis_client: Optional[redis.Redis] = None
+) -> None:
+    """Store a short-lived sentinel indicating mayorista is missing for date_key."""
+
+    try:
+        client = redis_client or config_redis()
+        if not client:
+            return
+        payload = {"missing": True, "timestamp": int(time.time())}
+        redis_setex_json(
+            client,
+            f"bcra_mayorista:{date_key}",
+            TTL_MAYORISTA_MISSING,
+            payload,
+        )
+    except Exception:
+        pass
+
+
 def calculate_tcrm_100(
     target_date: Optional[Union[str, datetime, date]] = None,
 ) -> Optional[float]:
@@ -2317,13 +2338,22 @@ def calculate_tcrm_100(
 
         # Lookup mayorista value by date from Redis
         wholesale_value: Optional[float] = None
+        sentinel_present = False
+        redis_client: Optional[redis.Redis] = None
         try:
             redis_client = config_redis()
             cached = redis_get_json(redis_client, f"bcra_mayorista:{date_key}")
-            if isinstance(cached, dict) and "value" in cached:
-                wholesale_value = parse_monetary_number(cached["value"])  # robust cast
+            if isinstance(cached, dict):
+                if cached.get("missing"):
+                    sentinel_present = True
+                elif "value" in cached:
+                    wholesale_value = parse_monetary_number(cached["value"])  # robust cast
         except Exception:
+            redis_client = None
             wholesale_value = None
+
+        if sentinel_present:
+            return None
 
         if wholesale_value is None:
             # Try to fetch from BCRA API for this exact date
@@ -2331,6 +2361,7 @@ def calculate_tcrm_100(
             if fetched is not None:
                 wholesale_value = float(fetched)
             else:
+                cache_mayorista_missing(date_key, redis_client)
                 return None
 
         return wholesale_value * 100 / itcrm_value
@@ -2377,6 +2408,7 @@ def get_cached_tcrm_100(
 
         # Determine if we have a same-day mayorista value for the current ITCRM date
         same_day_ok = False
+        skip_mayorista_fetch = False
         try:
             itcrm_cached = redis_get_json(redis_client, "latest_itcrm_details")
             itcrm_date_str = None
@@ -2392,16 +2424,22 @@ def get_cached_tcrm_100(
                 mayorista_cached = redis_get_json(
                     redis_client, f"bcra_mayorista:{date_key}"
                 )
-                if isinstance(mayorista_cached, dict) and "value" in mayorista_cached:
-                    if parse_monetary_number(mayorista_cached["value"]) is not None:
-                        same_day_ok = True
+                if isinstance(mayorista_cached, dict):
+                    if mayorista_cached.get("missing"):
+                        skip_mayorista_fetch = True
+                    elif "value" in mayorista_cached:
+                        if parse_monetary_number(mayorista_cached["value"]) is not None:
+                            same_day_ok = True
                 # If not cached, attempt a one-shot API fetch to populate cache
-                if not same_day_ok:
+                if not same_day_ok and not skip_mayorista_fetch:
                     fetched_val = bcra_get_value_for_date(
                         "tipo de cambio mayorista", date_key
                     )
                     if fetched_val is not None:
                         same_day_ok = True
+                    else:
+                        cache_mayorista_missing(date_key, redis_client)
+                        skip_mayorista_fetch = True
         except Exception:
             same_day_ok = False
 
