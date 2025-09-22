@@ -3029,6 +3029,48 @@ def test_calculate_tcrm_100_success():
         assert result == 1000.0 * 100 / 120.0
 
 
+def test_calculate_tcrm_100_caches_missing_mayorista():
+    from api.index import calculate_tcrm_100
+
+    cache = {}
+
+    with patch(
+        "api.index.get_latest_itcrm_value_and_date"
+    ) as mock_itcrm_details, patch("api.index.config_redis") as mock_cfg, patch(
+        "api.index.redis_get_json"
+    ) as mock_get_json, patch("api.index.redis_setex_json") as mock_setex_json, patch(
+        "api.index.bcra_get_value_for_date"
+    ) as mock_bcra:
+        mock_itcrm_details.return_value = (120.0, "01/01/24")
+        redis_client = MagicMock()
+        mock_cfg.return_value = redis_client
+
+        def get_json_side_effect(_client, key):  # noqa: ARG001
+            return cache.get(key)
+
+        def setex_side_effect(_client, key, ttl, value):  # noqa: ARG001
+            cache[key] = value
+            return True
+
+        mock_get_json.side_effect = get_json_side_effect
+        mock_setex_json.side_effect = setex_side_effect
+        mock_bcra.return_value = None
+
+        result = calculate_tcrm_100()
+        assert result is None
+
+        sentinel_key = "bcra_mayorista:2024-01-01"
+        assert sentinel_key in cache
+        assert cache[sentinel_key]["missing"] is True
+        mock_bcra.assert_called_once()
+
+        mock_bcra.reset_mock()
+
+        result_again = calculate_tcrm_100()
+        assert result_again is None
+        mock_bcra.assert_not_called()
+
+
 def test_get_cached_tcrm_100_backfills_missing_history():
     import pytest
     from api.index import get_cached_tcrm_100
@@ -3084,6 +3126,40 @@ def test_get_cached_tcrm_100_backfills_missing_history():
             call.args[1] == history_key and call.args[2]["data"] == 100.0
             for call in mock_set_json.call_args_list
         )
+
+
+def test_get_cached_tcrm_100_skips_fetch_when_mayorista_missing():
+    from api.index import get_cached_tcrm_100
+
+    cache = {
+        "bcra_mayorista:2024-01-02": {"missing": True, "timestamp": 1234567890}
+    }
+
+    with patch("api.index.config_redis") as mock_cfg, patch(
+        "api.index.redis_get_json"
+    ) as mock_get_json, patch("api.index.get_cache_history") as mock_history, patch(
+        "api.index.bcra_get_value_for_date"
+    ) as mock_bcra, patch("api.index.calculate_tcrm_100") as mock_calc:
+        redis_client = MagicMock()
+        redis_client.get.return_value = None
+        mock_cfg.return_value = redis_client
+        mock_history.return_value = None
+
+        def get_json_side_effect(_client, key):  # noqa: ARG001
+            if key == "tcrm_100":
+                return None
+            if key == "latest_itcrm_details":
+                return {"date": "2024-01-02"}
+            return cache.get(key)
+
+        mock_get_json.side_effect = get_json_side_effect
+
+        value, change = get_cached_tcrm_100()
+
+        assert value is None
+        assert change is None
+        mock_bcra.assert_not_called()
+        mock_calc.assert_called_once_with(target_date=ANY)
 
 def test_get_market_context_success():
     from api.index import get_market_context
