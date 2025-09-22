@@ -48,6 +48,25 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 TTL_MAYORISTA_MISSING = 300  # 5 minutes sentinel for missing mayorista values
 
+CACHE_STALE_GRACE_BCRA = 6 * 3600  # allow showing last BCRA data up to 6h stale
+CACHE_STALE_GRACE_BANDS = 3600  # currency bands fall back for 1h
+
+_bcra_local_cache: Dict[str, Any] = {
+    "value": None,
+    "expires_at": 0.0,
+    "stale_until": 0.0,
+    "meta": {},
+}
+_bcra_failure_until: float = 0.0
+
+_currency_band_local_cache: Dict[str, Any] = {
+    "value": None,
+    "expires_at": 0.0,
+    "stale_until": 0.0,
+    "meta": {},
+}
+_currency_band_failure_until: float = 0.0
+
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
 HACKER_NEWS_MAX_ITEMS = 5
@@ -273,6 +292,50 @@ def parse_monetary_number(value: Union[str, float, int, Decimal]) -> Optional[fl
 
 
 # -----------------------------
+# Lightweight local cache helpers
+# -----------------------------
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _update_local_cache(
+    cache_store: Dict[str, Any],
+    value: Any,
+    ttl: int,
+    stale_grace: int,
+    fetched_at: Optional[str] = None,
+) -> None:
+    now = time.time()
+    cache_store["value"] = value
+    cache_store["expires_at"] = now + max(ttl, 0)
+    cache_store["stale_until"] = cache_store["expires_at"] + max(stale_grace, 0)
+    cache_store["meta"] = {"fetched_at": fetched_at or _now_utc_iso()}
+
+
+def _local_cache_get(
+    cache_store: Dict[str, Any], allow_stale: bool = False
+) -> Tuple[Optional[Any], bool, Dict[str, Any]]:
+    value = cache_store.get("value")
+    meta = cache_store.get("meta") or {}
+    if value is None:
+        return None, False, {}
+
+    now = time.time()
+    expires_at = cache_store.get("expires_at", 0.0)
+    if now <= expires_at:
+        return value, True, meta
+
+    stale_until = cache_store.get("stale_until", 0.0)
+    if allow_stale and now <= stale_until:
+        return value, False, meta
+
+    if now > stale_until:
+        cache_store["value"] = None
+        cache_store["meta"] = {}
+    return None, False, {}
+
+
+# -----------------------------
 # BCRA v4.0 API helpers
 # -----------------------------
 def bcra_api_get(
@@ -460,6 +523,97 @@ def _parse_currency_band_rows(
     return result
 
 
+def _get_cached_currency_band_entry(
+    allow_stale: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Return cached currency band limits with freshness metadata."""
+
+    redis_client: Optional[redis.Redis]
+    try:
+        redis_client = config_redis()
+    except Exception:
+        redis_client = None
+
+    cache_key = "bcra_currency_band_limits"
+    if redis_client is not None:
+        cached = redis_get_json(redis_client, cache_key)
+        if cached:
+            payload: Dict[str, Any]
+            if isinstance(cached, dict) and "data" in cached:
+                payload = cast(Dict[str, Any], cached)
+            else:
+                payload = {"data": cached}
+            fetched_at = cast(Optional[str], payload.get("fetched_at"))
+            _update_local_cache(
+                _currency_band_local_cache,
+                cast(Dict[str, Any], payload["data"]),
+                TTL_BCRA,
+                CACHE_STALE_GRACE_BANDS,
+                fetched_at,
+            )
+            return cast(Dict[str, Any], payload["data"]), {
+                "is_fresh": True,
+                "fetched_at": fetched_at,
+            }
+
+        if allow_stale:
+            last_success = redis_get_json(redis_client, f"{cache_key}:last_success")
+            if isinstance(last_success, dict) and "data" in last_success:
+                fetched_at = cast(Optional[str], last_success.get("fetched_at"))
+                _update_local_cache(
+                    _currency_band_local_cache,
+                    cast(Dict[str, Any], last_success["data"]),
+                    0,
+                    CACHE_STALE_GRACE_BANDS,
+                    fetched_at,
+                )
+                return cast(Dict[str, Any], last_success["data"]), {
+                    "is_fresh": False,
+                    "fetched_at": fetched_at,
+                }
+
+    local_value, is_fresh, meta = _local_cache_get(
+        _currency_band_local_cache, allow_stale=allow_stale
+    )
+    if local_value is not None:
+        return cast(Dict[str, Any], local_value), {
+            "is_fresh": is_fresh,
+            "fetched_at": meta.get("fetched_at"),
+        }
+
+    return None, {"is_fresh": False, "fetched_at": None}
+
+
+def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> None:
+    if not data:
+        return
+
+    fetched_at_iso = _now_utc_iso()
+    payload = {"data": data, "fetched_at": fetched_at_iso}
+
+    try:
+        redis_client = config_redis()
+        redis_setex_json(redis_client, "bcra_currency_band_limits", ttl, payload)
+        try:
+            redis_set_json(
+                redis_client,
+                "bcra_currency_band_limits:last_success",
+                payload,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    _update_local_cache(
+        _currency_band_local_cache,
+        data,
+        ttl,
+        CACHE_STALE_GRACE_BANDS,
+        fetched_at_iso,
+    )
+
+
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
     """Fetch latest currency band limits (piso/techo) from BCRA website."""
 
@@ -489,35 +643,33 @@ def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
 def get_currency_band_limits() -> Optional[Dict[str, Any]]:
     """Return cached currency band limits, fetching and caching if necessary."""
 
-    cache_key = "bcra_currency_band_limits"
-    redis_client: Optional[redis.Redis] = None
+    global _currency_band_failure_until
+
+    cached, meta = _get_cached_currency_band_entry(allow_stale=True)
     effective_today = datetime.now(BA_TZ).date()
 
-    try:
-        redis_client = config_redis()
-        cached = redis_get_json(redis_client, cache_key)
-        if isinstance(cached, dict) and cached.get("lower") and cached.get("upper"):
-            cached_date = parse_date_string(str(cached.get("date", "")))
-            if cached_date and cached_date.date() > effective_today:
-                cached = None
-            else:
-                return cast(Dict[str, Any], cached)
-    except Exception:
-        redis_client = None
+    if cached and isinstance(cached, dict):
+        cached_date = parse_date_string(str(cached.get("date", "")))
+        if cached_date and cached_date.date() > effective_today:
+            cached = None
+            meta = {"is_fresh": False, "fetched_at": meta.get("fetched_at")}
+
+    if cached and meta.get("is_fresh"):
+        return cached
+
+    fallback = cached
+    now_ts = time.time()
+    if now_ts < _currency_band_failure_until:
+        return fallback
 
     fetched = fetch_currency_band_limits()
-    if not fetched:
-        return None
+    if fetched:
+        cache_currency_band_limits(fetched, TTL_BCRA)
+        _currency_band_failure_until = 0.0
+        return fetched
 
-    try:
-        if redis_client is None:
-            redis_client = config_redis()
-        if redis_client:
-            redis_setex_json(redis_client, cache_key, TTL_BCRA, fetched)
-    except Exception:
-        pass
-
-    return fetched
+    _currency_band_failure_until = now_ts + min(TTL_BCRA, 120)
+    return fallback
 
 
 def to_es_number(n: Union[float, int]) -> str:
@@ -2109,30 +2261,90 @@ $1 ARS = {sats_per_peso:.3f} sats"""
         return "no pude conseguir el precio de btc boludo"
 
 
-def get_cached_bcra_variables() -> Optional[Dict]:
-    """Get cached BCRA variables from Redis"""
+def _get_cached_bcra_cache_entry(
+    allow_stale: bool = False,
+) -> Tuple[Optional[Dict], Dict[str, Any]]:
+    """Return cached BCRA variables along with freshness metadata."""
+
+    redis_client: Optional[redis.Redis]
     try:
         redis_client = config_redis()
-        cache_key = "bcra_variables"
-        cached = redis_get_json(redis_client, cache_key)
-        if cached:
-            return cast(Dict, cached)
-        return None
     except Exception as e:
         print(f"Error getting cached BCRA variables: {e}")
-        return None
+        redis_client = None
+
+    cache_key = "bcra_variables"
+    if redis_client is not None:
+        cached = redis_get_json(redis_client, cache_key)
+        if cached:
+            payload: Dict[str, Any]
+            if isinstance(cached, dict) and "data" in cached:
+                payload = cast(Dict[str, Any], cached)
+            else:
+                payload = {"data": cached}
+            fetched_at = cast(Optional[str], payload.get("fetched_at"))
+            _update_local_cache(
+                _bcra_local_cache,
+                cast(Dict, payload["data"]),
+                TTL_BCRA,
+                CACHE_STALE_GRACE_BCRA,
+                fetched_at,
+            )
+            return cast(Dict, payload["data"]), {
+                "is_fresh": True,
+                "fetched_at": fetched_at,
+            }
+
+        if allow_stale:
+            last_success = redis_get_json(redis_client, f"{cache_key}:last_success")
+            if isinstance(last_success, dict) and "data" in last_success:
+                fetched_at = cast(Optional[str], last_success.get("fetched_at"))
+                _update_local_cache(
+                    _bcra_local_cache,
+                    cast(Dict, last_success["data"]),
+                    0,
+                    CACHE_STALE_GRACE_BCRA,
+                    fetched_at,
+                )
+                return cast(Dict, last_success["data"]), {
+                    "is_fresh": False,
+                    "fetched_at": fetched_at,
+                }
+
+    local_value, is_fresh, meta = _local_cache_get(_bcra_local_cache, allow_stale=allow_stale)
+    if local_value is not None:
+        return cast(Dict, local_value), {
+            "is_fresh": is_fresh,
+            "fetched_at": meta.get("fetched_at"),
+        }
+
+    return None, {"is_fresh": False, "fetched_at": None}
+
+
+def get_cached_bcra_variables(allow_stale: bool = False) -> Optional[Dict]:
+    """Get cached BCRA variables (optionally allowing stale fallback)."""
+
+    value, _ = _get_cached_bcra_cache_entry(allow_stale=allow_stale)
+    return value
 
 
 def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
-    """Cache BCRA variables in Redis.
+    """Cache BCRA variables in Redis and the local fallback store."""
 
-    - Stores the latest set under `bcra_variables` with TTL
-    - Persists Dólar Mayorista by date at `bcra_mayorista:YYYY-MM-DD` (no TTL)
-    """
+    if not variables:
+        return
+
+    fetched_at_iso = _now_utc_iso()
+    payload = {"data": variables, "fetched_at": fetched_at_iso}
+
     try:
         redis_client = config_redis()
         cache_key = "bcra_variables"
-        redis_setex_json(redis_client, cache_key, ttl, variables)
+        redis_setex_json(redis_client, cache_key, ttl, payload)
+        try:
+            redis_set_json(redis_client, f"{cache_key}:last_success", payload)
+        except Exception:
+            pass
 
         # Also persist the mayorista value by its own date for future lookups
         try:
@@ -2155,23 +2367,59 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
 
+    _update_local_cache(
+        _bcra_local_cache,
+        variables,
+        ttl,
+        CACHE_STALE_GRACE_BCRA,
+        fetched_at_iso,
+    )
+
+
+def _attach_bcra_meta(
+    value: Optional[Dict], meta: Dict[str, Any]
+) -> Optional[Dict]:
+    if not value:
+        return None
+    if meta.get("is_fresh"):
+        return value
+
+    enriched = dict(value)
+    meta_payload: Dict[str, Any] = {"stale": True}
+    fetched_at = meta.get("fetched_at")
+    if fetched_at:
+        meta_payload["fetched_at"] = fetched_at
+    enriched["_meta"] = meta_payload
+    return enriched
+
 
 def get_or_refresh_bcra_variables() -> Optional[Dict]:
-    """Return BCRA variables using cache or the BCRA API, propagating fetch errors.
+    """Return BCRA variables using cache or the BCRA API, propagating fetch errors."""
 
-    - Tries cache first; lets exceptions propagate to caller
-    - If cache misses, fetches via API and caches (caching errors are logged but ignored)
-    """
-    variables = get_cached_bcra_variables()  # may raise; callers handle
-    if variables:
-        return variables
-    variables = bcra_fetch_latest_variables()  # may raise; callers handle
+    global _bcra_failure_until
+
+    cached, meta = _get_cached_bcra_cache_entry(allow_stale=True)
+    if cached and meta.get("is_fresh"):
+        return cached
+
+    fallback = cached
+    fallback_meta = meta
+
+    now_ts = time.time()
+    if now_ts < _bcra_failure_until:
+        return _attach_bcra_meta(fallback, fallback_meta)
+
+    variables = bcra_fetch_latest_variables()
     if variables:
         try:
             cache_bcra_variables(variables)
         except Exception as e:
             print(f"Error caching BCRA variables: {e}")
-    return variables
+        _bcra_failure_until = 0.0
+        return variables
+
+    _bcra_failure_until = now_ts + min(TTL_BCRA, 120)
+    return _attach_bcra_meta(fallback, fallback_meta)
 
 
 def get_latest_itcrm_value() -> Optional[float]:
@@ -2641,16 +2889,28 @@ def format_bcra_variables(variables: Dict) -> str:
         (r"reservas.*internacionales", lambda v: f"🏛️ Reservas: USD {format_value(v)} millones"),
     ]
 
+    meta_info: Dict[str, Any] = {}
+    if isinstance(variables, dict):
+        candidate_meta = variables.get("_meta")
+        if isinstance(candidate_meta, dict):
+            meta_info = candidate_meta
+
     lines = ["📊 Variables principales BCRA\n"]
+    latest_dt: Optional[datetime] = None
     for pattern, formatter in specs:
         compiled = re.compile(pattern)
         for key, data in variables.items():
+            if str(key).startswith("_"):
+                continue
             if compiled.search(norm(key)):
                 value, date = data.get("value", ""), data.get("date", "")
                 line = formatter(value)
                 if date and date != value:
                     line += f" ({date.replace('/2025', '/25')})"
                 lines.append(line)
+                parsed_dt = parse_date_string(str(date))
+                if parsed_dt and (latest_dt is None or parsed_dt > latest_dt):
+                    latest_dt = parsed_dt
                 break
 
     band_limits = get_currency_band_limits()
@@ -2677,6 +2937,18 @@ def format_bcra_variables(variables: Dict) -> str:
             )
     except Exception:
         pass
+
+    if meta_info.get("stale"):
+        stale_msg = "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
+        if stale_msg not in lines:
+            lines.append(stale_msg)
+
+    if latest_dt:
+        age_days = (datetime.now(BA_TZ).date() - latest_dt.date()).days
+        if age_days >= 3:
+            lines.append(
+                f"⚠️ Datos del BCRA con {age_days} días de atraso, chequeá más tarde."
+            )
 
     return "\n".join(lines)
 
