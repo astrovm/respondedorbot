@@ -38,6 +38,7 @@ import requests
 import redis
 import random
 import re
+import time
 
 app = Flask(__name__)
 
@@ -52,6 +53,21 @@ def cleanup_test_artifacts():
             os.remove("test_api_key")
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_caches():
+    from api import index as index_module
+
+    index_module._bcra_local_cache.update(
+        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
+    )
+    index_module._bcra_failure_until = 0.0
+    index_module._currency_band_local_cache.update(
+        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
+    )
+    index_module._currency_band_failure_until = 0.0
+    yield
 
 
 def test_responder_no_args():
@@ -2559,7 +2575,8 @@ def test_get_cached_bcra_variables_success():
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
-        mock_redis.get.return_value = json.dumps(test_data)
+        payload = {"data": test_data, "fetched_at": "2025-09-20T00:00:00+00:00"}
+        mock_redis.get.return_value = json.dumps(payload)
 
         result = get_cached_bcra_variables()
 
@@ -2603,9 +2620,22 @@ def test_cache_bcra_variables_success():
 
         cache_bcra_variables(test_data, 600)
 
-        mock_redis.setex.assert_called_once_with(
-            "bcra_variables", 600, json.dumps(test_data)
-        )
+        assert mock_redis.setex.call_count == 1
+        args, _ = mock_redis.setex.call_args
+        assert args[0] == "bcra_variables"
+        assert args[1] == 600
+        payload = json.loads(args[2])
+        assert payload["data"] == test_data
+        assert "fetched_at" in payload
+
+        keys_written = [call[0][0] for call in mock_redis.set.call_args_list]
+        assert "bcra_variables:last_success" in keys_written
+        for args, _ in mock_redis.set.call_args_list:
+            if args[0] == "bcra_variables:last_success":
+                last_success_payload = json.loads(args[1])
+                assert last_success_payload["data"] == test_data
+                assert "fetched_at" in last_success_payload
+                break
 
 
 def test_cache_bcra_variables_default_ttl():
@@ -2619,9 +2649,12 @@ def test_cache_bcra_variables_default_ttl():
 
         cache_bcra_variables(test_data)
 
-        mock_redis.setex.assert_called_once_with(
-            "bcra_variables", 300, json.dumps(test_data)
-        )
+        args, _ = mock_redis.setex.call_args
+        assert args[0] == "bcra_variables"
+        assert args[1] == 300
+        payload = json.loads(args[2])
+        assert payload["data"] == test_data
+        assert "fetched_at" in payload
 
 
 def test_cache_bcra_variables_exception():
@@ -2633,6 +2666,78 @@ def test_cache_bcra_variables_exception():
 
         # Should not raise exception, just print error
         cache_bcra_variables(test_data)
+
+
+def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
+    from api import index as index_module
+    from api.index import cache_bcra_variables, get_or_refresh_bcra_variables
+
+    test_data = {
+        "Tipo de cambio mayorista": {"value": "1000", "date": "01/09/2025"}
+    }
+
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        cache_bcra_variables(test_data, ttl=1)
+
+    index_module._bcra_local_cache["expires_at"] = time.time() - 10
+    index_module._bcra_local_cache["stale_until"] = time.time() + 60
+
+    with patch("api.index.bcra_fetch_latest_variables") as mock_fetch, patch(
+        "api.index.config_redis"
+    ) as mock_config_redis:
+        mock_fetch.return_value = None
+        mock_config_redis.side_effect = Exception("Redis down")
+
+        result = get_or_refresh_bcra_variables()
+
+    assert result is not None
+    assert result.get("_meta", {}).get("stale") is True
+    assert "Tipo de cambio mayorista" in result
+
+
+def test_get_currency_band_limits_reuses_stale_after_failure():
+    from api import index as index_module
+    from api.index import get_currency_band_limits
+
+    band_data = {"lower": 950.0, "upper": 1200.0, "date": "22/09/2025"}
+
+    with patch("api.index.fetch_currency_band_limits") as mock_fetch, patch(
+        "api.index.config_redis"
+    ) as mock_config_redis:
+        mock_fetch.return_value = band_data
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        result = get_currency_band_limits()
+
+    assert result == band_data
+
+    index_module._currency_band_local_cache["expires_at"] = time.time() - 5
+    index_module._currency_band_local_cache["stale_until"] = time.time() + 300
+
+    with patch("api.index.fetch_currency_band_limits") as mock_fetch, patch(
+        "api.index.config_redis"
+    ) as mock_config_redis:
+        mock_fetch.return_value = None
+        mock_config_redis.side_effect = Exception("Redis offline")
+
+        fallback_result = get_currency_band_limits()
+        mock_fetch.assert_called_once()
+
+    assert fallback_result == band_data
+
+    with patch("api.index.fetch_currency_band_limits") as mock_fetch_again, patch(
+        "api.index.config_redis"
+    ) as mock_config_redis:
+        mock_fetch_again.return_value = None
+        mock_config_redis.side_effect = Exception("Redis offline")
+
+        second_result = get_currency_band_limits()
+        mock_fetch_again.assert_not_called()
+
+    assert second_result == band_data
 
 
 def test_handle_transcribe_with_message_no_reply():
@@ -2945,48 +3050,40 @@ def test_parse_currency_band_rows_skips_future_dates():
 def test_handle_bcra_variables_cached():
     from api.index import handle_bcra_variables
 
-    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
+    with patch("api.index.get_or_refresh_bcra_variables") as mock_get, patch(
         "api.index.format_bcra_variables"
     ) as mock_format:
 
-        mock_cached.return_value = {"test": "data"}
+        mock_get.return_value = {"test": "data"}
         mock_format.return_value = "formatted variables"
 
         result = handle_bcra_variables()
         assert result == "formatted variables"
-        mock_cached.assert_called_once()
+        mock_get.assert_called_once()
         mock_format.assert_called_once_with({"test": "data"})
 
 
 def test_handle_bcra_variables_scrape_fresh():
     from api.index import handle_bcra_variables
 
-    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
-        "api.index.bcra_fetch_latest_variables"
-    ) as mock_fetch, patch("api.index.cache_bcra_variables") as mock_cache, patch(
+    with patch("api.index.get_or_refresh_bcra_variables") as mock_get, patch(
         "api.index.format_bcra_variables"
     ) as mock_format:
 
-        mock_cached.return_value = None
-        mock_fetch.return_value = {"scraped": "data"}
+        mock_get.return_value = {"scraped": "data"}
         mock_format.return_value = "formatted scraped data"
 
         result = handle_bcra_variables()
         assert result == "formatted scraped data"
-        mock_fetch.assert_called_once()
-        mock_cache.assert_called_once_with({"scraped": "data"})
+        mock_get.assert_called_once()
         mock_format.assert_called_once_with({"scraped": "data"})
 
 
 def test_handle_bcra_variables_no_data():
     from api.index import handle_bcra_variables
 
-    with patch("api.index.get_cached_bcra_variables") as mock_cached, patch(
-        "api.index.bcra_fetch_latest_variables"
-    ) as mock_fetch:
-
-        mock_cached.return_value = None
-        mock_fetch.return_value = None
+    with patch("api.index.get_or_refresh_bcra_variables") as mock_get:
+        mock_get.return_value = None
 
         result = handle_bcra_variables()
         assert (
@@ -2998,8 +3095,8 @@ def test_handle_bcra_variables_no_data():
 def test_handle_bcra_variables_exception():
     from api.index import handle_bcra_variables
 
-    with patch("api.index.get_cached_bcra_variables") as mock_cached:
-        mock_cached.side_effect = Exception("Cache error")
+    with patch("api.index.get_or_refresh_bcra_variables") as mock_get:
+        mock_get.side_effect = Exception("Cache error")
 
         result = handle_bcra_variables()
         assert result == "Error al obtener las variables del BCRA"
