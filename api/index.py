@@ -10,7 +10,18 @@ from PIL import Image
 from requests.exceptions import RequestException, SSLError
 from urllib3.exceptions import InsecureRequestWarning
 import warnings
-from typing import Dict, List, Tuple, Callable, Union, Optional, Any, cast, Set, Iterable
+from typing import (
+    Dict,
+    List,
+    Tuple,
+    Callable,
+    Union,
+    Optional,
+    Any,
+    cast,
+    Set,
+    Iterable,
+)
 from collections import Counter
 from difflib import SequenceMatcher
 import ast
@@ -385,7 +396,9 @@ def bcra_list_variables(
         # Filter by category locally to avoid server-side incompatibilities
         def norm(s: str) -> str:
             return (
-                unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+                unicodedata.normalize("NFKD", s or "")
+                .encode("ascii", "ignore")
+                .decode("ascii")
             ).lower()
 
         cat = norm(category)
@@ -846,7 +859,7 @@ def get_agent_thoughts(
 
 
 def build_agent_thoughts_context_message(
-    thoughts: List[Dict[str, Any]]
+    thoughts: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     """Return a system message describing recent agent thoughts for the model."""
 
@@ -1025,9 +1038,7 @@ def _agent_keywords_are_repetitive(
     return overlap_ratio >= 0.6
 
 
-def _normalized_texts_are_repetitive(
-    normalized_new: str, normalized_prev: str
-) -> bool:
+def _normalized_texts_are_repetitive(normalized_new: str, normalized_prev: str) -> bool:
     """Compare normalized agent texts to determine repetitive content."""
 
     if not normalized_new or not normalized_prev:
@@ -1193,9 +1204,7 @@ def extract_agent_section_content(text: str, header: str) -> Optional[str]:
         re.escape(value) for value in other_headers_normalized if value
     )
     if combined_headers:
-        next_pattern = re.compile(
-            rf"(?im)^(?:{combined_headers}):\s*", re.UNICODE
-        )
+        next_pattern = re.compile(rf"(?im)^(?:{combined_headers}):\s*", re.UNICODE)
         next_match = next_pattern.search(normalized_text, match.end())
         if next_match:
             end = original_index(next_match.start())
@@ -1274,7 +1283,9 @@ def get_agent_retry_hint(
 
     letter_choices = tuple("abcdefghijklmnñopqrstuvwxyz")
     chosen_letter = rng_instance.choice(letter_choices).upper()
-    alternate_pool = [value for value in letter_choices if value.upper() != chosen_letter]
+    alternate_pool = [
+        value for value in letter_choices if value.upper() != chosen_letter
+    ]
     fallback_letter = (
         rng_instance.choice(alternate_pool).upper() if alternate_pool else chosen_letter
     )
@@ -1284,15 +1295,15 @@ def get_agent_retry_hint(
     numeric_target = numeric_floor * numeric_multiplier
 
     constraint_templates = (
-        "Sumá una restricción creativa: la búsqueda tiene que incluir un protagonista cuya inicial sea \"{letter}\" y una cifra cerca de {value}.",
-        "Obligate a que la consulta nombre algo que empiece con \"{letter}\" y mencione un número alrededor de {value}.",
-        "Forzá el query a combinar un actor que arranque con \"{letter}\" más un dato numérico aproximado a {value}.",
+        'Sumá una restricción creativa: la búsqueda tiene que incluir un protagonista cuya inicial sea "{letter}" y una cifra cerca de {value}.',
+        'Obligate a que la consulta nombre algo que empiece con "{letter}" y mencione un número alrededor de {value}.',
+        'Forzá el query a combinar un actor que arranque con "{letter}" más un dato numérico aproximado a {value}.',
     )
 
     pivot_templates = (
-        "Si web_search no trae novedad, generá otra lluvia de ideas reemplazando las palabras prohibidas por categorías nuevas y probá con inicial \"{fallback}\".",
-        "Si la ejecución devuelve humo, descartá la idea y repetí el proceso con términos distintos que comiencen con \"{fallback}\".",
-        "Si no aparecen datos frescos, reseteá las keywords vetadas y buscá una consulta distinta arrancando por \"{fallback}\".",
+        'Si web_search no trae novedad, generá otra lluvia de ideas reemplazando las palabras prohibidas por categorías nuevas y probá con inicial "{fallback}".',
+        'Si la ejecución devuelve humo, descartá la idea y repetí el proceso con términos distintos que comiencen con "{fallback}".',
+        'Si no aparecen datos frescos, reseteá las keywords vetadas y buscá una consulta distinta arrancando por "{fallback}".',
     )
 
     constraint_prompt = rng_instance.choice(constraint_templates).format(
@@ -1324,12 +1335,12 @@ def build_agent_retry_prompt(
         "Antes de escribir otra vez, completá el pendiente y contá resultados concretos. "
         "Si necesitás info fresca, llamá a la herramienta web_search con un query preciso y resumí lo que encontraste. Si ya cerraste ese tema, cambiá a otro interés fuerte del gordo en vez de seguir clavado en lo mismo. "
         + (
-            f"Esto fue lo último guardado o la nota fallida: \"{preview_single_line}\". "
+            f'Esto fue lo último guardado o la nota fallida: "{preview_single_line}". '
             if preview_single_line
             else ""
         )
         + "Escribí ahora una nota distinta con hechos puntuales y cerrala en dos secciones claras: "
-        "\"HALLAZGOS:\" con los datos específicos que obtuviste y \"PRÓXIMO PASO:\" con la siguiente acción directa."
+        '"HALLAZGOS:" con los datos específicos que obtuviste y "PRÓXIMO PASO:" con la siguiente acción directa.'
     )
 
     hint = get_agent_retry_hint(previous_text, rng=rng)
@@ -1349,8 +1360,10 @@ def build_agent_fallback_entry(previous_text: Optional[str]) -> str:
     preview_single_line = preview.replace("\n", " ").strip()
 
     include_fragment = True
-    if normalized_previous and fallback_marker and normalized_previous.startswith(
-        fallback_marker
+    if (
+        normalized_previous
+        and fallback_marker
+        and normalized_previous.startswith(fallback_marker)
     ):
         include_fragment = False
 
@@ -1470,7 +1483,7 @@ def run_agent_cycle() -> Dict[str, Any]:
     agent_prompt = (
         "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
         "Registrá en primera persona qué investigaste, qué encontraste y recién después el próximo paso. "
-        "Devolvé la nota en dos secciones en mayúsculas: \"HALLAZGOS:\" con los datos concretos y \"PRÓXIMO PASO:\" con la acción puntual."
+        'Devolvé la nota en dos secciones en mayúsculas: "HALLAZGOS:" con los datos concretos y "PRÓXIMO PASO:" con la acción puntual.'
     )
     if last_entry_text:
         agent_prompt += (
@@ -1486,9 +1499,7 @@ def run_agent_cycle() -> Dict[str, Any]:
             "Solo repetí uno si apareció un dato nuevo y específico; si no, cambiá a otro interés del gordo."
         )
     if hacker_news_items:
-        hn_lines = format_hacker_news_info(
-            hacker_news_items, include_discussion=False
-        )
+        hn_lines = format_hacker_news_info(hacker_news_items, include_discussion=False)
         agent_prompt += (
             "\n\nHACKER NEWS HOY:\n"
             f"{hn_lines}\n"
@@ -1547,14 +1558,9 @@ def run_agent_cycle() -> Dict[str, Any]:
         if not agent_sections_are_valid(cleaned):
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
 
-    matching_recent_text = find_repetitive_recent_thought(
-        cleaned, recent_entry_texts
-    )
+    matching_recent_text = find_repetitive_recent_thought(cleaned, recent_entry_texts)
     repetition_attempt = 0
-    while (
-        matching_recent_text
-        and repetition_attempt < AGENT_REPETITION_RETRY_LIMIT
-    ):
+    while matching_recent_text and repetition_attempt < AGENT_REPETITION_RETRY_LIMIT:
         corrective_prompt = build_agent_retry_prompt(matching_recent_text)
         if repetition_attempt == AGENT_REPETITION_RETRY_LIMIT - 1:
             corrective_prompt += " " + AGENT_REPETITION_ESCALATION_HINT
@@ -1597,11 +1603,8 @@ def run_agent_cycle() -> Dict[str, Any]:
         else:
             comparison_texts = recent_entry_texts
 
-        if (
-            is_loop_fallback_text(fallback_entry)
-            and find_repetitive_recent_thought(
-                fallback_entry, comparison_texts
-            )
+        if is_loop_fallback_text(fallback_entry) and find_repetitive_recent_thought(
+            fallback_entry, comparison_texts
         ):
             cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
         else:
@@ -1634,6 +1637,7 @@ def run_agent_cycle() -> Dict[str, Any]:
         result["iso_time"] = datetime.fromtimestamp(ts_int, tz=BA_TZ).isoformat()
 
     return result
+
 
 def get_cached_transcription(file_id: str) -> Optional[str]:
     """Get cached audio transcription from Redis"""
@@ -2108,7 +2112,9 @@ def sort_dollar_rates(
 
 
 def format_dollar_rates(
-    dollar_rates: List[Dict], hours_ago: int, band_limits: Optional[Dict[str, Any]] = None
+    dollar_rates: List[Dict],
+    hours_ago: int,
+    band_limits: Optional[Dict[str, Any]] = None,
 ) -> str:
     rates = list(dollar_rates)
 
@@ -2296,7 +2302,9 @@ def _get_cached_bcra_cache_entry(
                     "fetched_at": fetched_at,
                 }
 
-    local_value, is_fresh, meta = _local_cache_get(_bcra_local_cache, allow_stale=allow_stale)
+    local_value, is_fresh, meta = _local_cache_get(
+        _bcra_local_cache, allow_stale=allow_stale
+    )
     if local_value is not None:
         return cast(Dict, local_value), {
             "is_fresh": is_fresh,
@@ -2361,9 +2369,7 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     )
 
 
-def _attach_bcra_meta(
-    value: Optional[Dict], meta: Dict[str, Any]
-) -> Optional[Dict]:
+def _attach_bcra_meta(value: Optional[Dict], meta: Dict[str, Any]) -> Optional[Dict]:
     if not value:
         return None
     if meta.get("is_fresh"):
@@ -2580,7 +2586,9 @@ def calculate_tcrm_100(
                 if cached.get("missing"):
                     sentinel_present = True
                 elif "value" in cached:
-                    wholesale_value = parse_monetary_number(cached["value"])  # robust cast
+                    wholesale_value = parse_monetary_number(
+                        cached["value"]
+                    )  # robust cast
         except Exception:
             redis_client = None
             wholesale_value = None
@@ -2626,7 +2634,9 @@ def get_cached_tcrm_100(
                     backfill_value = calculate_tcrm_100(target_date=history_dt)
                     if backfill_value is not None:
                         history_timestamp = int(
-                            history_dt.replace(minute=0, second=0, microsecond=0).timestamp()
+                            history_dt.replace(
+                                minute=0, second=0, microsecond=0
+                            ).timestamp()
                         )
                         history_data = {
                             "timestamp": history_timestamp,
@@ -2825,7 +2835,13 @@ def format_bcra_variables(variables: Dict) -> str:
     def norm(s: str) -> str:
         try:
             import unicodedata as _ud
-            return _ud.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii").lower()
+
+            return (
+                _ud.normalize("NFKD", s or "")
+                .encode("ascii", "ignore")
+                .decode("ascii")
+                .lower()
+            )
         except Exception:
             return (s or "").lower()
 
@@ -2851,27 +2867,42 @@ def format_bcra_variables(variables: Dict) -> str:
     # Patterns over normalized (accent-free, lowercase) names
     specs = [
         # Base monetaria
-        (r"base\s*monetaria", lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos"),
+        (
+            r"base\s*monetaria",
+            lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos",
+        ),
         # Inflación mensual: "Variación mensual del índice de precios al consumidor"
-        (r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
-         lambda v: f"📈 Inflación mensual: {format_value(v, True)}"),
+        (
+            r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
+            lambda v: f"📈 Inflación mensual: {format_value(v, True)}",
+        ),
         # Inflación interanual: "Variación interanual del índice de precios al consumidor"
-        (r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
-         lambda v: f"📊 Inflación interanual: {format_value(v, True)}"),
+        (
+            r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
+            lambda v: f"📊 Inflación interanual: {format_value(v, True)}",
+        ),
         # Inflación esperada (REM)
-        (r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
-         lambda v: f"🔮 Inflación esperada: {format_value(v, True)}"),
+        (
+            r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
+            lambda v: f"🔮 Inflación esperada: {format_value(v, True)}",
+        ),
         # Tasas
         (r"tamar", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
         (r"badlar", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
         # Tipo de cambio
-        (r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor", lambda v: f"💵 Dólar minorista: ${v}"),
+        (
+            r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
+            lambda v: f"💵 Dólar minorista: ${v}",
+        ),
         (r"tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
         # UVA/CER
         (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"💰 UVA: ${v}"),
         (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"📊 CER: {v}"),
         # Reservas
-        (r"reservas.*internacionales", lambda v: f"🏛️ Reservas: USD {format_value(v)} millones"),
+        (
+            r"reservas.*internacionales",
+            lambda v: f"🏛️ Reservas: USD {format_value(v)} millones",
+        ),
     ]
 
     meta_info: Dict[str, Any] = {}
@@ -2924,7 +2955,9 @@ def format_bcra_variables(variables: Dict) -> str:
         pass
 
     if meta_info.get("stale"):
-        stale_msg = "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
+        stale_msg = (
+            "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
+        )
         if stale_msg not in lines:
             lines.append(stale_msg)
 
@@ -3755,9 +3788,7 @@ class _VisibleTextExtractor(HTMLParser):
         self._title_parts: List[str] = []
         self._in_title = False
 
-    def handle_starttag(
-        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
         tag_lower = tag.lower()
         if tag_lower in {"script", "style", "noscript"}:
             self._skip_depth += 1
@@ -3860,24 +3891,23 @@ def fetch_url_content(
 
     try:
         requested_max = (
-            int(max_chars)
-            if max_chars is not None
-            else WEB_FETCH_DEFAULT_CHARS
+            int(max_chars) if max_chars is not None else WEB_FETCH_DEFAULT_CHARS
         )
     except (TypeError, ValueError):
         requested_max = WEB_FETCH_DEFAULT_CHARS
 
-    requested_max = max(
-        WEB_FETCH_MIN_CHARS, min(requested_max, WEB_FETCH_MAX_CHARS)
-    )
+    requested_max = max(WEB_FETCH_MIN_CHARS, min(requested_max, WEB_FETCH_MAX_CHARS))
 
     cache_key = None
     redis_client: Optional[redis.Redis] = None
     try:
         cache_payload = {"url": normalized, "max": requested_max}
-        cache_key = "fetch_url:" + hashlib.md5(
-            json.dumps(cache_payload, sort_keys=True).encode()
-        ).hexdigest()
+        cache_key = (
+            "fetch_url:"
+            + hashlib.md5(
+                json.dumps(cache_payload, sort_keys=True).encode()
+            ).hexdigest()
+        )
         redis_client = config_redis()
         cached = redis_get_json(redis_client, cache_key)
         if isinstance(cached, dict):
@@ -3928,9 +3958,7 @@ def fetch_url_content(
         apparent_encoding = getattr(response, "apparent_encoding", None)
         status_code = getattr(response, "status_code", None)
 
-        max_bytes = min(
-            WEB_FETCH_MAX_BYTES, max(requested_max * 6, 20000)
-        )
+        max_bytes = min(WEB_FETCH_MAX_BYTES, max(requested_max * 6, 20000))
         total = 0
         chunks: List[bytes] = []
         for chunk in response.iter_content(chunk_size=4096):
@@ -4058,12 +4086,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             pass
         return json.dumps({"query": query, "results": results})
     if name == "fetch_url":
-        raw_url = (
-            args.get("url")
-            or args.get("link")
-            or args.get("href")
-            or ""
-        )
+        raw_url = args.get("url") or args.get("link") or args.get("href") or ""
         url = str(raw_url).strip()
         max_chars_arg = args.get("max_chars") or args.get("chars")
         result = fetch_url_content(url, max_chars=max_chars_arg)
@@ -4244,9 +4267,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                response = requests.get(
-                    HACKER_NEWS_RSS_URL, timeout=5, verify=False
-                )
+                response = requests.get(HACKER_NEWS_RSS_URL, timeout=5, verify=False)
                 response.raise_for_status()
                 response_text = response.text
         except Exception as ssl_error:
@@ -4295,9 +4316,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
                 r"Comments URL: <a href=\"([^\"]+)\"", description
             )
             comments_url = (
-                comments_url_match.group(1).strip()
-                if comments_url_match
-                else ""
+                comments_url_match.group(1).strip() if comments_url_match else ""
             )
 
             items.append(
@@ -4390,8 +4409,8 @@ def get_ai_response(
     """Get AI response with retries and timeout (text-only)"""
     models = [
         "moonshotai/kimi-k2:free",
-        "z-ai/glm-4.5-air:free",
-        "deepseek/deepseek-chat-v3-0324:free",
+        "x-ai/grok-4-fast:free",
+        "deepseek/deepseek-chat-v3.1:free",
     ]
 
     for attempt in range(max_retries):
@@ -5932,7 +5951,9 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
             try:
                 thought_result = run_agent_cycle()
                 return (
-                    json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False),
+                    json.dumps(
+                        {"status": "ok", "thought": thought_result}, ensure_ascii=False
+                    ),
                     200,
                 )
             except Exception as agent_error:
