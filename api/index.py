@@ -341,13 +341,13 @@ def _local_cache_get(
 def bcra_api_get(
     path: str, params: Optional[Dict[str, Any]] = None, ttl: int = TTL_BCRA
 ) -> Optional[Dict[str, Any]]:
-    """Call BCRA Estadísticas Monetarias v4.0 API via cached_requests.
+    """Call BCRA Estadísticas Monetarias v4.0 API via cached_requests without SSL validation."""
 
-    Returns the parsed JSON dict (not wrapped) or None on failure.
-    """
     try:
         base_url = "https://api.bcra.gob.ar/estadisticas/v4.0"
         url = base_url + (path if path.startswith("/") else "/" + path)
+        # Explicitly skip certificate validation per ops request; quiet the warning once
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
         resp = cached_requests(
             url,
             params,
@@ -355,23 +355,8 @@ def bcra_api_get(
             ttl,
             hourly_cache=False,
             get_history=False,
-            verify_ssl=True,
+            verify_ssl=False,
         )
-        # Fallback to insecure verification if strict SSL fails in this environment
-        if not resp:
-            try:
-                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                resp = cached_requests(
-                    url,
-                    params,
-                    None,
-                    ttl,
-                    hourly_cache=False,
-                    get_history=False,
-                    verify_ssl=False,
-                )
-            except Exception:
-                resp = None
         if not resp or "data" not in resp:
             return None
         data = resp["data"]
