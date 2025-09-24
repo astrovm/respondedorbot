@@ -59,6 +59,11 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 TTL_MAYORISTA_MISSING = 300  # 5 minutes sentinel for missing mayorista values
 
+# Provider backoff windows (seconds)
+GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit response
+OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS = 600
+CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS = 600
+
 CACHE_STALE_GRACE_BCRA = 6 * 3600  # allow showing last BCRA data up to 6h stale
 CACHE_STALE_GRACE_BANDS = 3600  # currency bands fall back for 1h
 
@@ -77,6 +82,42 @@ _currency_band_local_cache: Dict[str, Any] = {
     "meta": {},
 }
 _currency_band_failure_until: float = 0.0
+
+
+_provider_backoff_until: Dict[str, float] = {}
+
+
+def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
+    """Set or extend the backoff window for a provider."""
+
+    if not provider:
+        return
+
+    duration = max(0, int(duration or 0))
+    if duration == 0:
+        return
+
+    provider_key = provider.lower()
+    new_until = time.time() + duration
+    current_until = _provider_backoff_until.get(provider_key, 0.0)
+    if new_until > current_until:
+        _provider_backoff_until[provider_key] = new_until
+
+
+def get_provider_backoff_remaining(provider: str) -> float:
+    """Return seconds remaining on the provider backoff window."""
+
+    if not provider:
+        return 0.0
+
+    provider_key = provider.lower()
+    return max(0.0, _provider_backoff_until.get(provider_key, 0.0) - time.time())
+
+
+def is_provider_backoff_active(provider: str) -> bool:
+    """Check whether calls should be skipped for the provider due to rate limiting."""
+
+    return get_provider_backoff_remaining(provider) > 0
 
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
@@ -3591,37 +3632,53 @@ def ask_ai(
 def complete_with_providers(
     system_message: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Try Groq, then OpenRouter, then Cloudflare with retries and return the first response."""
+    """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
 
-    # Try Groq first with retries
-    for attempt in range(2):
+    # Try Groq first
+    if is_provider_backoff_active("groq"):
+        remaining = int(get_provider_backoff_remaining("groq"))
+        print(f"Groq backoff active ({remaining}s remaining), skipping Groq attempts")
+    else:
         groq_response = get_groq_ai_response(system_message, messages)
         if groq_response:
             print("complete_with_providers: got response from Groq")
             return groq_response
-        if attempt == 0:
-            print(f"Groq attempt {attempt + 1} failed, retrying...")
-            time.sleep(2)
 
-    # Try OpenRouter second (already has internal retries with model rotation)
-    openrouter = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=environ.get("OPENROUTER_API_KEY"),
-    )
-    response = get_ai_response(openrouter, system_message, messages)
-    if response:
-        print("complete_with_providers: got response from OpenRouter")
-        return response
+    # Try OpenRouter second
+    if is_provider_backoff_active("openrouter"):
+        remaining = int(get_provider_backoff_remaining("openrouter"))
+        print(
+            "OpenRouter backoff active "
+            f"({remaining}s remaining), skipping OpenRouter attempts"
+        )
+    else:
+        openrouter_api_key = environ.get("OPENROUTER_API_KEY")
+        if openrouter_api_key:
+            openrouter = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_api_key,
+            )
+            response = get_ai_response(
+                openrouter, system_message, messages, provider_name="openrouter"
+            )
+            if response:
+                print("complete_with_providers: got response from OpenRouter")
+                return response
+        else:
+            print("OpenRouter API key not configured")
 
-    # Fallback to Cloudflare Workers AI with retries
-    for attempt in range(2):
+    # Fallback to Cloudflare Workers AI
+    if is_provider_backoff_active("cloudflare"):
+        remaining = int(get_provider_backoff_remaining("cloudflare"))
+        print(
+            "Cloudflare backoff active "
+            f"({remaining}s remaining), skipping Cloudflare attempts"
+        )
+    else:
         cloudflare_response = get_cloudflare_ai_response(system_message, messages)
         if cloudflare_response:
             print("complete_with_providers: got response from Cloudflare AI")
             return cloudflare_response
-        if attempt == 0:
-            print(f"Cloudflare attempt {attempt + 1} failed, retrying...")
-            time.sleep(2)
 
     return None
 
@@ -4404,56 +4461,54 @@ def get_ai_response(
     client: OpenAI,
     system_msg: Dict[str, Any],
     messages: List[Dict[str, Any]],
-    max_retries: int = 2,
+    *,
+    provider_name: str = "openrouter",
+    backoff_seconds: Optional[int] = None,
 ) -> Optional[str]:
-    """Get AI response with retries and timeout (text-only)"""
+    """Get AI response (text-only) from a generic OpenAI-compatible provider."""
+
+    if is_provider_backoff_active(provider_name):
+        remaining = int(get_provider_backoff_remaining(provider_name))
+        print(
+            f"{provider_name.capitalize()} backoff active ({remaining}s remaining), skipping API call"
+        )
+        return None
+
     models = [
         "moonshotai/kimi-k2:free",
         "x-ai/grok-4-fast:free",
         "deepseek/deepseek-chat-v3.1:free",
     ]
 
-    for attempt in range(max_retries):
-        # Determine which model to use based on the attempt number
-        current_model = models[0]  # Always use the first model in the list
-        fallback_models = models[1:]  # Use the rest as fallbacks
+    try:
+        print(f"Attempt 1/1 using model: {models[0]}")
 
-        try:
-            print(f"Attempt {attempt + 1}/{max_retries} using model: {current_model}")
+        response = client.chat.completions.create(
+            model=models[0],
+            extra_body={
+                "models": models[1:],
+            },
+            messages=cast(Any, [system_msg] + messages),
+            max_tokens=1024,
+        )
 
-            response = client.chat.completions.create(
-                model=current_model,
-                extra_body={
-                    "models": fallback_models,
-                },
-                messages=cast(Any, [system_msg] + messages),
-                max_tokens=1024,  # Control response length
+        if response and hasattr(response, "choices") and response.choices:
+            if response.choices[0].finish_reason == "stop":
+                return response.choices[0].message.content
+
+    except Exception as e:
+        print(f"API error: {e}")
+        if _is_rate_limit_error(e):
+            duration = (
+                backoff_seconds
+                if backoff_seconds is not None
+                else OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS
             )
-
-            if response and hasattr(response, "choices") and response.choices:
-                if response.choices[0].finish_reason == "stop":
-                    return response.choices[0].message.content
-
-            # If we get here, there was a problem with the response but no exception
-            # Move the current model to the end of the list
-            models.append(models.pop(0))
-
-            if attempt < max_retries - 1:
-                print(f"Retry {attempt + 1}/{max_retries} with next model")
-                time.sleep(2)
-
-        except Exception as e:
-            # Simplified error handling - handle all errors the same way
-            print(f"API error: {e}")
-
-            # Move the current model to the end of the list
-            models.append(models.pop(0))
-
-            if attempt < max_retries - 1:
-                print(f"Switching to next model after error")
-                time.sleep(2)
-            else:
-                break
+            _set_provider_backoff(provider_name, duration)
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                f"{provider_name.capitalize()} rate limit detected; backing off for {remaining}s"
+            )
 
     return None
 
@@ -4462,12 +4517,21 @@ def get_cloudflare_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
     """Fallback using Cloudflare Workers AI for text-only"""
+    provider_name = "cloudflare"
     try:
         cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
         cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
 
         if not cloudflare_account_id or not cloudflare_api_key:
             print("Cloudflare Workers AI credentials not configured")
+            return None
+
+        if is_provider_backoff_active(provider_name):
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                "Cloudflare backoff active "
+                f"({remaining}s remaining), skipping API call"
+            )
             return None
 
         print("Trying Cloudflare Workers AI as fallback...")
@@ -4491,18 +4555,54 @@ def get_cloudflare_ai_response(
 
     except Exception as e:
         print(f"Cloudflare Workers AI error: {e}")
+        if _is_rate_limit_error(e):
+            _set_provider_backoff(
+                provider_name, CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS
+            )
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                "Cloudflare rate limit detected; backing off for "
+                f"{remaining}s"
+            )
 
     return None
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Detect whether the provided exception represents a rate limit."""
+
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429:
+        return True
+
+    status = getattr(error, "status", None)
+    if status == 429:
+        return True
+
+    message = str(getattr(error, "message", "") or error)
+    lowered = message.lower()
+    if "rate limit" in lowered:
+        return True
+
+    return "429" in lowered
 
 
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
     """First option using Groq AI"""
+    provider_name = "groq"
     try:
         groq_api_key = environ.get("GROQ_API_KEY")
         if not groq_api_key:
             print("Groq API key not configured")
+            return None
+
+        if is_provider_backoff_active(provider_name):
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                f"Groq backoff active ({remaining}s remaining), skipping API call"
+            )
             return None
 
         print("Trying Groq AI as first option...")
@@ -4526,6 +4626,13 @@ def get_groq_ai_response(
 
     except Exception as e:
         print(f"Groq AI error: {e}")
+        if _is_rate_limit_error(e):
+            _set_provider_backoff(provider_name, GROQ_RATE_LIMIT_BACKOFF_SECONDS)
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                "Groq rate limit detected; backing off for "
+                f"{remaining}s"
+            )
 
     return None
 
