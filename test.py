@@ -19,6 +19,10 @@ from api.index import (
     parse_tool_call,
     execute_tool,
     complete_with_providers,
+    get_groq_ai_response,
+    get_ai_response,
+    get_provider_backoff_remaining,
+    get_cloudflare_ai_response,
     remove_gordo_prefix,
     handle_ai_response,
     handle_msg,
@@ -67,6 +71,7 @@ def reset_caches():
         {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
     )
     index_module._currency_band_failure_until = 0.0
+    index_module._provider_backoff_until.clear()
     yield
 
 
@@ -4742,7 +4747,7 @@ def test_complete_with_providers_fallback_sequence():
         result = complete_with_providers(system_message, messages)
 
         assert result == "OpenRouter response"
-        assert mock_groq.call_count == 2
+        assert mock_groq.call_count == 1
         mock_openrouter.assert_called_once()
         mock_cloudflare.assert_not_called()
 
@@ -4774,9 +4779,159 @@ def test_complete_with_providers_all_fail():
         result = complete_with_providers(system_message, messages)
 
         assert result is None
-        assert mock_groq.call_count == 2
+        assert mock_groq.call_count == 1
         mock_openrouter.assert_called_once()
-        assert mock_cloudflare.call_count == 2
+        assert mock_cloudflare.call_count == 1
+
+
+def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
+    """When Groq backoff is active we should skip Groq attempts entirely."""
+
+    from api import index as index_module
+
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+
+    index_module._provider_backoff_until["groq"] = time.time() + 30
+
+    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
+        "api.index.get_ai_response"
+    ) as mock_openrouter, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_cloudflare, patch(
+        "os.environ.get"
+    ) as mock_env, patch(
+        "api.index.OpenAI"
+    ) as mock_openai:
+
+        mock_env.return_value = "test_api_key"
+        mock_openrouter.return_value = "OpenRouter response"
+        mock_cloudflare.return_value = None
+
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
+
+        result = complete_with_providers(system_message, messages)
+
+        assert result == "OpenRouter response"
+        mock_groq.assert_not_called()
+        mock_openrouter.assert_called_once()
+        mock_cloudflare.assert_not_called()
+
+
+def test_complete_with_providers_skips_openrouter_during_backoff(monkeypatch):
+    """OpenRouter backoff should skip OpenRouter and fall through to Cloudflare."""
+
+    from api import index as index_module
+
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+
+    index_module._provider_backoff_until["openrouter"] = time.time() + 30
+
+    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
+        "api.index.get_ai_response"
+    ) as mock_openrouter, patch(
+        "api.index.get_cloudflare_ai_response"
+    ) as mock_cloudflare, patch(
+        "os.environ.get"
+    ) as mock_env, patch("api.index.OpenAI") as mock_openai:
+
+        mock_groq.return_value = None
+        mock_cloudflare.return_value = "Cloudflare response"
+        mock_env.return_value = "test_api_key"
+
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
+
+        result = complete_with_providers(system_message, messages)
+
+        assert result == "Cloudflare response"
+        mock_groq.assert_called_once()
+        mock_openrouter.assert_not_called()
+        mock_cloudflare.assert_called_once()
+
+
+def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
+    """Rate limit errors should trigger a backoff window and skip subsequent calls."""
+
+    from api import index as index_module
+
+    index_module._provider_backoff_until.clear()
+
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    with patch("api.index.OpenAI", return_value=fake_client) as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+        assert result is None
+        remaining = index_module.get_provider_backoff_remaining("groq")
+        assert remaining > 0
+        assert mock_openai.call_count == 1
+
+        # Second call should be skipped without hitting the API client again
+        second_result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+        assert second_result is None
+        assert mock_openai.call_count == 1
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+
+def test_get_ai_response_sets_backoff_on_rate_limit():
+    from api import index as index_module
+
+    index_module._provider_backoff_until.clear()
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = Exception(
+        "HTTP 429 rate limit"
+    )
+
+    result = get_ai_response(
+        fake_client,
+        {"role": "system", "content": "system"},
+        [{"role": "user", "content": "hola"}],
+        provider_name="openrouter",
+    )
+
+    assert result is None
+    assert index_module.get_provider_backoff_remaining("openrouter") > 0
+
+
+def test_get_cloudflare_ai_response_sets_backoff_on_rate_limit(monkeypatch):
+    from api import index as index_module
+
+    index_module._provider_backoff_until.clear()
+
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CLOUDFLARE_API_KEY", "key")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = Exception("429 rate limit")
+
+    with patch("api.index.OpenAI", return_value=fake_client):
+        result = get_cloudflare_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is None
+    assert index_module.get_provider_backoff_remaining("cloudflare") > 0
+
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_KEY", raising=False)
 
 
 def test_is_social_frontend():
