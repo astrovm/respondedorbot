@@ -3250,6 +3250,8 @@ comandos disponibles boludo:
 
 - /buscar algo: te busco en la web
 
+- /agent: te muestro lo ultimo que penso el agente autonomo
+
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
 
 - /dolar, /dollar, /usd: te tiro la posta del blue y todos los dolares
