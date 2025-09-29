@@ -4940,6 +4940,7 @@ def test_is_social_frontend():
     assert is_social_frontend("twitter.com")
     assert is_social_frontend("mobile.twitter.com")
     assert is_social_frontend("vxtiktok.com")
+    assert is_social_frontend("xcancel.com")
     assert not is_social_frontend("example.com")
 
 
@@ -5195,6 +5196,22 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     assert changed is True
     assert fixed == "https://fixupx.com/foo"
     assert originals == ["https://x.com/foo"]
+    mock_get.assert_called_once_with(
+        "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
+    )
+
+
+@patch("api.index.requests.get")
+def test_xcancel_link_replacement(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_get.return_value = mock_response
+    fixed, changed, originals = replace_links("https://xcancel.com/foo")
+    assert changed is True
+    assert fixed == "https://fixupx.com/foo"
+    assert originals == ["https://xcancel.com/foo"]
     mock_get.assert_called_once_with(
         "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
     )

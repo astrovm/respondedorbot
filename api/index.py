@@ -247,6 +247,7 @@ ALTERNATIVE_FRONTENDS = {
 ORIGINAL_FRONTENDS = {
     "twitter.com",
     "x.com",
+    "xcancel.com",
     "bsky.app",
     "instagram.com",
     "reddit.com",
@@ -5568,6 +5569,7 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
     patterns = [
         (r"(https?://)(?:www\.)?twitter\.com([^\s]*)", r"\1fxtwitter.com\2"),
         (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
+        (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
         (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
         (
