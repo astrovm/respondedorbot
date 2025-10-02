@@ -3052,6 +3052,72 @@ def test_parse_currency_band_rows_skips_future_dates():
     assert pytest.approx(parsed["upper_change_pct"], rel=1e-6) == ((1475.32 - 1400.0) / 1400.0) * 100
 
 
+def test_fetch_currency_band_limits_uses_principales_variables():
+    from api.index import fetch_currency_band_limits, BA_TZ
+
+    today = datetime.now(BA_TZ).date()
+    previous = today - timedelta(days=1)
+    future = today + timedelta(days=1)
+
+    lower_payload = {
+        "status": 200,
+        "results": [
+            {
+                "detalle": [
+                    {"fecha": future.isoformat(), "valor": 950.0},
+                    {"fecha": today.isoformat(), "valor": 944.32},
+                    {"fecha": previous.isoformat(), "valor": 930.0},
+                ]
+            }
+        ],
+    }
+
+    upper_payload = {
+        "status": 200,
+        "results": [
+            {
+                "detalle": [
+                    {"fecha": future.isoformat(), "valor": 1490.0},
+                    {"fecha": today.isoformat(), "valor": 1481.70},
+                    {"fecha": previous.isoformat(), "valor": 1470.0},
+                ]
+            }
+        ],
+    }
+
+    with patch("api.index.bcra_list_variables") as mock_list, patch(
+        "api.index.bcra_api_get"
+    ) as mock_api:
+        mock_list.return_value = [
+            {
+                "idVariable": 1188,
+                "descripcion": "Régimen de bandas cambiarias  (Límite superior $1.400 + 1% mensual)",
+            },
+            {
+                "idVariable": 1187,
+                "descripcion": "Régimen de bandas cambiarias (Límite inferior $1.000 - 1% mensual)",
+            },
+        ]
+
+        def side_effect(path, params=None, ttl=None):
+            if "1187" in path:
+                return lower_payload
+            if "1188" in path:
+                return upper_payload
+            return None
+
+        mock_api.side_effect = side_effect
+
+        result = fetch_currency_band_limits()
+
+    assert result is not None
+    assert result["date"] == today.strftime("%d/%m/%y")
+    assert result["lower"] == pytest.approx(944.32)
+    assert result["upper"] == pytest.approx(1481.70)
+    assert result["lower_change_pct"] == pytest.approx(((944.32 - 930.0) / 930.0) * 100)
+    assert result["upper_change_pct"] == pytest.approx(((1481.70 - 1470.0) / 1470.0) * 100)
+
+
 def test_handle_bcra_variables_cached():
     from api.index import handle_bcra_variables
 
