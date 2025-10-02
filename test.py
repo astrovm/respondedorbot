@@ -36,6 +36,9 @@ from api.index import (
     agent_sections_are_valid,
     get_agent_retry_hint,
 )
+from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
+from api import config as config_module
+from api.services import bcra as bcra_service
 from datetime import datetime, timezone, timedelta
 import json
 import requests
@@ -62,16 +65,9 @@ def cleanup_test_artifacts():
 @pytest.fixture(autouse=True)
 def reset_caches():
     from api import index as index_module
-
-    index_module._bcra_local_cache.update(
-        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
-    )
-    index_module._bcra_failure_until = 0.0
-    index_module._currency_band_local_cache.update(
-        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
-    )
-    index_module._currency_band_failure_until = 0.0
+    bcra_service.reset_local_caches()
     index_module._provider_backoff_until.clear()
+    config_module.reset_cache()
     yield
 
 
@@ -218,7 +214,7 @@ def test_config_redis():
 def test_load_bot_config_caches_and_parses(monkeypatch):
     from api import index
 
-    index._bot_config = None
+    config_module.reset_cache()
     monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
     monkeypatch.setenv("BOT_TRIGGER_WORDS", "bot, amigo")
 
@@ -238,7 +234,7 @@ def test_load_bot_config_caches_and_parses(monkeypatch):
 def test_load_bot_config_missing_env(monkeypatch):
     from api import index
 
-    index._bot_config = None
+    config_module.reset_cache()
     monkeypatch.delenv("BOT_SYSTEM_PROMPT", raising=False)
     monkeypatch.setenv("BOT_TRIGGER_WORDS", "foo")
 
@@ -313,7 +309,7 @@ def test_should_gordo_respond():
     import api.index
 
     # Reset global cache to ensure clean state
-    api.index._bot_config = None
+    config_module.reset_cache()
 
     commands = {"/test": (lambda x: x, False, False)}
 
@@ -359,7 +355,7 @@ def test_should_gordo_respond():
 def test_should_gordo_respond_ignores_link_fix_reply():
     import api.index
 
-    api.index._bot_config = None
+    config_module.reset_cache()
     commands = {"/test": (lambda x: x, False, False)}
 
     with patch("os.environ.get") as mock_env:
@@ -737,7 +733,7 @@ def test_show_agent_thoughts_no_entries():
 
 
 def test_show_agent_thoughts_limits_entries():
-    from api.index import show_agent_thoughts, AGENT_THOUGHT_DISPLAY_LIMIT
+    from api.index import show_agent_thoughts
 
     sample = [{"text": f"nota {i}"} for i in range(1, AGENT_THOUGHT_DISPLAY_LIMIT + 3)]
 
@@ -1757,10 +1753,12 @@ def test_should_gordo_respond_complex_cases():
     import api.index
     from api.index import should_gordo_respond
 
-    api.index._bot_config = {
-        "trigger_words": ["gordo", "test", "bot"],
-        "system_prompt": "You are a test bot",
-    }
+    config_module.set_cache(
+        {
+            "trigger_words": ["gordo", "test", "bot"],
+            "system_prompt": "You are a test bot",
+        }
+    )
 
     commands = {
         "/test": (lambda x: x, False, False),
@@ -2686,8 +2684,8 @@ def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
         mock_config_redis.return_value = mock_redis
         cache_bcra_variables(test_data, ttl=1)
 
-    index_module._bcra_local_cache["expires_at"] = time.time() - 10
-    index_module._bcra_local_cache["stale_until"] = time.time() + 60
+    bcra_service._bcra_local_cache["expires_at"] = time.time() - 10
+    bcra_service._bcra_local_cache["stale_until"] = time.time() + 60
 
     with patch("api.index.bcra_fetch_latest_variables") as mock_fetch, patch(
         "api.index.config_redis"
@@ -2719,8 +2717,8 @@ def test_get_currency_band_limits_reuses_stale_after_failure():
 
     assert result == band_data
 
-    index_module._currency_band_local_cache["expires_at"] = time.time() - 5
-    index_module._currency_band_local_cache["stale_until"] = time.time() + 300
+    bcra_service._currency_band_local_cache["expires_at"] = time.time() - 5
+    bcra_service._currency_band_local_cache["stale_until"] = time.time() + 300
 
     with patch("api.index.fetch_currency_band_limits") as mock_fetch, patch(
         "api.index.config_redis"
@@ -3588,7 +3586,7 @@ def test_build_system_message():
     import api.index
 
     # Reset global cache to ensure clean state
-    api.index._bot_config = None
+    config_module.reset_cache()
 
     context = {
         "market": {
@@ -3643,7 +3641,7 @@ def test_build_system_message_empty_context():
     import api.index
 
     # Reset global cache to ensure clean state
-    api.index._bot_config = None
+    config_module.reset_cache()
 
     context = {
         "market": {},
