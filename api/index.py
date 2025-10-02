@@ -21,6 +21,7 @@ from typing import (
     cast,
     Set,
     Iterable,
+    Mapping,
 )
 from collections import Counter
 from difflib import SequenceMatcher
@@ -43,6 +44,28 @@ from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
 from functools import lru_cache
 
+from api.utils import (
+    fmt_num,
+    fmt_signed_pct,
+    local_cache_get,
+    now_utc_iso,
+    parse_date_string,
+    parse_monetary_number,
+    to_ddmmyy,
+    to_es_number,
+    update_local_cache,
+)
+from api.services.redis_helpers import (
+    redis_get_json,
+    redis_set_json,
+    redis_setex_json,
+)
+from api.utils.links import (
+    can_embed_url as _links_can_embed_url,
+    is_social_frontend as _links_is_social_frontend,
+    replace_links as _links_replace_links,
+)
+
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -58,6 +81,24 @@ WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 TTL_MAYORISTA_MISSING = 300  # 5 minutes sentinel for missing mayorista values
+
+
+def can_embed_url(url: str) -> bool:
+    """Wrapper to allow tests to monkeypatch embed detection."""
+
+    return _links_can_embed_url(url)
+
+
+def is_social_frontend(host: str) -> bool:
+    """Expose social frontend check while keeping implementation in utils."""
+
+    return _links_is_social_frontend(host)
+
+
+def replace_links(text: str) -> Tuple[str, bool, List[str]]:
+    """Delegate to utils helper while preserving legacy monkeypatch hook."""
+
+    return _links_replace_links(text, embed_checker=can_embed_url)
 
 # Provider backoff windows (seconds)
 GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit response
@@ -216,52 +257,6 @@ BA_TZ = timezone(timedelta(hours=-3))
 # Global variable to cache bot configuration
 _bot_config = None
 
-
-def fmt_num(value: float, decimals: int = 2) -> str:
-    """Format a number with up to `decimals` decimals, trimming trailing zeros."""
-    try:
-        return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(value)
-
-
-def fmt_signed_pct(value: float, decimals: int = 2) -> str:
-    """Format a signed percentage with trimmed trailing zeros."""
-    try:
-        return f"{value:+.{decimals}f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(value)
-
-
-# Known alternative frontends that users may already provide
-ALTERNATIVE_FRONTENDS = {
-    "fxtwitter.com",
-    "fixupx.com",
-    "fxbsky.app",
-    "kkinstagram.com",
-    "rxddit.com",
-    "vxtiktok.com",
-}
-
-# Original social domains that may need replacement
-ORIGINAL_FRONTENDS = {
-    "twitter.com",
-    "x.com",
-    "xcancel.com",
-    "bsky.app",
-    "instagram.com",
-    "reddit.com",
-    "tiktok.com",
-}
-
-
-def is_social_frontend(host: str) -> bool:
-    """Return True if host is an original or alternative social frontend"""
-    host = host.lower()
-    frontends = ALTERNATIVE_FRONTENDS | ORIGINAL_FRONTENDS
-    return any(host == d or host.endswith(f".{d}") for d in frontends)
-
-
 def load_bot_config():
     """Load bot configuration from environment variables"""
     global _bot_config
@@ -307,87 +302,6 @@ def config_redis(host=None, port=None, password=None):
         print(error_msg)
         admin_report(error_msg, e, error_context)
         raise  # Re-raise to prevent silent failure
-
-
-# -----------------------------
-# Small parsing helpers (reused)
-# -----------------------------
-def parse_date_string(value: str) -> Optional[datetime]:
-    """Parse common date formats into a datetime (date at midnight).
-
-    Accepts: DD/MM/YYYY, DD/MM/YY, YYYY-MM-DD, DD-MM-YYYY
-    Returns None on failure.
-    """
-    try:
-        s = (value or "").strip().split()[0]
-        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                return datetime.strptime(s, fmt)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
-
-
-def parse_monetary_number(value: Union[str, float, int, Decimal]) -> Optional[float]:
-    """Parse localized monetary strings like "1.234,56" to float.
-
-    Returns float or None on failure. If already number-like, casts to float.
-    """
-    try:
-        if isinstance(value, (int, float, Decimal)):
-            return float(value)
-        s = str(value)
-        return float(s.replace(".", "").replace(",", "."))
-    except Exception:
-        return None
-
-
-# -----------------------------
-# Lightweight local cache helpers
-# -----------------------------
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _update_local_cache(
-    cache_store: Dict[str, Any],
-    value: Any,
-    ttl: int,
-    stale_grace: int,
-    fetched_at: Optional[str] = None,
-) -> None:
-    now = time.time()
-    cache_store["value"] = value
-    cache_store["expires_at"] = now + max(ttl, 0)
-    cache_store["stale_until"] = cache_store["expires_at"] + max(stale_grace, 0)
-    cache_store["meta"] = {"fetched_at": fetched_at or _now_utc_iso()}
-
-
-def _local_cache_get(
-    cache_store: Dict[str, Any], allow_stale: bool = False
-) -> Tuple[Optional[Any], bool, Dict[str, Any]]:
-    value = cache_store.get("value")
-    meta = cache_store.get("meta") or {}
-    if value is None:
-        return None, False, {}
-
-    now = time.time()
-    expires_at = cache_store.get("expires_at", 0.0)
-    if now <= expires_at:
-        return value, True, meta
-
-    stale_until = cache_store.get("stale_until", 0.0)
-    if allow_stale and now <= stale_until:
-        return value, False, meta
-
-    if now > stale_until:
-        cache_store["value"] = None
-        cache_store["meta"] = {}
-    return None, False, {}
-
-
 # -----------------------------
 # BCRA v4.0 API helpers
 # -----------------------------
@@ -453,7 +367,9 @@ def bcra_list_variables(
 
 
 def _parse_currency_band_rows(
-    rows: Iterable[List[str]], *, today: Optional[date] = None
+    rows: Iterable[Iterable[Union[str, float, int, Decimal]]],
+    *,
+    today: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return latest band row parsed into floats and formatted date."""
 
@@ -461,10 +377,11 @@ def _parse_currency_band_rows(
     parsed_rows: List[Tuple[date, float, float]] = []
 
     for row in rows:
-        if len(row) < 3:
+        row_list = list(row)
+        if len(row_list) < 3:
             continue
-        date_raw, lower_raw, upper_raw = row[0], row[1], row[2]
-        dt = parse_date_string(date_raw)
+        date_raw, lower_raw, upper_raw = row_list[0], row_list[1], row_list[2]
+        dt = parse_date_string(str(date_raw))
         if not dt:
             continue
         lower = parse_monetary_number(lower_raw)
@@ -579,7 +496,7 @@ def _get_cached_currency_band_entry(
             else:
                 payload = {"data": cached}
             fetched_at = cast(Optional[str], payload.get("fetched_at"))
-            _update_local_cache(
+            update_local_cache(
                 _currency_band_local_cache,
                 cast(Dict[str, Any], payload["data"]),
                 TTL_BCRA,
@@ -595,7 +512,7 @@ def _get_cached_currency_band_entry(
             last_success = redis_get_json(redis_client, f"{cache_key}:last_success")
             if isinstance(last_success, dict) and "data" in last_success:
                 fetched_at = cast(Optional[str], last_success.get("fetched_at"))
-                _update_local_cache(
+                update_local_cache(
                     _currency_band_local_cache,
                     cast(Dict[str, Any], last_success["data"]),
                     0,
@@ -607,7 +524,7 @@ def _get_cached_currency_band_entry(
                     "fetched_at": fetched_at,
                 }
 
-    local_value, is_fresh, meta = _local_cache_get(
+    local_value, is_fresh, meta = local_cache_get(
         _currency_band_local_cache, allow_stale=allow_stale
     )
     if local_value is not None:
@@ -623,7 +540,7 @@ def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> Non
     if not data:
         return
 
-    fetched_at_iso = _now_utc_iso()
+    fetched_at_iso = now_utc_iso()
     payload = {"data": data, "fetched_at": fetched_at_iso}
 
     try:
@@ -640,7 +557,7 @@ def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> Non
     except Exception:
         pass
 
-    _update_local_cache(
+    update_local_cache(
         _currency_band_local_cache,
         data,
         ttl,
@@ -701,7 +618,7 @@ def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
         # limit to reasonable history window to keep downstream parsing lean
         max_rows = 180
         selected_dates = common_dates[-max_rows:]
-        rows: List[List[str]] = [
+        rows: List[List[Union[str, float]]] = [
             [
                 dt.isoformat(),
                 lower_series[dt],
@@ -746,23 +663,6 @@ def get_currency_band_limits() -> Optional[Dict[str, Any]]:
 
     _currency_band_failure_until = now_ts + min(TTL_BCRA, 120)
     return fallback
-
-
-def to_es_number(n: Union[float, int]) -> str:
-    try:
-        s = f"{float(n):,.2f}"
-        return s.replace(",", "_").replace(".", ",").replace("_", ".")
-    except Exception:
-        return str(n)
-
-
-def to_ddmmyy(date_iso: str) -> str:
-    dt = parse_date_string(date_iso)
-    if not dt:
-        return str(date_iso)
-    return f"{dt.day:02d}/{dt.month:02d}/{dt.year % 100:02d}"
-
-
 def bcra_fetch_latest_variables() -> Optional[Dict[str, Dict[str, str]]]:
     """Fetch latest Principales Variables via BCRA API and map to {name: {value, date}}"""
     try:
@@ -852,33 +752,6 @@ def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
         return val_f
     except Exception:
         return None
-
-
-def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
-    """Get a JSON value from Redis, parsed into Python or None."""
-    try:
-        data = redis_client.get(key)
-        if not data:
-            return None
-        return json.loads(str(data))
-    except Exception:
-        return None
-
-
-def redis_setex_json(redis_client: redis.Redis, key: str, ttl: int, value: Any) -> bool:
-    """Set a JSON value with TTL in Redis; returns True on success."""
-    try:
-        return bool(redis_client.setex(key, ttl, json.dumps(value)))
-    except Exception:
-        return False
-
-
-def redis_set_json(redis_client: redis.Redis, key: str, value: Any) -> bool:
-    """Set a JSON value (no TTL) in Redis; returns True on success."""
-    try:
-        return bool(redis_client.set(key, json.dumps(value)))
-    except Exception:
-        return False
 
 
 def get_agent_thoughts(
@@ -2352,7 +2225,7 @@ def _get_cached_bcra_cache_entry(
             else:
                 payload = {"data": cached}
             fetched_at = cast(Optional[str], payload.get("fetched_at"))
-            _update_local_cache(
+            update_local_cache(
                 _bcra_local_cache,
                 cast(Dict, payload["data"]),
                 TTL_BCRA,
@@ -2368,7 +2241,7 @@ def _get_cached_bcra_cache_entry(
             last_success = redis_get_json(redis_client, f"{cache_key}:last_success")
             if isinstance(last_success, dict) and "data" in last_success:
                 fetched_at = cast(Optional[str], last_success.get("fetched_at"))
-                _update_local_cache(
+                update_local_cache(
                     _bcra_local_cache,
                     cast(Dict, last_success["data"]),
                     0,
@@ -2380,7 +2253,7 @@ def _get_cached_bcra_cache_entry(
                     "fetched_at": fetched_at,
                 }
 
-    local_value, is_fresh, meta = _local_cache_get(
+    local_value, is_fresh, meta = local_cache_get(
         _bcra_local_cache, allow_stale=allow_stale
     )
     if local_value is not None:
@@ -2405,7 +2278,7 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     if not variables:
         return
 
-    fetched_at_iso = _now_utc_iso()
+    fetched_at_iso = now_utc_iso()
     payload = {"data": variables, "fetched_at": fetched_at_iso}
 
     try:
@@ -2438,7 +2311,7 @@ def cache_bcra_variables(variables: Dict, ttl: int = TTL_BCRA) -> None:
     except Exception as e:
         print(f"Error caching BCRA variables: {e}")
 
-    _update_local_cache(
+    update_local_cache(
         _bcra_local_cache,
         variables,
         ttl,
@@ -5537,129 +5410,6 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     return command, message_text
 
 
-def can_embed_url(url: str) -> bool:
-    """Return True if URL has metadata for embed previews"""
-    headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
-    try:
-        response = requests.get(url, allow_redirects=True, timeout=5, headers=headers)
-    except SSLError:
-        try:
-            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-            response = requests.get(
-                url, allow_redirects=True, timeout=5, verify=False, headers=headers
-            )
-        except RequestException as e:
-            print(f"[EMBED] {url} request failed after SSL error: {e}")
-            return False
-    except RequestException as e:
-        print(f"[EMBED] {url} request failed: {e}")
-        return False
-    if response.status_code >= 400:
-        print(f"[EMBED] {url} returned status {response.status_code}")
-        return False
-    content_type = response.headers.get("Content-Type", "").lower()
-    if content_type.startswith(("image/", "video/", "audio/")):
-        print(f"[EMBED] {url} served direct media type {content_type}")
-        return True
-    if "text/html" not in content_type:
-        print(f"[EMBED] {url} content-type {content_type} not embeddable")
-        return False
-    html = response.text[:20000]
-
-    class MetaParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.tags = []
-
-        def handle_starttag(self, tag, attrs):
-            if tag != "meta":
-                return
-            attrs_dict = dict(attrs)
-            key = attrs_dict.get("property") or attrs_dict.get("name")
-            if not key:
-                return
-            key_lower = key.lower()
-            if key_lower.startswith("og:") or key_lower.startswith("twitter:"):
-                self.tags.append((key, attrs_dict.get("content", "")))
-
-    parser = MetaParser()
-    parser.feed(html)
-    meta_tags = parser.tags
-    has_meta = bool(meta_tags)
-    if not has_meta:
-        print(f"[EMBED] {url} missing og/twitter meta tags")
-    else:
-        detail = ", ".join(f"{k}={v[:80]}" for k, v in meta_tags)
-        print(f"[EMBED] {url} has embed metadata: {detail}")
-    return has_meta
-
-
-def url_is_embedable(url: str) -> bool:
-    """Check if a URL is likely to produce an embed preview"""
-    return can_embed_url(url)
-
-
-def replace_links(text: str) -> Tuple[str, bool, List[str]]:
-    """Replace social links with alternative frontends"""
-
-    patterns = [
-        (r"(https?://)(?:www\.)?twitter\.com([^\s]*)", r"\1fxtwitter.com\2"),
-        (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
-        (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"\1fixupx.com\2"),
-        (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
-        (
-            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
-            r"\1\2rxddit.com\3",
-        ),
-        (
-            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com([^\s]*)",
-            r"\1\2vxtiktok.com\3",
-        ),
-    ]
-
-    changed = False
-    original_links: List[str] = []
-
-    def make_sub(repl: str):
-        def _sub(match: re.Match) -> str:
-            original = match.group(0)
-            replaced = match.expand(repl)
-            parsed = urlparse(replaced)
-            cleaned = parsed._replace(query="", fragment="")
-            replaced_full = urlunparse(cleaned)
-            if url_is_embedable(replaced_full):
-                nonlocal changed
-                changed = True
-                parsed_original = urlparse(original)
-                cleaned_original = parsed_original._replace(query="", fragment="")
-                original_links.append(urlunparse(cleaned_original))
-                print(f"[LINK] replacing {original} with {replaced_full}")
-                return replaced_full
-            print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
-            return original
-
-        return _sub
-
-    new_text = text
-    for pattern, repl in patterns:
-        new_text = re.sub(pattern, make_sub(repl), new_text, flags=re.IGNORECASE)
-
-    url_pattern = re.compile(r"(https?://[^\s]+)")
-
-    def strip_tracking(match: re.Match) -> str:
-        url = match.group(0)
-        parsed = urlparse(url)
-        if is_social_frontend(parsed.netloc):
-            cleaned = parsed._replace(query="", fragment="")
-            return urlunparse(cleaned)
-        return url
-
-    new_text = url_pattern.sub(strip_tracking, new_text)
-
-    return new_text, changed, original_links
-
-
 def configure_links(chat_id: str, params: str) -> str:
     """Configure automatic link fixing for a chat"""
     redis_client = config_redis()
@@ -6063,49 +5813,56 @@ def is_secret_token_valid(request: Request) -> bool:
     return redis_secret_token == secret_token
 
 
+def _arg_is_true(args: Mapping[str, Any], key: str) -> bool:
+    value = args.get(key)
+    if isinstance(value, str):
+        return value.lower() == "true"
+    return False
+
+
+def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
+    if _arg_is_true(args, "check_webhook"):
+        webhook_verified = verify_webhook()
+        return ("Webhook checked", 200) if webhook_verified else ("Webhook check error", 400)
+
+    if _arg_is_true(args, "update_webhook"):
+        function_url = environ.get("FUNCTION_URL")
+        if not function_url:
+            return "Webhook update error", 400
+        updated = set_telegram_webhook(function_url)
+        return ("Webhook updated", 200) if updated else ("Webhook update error", 400)
+
+    return None
+
+
+def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
+    if _arg_is_true(args, "update_dollars"):
+        get_dollar_rates()
+        return "Dollars updated", 200
+
+    if _arg_is_true(args, "run_agent"):
+        try:
+            thought_result = run_agent_cycle()
+            payload = json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False)
+            return payload, 200
+        except Exception as agent_error:
+            admin_report("Agent run failed", agent_error)
+            return "Agent run failed", 500
+
+    return None
+
+
 def process_request_parameters(request: Request) -> Tuple[str, int]:
     try:
-        # Handle webhook checks
-        check_webhook = request.args.get("check_webhook") == "true"
-        if check_webhook:
-            webhook_verified = verify_webhook()
-            return (
-                ("Webhook checked", 200)
-                if webhook_verified
-                else ("Webhook check error", 400)
-            )
+        args = request.args
 
-        # Handle webhook updates
-        update_webhook = request.args.get("update_webhook") == "true"
-        if update_webhook:
-            function_url = environ.get("FUNCTION_URL")
-            if not function_url:
-                return ("Webhook update error", 400)
-            return (
-                ("Webhook updated", 200)
-                if set_telegram_webhook(function_url)
-                else ("Webhook update error", 400)
-            )
+        webhook_response = _handle_webhook_actions(args)
+        if webhook_response:
+            return webhook_response
 
-        # Handle dollar rates update
-        update_dollars = request.args.get("update_dollars") == "true"
-        if update_dollars:
-            get_dollar_rates()
-            return "Dollars updated", 200
-
-        run_agent = request.args.get("run_agent") == "true"
-        if run_agent:
-            try:
-                thought_result = run_agent_cycle()
-                return (
-                    json.dumps(
-                        {"status": "ok", "thought": thought_result}, ensure_ascii=False
-                    ),
-                    200,
-                )
-            except Exception as agent_error:
-                admin_report("Agent run failed", agent_error)
-                return "Agent run failed", 500
+        control_response = _handle_control_actions(args)
+        if control_response:
+            return control_response
 
         # Validate secret token
         if not is_secret_token_valid(request):
