@@ -9,7 +9,12 @@ import time
 from typing import Dict, List, Any
 import os
 from datetime import datetime
-from dotenv import load_dotenv
+
+try:  # Optional dependency used in manual benchmarking CLI
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - fallback for environments without python-dotenv
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:  # type: ignore[override]
+        return False
 
 # Load environment variables from .env file
 load_dotenv()
