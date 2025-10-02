@@ -425,7 +425,10 @@ def bcra_list_variables(
 ) -> Optional[List[Dict[str, Any]]]:
     """Return list of variables. If `category` is provided, filter client-side."""
     # Server defaults limit to 1000; omit category/limit for compatibility
-    data = bcra_api_get("/monetarias", None)
+    params: Optional[Dict[str, Any]] = None
+    if category:
+        params = {"limit": "2000"}
+    data = bcra_api_get("/monetarias", params)
     try:
         if not data:
             return None
@@ -447,49 +450,6 @@ def bcra_list_variables(
         return [r for r in results if cat in norm(str(r.get("categoria", "")))]
     except Exception:
         return None
-
-
-class _CurrencyBandTableParser(HTMLParser):
-    """Lightweight HTML table parser tailored to the BCRA bands page."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._in_table = False
-        self._capture_cell = False
-        self._current_cell: List[str] = []
-        self._current_row: List[str] = []
-        self.rows: List[List[str]] = []
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        if tag.lower() == "table":
-            self._in_table = True
-        if not self._in_table:
-            return
-        if tag.lower() in ("td", "th"):
-            self._capture_cell = True
-            self._current_cell = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "table":
-            self._in_table = False
-            return
-        if not self._in_table:
-            return
-        if tag.lower() in ("td", "th") and self._capture_cell:
-            cell_text = "".join(self._current_cell).strip()
-            if cell_text:
-                self._current_row.append(cell_text)
-            else:
-                self._current_row.append("")
-            self._capture_cell = False
-        elif tag.lower() == "tr":
-            if self._current_row:
-                self.rows.append(self._current_row)
-            self._current_row = []
-
-    def handle_data(self, data: str) -> None:
-        if self._capture_cell and data:
-            self._current_cell.append(unescape(data))
 
 
 def _parse_currency_band_rows(
@@ -561,6 +521,41 @@ def _parse_currency_band_rows(
         result["upper_change_pct"] = upper_change
 
     return result
+
+
+def _fetch_currency_band_series(var_id: int, limit: int = 200) -> Dict[date, float]:
+    """Return a {date: value} map for the requested Principales Variables series."""
+
+    data = bcra_api_get(f"/monetarias/{var_id}", {"limit": str(int(limit))})
+    if not data:
+        return {}
+
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        return {}
+
+    first = results[0]
+    detalle = first.get("detalle") if isinstance(first, dict) else None
+    if not isinstance(detalle, list):
+        return {}
+
+    series: Dict[date, float] = {}
+    for entry in detalle:
+        if not isinstance(entry, dict):
+            continue
+        fecha_raw = entry.get("fecha")
+        valor_raw = entry.get("valor")
+        if valor_raw is None:
+            continue
+        dt = parse_date_string(str(fecha_raw or ""))
+        if not dt:
+            continue
+        try:
+            series[dt.date()] = float(valor_raw)
+        except Exception:
+            continue
+
+    return series
 
 
 def _get_cached_currency_band_entry(
@@ -655,28 +650,69 @@ def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> Non
 
 
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
-    """Fetch latest currency band limits (piso/techo) from BCRA website."""
+    """Fetch latest currency band limits (piso/techo) via Principales Variables API."""
 
-    url = "https://www.bcra.gob.ar/PublicacionesEstadisticas/bandas-cambiarias-piso-techo.asp"
     try:
-        try:
-            response = requests.get(url, timeout=10, verify=True)
-            response.raise_for_status()
-        except SSLError:
-            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-            response = requests.get(url, timeout=10, verify=False)
-            response.raise_for_status()
-
-        encoding = response.encoding or "latin-1"
-        html_text = response.content.decode(encoding, errors="ignore")
-        parser = _CurrencyBandTableParser()
-        parser.feed(html_text)
-        parsed = _parse_currency_band_rows(parser.rows)
-        if not parsed:
+        variables = bcra_list_variables("Principales Variables")
+        if not variables:
             return None
-        return parsed
-    except (RequestException, ValueError) as exc:
-        print(f"Error fetching BCRA currency bands: {exc}")
+
+        def norm(text: str) -> str:
+            return (
+                unicodedata.normalize("NFKD", text or "")
+                .encode("ascii", "ignore")
+                .decode("ascii")
+            ).lower()
+
+        lower_id: Optional[int] = None
+        upper_id: Optional[int] = None
+
+        for item in variables:
+            if lower_id and upper_id:
+                break
+            if not isinstance(item, dict):
+                continue
+            desc = str(item.get("descripcion", ""))
+            if not desc:
+                continue
+            normalized = norm(desc)
+            if "bandas cambiarias" not in normalized:
+                continue
+            var_id = item.get("idVariable")
+            if not isinstance(var_id, int):
+                continue
+            if "superior" in normalized and upper_id is None:
+                upper_id = var_id
+            elif "inferior" in normalized and lower_id is None:
+                lower_id = var_id
+
+        if lower_id is None or upper_id is None:
+            return None
+
+        lower_series = _fetch_currency_band_series(lower_id)
+        upper_series = _fetch_currency_band_series(upper_id)
+        if not lower_series or not upper_series:
+            return None
+
+        common_dates = sorted(set(lower_series.keys()) & set(upper_series.keys()))
+        if not common_dates:
+            return None
+
+        # limit to reasonable history window to keep downstream parsing lean
+        max_rows = 180
+        selected_dates = common_dates[-max_rows:]
+        rows: List[List[str]] = [
+            [
+                dt.isoformat(),
+                lower_series[dt],
+                upper_series[dt],
+            ]
+            for dt in selected_dates
+        ]
+
+        return _parse_currency_band_rows(rows)
+    except Exception as exc:
+        print(f"Error fetching BCRA currency bands via API: {exc}")
         return None
 
 
