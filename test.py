@@ -5022,18 +5022,18 @@ def test_replace_links(mock_get):
     )
     fixed, changed, originals = replace_links(text)
     assert changed
-    assert "https://fxtwitter.com/foo" in fixed
-    assert "http://fixupx.com/bar" in fixed
+    assert "https://twitter.com/foo" in fixed
+    assert "http://x.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
     assert "https://kkinstagram.com/qux" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.vxtiktok.com/@bar" in fixed
     assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+    assert "fxtwitter.com" not in fixed
+    assert "fixupx.com" not in fixed
     assert "?" not in fixed
     expected = {
-        "https://twitter.com/foo",
-        "http://x.com/bar",
         "https://bsky.app/baz",
         "https://www.instagram.com/qux",
         "https://www.reddit.com/r/foo",
@@ -5103,7 +5103,7 @@ def test_handle_msg_link_reply():
         "message_id": 1,
         "chat": {"id": 123, "type": "group"},
         "from": {"first_name": "John", "username": "john"},
-        "text": "check https://twitter.com/foo",
+        "text": "check https://twitter.com/foo/status/1",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
@@ -5128,9 +5128,9 @@ def test_handle_msg_link_reply():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "check https://fxtwitter.com/foo\n\nShared by @john"
+        expected = "check https://fxtwitter.com/foo/status/1\n\nShared by @john"
         mock_send.assert_called_once_with(
-            "123", expected, "1", ["https://twitter.com/foo"]
+            "123", expected, "1", ["https://twitter.com/foo/status/1"]
         )
         mock_delete.assert_not_called()
         mock_save.assert_not_called()
@@ -5179,7 +5179,7 @@ def test_handle_msg_link_delete():
         "message_id": 2,
         "chat": {"id": 456, "type": "group"},
         "from": {"first_name": "Ana", "username": "ana"},
-        "text": "look https://x.com/bar",
+        "text": "look https://x.com/bar/status/1",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
@@ -5204,10 +5204,10 @@ def test_handle_msg_link_delete():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "look https://fixupx.com/bar\n\nShared by @ana"
+        expected = "look https://fixupx.com/bar/status/1\n\nShared by @ana"
         mock_delete.assert_called_once_with("456", "2")
         mock_send.assert_called_once_with(
-            "456", expected, buttons=["https://x.com/bar"]
+            "456", expected, buttons=["https://x.com/bar/status/1"]
         )
         mock_save.assert_not_called()
 
@@ -5242,11 +5242,23 @@ def test_replace_links_checks_preview(monkeypatch):
 
     mock_can = MagicMock(return_value=True)
     monkeypatch.setattr("api.index.can_embed_url", mock_can)
-    text, changed, originals = replace_links("https://x.com/foo")
-    assert text == "https://fixupx.com/foo"
+    text, changed, originals = replace_links("https://x.com/foo/status/123")
+    assert text == "https://fixupx.com/foo/status/123"
     assert changed is True
-    assert originals == ["https://x.com/foo"]
-    mock_can.assert_called_once_with("https://fixupx.com/foo")
+    assert originals == ["https://x.com/foo/status/123"]
+    mock_can.assert_called_once_with("https://fixupx.com/foo/status/123")
+
+
+def test_replace_links_skips_twitter_user_profiles(monkeypatch):
+    from api.index import replace_links
+
+    mock_can = MagicMock(return_value=True)
+    monkeypatch.setattr("api.index.can_embed_url", mock_can)
+    text, changed, originals = replace_links("https://twitter.com/foo")
+    assert text == "https://twitter.com/foo"
+    assert changed is False
+    assert originals == []
+    mock_can.assert_not_called()
 
 
 @patch("api.index.requests.get")
@@ -5256,12 +5268,15 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<meta property='og:title' content='foo'>"
     mock_get.return_value = mock_response
-    fixed, changed, originals = replace_links("https://x.com/foo")
+    fixed, changed, originals = replace_links("https://x.com/foo/status/123")
     assert changed is True
-    assert fixed == "https://fixupx.com/foo"
-    assert originals == ["https://x.com/foo"]
+    assert fixed == "https://fixupx.com/foo/status/123"
+    assert originals == ["https://x.com/foo/status/123"]
     mock_get.assert_called_once_with(
-        "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
+        "https://fixupx.com/foo/status/123",
+        allow_redirects=True,
+        timeout=5,
+        headers=ANY,
     )
 
 
@@ -5272,12 +5287,15 @@ def test_xcancel_link_replacement(mock_get):
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<meta property='og:title' content='foo'>"
     mock_get.return_value = mock_response
-    fixed, changed, originals = replace_links("https://xcancel.com/foo")
+    fixed, changed, originals = replace_links("https://xcancel.com/foo/status/123")
     assert changed is True
-    assert fixed == "https://fixupx.com/foo"
-    assert originals == ["https://xcancel.com/foo"]
+    assert fixed == "https://fixupx.com/foo/status/123"
+    assert originals == ["https://xcancel.com/foo/status/123"]
     mock_get.assert_called_once_with(
-        "https://fixupx.com/foo", allow_redirects=True, timeout=5, headers=ANY
+        "https://fixupx.com/foo/status/123",
+        allow_redirects=True,
+        timeout=5,
+        headers=ANY,
     )
 
 
@@ -5405,7 +5423,7 @@ def test_handle_msg_replaced_link_adds_button():
         "message_id": 9,
         "chat": {"id": 111, "type": "group"},
         "from": {"id": 1},
-        "text": "https://x.com/foo?utm_source=bar",
+        "text": "https://x.com/foo/status/1?utm_source=bar",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
@@ -5429,7 +5447,10 @@ def test_handle_msg_replaced_link_adds_button():
 
         assert result == "ok"
         mock_send.assert_called_once_with(
-            "111", "https://fixupx.com/foo", "9", ["https://x.com/foo"]
+            "111",
+            "https://fixupx.com/foo/status/1",
+            "9",
+            ["https://x.com/foo/status/1"],
         )
         mock_should.assert_not_called()
 
@@ -5439,7 +5460,7 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         "message_id": 10,
         "chat": {"id": 222, "type": "group"},
         "from": {"id": 1, "username": "user"},
-        "text": "https://x.com/foo",
+        "text": "https://x.com/foo/status/1",
         "reply_to_message": {"message_id": 1},
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
@@ -5465,9 +5486,9 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         assert result == "ok"
         mock_send.assert_called_once_with(
             "222",
-            "https://fixupx.com/foo\n\nShared by @user",
+            "https://fixupx.com/foo/status/1\n\nShared by @user",
             "1",
-            ["https://x.com/foo"],
+            ["https://x.com/foo/status/1"],
         )
         mock_should.assert_not_called()
 
@@ -5477,7 +5498,7 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         "message_id": 11,
         "chat": {"id": 333, "type": "group"},
         "from": {"id": 1, "username": "user"},
-        "text": "https://x.com/foo",
+        "text": "https://x.com/foo/status/1",
         "reply_to_message": {"message_id": 2},
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
@@ -5506,9 +5527,9 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         mock_delete.assert_called_once_with("333", "11")
         mock_send.assert_called_once_with(
             "333",
-            "https://fixupx.com/foo\n\nShared by @user",
+            "https://fixupx.com/foo/status/1\n\nShared by @user",
             "2",
-            ["https://x.com/foo"],
+            ["https://x.com/foo/status/1"],
         )
         mock_should.assert_not_called()
 
