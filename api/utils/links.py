@@ -6,7 +6,7 @@ import re
 import warnings
 from html.parser import HTMLParser
 from typing import Callable, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import ParseResult, urlparse, urlunparse
 
 import requests
 from requests.exceptions import RequestException, SSLError
@@ -39,6 +39,59 @@ __all__ = [
     "url_is_embedable",
     "replace_links",
 ]
+
+
+_TWITTER_HOSTS: Set[str] = {
+    "twitter.com",
+    "x.com",
+    "xcancel.com",
+}
+
+
+def _is_twitter_user_profile(parsed: ParseResult) -> bool:
+    """Return ``True`` when *parsed* points to a Twitter/X user profile."""
+
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in _TWITTER_HOSTS:
+        return False
+
+    path = parsed.path.strip("/")
+    if not path:
+        return False
+
+    segments = [segment.lstrip("@") for segment in path.split("/") if segment]
+    if not segments:
+        return False
+
+    lower_segments = [segment.lower() for segment in segments]
+    if "status" in lower_segments:
+        return False
+
+    first_segment = lower_segments[0]
+    reserved = {
+        "home",
+        "share",
+        "intent",
+        "i",
+        "search",
+        "explore",
+        "notifications",
+        "messages",
+        "settings",
+        "compose",
+        "privacy",
+        "tos",
+    }
+    if first_segment in reserved:
+        return False
+
+    if len(lower_segments) == 1:
+        return True
+
+    profile_subpages = {"with_replies", "media", "likes"}
+    return len(lower_segments) == 2 and lower_segments[1] in profile_subpages
 
 
 def is_social_frontend(host: str) -> bool:
@@ -143,6 +196,9 @@ def replace_links(
     def make_sub(repl: str):
         def _sub(match: re.Match) -> str:
             original = match.group(0)
+            parsed_original = urlparse(original)
+            if _is_twitter_user_profile(parsed_original):
+                return original
             replaced = match.expand(repl)
             parsed = urlparse(replaced)
             cleaned = parsed._replace(query="", fragment="")
@@ -150,7 +206,6 @@ def replace_links(
             if checker(replaced_full):
                 nonlocal changed
                 changed = True
-                parsed_original = urlparse(original)
                 cleaned_original = parsed_original._replace(query="", fragment="")
                 original_links.append(urlunparse(cleaned_original))
                 print(f"[LINK] replacing {original} with {replaced_full}")
