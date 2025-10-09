@@ -139,6 +139,16 @@ TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
 
 
+CHAT_CONFIG_KEY_PREFIX = "chat_config:"
+CHAT_CONFIG_DEFAULTS = {
+    "link_mode": "off",
+    "ai_random_replies": True,
+    "ai_command_followups": True,
+}
+BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
+BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60  # 3 days
+
+
 def config_redis(host=None, port=None, password=None):
     configure_app_config(admin_reporter=globals().get("admin_report"))
     return _config_config_redis(host=host, port=port, password=password)
@@ -1402,7 +1412,7 @@ comandos disponibles boludo:
 
 - /instance: te digo donde estoy corriendo
 
-- /links reply|delete|off: te arreglo los links de twitter/x/bsky/instagram/reddit/tiktok
+- /config: cambiá la config del gordo, link fixer y demases
 
 - /prices, /precio, /precios, /presio, /presios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
@@ -1442,16 +1452,34 @@ def send_msg(
     msg: str,
     msg_id: str = "",
     buttons: Optional[List[str]] = None,
-) -> None:
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
     token = environ.get("TELEGRAM_TOKEN")
-    parameters = {"chat_id": chat_id, "text": msg}
-    if msg_id != "":
-        parameters["reply_to_message_id"] = msg_id
-    if buttons:
+    payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
+    if msg_id:
+        payload["reply_to_message_id"] = msg_id
+
+    markup = reply_markup
+    if markup is None and buttons:
         keyboard = [[{"text": "Open in app", "url": url}] for url in buttons]
-        parameters["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+        markup = {"inline_keyboard": keyboard}
+
+    if markup is not None:
+        payload["reply_markup"] = markup
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.get(url, params=parameters, timeout=5)
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("ok") and isinstance(data.get("result"), dict):
+            message_id = data["result"].get("message_id")
+            if isinstance(message_id, int):
+                return message_id
+    except (requests.RequestException, ValueError, KeyError):
+        return None
+
+    return None
 
 
 def delete_msg(chat_id: str, msg_id: str) -> None:
@@ -3067,6 +3095,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/gordo": (ask_ai, True, True),
         "/agent": (show_agent_thoughts, False, False),
         # Regular commands
+        "/config": (lambda: "", False, False),
         "/convertbase": (convert_base, False, True),
         "/random": (select_random, False, True),
         "/prices": (get_prices, False, True),
@@ -3091,7 +3120,6 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/instance": (get_instance_name, False, False),
         "/help": (get_help, False, False),
         "/transcribe": (handle_transcribe, False, False),
-        "/links": (lambda params: "", False, True),
         "/bcra": (handle_bcra_variables, False, False),
         "/variables": (handle_bcra_variables, False, False),
     }
@@ -3231,6 +3259,8 @@ def should_gordo_respond(
     command: str,
     message_text: str,
     message: dict,
+    chat_config: Mapping[str, Any],
+    reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
     """Decide if the bot should respond to a message"""
     # Get message context
@@ -3260,15 +3290,28 @@ def should_gordo_respond(
     is_mention = bot_name in message_lower
     is_reply = reply.get("from", {}).get("username", "") == bot_username
 
+    if (
+        is_reply
+        and reply_metadata
+        and reply_metadata.get("type") == "command"
+        and not bool(reply_metadata.get("uses_ai", False))
+        and not bool(chat_config.get("ai_command_followups", True))
+    ):
+        return False
+
     # Check trigger keywords with 10% chance
     try:
         config = load_bot_config()
         trigger_words = config.get("trigger_words", ["bot", "assistant"])
     except ValueError:
         trigger_words = ["bot", "assistant"]
-    is_trigger = (
-        any(word in message_lower for word in trigger_words) and random.random() < 0.1
-    )
+    if bool(chat_config.get("ai_random_replies", True)):
+        is_trigger = (
+            any(word in message_lower for word in trigger_words)
+            and random.random() < 0.1
+        )
+    else:
+        is_trigger = False
 
     return (
         is_command
@@ -3666,21 +3709,260 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     return command, message_text
 
 
-def configure_links(chat_id: str, params: str) -> str:
-    """Configure automatic link fixing for a chat"""
+def _chat_config_key(chat_id: str) -> str:
+    return f"{CHAT_CONFIG_KEY_PREFIX}{chat_id}"
+
+
+def _legacy_link_mode_key(chat_id: str) -> str:
+    return f"link_mode:{chat_id}"
+
+
+def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
+    config = dict(CHAT_CONFIG_DEFAULTS)
+    try:
+        raw_value = redis_client.get(_chat_config_key(chat_id))
+        if raw_value:
+            try:
+                loaded = json.loads(raw_value)
+                if isinstance(loaded, dict):
+                    for key, value in loaded.items():
+                        if key in config:
+                            config[key] = value
+            except json.JSONDecodeError:
+                pass
+        elif redis_client.get(_legacy_link_mode_key(chat_id)):
+            config["link_mode"] = redis_client.get(_legacy_link_mode_key(chat_id))
+    except Exception as error:
+        admin_report(
+            "Error loading chat config",
+            error,
+            {"chat_id": chat_id},
+        )
+    return config
+
+
+def set_chat_config(
+    redis_client: redis.Redis, chat_id: str, **updates: Any
+) -> Dict[str, Any]:
+    config = get_chat_config(redis_client, chat_id)
+    for key, value in updates.items():
+        if key in config:
+            config[key] = value
+
+    try:
+        redis_client.set(_chat_config_key(chat_id), json.dumps(config))
+        link_mode = config.get("link_mode", "off")
+        legacy_key = _legacy_link_mode_key(chat_id)
+        if link_mode in {"reply", "delete"}:
+            redis_client.set(legacy_key, link_mode)
+        else:
+            redis_client.delete(legacy_key)
+    except Exception as error:
+        admin_report(
+            "Error saving chat config",
+            error,
+            {"chat_id": chat_id, "updates": updates},
+        )
+
+    return config
+
+
+def _build_config_choice_button(
+    label: str, value: str, current: str, *, action: str
+) -> Dict[str, str]:
+    prefix = "✅" if current == value else "▫️"
+    return {
+        "text": f"{prefix} {label}",
+        "callback_data": f"cfg:{action}:{value}",
+    }
+
+
+def _build_config_toggle_button(label: str, enabled: bool, action: str) -> Dict[str, str]:
+    prefix = "✅" if enabled else "▫️"
+    return {
+        "text": f"{prefix} {label}",
+        "callback_data": f"cfg:{action}:toggle",
+    }
+
+
+def build_config_text(config: Mapping[str, Any]) -> str:
+    link_mode = str(config.get("link_mode", "off"))
+    link_mode_labels = {
+        "reply": "responder", 
+        "delete": "borrar", 
+        "off": "apagado",
+    }
+    link_label = link_mode_labels.get(link_mode, "apagado")
+    random_enabled = bool(config.get("ai_random_replies", True))
+    followups_enabled = bool(config.get("ai_command_followups", True))
+
+    lines = [
+        "configuracion del gordo:",
+        "",
+        f"- Link fixer: {link_label}",
+        "- Respuestas random de la IA: "
+        f"{'activadas' if random_enabled else 'desactivadas'}",
+        "- Follow ups a comandos sin IA: "
+        f"{'habilitados' if followups_enabled else 'deshabilitados'}",
+        "",
+        "Tocá un botón para cambiar.",
+    ]
+    return "\n".join(lines)
+
+
+def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
+    link_mode = str(config.get("link_mode", "off"))
+    random_enabled = bool(config.get("ai_random_replies", True))
+    followups_enabled = bool(config.get("ai_command_followups", True))
+
+    keyboard = [
+        [
+            _build_config_choice_button("Reply", "reply", link_mode, action="link"),
+            _build_config_choice_button("Delete", "delete", link_mode, action="link"),
+            _build_config_choice_button("Off", "off", link_mode, action="link"),
+        ],
+        [
+            _build_config_toggle_button(
+                "Random replies", random_enabled, action="random"
+            ),
+        ],
+        [
+            _build_config_toggle_button(
+                "Follow ups comandos", followups_enabled, action="followups"
+            ),
+        ],
+    ]
+    return {"inline_keyboard": keyboard}
+
+
+def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
     redis_client = config_redis()
-    key = f"link_mode:{chat_id}"
-    mode = params.strip().lower()
+    config = get_chat_config(redis_client, chat_id)
+    return build_config_text(config), build_config_keyboard(config)
 
-    if mode in {"reply", "delete"}:
-        redis_client.set(key, mode)
-        return f"Link fixer set to {mode} mode"
-    if mode == "off":
-        redis_client.delete(key)
-        return "Link fixer disabled"
 
-    current = redis_client.get(key) or "off"
-    return f"Usage: /links reply|delete|off (current: {current})"
+def _answer_callback_query(callback_query_id: str) -> None:
+    token = environ.get("TELEGRAM_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    try:
+        requests.post(
+            url,
+            json={"callback_query_id": callback_query_id},
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
+def edit_message(
+    chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
+) -> None:
+    token = environ.get("TELEGRAM_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "reply_markup": json.dumps(reply_markup),
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except requests.RequestException:
+        pass
+
+
+def handle_callback_query(callback_query: Dict[str, Any]) -> None:
+    callback_data = callback_query.get("data")
+    callback_id = callback_query.get("id")
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not callback_data or chat_id is None or message_id is None:
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    redis_client = config_redis()
+    chat_id_str = str(chat_id)
+    config = get_chat_config(redis_client, chat_id_str)
+
+    try:
+        _, action, value = callback_data.split(":", 2)
+    except ValueError:
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    if action == "link" and value in {"reply", "delete", "off"}:
+        config = set_chat_config(redis_client, chat_id_str, link_mode=value)
+    elif action == "random":
+        config = set_chat_config(
+            redis_client,
+            chat_id_str,
+            ai_random_replies=not bool(config.get("ai_random_replies", True)),
+        )
+    elif action == "followups":
+        config = set_chat_config(
+            redis_client,
+            chat_id_str,
+            ai_command_followups=not bool(config.get("ai_command_followups", True)),
+        )
+
+    text = build_config_text(config)
+    keyboard = build_config_keyboard(config)
+    try:
+        edit_message(chat_id_str, int(message_id), text, keyboard)
+    finally:
+        if callback_id:
+            _answer_callback_query(callback_id)
+
+
+def _bot_message_meta_key(chat_id: str, message_id: Union[str, int]) -> str:
+    return f"{BOT_MESSAGE_META_PREFIX}{chat_id}:{message_id}"
+
+
+def save_bot_message_metadata(
+    redis_client: redis.Redis,
+    chat_id: str,
+    message_id: Union[str, int],
+    metadata: Mapping[str, Any],
+    ttl: int = BOT_MESSAGE_META_TTL,
+) -> None:
+    try:
+        redis_client.setex(
+            _bot_message_meta_key(chat_id, message_id),
+            ttl,
+            json.dumps(dict(metadata)),
+        )
+    except Exception as error:
+        admin_report(
+            "Error saving bot message metadata",
+            error,
+            {"chat_id": chat_id, "message_id": message_id},
+        )
+
+
+def get_bot_message_metadata(
+    redis_client: redis.Redis, chat_id: str, message_id: Union[str, int]
+) -> Optional[Dict[str, Any]]:
+    try:
+        raw_value = redis_client.get(_bot_message_meta_key(chat_id, message_id))
+        if raw_value:
+            try:
+                loaded = json.loads(raw_value)
+                if isinstance(loaded, dict):
+                    return loaded
+            except json.JSONDecodeError:
+                pass
+    except Exception as error:
+        admin_report(
+            "Error loading bot message metadata",
+            error,
+            {"chat_id": chat_id, "message_id": message_id},
+        )
+    return None
 
 
 def format_user_message(message: Dict, message_text: str) -> str:
@@ -3738,9 +4020,10 @@ def handle_msg(message: Dict) -> str:
 
         # Initialize Redis and commands
         redis_client = config_redis()
+        chat_config = get_chat_config(redis_client, chat_id)
 
-        link_mode = redis_client.get(f"link_mode:{chat_id}")
-        if link_mode and message_text and not message_text.startswith("/"):
+        link_mode = str(chat_config.get("link_mode", "off"))
+        if link_mode != "off" and message_text and not message_text.startswith("/"):
             fixed_text, changed, original_links = replace_links(message_text)
             if changed:
                 user_info = message.get("from", {})
@@ -3787,8 +4070,22 @@ def handle_msg(message: Dict) -> str:
         # Get command and message text
         command, sanitized_message_text = parse_command(message_text, bot_name)
 
+        reply_metadata: Optional[Dict[str, Any]] = None
+        if "reply_to_message" in message:
+            reply_msg = message["reply_to_message"]
+            if reply_msg.get("from", {}).get("username") == environ.get(
+                "TELEGRAM_USERNAME"
+            ):
+                reply_id = reply_msg.get("message_id")
+                if reply_id is not None:
+                    reply_metadata = get_bot_message_metadata(
+                        redis_client, chat_id, reply_id
+                    )
+
         # Check if we should respond
-        if not should_gordo_respond(commands, command, sanitized_message_text, message):
+        if not should_gordo_respond(
+            commands, command, sanitized_message_text, message, chat_config, reply_metadata
+        ):
             # Even if we don't respond, save the message for context
             if message_text:
                 formatted_message = format_user_message(message, message_text)
@@ -3829,14 +4126,22 @@ def handle_msg(message: Dict) -> str:
                     )
 
         # Process command or conversation
-        if command in commands:
+        response_msg: Optional[str] = None
+        response_markup: Optional[Dict[str, Any]] = None
+        response_uses_ai = False
+        response_command: Optional[str] = None
+
+        if command == "/config":
+            response_command = command
+            response_msg, response_markup = handle_config_command(chat_id)
+        elif command in commands:
             handler_func, uses_ai, takes_params = commands[command]
+            response_command = command
 
             if uses_ai:
                 if not check_rate_limit(chat_id, redis_client):
                     response_msg = handle_rate_limit(chat_id, message)
                 else:
-                    # Get chat history BEFORE saving the current message
                     chat_history = get_chat_history(chat_id, redis_client)
                     messages = build_ai_messages(
                         message, chat_history, sanitized_message_text
@@ -3848,12 +4153,10 @@ def handle_msg(message: Dict) -> str:
                         image_data=resized_image_data if photo_file_id else None,
                         image_file_id=photo_file_id or None,
                     )
+                    response_uses_ai = True
             else:
-                # Special handling for transcribe command which needs the full message
                 if command == "/transcribe":
                     response_msg = handle_transcribe_with_message(message)
-                elif command == "/links":
-                    response_msg = configure_links(chat_id, sanitized_message_text)
                 else:
                     if takes_params:
                         response_msg = handler_func(sanitized_message_text)
@@ -3863,7 +4166,6 @@ def handle_msg(message: Dict) -> str:
             if not check_rate_limit(chat_id, redis_client):
                 response_msg = handle_rate_limit(chat_id, message)
             else:
-                # Get chat history BEFORE saving the current message
                 chat_history = get_chat_history(chat_id, redis_client)
                 messages = build_ai_messages(message, chat_history, message_text)
                 response_msg = handle_ai_response(
@@ -3873,6 +4175,7 @@ def handle_msg(message: Dict) -> str:
                     image_data=resized_image_data if photo_file_id else None,
                     image_file_id=photo_file_id or None,
                 )
+                response_uses_ai = True
 
         # Only save messages AFTER we've generated a response
         if message_text:
@@ -3885,7 +4188,25 @@ def handle_msg(message: Dict) -> str:
             save_message_to_redis(
                 chat_id, f"bot_{message_id}", response_msg, redis_client
             )
-            send_msg(chat_id, response_msg, message_id)
+            sent_message_id = send_msg(
+                chat_id,
+                response_msg,
+                message_id,
+                reply_markup=response_markup,
+            )
+            if sent_message_id is not None:
+                metadata: Dict[str, Any]
+                if response_command:
+                    metadata = {
+                        "type": "command",
+                        "command": response_command,
+                        "uses_ai": response_uses_ai,
+                    }
+                else:
+                    metadata = {"type": "ai"}
+                save_bot_message_metadata(
+                    redis_client, chat_id, sent_message_id, metadata
+                )
 
         return "ok"
 
@@ -4026,7 +4347,7 @@ def set_telegram_webhook(webhook_url: str) -> bool:
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
         "url": f"{webhook_url}?key={webhook_key}",
-        "allowed_updates": '["message"]',
+        "allowed_updates": '["message","callback_query"]',
         "secret_token": secret_token,
         "max_connections": 8,
     }
@@ -4129,6 +4450,11 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         request_json = request.get_json(silent=True)
         if not request_json:
             return "Invalid JSON", 400
+        callback_query = request_json.get("callback_query")
+        if callback_query:
+            handle_callback_query(callback_query)
+            return "Ok", 200
+
         message = request_json.get("message")
         if not message:
             return "No message", 200

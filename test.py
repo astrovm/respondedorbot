@@ -27,7 +27,15 @@ from api.index import (
     handle_ai_response,
     handle_msg,
     replace_links,
-    configure_links,
+    get_chat_config,
+    set_chat_config,
+    build_config_text,
+    build_config_keyboard,
+    handle_config_command,
+    handle_callback_query,
+    save_bot_message_metadata,
+    get_bot_message_metadata,
+    CHAT_CONFIG_DEFAULTS,
     is_repetitive_thought,
     find_repetitive_recent_thought,
     build_agent_retry_prompt,
@@ -312,6 +320,11 @@ def test_should_gordo_respond():
     config_module.reset_cache()
 
     commands = {"/test": (lambda x: x, False, False)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+    }
 
     with patch("os.environ.get") as mock_env:
         # Mock environment variables for both bot config and telegram username
@@ -327,15 +340,26 @@ def test_should_gordo_respond():
 
         # Test command
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "/test", "hello", msg) == True
+        assert (
+            should_gordo_respond(commands, "/test", "hello", msg, chat_config, None)
+            is True
+        )
 
         # Test private chat
         msg = {"chat": {"type": "private"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "", "hello", msg) == True
+        assert (
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
+            is True
+        )
 
         # Test mention
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "", "@testbot hello", msg) == True
+        assert (
+            should_gordo_respond(
+                commands, "", "@testbot hello", msg, chat_config, None
+            )
+            is True
+        )
 
         # Test reply to bot
         msg = {
@@ -343,13 +367,21 @@ def test_should_gordo_respond():
             "from": {"username": "test"},
             "reply_to_message": {"from": {"username": "testbot"}},
         }
-        assert should_gordo_respond(commands, "", "hello", msg) == True
+        assert (
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
+            is True
+        )
 
         # Test trigger word with mocked random
         with patch("random.random") as mock_random:
             mock_random.return_value = 0.05  # Below 0.1 threshold
             msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-            assert should_gordo_respond(commands, "", "hey gordo", msg) == True
+            assert (
+                should_gordo_respond(
+                    commands, "", "hey gordo", msg, chat_config, None
+                )
+                is True
+            )
 
 
 def test_should_gordo_respond_ignores_link_fix_reply():
@@ -357,6 +389,11 @@ def test_should_gordo_respond_ignores_link_fix_reply():
 
     config_module.reset_cache()
     commands = {"/test": (lambda x: x, False, False)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+    }
 
     with patch("os.environ.get") as mock_env:
 
@@ -379,7 +416,58 @@ def test_should_gordo_respond_ignores_link_fix_reply():
             },
         }
 
-        assert should_gordo_respond(commands, "/test", "hello", msg) is False
+        assert (
+            should_gordo_respond(
+                commands, "/test", "hello", msg, chat_config, None
+            )
+            is False
+        )
+
+
+def test_should_gordo_respond_respects_random_toggle():
+    commands = {}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": False,
+        "ai_command_followups": True,
+    }
+    msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+
+    with patch("os.environ.get") as mock_env, patch(
+        "random.random", return_value=0.05
+    ) as mock_random:
+        mock_env.return_value = "testbot"
+        assert (
+            should_gordo_respond(
+                commands, "", "hey gordo", msg, chat_config, None
+            )
+            is False
+        )
+        mock_random.assert_not_called()
+
+
+def test_should_gordo_respond_blocks_followups_when_disabled():
+    commands = {"/test": (lambda x: x, False, False)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": False,
+    }
+    msg = {
+        "chat": {"type": "group"},
+        "from": {"username": "user"},
+        "reply_to_message": {"from": {"username": "testbot"}},
+    }
+    reply_metadata = {"type": "command", "uses_ai": False}
+
+    with patch("os.environ.get") as mock_env:
+        mock_env.return_value = "testbot"
+        assert (
+            should_gordo_respond(
+                commands, "", "hola", msg, chat_config, reply_metadata
+            )
+            is False
+        )
 
 
 def test_gen_random():
@@ -954,7 +1042,21 @@ def test_handle_msg():
         # Mock Redis instance
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
+
+        def redis_get(key):
+            if key == "chat_config:123":
+                return json.dumps(CHAT_CONFIG_DEFAULTS)
+            return None
+
+        mock_redis.get.side_effect = redis_get
         mock_redis.lrange.return_value = []  # Empty chat history
+
+        def redis_get(key):
+            if key == "chat_config:456":
+                return json.dumps(CHAT_CONFIG_DEFAULTS)
+            return None
+
+        mock_redis.get.side_effect = redis_get
 
         # Test basic message handling
         message = {
@@ -1004,6 +1106,13 @@ def test_handle_msg_with_crypto_command():
         # Mock Redis instance
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
+
+        def redis_get(key):
+            if key == "chat_config:123":
+                return json.dumps(CHAT_CONFIG_DEFAULTS)
+            return None
+
+        mock_redis.get.side_effect = redis_get
 
         message = {
             "message_id": 1,
@@ -1314,9 +1423,15 @@ def test_handle_msg_edge_cases():
         mock_gen_random.return_value = "no boludo"
         mock_cached_requests.return_value = None  # Prevent API calls
         mock_ask_ai.return_value = "test response"
-        mock_redis.get.return_value = json.dumps(
-            {"timestamp": 123, "data": {}}
-        )  # Valid JSON
+        
+        def redis_get(key):
+            if key == "chat_config:456":
+                return json.dumps(CHAT_CONFIG_DEFAULTS)
+            if key.startswith("prices:"):
+                return json.dumps({"timestamp": 123, "data": {}})
+            return None
+
+        mock_redis.get.side_effect = redis_get
         mock_should_respond.return_value = False  # Don't respond by default
 
         # Reset all mocks before starting tests
@@ -1345,12 +1460,15 @@ def test_handle_msg_edge_cases():
         message["text"] = "test"
         mock_send_msg.reset_mock()
         assert handle_msg(message) == "ok"
-        mock_send_msg.assert_called_once_with("456", "test response", "123")
+        mock_send_msg.assert_called_once_with(
+            "456", "test response", "123", reply_markup=None
+        )
 
         # Test message with invalid JSON
-        mock_redis.get.return_value = "invalid json"
+        mock_redis.get.side_effect = lambda key: "invalid json"
         mock_send_msg.reset_mock()
         assert handle_msg(message) == "ok"
+        mock_redis.get.side_effect = redis_get
 
         # Test message with missing required fields
         mock_admin_report.reset_mock()  # Reset admin report mock
@@ -1764,19 +1882,36 @@ def test_should_gordo_respond_complex_cases():
         "/test": (lambda x: x, False, False),
         "/other": (lambda x: x, True, False),
     }
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+    }
 
     with patch("os.environ.get") as mock_env:
         mock_env.return_value = "testbot"  # Set mock bot username
 
         # Test with command not in command list but starts with /
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "/unknown", "hello", msg) == False
+        assert (
+            should_gordo_respond(
+                commands, "/unknown", "hello", msg, chat_config, None
+            )
+            is False
+        )
 
         # Test with message containing bot username in middle of message
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
         assert (
-            should_gordo_respond(commands, "", "hey there @testbot how are you", msg)
-            == True
+            should_gordo_respond(
+                commands,
+                "",
+                "hey there @testbot how are you",
+                msg,
+                chat_config,
+                None,
+            )
+            is True
         )
 
         # Test with reply to message that's not from the bot
@@ -1785,7 +1920,10 @@ def test_should_gordo_respond_complex_cases():
             "from": {"username": "test"},
             "reply_to_message": {"from": {"username": "not_bot"}},
         }
-        assert should_gordo_respond(commands, "", "hello", msg) == False
+        assert (
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
+            is False
+        )
 
     # Test trigger words in a separate block with proper random mocking
     with patch("os.environ.get") as mock_env, patch("random.random", return_value=0.5):
@@ -1793,7 +1931,10 @@ def test_should_gordo_respond_complex_cases():
 
         # Test with trigger word but probability too high (0.5 > 0.1)
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "", "hey gordo", msg) == False
+        assert (
+            should_gordo_respond(commands, "", "hey gordo", msg, chat_config, None)
+            is False
+        )
 
     with patch("os.environ.get") as mock_env, patch("random.random", return_value=0.05):
         mock_env.return_value = "testbot"
@@ -1801,12 +1942,23 @@ def test_should_gordo_respond_complex_cases():
         # Test with multiple trigger words and low probability (0.05 < 0.1)
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
         assert (
-            should_gordo_respond(commands, "", "hey gordo and respondedor", msg) == True
+            should_gordo_respond(
+                commands,
+                "",
+                "hey gordo and respondedor",
+                msg,
+                chat_config,
+                None,
+            )
+            is True
         )
 
         # Test with case-insensitive trigger words
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
-        assert should_gordo_respond(commands, "", "hey GORDO", msg) == True
+        assert (
+            should_gordo_respond(commands, "", "hey GORDO", msg, chat_config, None)
+            is True
+        )
 
 
 def test_get_prices_basic():
@@ -2294,7 +2446,7 @@ def test_get_help_basic():
     assert "/dolar" in result
     assert "/usd" in result
     assert "/prices" in result
-    assert "/links" in result
+    assert "/config" in result
 
 
 def test_get_instance_name_basic():
@@ -2320,37 +2472,49 @@ def test_send_typing_basic():
 def test_send_msg_basic():
     from api.index import send_msg
 
-    with patch("requests.get") as mock_get, patch("os.environ.get") as mock_env:
+    with patch("requests.post") as mock_post, patch("os.environ.get") as mock_env:
         mock_env.return_value = "test_token"
-        send_msg("12345", "hello")
-        mock_get.assert_called_once_with(
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "result": {"message_id": 42}}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        result = send_msg("12345", "hello")
+
+        mock_post.assert_called_once_with(
             "https://api.telegram.org/bottest_token/sendMessage",
-            params={"chat_id": "12345", "text": "hello"},
+            json={"chat_id": "12345", "text": "hello"},
             timeout=5,
         )
+        assert result == 42
 
 
 def test_send_msg_with_buttons():
     from api.index import send_msg
 
-    with patch("requests.get") as mock_get, patch("os.environ.get") as mock_env:
+    with patch("requests.post") as mock_post, patch("os.environ.get") as mock_env:
         mock_env.return_value = "test_token"
-        send_msg("12345", "hello", buttons=["https://twitter.com/foo"])
-        mock_get.assert_called_once_with(
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "result": {"message_id": 77}}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        result = send_msg("12345", "hello", buttons=["https://twitter.com/foo"])
+
+        mock_post.assert_called_once_with(
             "https://api.telegram.org/bottest_token/sendMessage",
-            params={
+            json={
                 "chat_id": "12345",
                 "text": "hello",
-                "reply_markup": json.dumps(
-                    {
-                        "inline_keyboard": [
-                            [{"text": "Open in app", "url": "https://twitter.com/foo"}]
-                        ]
-                    }
-                ),
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Open in app", "url": "https://twitter.com/foo"}]
+                    ]
+                },
             },
             timeout=5,
         )
+        assert result == 77
 
 
 def test_admin_report_basic():
@@ -5072,30 +5236,126 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert originals == []
 
 
-def test_configure_links_sets_and_disables():
-    with patch("api.index.config_redis") as mock_redis:
-        redis_client = MagicMock()
-        mock_redis.return_value = redis_client
+def test_set_chat_config_updates_link_mode_and_persists():
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
 
-        resp = configure_links("123", "reply")
-        redis_client.set.assert_called_with("link_mode:123", "reply")
-        assert "reply" in resp
+    config = set_chat_config(redis_client, "123", link_mode="reply")
 
-        resp = configure_links("123", "off")
-        redis_client.delete.assert_called_with("link_mode:123")
-        assert "disabled" in resp
+    chat_config_call = redis_client.set.call_args_list[0]
+    assert chat_config_call[0][0] == "chat_config:123"
+    saved_config = json.loads(chat_config_call[0][1])
+    assert saved_config["link_mode"] == "reply"
+    assert saved_config["ai_random_replies"] is True
+
+    legacy_call = redis_client.set.call_args_list[1]
+    assert legacy_call[0] == ("link_mode:123", "reply")
+    assert config["link_mode"] == "reply"
 
 
-def test_configure_links_usage_shows_current():
-    with patch("api.index.config_redis") as mock_redis:
-        redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
-        mock_redis.return_value = redis_client
+def test_set_chat_config_turns_off_link_mode():
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
 
-        resp = configure_links("123", "")
-        redis_client.delete.assert_not_called()
-        assert "Usage:" in resp
-        assert "current: reply" in resp
+    set_chat_config(redis_client, "123", link_mode="off")
+
+    redis_client.set.assert_called_once()
+    redis_client.delete.assert_called_with("link_mode:123")
+
+
+def test_get_chat_config_uses_defaults_and_legacy():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = (
+        lambda key: "reply" if key == "link_mode:123" else None
+    )
+
+    config = get_chat_config(redis_client, "123")
+
+    assert config["link_mode"] == "reply"
+    assert config["ai_random_replies"] is True
+    assert config["ai_command_followups"] is True
+
+
+def test_build_config_text_and_keyboard_reflect_values():
+    config = {
+        "link_mode": "delete",
+        "ai_random_replies": False,
+        "ai_command_followups": False,
+    }
+
+    text = build_config_text(config)
+    assert "Link fixer: borrar" in text
+    assert "desactivadas" in text
+    assert "deshabilitados" in text
+
+    keyboard = build_config_keyboard(config)
+    assert keyboard["inline_keyboard"][0][1]["text"].startswith("✅ Delete")
+    assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
+
+
+def test_handle_config_command_loads_config():
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    with patch("api.index.config_redis", return_value=redis_client):
+        text, keyboard = handle_config_command("123")
+    assert "configuracion" in text
+    assert "inline_keyboard" in keyboard
+    redis_client.get.assert_called_with("chat_config:123")
+
+
+def test_handle_callback_query_updates_random_toggle():
+    redis_client = MagicMock()
+    callback = {
+        "id": "cbq",
+        "data": "cfg:random:toggle",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.get_chat_config", return_value={
+            "link_mode": "off",
+            "ai_random_replies": True,
+            "ai_command_followups": True,
+        },
+    ) as mock_get, patch(
+        "api.index.set_chat_config",
+        return_value={
+            "link_mode": "off",
+            "ai_random_replies": False,
+            "ai_command_followups": True,
+        },
+    ) as mock_set, patch("api.index.build_config_text", return_value="text") as mock_text, patch(
+        "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
+    ) as mock_keyboard, patch("api.index.edit_message") as mock_edit, patch(
+        "api.index._answer_callback_query"
+    ) as mock_answer:
+        handle_callback_query(callback)
+
+    mock_get.assert_called_once_with(redis_client, "1")
+    mock_set.assert_called_once_with(
+        redis_client, "1", ai_random_replies=False
+    )
+    mock_text.assert_called_once()
+    mock_keyboard.assert_called_once()
+    mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
+    mock_answer.assert_called_once_with("cbq")
+
+
+def test_save_and_get_bot_message_metadata():
+    redis_client = MagicMock()
+
+    save_bot_message_metadata(
+        redis_client, "chat", 100, {"foo": "bar"}, ttl=120
+    )
+
+    setex_call = redis_client.setex.call_args
+    assert setex_call[0][0] == "bot_message_meta:chat:100"
+    assert setex_call[0][1] == 120
+    saved_payload = setex_call[0][2]
+    assert json.loads(saved_payload) == {"foo": "bar"}
+
+    redis_client.get.return_value = saved_payload
+    metadata = get_bot_message_metadata(redis_client, "chat", 100)
+    assert metadata == {"foo": "bar"}
 
 
 def test_handle_msg_link_reply():
@@ -5117,7 +5377,13 @@ def test_handle_msg_link_reply():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:123":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -5155,7 +5421,13 @@ def test_handle_msg_link_reply_instagram():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:789":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -5193,7 +5465,13 @@ def test_handle_msg_link_delete():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "delete"
+
+        def mock_get_value_delete(key):
+            if key == "chat_config:456":
+                return json.dumps({"link_mode": "delete"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value_delete
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -5226,7 +5504,13 @@ def test_handle_msg_link_without_preview(mock_redis):
         "api.index.should_gordo_respond"
     ) as mock_should:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:321":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://example.com", False, [])
 
@@ -5348,7 +5632,13 @@ def test_handle_msg_link_already_fixed():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:654":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
 
         result = handle_msg(message)
@@ -5378,7 +5668,13 @@ def test_handle_msg_original_link_no_check():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:987":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://vm.tiktok.com/foo", False, [])
 
@@ -5407,7 +5703,13 @@ def test_handle_msg_link_already_fixed_subdomain():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:999":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
 
         result = handle_msg(message)
@@ -5435,7 +5737,13 @@ def test_handle_msg_replaced_link_adds_button():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:111":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -5473,7 +5781,13 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "reply"
+
+        def mock_get_value(key):
+            if key == "chat_config:222":
+                return json.dumps({"link_mode": "reply"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -5513,7 +5827,13 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-        redis_client.get.return_value = "delete"
+
+        def mock_get_value(key):
+            if key == "chat_config:333":
+                return json.dumps({"link_mode": "delete"})
+            return None
+
+        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
