@@ -3907,7 +3907,7 @@ def _answer_callback_query(callback_query_id: str) -> None:
 
 def edit_message(
     chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
-) -> None:
+) -> bool:
     token = environ.get("TELEGRAM_TOKEN")
     url = f"https://api.telegram.org/bot{token}/editMessageText"
     payload = {
@@ -3917,9 +3917,17 @@ def edit_message(
         "reply_markup": reply_markup,
     }
     try:
-        requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status()
     except requests.RequestException:
-        pass
+        return False
+
+    try:
+        data = response.json()
+    except ValueError:
+        return False
+
+    return bool(data.get("ok"))
 
 
 def handle_callback_query(callback_query: Dict[str, Any]) -> None:
@@ -3964,7 +3972,15 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     text = build_config_text(config)
     keyboard = build_config_keyboard(config)
     try:
-        edit_message(chat_id_str, int(message_id), text, keyboard)
+        edit_succeeded = edit_message(
+            chat_id_str, int(message_id), text, keyboard
+        )
+        if not edit_succeeded:
+            _log_config_event(
+                "Falling back to new config message",
+                {"chat_id": chat_id_str, "message_id": message_id},
+            )
+            send_msg(chat_id_str, text, reply_markup=keyboard)
     finally:
         if callback_id:
             _answer_callback_query(callback_id)
