@@ -5325,9 +5325,9 @@ def test_handle_callback_query_updates_random_toggle():
         },
     ) as mock_set, patch("api.index.build_config_text", return_value="text") as mock_text, patch(
         "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
-    ) as mock_keyboard, patch("api.index.edit_message") as mock_edit, patch(
-        "api.index._answer_callback_query"
-    ) as mock_answer:
+    ) as mock_keyboard, patch("api.index.edit_message", return_value=True) as mock_edit, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("api.index._answer_callback_query") as mock_answer:
         handle_callback_query(callback)
 
     mock_get.assert_called_once_with(redis_client, "1")
@@ -5337,6 +5337,47 @@ def test_handle_callback_query_updates_random_toggle():
     mock_text.assert_called_once()
     mock_keyboard.assert_called_once()
     mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
+    mock_send_msg.assert_not_called()
+    mock_answer.assert_called_once_with("cbq")
+
+
+def test_handle_callback_query_falls_back_when_edit_fails():
+    redis_client = MagicMock()
+    callback = {
+        "id": "cbq",
+        "data": "cfg:link:reply",
+        "message": {"chat": {"id": 9}, "message_id": 42},
+    }
+    updated_config = {
+        "link_mode": "reply",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+    }
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.get_chat_config", return_value={**updated_config, "link_mode": "off"}
+    ) as mock_get, patch(
+        "api.index.set_chat_config", return_value=updated_config
+    ) as mock_set, patch("api.index.build_config_text", return_value="new text") as mock_text, patch(
+        "api.index.build_config_keyboard", return_value={"inline_keyboard": ["btn"]}
+    ) as mock_keyboard, patch(
+        "api.index.edit_message", return_value=False
+    ) as mock_edit, patch("api.index.send_msg") as mock_send_msg, patch(
+        "api.index._answer_callback_query"
+    ) as mock_answer, patch("api.index._log_config_event") as mock_log:
+        handle_callback_query(callback)
+
+    mock_get.assert_called_once_with(redis_client, "9")
+    mock_set.assert_called_once_with(redis_client, "9", link_mode="reply")
+    mock_text.assert_called_once_with(updated_config)
+    mock_keyboard.assert_called_once_with(updated_config)
+    mock_edit.assert_called_once_with("9", 42, "new text", {"inline_keyboard": ["btn"]})
+    mock_log.assert_any_call(
+        "Falling back to new config message", {"chat_id": "9", "message_id": 42}
+    )
+    mock_send_msg.assert_called_once_with(
+        "9", "new text", reply_markup={"inline_keyboard": ["btn"]}
+    )
     mock_answer.assert_called_once_with("cbq")
 
 
