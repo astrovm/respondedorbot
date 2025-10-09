@@ -3863,7 +3863,7 @@ def edit_message(
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "reply_markup": json.dumps(reply_markup),
+        "reply_markup": reply_markup,
     }
     try:
         requests.post(url, json=payload, timeout=5)
