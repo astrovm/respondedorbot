@@ -5287,13 +5287,15 @@ def test_build_config_text_and_keyboard_reflect_values():
 
     text = build_config_text(config)
     assert "Gordo config:" in text
-    assert "Link fixer: delete original message" in text
-    assert "Random AI responses: ▫️ disabled" in text
-    assert "Follow-ups to non-AI commands: ▫️ disabled" in text
-    assert "Usá los botones de abajo" in text
+    assert "Link fixer: Delete original message" in text
+    assert "Random AI replies: ▫️ disabled" in text
+    assert "Follow-ups for non-AI commands: ▫️ disabled" in text
+    assert "Use the buttons below" in text
 
     keyboard = build_config_keyboard(config)
-    assert keyboard["inline_keyboard"][0][1]["text"].startswith("✅ Delete")
+    assert keyboard["inline_keyboard"][0][1]["text"].startswith(
+        "✅ Delete original message"
+    )
     assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
 
 

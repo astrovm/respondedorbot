@@ -3867,20 +3867,20 @@ def build_config_text(config: Mapping[str, Any]) -> str:
     )
 
     link_labels = {
-        "delete": "delete original message",
-        "reply": "reply to original message",
-        "off": "off",
+        "delete": "Delete original message",
+        "reply": "Reply to original message",
+        "off": "Off",
     }
 
     lines = [
         "Gordo config:",
         "",
         f"Link fixer: {link_labels.get(link_mode, link_mode)}",
-        f"Random AI responses: {'✅ enabled' if random_enabled else '▫️ disabled'}",
-        "Follow-ups to non-AI commands: "
+        f"Random AI replies: {'✅ enabled' if random_enabled else '▫️ disabled'}",
+        "Follow-ups for non-AI commands: "
         f"{'✅ enabled' if followups_enabled else '▫️ disabled'}",
         "",
-        "Usá los botones de abajo para cambiar la configuración.",
+        "Use the buttons below to change the settings.",
     ]
     return "\n".join(lines)
 
@@ -3894,18 +3894,24 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
 
     keyboard = [
         [
-            _build_config_choice_button("Reply", "reply", link_mode, action="link"),
-            _build_config_choice_button("Delete", "delete", link_mode, action="link"),
+            _build_config_choice_button(
+                "Reply to original message", "reply", link_mode, action="link"
+            ),
+            _build_config_choice_button(
+                "Delete original message", "delete", link_mode, action="link"
+            ),
             _build_config_choice_button("Off", "off", link_mode, action="link"),
         ],
         [
             _build_config_toggle_button(
-                "Random replies", random_enabled, action="random"
+                "Random AI replies", random_enabled, action="random"
             ),
         ],
         [
             _build_config_toggle_button(
-                "Follow ups comandos", followups_enabled, action="followups"
+                "Follow-ups for non-AI commands",
+                followups_enabled,
+                action="followups",
             ),
         ],
     ]
