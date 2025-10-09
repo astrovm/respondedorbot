@@ -35,7 +35,6 @@ import redis
 import requests
 import time
 import traceback
-import logging
 from openpyxl import load_workbook
 from decimal import Decimal
 import unicodedata
@@ -138,9 +137,6 @@ WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
-
-
-logger = logging.getLogger(__name__)
 
 
 CHAT_CONFIG_KEY_PREFIX = "chat_config:"
@@ -3721,19 +3717,27 @@ def _legacy_link_mode_key(chat_id: str) -> str:
     return f"link_mode:{chat_id}"
 
 
+def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -> None:
+    log_entry: Dict[str, Any] = {"scope": "config", "message": message}
+    if extra:
+        for key, value in extra.items():
+            log_entry[key] = value
+    print(json.dumps(log_entry, ensure_ascii=False, default=str))
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     config = dict(CHAT_CONFIG_DEFAULTS)
     try:
-        logger.info("Loading chat config", extra={"chat_id": chat_id})
+        _log_config_event("Loading chat config", {"chat_id": chat_id})
         raw_value = redis_client.get(_chat_config_key(chat_id))
         raw_value_text: Optional[str]
         if isinstance(raw_value, bytes):
             raw_value_text = raw_value.decode("utf-8", errors="replace")
         else:
             raw_value_text = str(raw_value) if raw_value is not None else None
-        logger.info(
+        _log_config_event(
             "Chat config raw value fetched",
-            extra={
+            {
                 "chat_id": chat_id,
                 "raw_value": raw_value_text,
             },
@@ -3757,18 +3761,18 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
                     )
                 else:
                     legacy_value_text = str(legacy_value)
-                logger.info(
+                _log_config_event(
                     "Using legacy link mode config",
-                    extra={
+                    {
                         "chat_id": chat_id,
                         "legacy_value": legacy_value_text,
                     },
                 )
                 config["link_mode"] = legacy_value_text
             else:
-                logger.info(
+                _log_config_event(
                     "No stored chat config found; using defaults",
-                    extra={"chat_id": chat_id},
+                    {"chat_id": chat_id},
                 )
     except Exception as error:
         admin_report(
@@ -3788,25 +3792,22 @@ def set_chat_config(
             config[key] = value
 
     try:
-        logger.info(
+        _log_config_event(
             "Saving chat config",
-            extra={"chat_id": chat_id, "updates": updates, "config": config},
+            {"chat_id": chat_id, "updates": updates, "config": config},
         )
         redis_client.set(_chat_config_key(chat_id), json.dumps(config))
         link_mode = config.get("link_mode", "off")
         legacy_key = _legacy_link_mode_key(chat_id)
         if link_mode in {"reply", "delete"}:
             redis_client.set(legacy_key, link_mode)
-            logger.info(
+            _log_config_event(
                 "Persisted legacy link mode",
-                extra={"chat_id": chat_id, "link_mode": link_mode},
+                {"chat_id": chat_id, "link_mode": link_mode},
             )
         else:
             redis_client.delete(legacy_key)
-            logger.info(
-                "Cleared legacy link mode",
-                extra={"chat_id": chat_id},
-            )
+            _log_config_event("Cleared legacy link mode", {"chat_id": chat_id})
     except Exception as error:
         admin_report(
             "Error saving chat config",
