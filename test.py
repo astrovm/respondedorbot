@@ -33,6 +33,7 @@ from api.index import (
     build_config_keyboard,
     handle_config_command,
     handle_callback_query,
+    ensure_callback_updates_enabled,
     save_bot_message_metadata,
     get_bot_message_metadata,
     CHAT_CONFIG_DEFAULTS,
@@ -75,6 +76,7 @@ def reset_caches():
     from api import index as index_module
     bcra_service.reset_local_caches()
     index_module._provider_backoff_until.clear()
+    index_module._WEBHOOK_CALLBACKS_CHECKED = False
     config_module.reset_cache()
     yield
 
@@ -5296,11 +5298,68 @@ def test_build_config_text_and_keyboard_reflect_values():
 def test_handle_config_command_loads_config():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
-    with patch("api.index.config_redis", return_value=redis_client):
+    with patch("api.index.ensure_callback_updates_enabled"), patch(
+        "api.index.config_redis", return_value=redis_client
+    ):
         text, keyboard = handle_config_command("123")
     assert "configuracion" in text
     assert "inline_keyboard" in keyboard
     redis_client.get.assert_called_with("chat_config:123")
+
+
+def test_ensure_callback_updates_enabled_updates_webhook():
+    from api import index as index_module
+
+    index_module._WEBHOOK_CALLBACKS_CHECKED = False
+    with patch.dict(
+        index_module.environ,
+        {
+            "TELEGRAM_TOKEN": "token",
+            "WEBHOOK_AUTH_KEY": "secret",
+            "FUNCTION_URL": "https://example.com",
+        },
+        clear=True,
+    ), patch(
+        "api.index.get_telegram_webhook_info",
+        return_value={
+            "url": "https://example.com?key=secret",
+            "allowed_updates": ["message"],
+        },
+    ) as mock_info, patch(
+        "api.index.set_telegram_webhook",
+        return_value=True,
+    ) as mock_set, patch("api.index._log_config_event") as mock_log:
+        ensure_callback_updates_enabled()
+
+    mock_info.assert_called_once_with("token")
+    mock_set.assert_called_once_with("https://example.com")
+    mock_log.assert_called_once()
+    assert index_module._WEBHOOK_CALLBACKS_CHECKED is True
+
+
+def test_ensure_callback_updates_enabled_skips_when_allowed():
+    from api import index as index_module
+
+    index_module._WEBHOOK_CALLBACKS_CHECKED = False
+    with patch.dict(
+        index_module.environ,
+        {
+            "TELEGRAM_TOKEN": "token",
+            "WEBHOOK_AUTH_KEY": "secret",
+            "FUNCTION_URL": "https://example.com",
+        },
+        clear=True,
+    ), patch(
+        "api.index.get_telegram_webhook_info",
+        return_value={
+            "url": "https://example.com?key=secret",
+            "allowed_updates": ["message", "callback_query"],
+        },
+    ), patch("api.index.set_telegram_webhook") as mock_set:
+        ensure_callback_updates_enabled()
+
+    mock_set.assert_not_called()
+    assert index_module._WEBHOOK_CALLBACKS_CHECKED is True
 
 
 def test_handle_callback_query_updates_random_toggle():
