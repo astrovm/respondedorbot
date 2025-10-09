@@ -3837,46 +3837,60 @@ def _build_config_toggle_button(label: str, enabled: bool, action: str) -> Dict[
     }
 
 
-def _format_config_options(
-    current_value: Any, options: Sequence[Tuple[Any, str]]
-) -> str:
-    formatted: List[str] = []
-    for value, label in options:
-        if value == current_value:
-            formatted.append(f"**{label}**")
-        else:
-            formatted.append(label)
-    return " / ".join(formatted)
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    """Normalize truthy config values that might be stored as strings."""
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on", "enabled"}:
+            return True
+        if lowered in {"false", "0", "no", "off", "disabled"}:
+            return False
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    if value is None:
+        return default
+
+    return default
 
 
 def build_config_text(config: Mapping[str, Any]) -> str:
     link_mode = str(config.get("link_mode", "off"))
-    random_enabled = bool(config.get("ai_random_replies", True))
-    followups_enabled = bool(config.get("ai_command_followups", True))
+    random_enabled = _coerce_bool(config.get("ai_random_replies"), default=True)
+    followups_enabled = _coerce_bool(
+        config.get("ai_command_followups"), default=True
+    )
 
-    link_options = [
-        ("delete", "delete original message"),
-        ("reply", "reply to original message"),
-        ("off", "off"),
-    ]
-    random_options = [(True, "enabled"), (False, "disabled")]
-    followup_options = [(True, "enabled"), (False, "disabled")]
+    link_labels = {
+        "delete": "delete original message",
+        "reply": "reply to original message",
+        "off": "off",
+    }
 
     lines = [
         "Gordo config:",
         "",
-        f"Link fixer: {_format_config_options(link_mode, link_options)}",
-        f"Random AI responses: {_format_config_options(random_enabled, random_options)}",
+        f"Link fixer: {link_labels.get(link_mode, link_mode)}",
+        f"Random AI responses: {'✅ enabled' if random_enabled else '▫️ disabled'}",
         "Follow-ups to non-AI commands: "
-        f"{_format_config_options(followups_enabled, followup_options)}",
+        f"{'✅ enabled' if followups_enabled else '▫️ disabled'}",
+        "",
+        "Usá los botones de abajo para cambiar la configuración.",
     ]
     return "\n".join(lines)
 
 
 def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     link_mode = str(config.get("link_mode", "off"))
-    random_enabled = bool(config.get("ai_random_replies", True))
-    followups_enabled = bool(config.get("ai_command_followups", True))
+    random_enabled = _coerce_bool(config.get("ai_random_replies"), default=True)
+    followups_enabled = _coerce_bool(
+        config.get("ai_command_followups"), default=True
+    )
 
     keyboard = [
         [
@@ -4025,16 +4039,18 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     if action == "link" and value in {"reply", "delete", "off"}:
         config = set_chat_config(redis_client, chat_id_str, link_mode=value)
     elif action == "random":
+        current = _coerce_bool(config.get("ai_random_replies"), default=True)
         config = set_chat_config(
             redis_client,
             chat_id_str,
-            ai_random_replies=not bool(config.get("ai_random_replies", True)),
+            ai_random_replies=not current,
         )
     elif action == "followups":
+        current = _coerce_bool(config.get("ai_command_followups"), default=True)
         config = set_chat_config(
             redis_client,
             chat_id_str,
-            ai_command_followups=not bool(config.get("ai_command_followups", True)),
+            ai_command_followups=not current,
         )
 
     text = build_config_text(config)
