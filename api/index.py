@@ -3886,7 +3886,63 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     return {"inline_keyboard": keyboard}
 
 
+_WEBHOOK_CALLBACKS_CHECKED = False
+
+
+def ensure_callback_updates_enabled() -> None:
+    """Ensure the Telegram webhook can deliver callback_query updates."""
+
+    global _WEBHOOK_CALLBACKS_CHECKED
+    if _WEBHOOK_CALLBACKS_CHECKED:
+        return
+
+    token = environ.get("TELEGRAM_TOKEN")
+    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
+    function_url = environ.get("FUNCTION_URL")
+
+    if not token or not webhook_key or not function_url:
+        _WEBHOOK_CALLBACKS_CHECKED = True
+        return
+
+    webhook_info = get_telegram_webhook_info(token)
+    if webhook_info.get("error"):
+        _WEBHOOK_CALLBACKS_CHECKED = True
+        admin_report("Failed to fetch webhook info for callbacks")
+        return
+
+    allowed_updates = webhook_info.get("allowed_updates")
+    if isinstance(allowed_updates, list):
+        if not allowed_updates or "callback_query" in allowed_updates:
+            _WEBHOOK_CALLBACKS_CHECKED = True
+            return
+    elif allowed_updates is None:
+        _WEBHOOK_CALLBACKS_CHECKED = True
+        return
+
+    expected_url = f"{function_url}?key={webhook_key}"
+    current_url = webhook_info.get("url")
+    if current_url and current_url != expected_url:
+        _WEBHOOK_CALLBACKS_CHECKED = True
+        _log_config_event(
+            "Webhook points to different URL; skipping callback update",
+            {"current_url": current_url},
+        )
+        return
+
+    updated = set_telegram_webhook(function_url)
+    if updated:
+        _log_config_event(
+            "Updated webhook to enable callback queries",
+            {"url": expected_url},
+        )
+        _WEBHOOK_CALLBACKS_CHECKED = True
+    else:
+        _WEBHOOK_CALLBACKS_CHECKED = True
+        admin_report("Failed to update webhook for callback queries")
+
+
 def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
+    ensure_callback_updates_enabled()
     redis_client = config_redis()
     config = get_chat_config(redis_client, chat_id)
     return build_config_text(config), build_config_keyboard(config)
