@@ -22,6 +22,7 @@ from typing import (
     Set,
     Iterable,
     Mapping,
+    Sequence,
 )
 import ast
 import base64
@@ -3836,27 +3837,38 @@ def _build_config_toggle_button(label: str, enabled: bool, action: str) -> Dict[
     }
 
 
+def _format_config_options(
+    current_value: Any, options: Sequence[Tuple[Any, str]]
+) -> str:
+    formatted: List[str] = []
+    for value, label in options:
+        if value == current_value:
+            formatted.append(f"**{label}**")
+        else:
+            formatted.append(label)
+    return " / ".join(formatted)
+
+
 def build_config_text(config: Mapping[str, Any]) -> str:
     link_mode = str(config.get("link_mode", "off"))
-    link_mode_labels = {
-        "reply": "responder", 
-        "delete": "borrar", 
-        "off": "apagado",
-    }
-    link_label = link_mode_labels.get(link_mode, "apagado")
     random_enabled = bool(config.get("ai_random_replies", True))
     followups_enabled = bool(config.get("ai_command_followups", True))
 
+    link_options = [
+        ("delete", "delete original message"),
+        ("reply", "reply to original message"),
+        ("off", "off"),
+    ]
+    random_options = [(True, "enabled"), (False, "disabled")]
+    followup_options = [(True, "enabled"), (False, "disabled")]
+
     lines = [
-        "configuracion del gordo:",
+        "Gordo config:",
         "",
-        f"- Link fixer: {link_label}",
-        "- Respuestas random de la IA: "
-        f"{'activadas' if random_enabled else 'desactivadas'}",
-        "- Follow ups a comandos sin IA: "
-        f"{'habilitados' if followups_enabled else 'deshabilitados'}",
-        "",
-        "Tocá un botón para cambiar.",
+        f"Link fixer: {_format_config_options(link_mode, link_options)}",
+        f"Random AI responses: {_format_config_options(random_enabled, random_options)}",
+        "Follow-ups to non-AI commands: "
+        f"{_format_config_options(followups_enabled, followup_options)}",
     ]
     return "\n".join(lines)
 
