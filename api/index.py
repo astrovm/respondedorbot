@@ -986,13 +986,13 @@ def sort_dollar_rates(
         },
         {
             "name": "MEP",
-            "price": dollars["mep"]["al30"]["ci"]["price"],
-            "history": dollars["mep"]["al30"]["ci"]["variation"],
+            "price": dollars["mep"]["al30"]["24hs"]["price"],
+            "history": dollars["mep"]["al30"]["24hs"]["variation"],
         },
         {
             "name": "CCL",
-            "price": dollars["ccl"]["al30"]["ci"]["price"],
-            "history": dollars["ccl"]["al30"]["ci"]["variation"],
+            "price": dollars["ccl"]["al30"]["24hs"]["price"],
+            "history": dollars["ccl"]["al30"]["24hs"]["variation"],
         },
         {
             "name": "Blue",
@@ -3732,10 +3732,16 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
         _log_config_event("Loading chat config", {"chat_id": chat_id})
         raw_value = redis_client.get(_chat_config_key(chat_id))
         raw_value_text: Optional[str]
-        if isinstance(raw_value, bytes):
+        deserializable_value: Optional[str]
+        if isinstance(raw_value, (bytes, bytearray)):
             raw_value_text = raw_value.decode("utf-8", errors="replace")
+            deserializable_value = raw_value_text
+        elif raw_value is not None:
+            raw_value_text = str(raw_value)
+            deserializable_value = raw_value_text
         else:
-            raw_value_text = str(raw_value) if raw_value is not None else None
+            raw_value_text = None
+            deserializable_value = None
         _log_config_event(
             "Chat config raw value fetched",
             {
@@ -3743,9 +3749,9 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
                 "raw_value": raw_value_text,
             },
         )
-        if raw_value:
+        if deserializable_value:
             try:
-                loaded = json.loads(raw_value)
+                loaded = json.loads(deserializable_value)
                 if isinstance(loaded, dict):
                     for key, value in loaded.items():
                         if key in config:
@@ -4106,9 +4112,16 @@ def get_bot_message_metadata(
 ) -> Optional[Dict[str, Any]]:
     try:
         raw_value = redis_client.get(_bot_message_meta_key(chat_id, message_id))
-        if raw_value:
+        deserializable_value: Optional[str]
+        if isinstance(raw_value, (bytes, bytearray)):
+            deserializable_value = raw_value.decode("utf-8", errors="replace")
+        elif raw_value is not None:
+            deserializable_value = str(raw_value)
+        else:
+            deserializable_value = None
+        if deserializable_value:
             try:
-                loaded = json.loads(raw_value)
+                loaded = json.loads(deserializable_value)
                 if isinstance(loaded, dict):
                     return loaded
             except json.JSONDecodeError:

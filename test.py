@@ -1046,17 +1046,12 @@ def test_handle_msg():
         mock_config_redis.return_value = mock_redis
 
         def redis_get(key):
-            if key == "chat_config:123":
+            if key in {"chat_config:123", "chat_config:456"}:
                 return json.dumps(CHAT_CONFIG_DEFAULTS)
             return None
 
         mock_redis.get.side_effect = redis_get
         mock_redis.lrange.return_value = []  # Empty chat history
-
-        def redis_get(key):
-            if key == "chat_config:456":
-                return json.dumps(CHAT_CONFIG_DEFAULTS)
-            return None
 
         mock_redis.get.side_effect = redis_get
 
@@ -2257,8 +2252,8 @@ def test_get_dollar_rates_basic():
                 "mayorista": {"price": 90.0, "variation": 0.25},
                 "oficial": {"price": 100.0, "variation": 0.5},
                 "tarjeta": {"price": 150.0, "variation": 0.75},
-                "mep": {"al30": {"ci": {"price": 200.0, "variation": 1.25}}},
-                "ccl": {"al30": {"ci": {"price": 210.0, "variation": 1.5}}},
+                "mep": {"al30": {"24hs": {"price": 200.0, "variation": 1.25}}},
+                "ccl": {"al30": {"24hs": {"price": 210.0, "variation": 1.5}}},
                 "blue": {"ask": 220.0, "variation": 2.0},
                 "cripto": {
                     "ccb": {"ask": 230.0, "variation": 2.5},
@@ -3934,8 +3929,8 @@ def test_sort_dollar_rates_success():
             "mayorista": {"price": 900.00, "variation": 1.0},
             "oficial": {"price": 1000.50, "variation": 1.2},
             "tarjeta": {"price": 1600.75, "variation": -0.8},
-            "mep": {"al30": {"ci": {"price": 1050.25, "variation": 0.5}}},
-            "ccl": {"al30": {"ci": {"price": 1075.80, "variation": 0.7}}},
+            "mep": {"al30": {"24hs": {"price": 1050.25, "variation": 0.5}}},
+            "ccl": {"al30": {"24hs": {"price": 1075.80, "variation": 0.7}}},
             "blue": {"ask": 1200.00, "variation": 2.1},
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": 1.8},
@@ -3966,8 +3961,8 @@ def test_sort_dollar_rates_with_none_variations():
             "mayorista": {"price": 900.00, "variation": None},
             "oficial": {"price": 1000.50, "variation": None},
             "tarjeta": {"price": 1600.75, "variation": None},
-            "mep": {"al30": {"ci": {"price": 1050.25, "variation": None}}},
-            "ccl": {"al30": {"ci": {"price": 1075.80, "variation": None}}},
+            "mep": {"al30": {"24hs": {"price": 1050.25, "variation": None}}},
+            "ccl": {"al30": {"24hs": {"price": 1075.80, "variation": None}}},
             "blue": {"ask": 1200.00, "variation": None},
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": None},
@@ -3992,8 +3987,8 @@ def test_sort_dollar_rates_with_tcrm():
             "mayorista": {"price": 90.0, "variation": 0.5},
             "oficial": {"price": 100.0, "variation": 0.5},
             "tarjeta": {"price": 150.0, "variation": 0.5},
-            "mep": {"al30": {"ci": {"price": 120.0, "variation": 0.5}}},
-            "ccl": {"al30": {"ci": {"price": 130.0, "variation": 0.5}}},
+            "mep": {"al30": {"24hs": {"price": 120.0, "variation": 0.5}}},
+            "ccl": {"al30": {"24hs": {"price": 130.0, "variation": 0.5}}},
             "blue": {"ask": 140.0, "variation": 0.5},
             "cripto": {
                 "ccb": {"ask": 145.0, "variation": 0.5},
