@@ -1168,6 +1168,10 @@ def _format_spread_line(
 def get_rulo() -> str:
     cache_expiration_time = TTL_DOLLAR
     api_url = "https://criptoya.com/api/dolar"
+    usd_amount = 1000.0
+    amount_param = (
+        f"{int(usd_amount)}" if isinstance(usd_amount, float) and usd_amount.is_integer() else str(usd_amount)
+    )
 
     dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
 
@@ -1210,14 +1214,14 @@ def get_rulo() -> str:
 
     # Oficial -> USDT -> ARS
     usd_usdt = cached_requests(
-        "https://criptoya.com/api/USDT/USD/1000",
+        f"https://criptoya.com/api/USDT/USD/{amount_param}",
         None,
         None,
         cache_expiration_time,
         True,
     )
     usdt_ars = cached_requests(
-        "https://criptoya.com/api/USDT/ARS/1000",
+        f"https://criptoya.com/api/USDT/ARS/{amount_param}",
         None,
         None,
         cache_expiration_time,
@@ -1225,9 +1229,13 @@ def get_rulo() -> str:
     )
 
     best_usd_to_usdt: Optional[Tuple[str, float]] = None
+    excluded_usd_to_usdt_exchanges = {"banexcoin", "xapo", "x4t"}
+
     if usd_usdt and "data" in usd_usdt:
         for exchange, quote in usd_usdt["data"].items():
             if not isinstance(quote, Mapping):
+                continue
+            if exchange.lower() in excluded_usd_to_usdt_exchanges:
                 continue
             ask = _safe_float(quote.get("totalAsk")) or _safe_float(quote.get("ask"))
             if not ask or ask <= 0:
@@ -1249,8 +1257,15 @@ def get_rulo() -> str:
     if best_usd_to_usdt and best_usdt_to_ars:
         usd_to_usdt_rate = best_usd_to_usdt[1]
         usdt_to_ars_rate = best_usdt_to_ars[1]
-        final_price = (1 / usd_to_usdt_rate) * usdt_to_ars_rate
-        extra = f"USD→USDT {best_usd_to_usdt[0]}, USDT→ARS {best_usdt_to_ars[0]}"
+        usdt_obtained = usd_amount / usd_to_usdt_rate
+        ars_obtained = usdt_obtained * usdt_to_ars_rate
+        final_price = ars_obtained / usd_amount
+        extra = (
+            f"USD→USDT {best_usd_to_usdt[0]}, "
+            f"USDT→ARS {best_usdt_to_ars[0]}, "
+            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(usdt_obtained, 2)} USDT→"
+            f"{fmt_num(ars_obtained, 2)} ARS"
+        )
         lines.append(_format_spread_line("USDT", final_price, oficial_price, extra))
 
     if len(lines) == 1:
