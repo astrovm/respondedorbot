@@ -3198,7 +3198,10 @@ def format_weather_info(weather: Dict) -> str:
 
 
 def build_ai_messages(
-    message: Dict, chat_history: List[Dict], message_text: str
+    message: Dict,
+    chat_history: List[Dict],
+    message_text: str,
+    reply_context: Optional[str] = None,
 ) -> List[Dict]:
     messages = []
 
@@ -3229,12 +3232,28 @@ def build_ai_messages(
         f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
         f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
         f"- Hora: {current_time.strftime('%H:%M')}",
-        "\nMENSAJE:",
-        truncate_text(message_text),
-        "\nINSTRUCCIONES:",
-        "- Mantené el personaje del gordo",
-        "- Usá lenguaje coloquial argentino",
     ]
+
+    if reply_context:
+        context_parts.extend(
+            [
+                "",
+                "MENSAJE AL QUE RESPONDE:",
+                truncate_text(reply_context),
+            ]
+        )
+
+    context_parts.extend(
+        [
+            "",
+            "MENSAJE:",
+            truncate_text(message_text),
+            "",
+            "INSTRUCCIONES:",
+            "- Mantené el personaje del gordo",
+            "- Usá lenguaje coloquial argentino",
+        ]
+    )
 
     messages.append(
         {
@@ -4299,16 +4318,78 @@ def get_bot_message_metadata(
     return None
 
 
-def format_user_message(message: Dict, message_text: str) -> str:
-    """Format message with user info"""
-    username = message["from"].get("username", "")
-    first_name = message["from"].get("first_name", "")
+def _format_user_identity(user: Mapping[str, Any]) -> str:
+    """Build a display name for a Telegram user"""
 
-    # Handle None values
-    first_name = "" if first_name is None else first_name
-    username = "" if username is None else username
+    first_name = user.get("first_name", "") if user else ""
+    username = user.get("username", "") if user else ""
 
-    formatted_user = f"{first_name}" + (f" ({username})" if username else "")
+    first_name = "" if first_name is None else str(first_name)
+    username = "" if username is None else str(username)
+
+    return f"{first_name}" + (f" ({username})" if username else "")
+
+
+def _describe_replied_message(reply_msg: Mapping[str, Any]) -> Optional[str]:
+    """Generate a short description for a replied-to message"""
+
+    reply_text = extract_message_text(cast(Dict[str, Any], reply_msg))
+    if reply_text:
+        return reply_text
+
+    if reply_msg.get("photo"):
+        return "una foto sin texto"
+    if reply_msg.get("sticker"):
+        sticker = reply_msg.get("sticker", {})
+        emoji_char = cast(Dict[str, Any], sticker).get("emoji")
+        if emoji_char:
+            return f"un sticker {emoji_char}"
+    if reply_msg.get("voice"):
+        return "un audio de voz"
+    if reply_msg.get("audio"):
+        return "un archivo de audio"
+    if reply_msg.get("video"):
+        return "un video"
+    if reply_msg.get("document"):
+        return "un archivo adjunto"
+
+    return None
+
+
+def build_reply_context_text(message: Mapping[str, Any]) -> Optional[str]:
+    """Return contextual text describing the message being replied to"""
+
+    reply_msg = message.get("reply_to_message") if message else None
+    if not isinstance(reply_msg, Mapping):
+        return None
+
+    reply_description = _describe_replied_message(reply_msg)
+    if not reply_description:
+        return None
+
+    reply_user = _format_user_identity(cast(Mapping[str, Any], reply_msg.get("from", {})))
+    reply_user = reply_user.strip()
+
+    if reply_user:
+        return f"{reply_user}: {reply_description}"
+
+    return reply_description
+
+
+def format_user_message(
+    message: Dict,
+    message_text: str,
+    reply_context: Optional[str] = None,
+) -> str:
+    """Format message with user info and optional reply context"""
+
+    formatted_user = _format_user_identity(message.get("from", {}))
+
+    if reply_context:
+        if formatted_user:
+            return f"{formatted_user} (en respuesta a {reply_context}): {message_text}"
+        return f"(en respuesta a {reply_context}): {message_text}"
+
     return f"{formatted_user}: {message_text}"
 
 
@@ -4416,13 +4497,17 @@ def handle_msg(message: Dict) -> str:
                         redis_client, chat_id, reply_id
                     )
 
+        reply_context_text = build_reply_context_text(message)
+
         # Check if we should respond
         if not should_gordo_respond(
             commands, command, sanitized_message_text, message, chat_config, reply_metadata
         ):
             # Even if we don't respond, save the message for context
             if message_text:
-                formatted_message = format_user_message(message, message_text)
+                formatted_message = format_user_message(
+                    message, message_text, reply_context_text
+                )
                 save_message_to_redis(
                     chat_id, message_id, formatted_message, redis_client
                 )
@@ -4478,7 +4563,10 @@ def handle_msg(message: Dict) -> str:
                 else:
                     chat_history = get_chat_history(chat_id, redis_client)
                     messages = build_ai_messages(
-                        message, chat_history, sanitized_message_text
+                        message,
+                        chat_history,
+                        sanitized_message_text,
+                        reply_context_text,
                     )
                     response_msg = handle_ai_response(
                         chat_id,
@@ -4501,7 +4589,12 @@ def handle_msg(message: Dict) -> str:
                 response_msg = handle_rate_limit(chat_id, message)
             else:
                 chat_history = get_chat_history(chat_id, redis_client)
-                messages = build_ai_messages(message, chat_history, message_text)
+                messages = build_ai_messages(
+                    message,
+                    chat_history,
+                    message_text,
+                    reply_context_text,
+                )
                 response_msg = handle_ai_response(
                     chat_id,
                     ask_ai,
@@ -4513,7 +4606,9 @@ def handle_msg(message: Dict) -> str:
 
         # Only save messages AFTER we've generated a response
         if message_text:
-            formatted_message = format_user_message(message, message_text)
+            formatted_message = format_user_message(
+                message, message_text, reply_context_text
+            )
             save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
 
         # Save and send response
