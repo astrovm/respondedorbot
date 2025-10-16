@@ -1184,9 +1184,16 @@ def get_rulo() -> str:
     if not oficial_price or oficial_price <= 0:
         return "No pude conseguir el oficial para armar el rulo"
 
+    oficial_cost_ars = oficial_price * usd_amount
+
     lines: List[str] = [
-        f"Rulos desde Oficial (1 USD = {fmt_num(oficial_price, 2)} ARS):"
+        f"Rulos desde Oficial (1 USD = {fmt_num(oficial_price, 2)} ARS):",
+        f"{fmt_num(usd_amount, 0)} USD Oficial = {fmt_num(oficial_cost_ars, 2)} ARS",
     ]
+
+    def format_profit(value: float) -> str:
+        sign = "+" if value >= 0 else "-"
+        return f"{sign}{fmt_num(abs(value), 2)}"
 
     # Oficial -> MEP
     mep_best_price: Optional[float] = None
@@ -1204,13 +1211,29 @@ def get_rulo() -> str:
                 mep_best_price = price
                 mep_label = f"MEP ({instrument_name.upper()} {variant_name.upper()})"
     if mep_best_price:
-        lines.append(_format_spread_line(mep_label, mep_best_price, oficial_price))
+        mep_final_ars = mep_best_price * usd_amount
+        mep_profit_ars = mep_final_ars - oficial_cost_ars
+        mep_extra = (
+            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(mep_final_ars, 2)} ARS, "
+            f"{format_profit(mep_profit_ars)} ARS"
+        )
+        lines.append(
+            _format_spread_line(mep_label, mep_best_price, oficial_price, mep_extra)
+        )
 
     # Oficial -> Blue
     blue_data = data.get("blue", {})
     blue_price = _safe_float(blue_data.get("bid")) or _safe_float(blue_data.get("price"))
     if blue_price:
-        lines.append(_format_spread_line("Blue", blue_price, oficial_price))
+        blue_final_ars = blue_price * usd_amount
+        blue_profit_ars = blue_final_ars - oficial_cost_ars
+        blue_extra = (
+            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(blue_final_ars, 2)} ARS, "
+            f"{format_profit(blue_profit_ars)} ARS"
+        )
+        lines.append(
+            _format_spread_line("Blue", blue_price, oficial_price, blue_extra)
+        )
 
     # Oficial -> USDT -> ARS
     usd_usdt = cached_requests(
@@ -1260,15 +1283,16 @@ def get_rulo() -> str:
         usdt_obtained = usd_amount / usd_to_usdt_rate
         ars_obtained = usdt_obtained * usdt_to_ars_rate
         final_price = ars_obtained / usd_amount
+        usdt_profit_ars = ars_obtained - oficial_cost_ars
         extra = (
             f"USD→USDT {best_usd_to_usdt[0]}, "
             f"USDT→ARS {best_usdt_to_ars[0]}, "
             f"{fmt_num(usd_amount, 0)} USD→{fmt_num(usdt_obtained, 2)} USDT→"
-            f"{fmt_num(ars_obtained, 2)} ARS"
+            f"{fmt_num(ars_obtained, 2)} ARS, {format_profit(usdt_profit_ars)} ARS"
         )
         lines.append(_format_spread_line("USDT", final_price, oficial_price, extra))
 
-    if len(lines) == 1:
+    if len(lines) <= 2:
         return "No encontré ningún rulo potable"
 
     return "\n".join(lines)
