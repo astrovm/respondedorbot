@@ -1272,6 +1272,7 @@ def get_rulo() -> str:
 
     best_usd_to_usdt: Optional[Tuple[str, float]] = None
     excluded_usd_to_usdt_exchanges = {"banexcoin", "xapo", "x4t"}
+    excluded_usdt_to_ars_exchanges = {"okexp2p"}
 
     if usd_usdt and "data" in usd_usdt:
         for exchange, quote in usd_usdt["data"].items():
@@ -1289,6 +1290,8 @@ def get_rulo() -> str:
     if usdt_ars and "data" in usdt_ars:
         for exchange, quote in usdt_ars["data"].items():
             if not isinstance(quote, Mapping):
+                continue
+            if exchange.lower() in excluded_usdt_to_ars_exchanges:
                 continue
             bid = _safe_float(quote.get("totalBid")) or _safe_float(quote.get("bid"))
             if not bid or bid <= 0:
