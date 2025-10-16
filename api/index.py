@@ -1137,6 +1137,128 @@ Total: {fmt_num(compra_ars + ganancia_ars, 2)} ARS / {fmt_num(compra_usdt + gana
         return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            return float(value)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _format_spread_line(
+    label: str, sell_price: float, oficial_price: float, extra: Optional[str] = None
+) -> str:
+    diff = sell_price - oficial_price
+    pct = (diff / oficial_price) * 100 if oficial_price else 0.0
+    diff_prefix = "+" if diff >= 0 else "-"
+    diff_value = fmt_num(abs(diff), 2)
+    pct_value = fmt_signed_pct(pct, 2)
+    line = (
+        f"- {label}: {fmt_num(sell_price, 2)} ARS/USD "
+        f"({diff_prefix}{diff_value} ARS, {pct_value}%)"
+    )
+    if extra:
+        line += f" [{extra}]"
+    return line
+
+
+def get_rulo() -> str:
+    cache_expiration_time = TTL_DOLLAR
+    api_url = "https://criptoya.com/api/dolar"
+
+    dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+
+    if not dollars or "data" not in dollars:
+        return "Error consiguiendo cotizaciones del dólar"
+
+    data = dollars["data"]
+    oficial_price = _safe_float(data.get("oficial", {}).get("price"))
+
+    if not oficial_price or oficial_price <= 0:
+        return "No pude conseguir el oficial para armar el rulo"
+
+    lines: List[str] = [
+        f"Rulos desde Oficial (1 USD = {fmt_num(oficial_price, 2)} ARS):"
+    ]
+
+    # Oficial -> MEP
+    mep_best_price: Optional[float] = None
+    mep_label = "MEP"
+    for instrument_name, instrument_data in data.get("mep", {}).items():
+        if not isinstance(instrument_data, Mapping):
+            continue
+        for variant_name, variant_data in instrument_data.items():
+            if not isinstance(variant_data, Mapping):
+                continue
+            price = _safe_float(variant_data.get("price"))
+            if price is None:
+                continue
+            if mep_best_price is None or price > mep_best_price:
+                mep_best_price = price
+                mep_label = f"MEP ({instrument_name.upper()} {variant_name.upper()})"
+    if mep_best_price:
+        lines.append(_format_spread_line(mep_label, mep_best_price, oficial_price))
+
+    # Oficial -> Blue
+    blue_data = data.get("blue", {})
+    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(blue_data.get("price"))
+    if blue_price:
+        lines.append(_format_spread_line("Blue", blue_price, oficial_price))
+
+    # Oficial -> USDT -> ARS
+    usd_usdt = cached_requests(
+        "https://criptoya.com/api/USDT/USD/1000",
+        None,
+        None,
+        cache_expiration_time,
+        True,
+    )
+    usdt_ars = cached_requests(
+        "https://criptoya.com/api/USDT/ARS/1000",
+        None,
+        None,
+        cache_expiration_time,
+        True,
+    )
+
+    best_usd_to_usdt: Optional[Tuple[str, float]] = None
+    if usd_usdt and "data" in usd_usdt:
+        for exchange, quote in usd_usdt["data"].items():
+            if not isinstance(quote, Mapping):
+                continue
+            ask = _safe_float(quote.get("totalAsk")) or _safe_float(quote.get("ask"))
+            if not ask or ask <= 0:
+                continue
+            if best_usd_to_usdt is None or ask < best_usd_to_usdt[1]:
+                best_usd_to_usdt = (exchange, ask)
+
+    best_usdt_to_ars: Optional[Tuple[str, float]] = None
+    if usdt_ars and "data" in usdt_ars:
+        for exchange, quote in usdt_ars["data"].items():
+            if not isinstance(quote, Mapping):
+                continue
+            bid = _safe_float(quote.get("totalBid")) or _safe_float(quote.get("bid"))
+            if not bid or bid <= 0:
+                continue
+            if best_usdt_to_ars is None or bid > best_usdt_to_ars[1]:
+                best_usdt_to_ars = (exchange, bid)
+
+    if best_usd_to_usdt and best_usdt_to_ars:
+        usd_to_usdt_rate = best_usd_to_usdt[1]
+        usdt_to_ars_rate = best_usdt_to_ars[1]
+        final_price = (1 / usd_to_usdt_rate) * usdt_to_ars_rate
+        extra = f"USD→USDT {best_usd_to_usdt[0]}, USDT→ARS {best_usdt_to_ars[0]}"
+        lines.append(_format_spread_line("USDT", final_price, oficial_price, extra))
+
+    if len(lines) == 1:
+        return "No encontré ningún rulo potable"
+
+    return "\n".join(lines)
+
+
 def satoshi() -> str:
     """Calculate the value of 1 satoshi in USD and ARS"""
     try:
@@ -1408,6 +1530,8 @@ comandos disponibles boludo:
 - /agent: te muestro lo ultimo que penso el agente autonomo
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
+
+- /rulo: te armo los rulos desde el oficial
 
 - /dolar, /dollar, /usd: te tiro la posta del blue y todos los dolares
 
@@ -3107,6 +3231,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/dolar": (get_dollar_rates, False, False),
         "/dollar": (get_dollar_rates, False, False),
         "/usd": (get_dollar_rates, False, False),
+        "/rulo": (get_rulo, False, False),
         "/devo": (get_devo, False, True),
         "/powerlaw": (powerlaw, False, False),
         "/rainbow": (rainbow, False, False),
