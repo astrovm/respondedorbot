@@ -241,10 +241,15 @@ def test_get_rulo():
     with patch("api.index.cached_requests", side_effect=fake_cached_requests):
         result = get_rulo()
 
-    assert "Rulos desde Oficial" in result
-    assert "MEP" in result
-    assert "Blue" in result
-    assert "USDT" in result
+    assert result.startswith("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
+    assert "Inversión base: 1.000 USD → 1.440.000 ARS" in result
+    assert "- MEP (AL30 24HS)" in result
+    assert "  • Resultado: 1.000 USD → 1.462.320 ARS" in result
+    assert "  • Ganancia: +22.320 ARS" in result
+    assert "- Blue" in result
+    assert "  • Ganancia: -10.000 ARS" in result
+    assert "- USDT" in result
+    assert "Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT" in result
 
 
 def test_config_redis():
