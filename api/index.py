@@ -1149,20 +1149,28 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 def _format_spread_line(
-    label: str, sell_price: float, oficial_price: float, extra: Optional[str] = None
+    label: str, sell_price: float, oficial_price: float, details: Sequence[str]
 ) -> str:
+    def _format_currency(value: float, decimals: int = 2) -> str:
+        formatted = f"{value:,.{decimals}f}"
+        formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
+        if decimals:
+            formatted = formatted.rstrip("0").rstrip(",")
+        return formatted
+
+    def _format_signed(value: float, decimals: int = 2) -> str:
+        sign = "+" if value >= 0 else "-"
+        return f"{sign}{_format_currency(abs(value), decimals)}"
+
     diff = sell_price - oficial_price
     pct = (diff / oficial_price) * 100 if oficial_price else 0.0
-    diff_prefix = "+" if diff >= 0 else "-"
-    diff_value = fmt_num(abs(diff), 2)
-    pct_value = fmt_signed_pct(pct, 2)
-    line = (
-        f"- {label}: {fmt_num(sell_price, 2)} ARS/USD "
-        f"({diff_prefix}{diff_value} ARS, {pct_value}%)"
-    )
-    if extra:
-        line += f" [{extra}]"
-    return line
+    lines = [
+        f"- {label}",
+        f"  • Precio venta: {_format_currency(sell_price)} ARS/USD",
+        f"  • Spread vs oficial: {_format_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
+    ]
+    lines.extend(f"  • {detail}" for detail in details)
+    return "\n".join(lines)
 
 
 def get_rulo() -> str:
@@ -1186,14 +1194,25 @@ def get_rulo() -> str:
 
     oficial_cost_ars = oficial_price * usd_amount
 
-    lines: List[str] = [
-        f"Rulos desde Oficial (1 USD = {fmt_num(oficial_price, 2)} ARS):",
-        f"{fmt_num(usd_amount, 0)} USD Oficial = {fmt_num(oficial_cost_ars, 2)} ARS",
-    ]
+    def format_currency(value: float, decimals: int = 2) -> str:
+        formatted = f"{value:,.{decimals}f}"
+        formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
+        if decimals:
+            formatted = formatted.rstrip("0").rstrip(",")
+        return formatted
 
-    def format_profit(value: float) -> str:
+    def format_signed(value: float, decimals: int = 2) -> str:
         sign = "+" if value >= 0 else "-"
-        return f"{sign}{fmt_num(abs(value), 2)}"
+        return f"{sign}{format_currency(abs(value), decimals)}"
+
+    base_usd = format_currency(usd_amount, 0)
+    base_ars = format_currency(oficial_cost_ars)
+
+    lines: List[str] = [
+        f"Rulos desde Oficial (precio oficial: {format_currency(oficial_price)} ARS/USD)",
+        f"Inversión base: {base_usd} USD → {base_ars} ARS",
+        "",
+    ]
 
     # Oficial -> MEP
     mep_best_price: Optional[float] = None
@@ -1213,10 +1232,10 @@ def get_rulo() -> str:
     if mep_best_price:
         mep_final_ars = mep_best_price * usd_amount
         mep_profit_ars = mep_final_ars - oficial_cost_ars
-        mep_extra = (
-            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(mep_final_ars, 2)} ARS, "
-            f"{format_profit(mep_profit_ars)} ARS"
-        )
+        mep_extra = [
+            f"Resultado: {base_usd} USD → {format_currency(mep_final_ars)} ARS",
+            f"Ganancia: {format_signed(mep_profit_ars)} ARS",
+        ]
         lines.append(
             _format_spread_line(mep_label, mep_best_price, oficial_price, mep_extra)
         )
@@ -1227,10 +1246,10 @@ def get_rulo() -> str:
     if blue_price:
         blue_final_ars = blue_price * usd_amount
         blue_profit_ars = blue_final_ars - oficial_cost_ars
-        blue_extra = (
-            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(blue_final_ars, 2)} ARS, "
-            f"{format_profit(blue_profit_ars)} ARS"
-        )
+        blue_extra = [
+            f"Resultado: {base_usd} USD → {format_currency(blue_final_ars)} ARS",
+            f"Ganancia: {format_signed(blue_profit_ars)} ARS",
+        ]
         lines.append(
             _format_spread_line("Blue", blue_price, oficial_price, blue_extra)
         )
@@ -1284,13 +1303,21 @@ def get_rulo() -> str:
         ars_obtained = usdt_obtained * usdt_to_ars_rate
         final_price = ars_obtained / usd_amount
         usdt_profit_ars = ars_obtained - oficial_cost_ars
-        extra = (
-            f"USD→USDT {best_usd_to_usdt[0]}, "
-            f"USDT→ARS {best_usdt_to_ars[0]}, "
-            f"{fmt_num(usd_amount, 0)} USD→{fmt_num(usdt_obtained, 2)} USDT→"
-            f"{fmt_num(ars_obtained, 2)} ARS, {format_profit(usdt_profit_ars)} ARS"
+        path_detail = (
+            f"Tramos: USD→USDT {best_usd_to_usdt[0].upper()}, "
+            f"USDT→ARS {best_usdt_to_ars[0].upper()}"
         )
-        lines.append(_format_spread_line("USDT", final_price, oficial_price, extra))
+        usdt_extra = [
+            path_detail,
+            (
+                f"Resultado: {base_usd} USD → {format_currency(usdt_obtained, 2)} USDT → "
+                f"{format_currency(ars_obtained)} ARS"
+            ),
+            f"Ganancia: {format_signed(usdt_profit_ars)} ARS",
+        ]
+        lines.append(
+            _format_spread_line("USDT", final_price, oficial_price, usdt_extra)
+        )
 
     if len(lines) <= 2:
         return "No encontré ningún rulo potable"
