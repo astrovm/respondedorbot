@@ -11,6 +11,7 @@ from api.index import (
     extract_message_text,
     parse_command,
     format_user_message,
+    build_reply_context_text,
     should_gordo_respond,
     truncate_text,
     fetch_url_content,
@@ -359,6 +360,14 @@ def test_format_user_message():
     assert format_user_message(msg, "hello") == "John: hello"
 
 
+def test_format_user_message_with_reply_context():
+    msg = {"from": {"first_name": "John", "username": "john123"}}
+    context = "Jane (jane77): texto original"
+    result = format_user_message(msg, "respuesta", context)
+    assert "en respuesta a" in result
+    assert "Jane (jane77): texto original" in result
+
+
 def test_should_gordo_respond():
     import api.index
 
@@ -646,6 +655,52 @@ def test_build_ai_messages():
     assert "CONTEXTO:" in messages[0]["content"]
     assert "Usuario: John" in messages[0]["content"]
     assert "test message" in messages[0]["content"]
+
+
+def test_build_reply_context_text():
+    reply_msg = {
+        "from": {"first_name": "Jane", "username": "jane77"},
+        "text": "mensaje original",
+    }
+    message = {"reply_to_message": reply_msg}
+
+    context = build_reply_context_text(message)
+    assert context == "Jane (jane77): mensaje original"
+
+    media_reply = {
+        "from": {"first_name": "Pablo"},
+        "photo": [{"file_id": "abc"}],
+    }
+    assert (
+        build_reply_context_text({"reply_to_message": media_reply})
+        == "Pablo: una foto sin texto"
+    )
+
+    assert build_reply_context_text({}) is None
+
+
+def test_build_ai_messages_includes_reply_context():
+    from api.index import build_ai_messages
+
+    message = {
+        "from": {"first_name": "Ana", "username": "ana"},
+        "chat": {"type": "group", "title": "Grupo"},
+        "text": "respuesta",
+    }
+
+    messages = build_ai_messages(
+        message,
+        [],
+        "respuesta",
+        "Juan (juan): mensaje citado",
+    )
+
+    assert len(messages) == 1
+    content = messages[0]["content"]
+    assert "MENSAJE AL QUE RESPONDE:" in content
+    assert "Juan (juan): mensaje citado" in content
+    assert "MENSAJE:" in content
+    assert "respuesta" in content
 
 
 def test_process_request_parameters():
