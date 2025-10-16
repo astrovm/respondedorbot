@@ -37,6 +37,7 @@ from api.index import (
     save_bot_message_metadata,
     get_bot_message_metadata,
     CHAT_CONFIG_DEFAULTS,
+    get_rulo,
     is_repetitive_thought,
     find_repetitive_recent_thought,
     build_agent_retry_prompt,
@@ -200,6 +201,49 @@ def test_convert_to_command():
     msg_text7 = ""
     expected7 = "y que queres que convierta boludo? mandate texto"
     assert convert_to_command(msg_text7) == expected7
+
+
+def test_get_rulo():
+    dolar_data = {
+        "oficial": {"price": 1440},
+        "blue": {"ask": 1450, "bid": 1430},
+        "mep": {
+            "al30": {
+                "24hs": {"price": 1462.32},
+                "ci": {"price": 1459.73},
+            },
+            "gd30": {
+                "24hs": {"price": 1460.0},
+            },
+        },
+    }
+
+    usd_usdt_data = {
+        "buenbit": {"ask": 1.031, "totalAsk": 1.031},
+        "xapo": {"ask": 1.002, "totalAsk": 1.004},
+    }
+
+    usdt_ars_data = {
+        "buenbit": {"bid": 1458.44, "totalBid": 1458.44},
+        "ripio": {"bid": 1448.75, "totalBid": 1448.75},
+    }
+
+    def fake_cached_requests(api_url, *_args, **_kwargs):
+        if "dolar" in api_url:
+            return {"data": dolar_data}
+        if "USDT/USD" in api_url:
+            return {"data": usd_usdt_data}
+        if "USDT/ARS" in api_url:
+            return {"data": usdt_ars_data}
+        raise AssertionError(f"unexpected url {api_url}")
+
+    with patch("api.index.cached_requests", side_effect=fake_cached_requests):
+        result = get_rulo()
+
+    assert "Rulos desde Oficial" in result
+    assert "MEP" in result
+    assert "Blue" in result
+    assert "USDT" in result
 
 
 def test_config_redis():
