@@ -560,54 +560,50 @@ def run_agent_cycle() -> Dict[str, Any]:
     return result
 
 
-def get_cached_transcription(file_id: str) -> Optional[str]:
-    """Get cached audio transcription from Redis"""
+def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
+    """Retrieve a cached media payload stored under the given prefix."""
+    cache_key = f"{prefix}:{file_id}"
     try:
         redis_client = config_redis()
-        cache_key = f"audio_transcription:{file_id}"
-        cached_text = redis_client.get(cache_key)
-        if cached_text:
-            return str(cached_text)
+        cached_value = redis_client.get(cache_key)
+        if cached_value:
+            return str(cached_value)
         return None
     except Exception as e:
-        print(f"Error getting cached transcription: {e}")
+        print(f"Error getting cached {prefix}: {e}")
         return None
+
+
+def _cache_media(prefix: str, file_id: str, text: str, ttl: int) -> None:
+    """Persist a media payload using the provided prefix and TTL."""
+    cache_key = f"{prefix}:{file_id}"
+    try:
+        redis_client = config_redis()
+        redis_client.setex(cache_key, ttl, text)
+    except Exception as e:
+        print(f"Error caching {prefix}: {e}")
+
+
+def get_cached_transcription(file_id: str) -> Optional[str]:
+    """Get cached audio transcription from Redis"""
+    return _get_cached_media("audio_transcription", file_id)
 
 
 def cache_transcription(file_id: str, text: str, ttl: int = TTL_MEDIA_CACHE) -> None:
     """Cache audio transcription in Redis (default 7 days)"""
-    try:
-        redis_client = config_redis()
-        cache_key = f"audio_transcription:{file_id}"
-        redis_client.setex(cache_key, ttl, text)
-    except Exception as e:
-        print(f"Error caching transcription: {e}")
+    _cache_media("audio_transcription", file_id, text, ttl)
 
 
 def get_cached_description(file_id: str) -> Optional[str]:
     """Get cached image description from Redis"""
-    try:
-        redis_client = config_redis()
-        cache_key = f"image_description:{file_id}"
-        cached_desc = redis_client.get(cache_key)
-        if cached_desc:
-            return str(cached_desc)
-        return None
-    except Exception as e:
-        print(f"Error getting cached description: {e}")
-        return None
+    return _get_cached_media("image_description", file_id)
 
 
 def cache_description(
     file_id: str, description: str, ttl: int = TTL_MEDIA_CACHE
 ) -> None:
     """Cache image description in Redis (default 7 days)"""
-    try:
-        redis_client = config_redis()
-        cache_key = f"image_description:{file_id}"
-        redis_client.setex(cache_key, ttl, description)
-    except Exception as e:
-        print(f"Error caching description: {e}")
+    _cache_media("image_description", file_id, description, ttl)
 
 
 # get cached data from previous hour
