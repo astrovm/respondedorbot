@@ -38,6 +38,7 @@ from api.index import (
     save_bot_message_metadata,
     get_bot_message_metadata,
     CHAT_CONFIG_DEFAULTS,
+    TTL_MEDIA_CACHE,
     get_rulo,
     is_repetitive_thought,
     find_repetitive_recent_thought,
@@ -2635,158 +2636,159 @@ def test_admin_report_basic():
         )
 
 
-def test_get_cached_transcription_success():
-    from api.index import get_cached_transcription
+@pytest.mark.parametrize(
+    "prefix,file_id,cached_value",
+    [
+        ("audio_transcription", "audio_file", "cached transcription text"),
+        ("image_description", "image_file", "cached image description"),
+    ],
+)
+def test_get_cached_media_success(prefix, file_id, cached_value):
+    from api.index import _get_cached_media
 
     with patch("api.index.config_redis") as mock_config_redis:
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = "cached transcription text"
+        mock_redis.get.return_value = cached_value
+
+        result = _get_cached_media(prefix, file_id)
+
+        assert result == cached_value
+        mock_redis.get.assert_called_once_with(f"{prefix}:{file_id}")
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["audio_transcription", "image_description"],
+)
+def test_get_cached_media_not_found(prefix):
+    from api.index import _get_cached_media
+
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = None
+
+        result = _get_cached_media(prefix, "test_file_id")
+
+        assert result is None
+        mock_redis.get.assert_called_once_with(f"{prefix}:test_file_id")
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["audio_transcription", "image_description"],
+)
+def test_get_cached_media_exception(prefix):
+    from api.index import _get_cached_media
+
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+
+        result = _get_cached_media(prefix, "test_file_id")
+
+        assert result is None
+
+
+@pytest.mark.parametrize(
+    "prefix,file_id,text,ttl",
+    [
+        ("audio_transcription", "audio_file", "transcription text", 3600),
+        ("image_description", "image_file", "image description", 7200),
+    ],
+)
+def test_cache_media_success(prefix, file_id, text, ttl):
+    from api.index import _cache_media
+
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        _cache_media(prefix, file_id, text, ttl)
+
+        mock_redis.setex.assert_called_once_with(f"{prefix}:{file_id}", ttl, text)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["audio_transcription", "image_description"],
+)
+def test_cache_media_exception(prefix):
+    from api.index import _cache_media
+
+    with patch("api.index.config_redis") as mock_config_redis:
+        mock_config_redis.side_effect = Exception("Redis error")
+
+        # Should not raise exception, just print error
+        _cache_media(prefix, "test_file_id", "payload", 3600)
+
+
+def test_get_cached_transcription_delegates_to_helper():
+    from api.index import get_cached_transcription
+
+    with patch("api.index._get_cached_media") as mock_get:
+        mock_get.return_value = "cached transcription text"
 
         result = get_cached_transcription("test_file_id")
 
         assert result == "cached transcription text"
-        mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
+        mock_get.assert_called_once_with("audio_transcription", "test_file_id")
 
 
-def test_get_cached_transcription_not_found():
-    from api.index import get_cached_transcription
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = None
-
-        result = get_cached_transcription("test_file_id")
-
-        assert result is None
-        mock_redis.get.assert_called_once_with("audio_transcription:test_file_id")
-
-
-def test_get_cached_transcription_exception():
-    from api.index import get_cached_transcription
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
-
-        result = get_cached_transcription("test_file_id")
-
-        assert result is None
-
-
-def test_cache_transcription_success():
-    from api.index import cache_transcription
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-
-        cache_transcription("test_file_id", "transcription text", 3600)
-
-        mock_redis.setex.assert_called_once_with(
-            "audio_transcription:test_file_id", 3600, "transcription text"
-        )
-
-
-def test_cache_transcription_default_ttl():
-    from api.index import cache_transcription
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-
-        cache_transcription("test_file_id", "transcription text")
-
-        mock_redis.setex.assert_called_once_with(
-            "audio_transcription:test_file_id", 604800, "transcription text"
-        )
-
-
-def test_cache_transcription_exception():
-    from api.index import cache_transcription
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
-
-        # Should not raise exception, just print error
-        cache_transcription("test_file_id", "transcription text")
-
-
-def test_get_cached_description_success():
+def test_get_cached_description_delegates_to_helper():
     from api.index import get_cached_description
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = "cached image description"
+    with patch("api.index._get_cached_media") as mock_get:
+        mock_get.return_value = "cached image description"
 
         result = get_cached_description("test_file_id")
 
         assert result == "cached image description"
-        mock_redis.get.assert_called_once_with("image_description:test_file_id")
+        mock_get.assert_called_once_with("image_description", "test_file_id")
 
 
-def test_get_cached_description_not_found():
-    from api.index import get_cached_description
+def test_cache_transcription_delegates_default_ttl():
+    from api.index import cache_transcription
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = None
+    with patch("api.index._cache_media") as mock_cache:
+        cache_transcription("test_file_id", "transcription text")
 
-        result = get_cached_description("test_file_id")
-
-        assert result is None
-        mock_redis.get.assert_called_once_with("image_description:test_file_id")
-
-
-def test_get_cached_description_exception():
-    from api.index import get_cached_description
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
-
-        result = get_cached_description("test_file_id")
-
-        assert result is None
-
-
-def test_cache_description_success():
-    from api.index import cache_description
-
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
-
-        cache_description("test_file_id", "image description", 3600)
-
-        mock_redis.setex.assert_called_once_with(
-            "image_description:test_file_id", 3600, "image description"
+        mock_cache.assert_called_once_with(
+            "audio_transcription", "test_file_id", "transcription text", TTL_MEDIA_CACHE
         )
 
 
-def test_cache_description_default_ttl():
-    from api.index import cache_description
+def test_cache_transcription_delegates_custom_ttl():
+    from api.index import cache_transcription
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    with patch("api.index._cache_media") as mock_cache:
+        cache_transcription("test_file_id", "transcription text", 3600)
 
-        cache_description("test_file_id", "image description")
-
-        mock_redis.setex.assert_called_once_with(
-            "image_description:test_file_id", 604800, "image description"
+        mock_cache.assert_called_once_with(
+            "audio_transcription", "test_file_id", "transcription text", 3600
         )
 
 
-def test_cache_description_exception():
+def test_cache_description_delegates_default_ttl():
     from api.index import cache_description
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
-
-        # Should not raise exception, just print error
+    with patch("api.index._cache_media") as mock_cache:
         cache_description("test_file_id", "image description")
+
+        mock_cache.assert_called_once_with(
+            "image_description", "test_file_id", "image description", TTL_MEDIA_CACHE
+        )
+
+
+def test_cache_description_delegates_custom_ttl():
+    from api.index import cache_description
+
+    with patch("api.index._cache_media") as mock_cache:
+        cache_description("test_file_id", "image description", 7200)
+
+        mock_cache.assert_called_once_with(
+            "image_description", "test_file_id", "image description", 7200
+        )
 
 
 def test_get_cache_history_success():
