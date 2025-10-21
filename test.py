@@ -47,6 +47,7 @@ from api.index import (
     summarize_recent_agent_topics,
     agent_sections_are_valid,
     get_agent_retry_hint,
+    _decode_redis_value,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -198,6 +199,71 @@ def test_convert_to_command():
     msg_text6 = "hola\nlinea\n"
     expected6 = "/HOLA_LINEA"
     assert convert_to_command(msg_text6) == expected6
+
+
+def test_decode_redis_value_variants():
+    assert _decode_redis_value(b"value") == "value"
+    assert _decode_redis_value("value") == "value"
+    assert _decode_redis_value(None) is None
+
+
+def test_get_chat_config_decodes_bytes():
+    redis_client = MagicMock(spec=redis.Redis)
+    stored_config = {"link_mode": "reply"}
+    redis_client.get.return_value = json.dumps(stored_config).encode("utf-8")
+
+    config = get_chat_config(redis_client, "chat-1")
+
+    assert config["link_mode"] == "reply"
+
+
+def test_get_chat_config_decodes_string():
+    redis_client = MagicMock(spec=redis.Redis)
+    stored_config = {"link_mode": "reply"}
+    redis_client.get.return_value = json.dumps(stored_config)
+
+    config = get_chat_config(redis_client, "chat-2")
+
+    assert config["link_mode"] == "reply"
+
+
+def test_get_chat_config_legacy_bytes():
+    redis_client = MagicMock(spec=redis.Redis)
+    redis_client.get.side_effect = [None, b"delete"]
+
+    config = get_chat_config(redis_client, "chat-3")
+
+    assert config["link_mode"] == "delete"
+    assert config["ai_random_replies"] is True
+
+
+def test_get_bot_message_metadata_decodes_bytes():
+    redis_client = MagicMock(spec=redis.Redis)
+    metadata = {"foo": "bar"}
+    redis_client.get.return_value = json.dumps(metadata).encode("utf-8")
+
+    result = get_bot_message_metadata(redis_client, "chat", 1)
+
+    assert result == metadata
+
+
+def test_get_bot_message_metadata_decodes_string():
+    redis_client = MagicMock(spec=redis.Redis)
+    metadata = {"foo": "bar"}
+    redis_client.get.return_value = json.dumps(metadata)
+
+    result = get_bot_message_metadata(redis_client, "chat", 1)
+
+    assert result == metadata
+
+
+def test_get_bot_message_metadata_handles_none():
+    redis_client = MagicMock(spec=redis.Redis)
+    redis_client.get.return_value = None
+
+    result = get_bot_message_metadata(redis_client, "chat", 1)
+
+    assert result is None
 
     # Test empty string
     msg_text7 = ""
