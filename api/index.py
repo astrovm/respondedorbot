@@ -1944,20 +1944,16 @@ def ask_ai(
                         if isinstance(last_tool_output, str)
                         else last_tool_output
                     )
+                    if not isinstance(data, Mapping):
+                        return format_search_results("", None)
                     query = data.get("query", "")
-                    results = data.get("results", []) or []
-                    if not results:
-                        return f"no encontré resultados ahora con duckduckgo"
-                    lines = [f"🔎 Resultados para: {query}"]
-                    for i, r in enumerate(results[:5], 1):
-                        title = r.get("title") or r.get("url") or "(sin título)"
-                        url = r.get("url", "")
-                        snippet = (r.get("snippet") or "").strip()
-                        if snippet:
-                            lines.append(f"{i}. {title}\n{url}\n{snippet[:300]}")
-                        else:
-                            lines.append(f"{i}. {title}\n{url}")
-                    return "\n\n".join(lines)
+                    raw_results = data.get("results", [])
+                    normalized_results: List[Mapping[str, Any]] = []
+                    if isinstance(raw_results, Sequence):
+                        for item in raw_results:
+                            if isinstance(item, Mapping):
+                                normalized_results.append(cast(Mapping[str, Any], item))
+                    return format_search_results(query, normalized_results, limit=5)
                 if last_tool_name == "fetch_url":
                     data: Any = last_tool_output
                     if isinstance(data, str):
@@ -2612,6 +2608,41 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
         return []
 
 
+def format_search_results(
+    query: str,
+    results: Optional[Sequence[Mapping[str, Any]]],
+    limit: int = 5,
+) -> str:
+    """Format DuckDuckGo search results with consistent truncation and fallbacks."""
+
+    normalized_query = (query or "").strip()
+    if not results:
+        return "no encontré resultados ahora con duckduckgo"
+
+    try:
+        normalized_limit = int(limit)
+    except (TypeError, ValueError):
+        normalized_limit = 5
+    if normalized_limit < 1:
+        normalized_limit = 1
+
+    limited_results = list(results)[:normalized_limit]
+    if not limited_results:
+        return "no encontré resultados ahora con duckduckgo"
+
+    lines = [f"🔎 Resultados para: {normalized_query}"]
+    for index, result in enumerate(limited_results, 1):
+        title = str(result.get("title") or result.get("url") or "(sin título)")
+        url = str(result.get("url") or "").strip()
+        snippet = str(result.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"{index}. {title}\n{url}\n{snippet[:300]}")
+        else:
+            lines.append(f"{index}. {title}\n{url}")
+
+    return "\n\n".join(lines)
+
+
 def sanitize_tool_artifacts(text: Optional[str]) -> str:
     """Remove any visible [TOOL] lines or code blocks that contain them from model output."""
     if not text:
@@ -2662,18 +2693,7 @@ def search_command(msg_text: Optional[str]) -> str:
     if not q:
         return "decime qué querés buscar capo"
     results = web_search(q, limit=10)
-    if not results:
-        return "no encontré resultados ahora con duckduckgo"
-    lines = [f"🔎 Resultados para: {q}"]
-    for i, r in enumerate(results, 1):
-        title = r.get("title") or r.get("url")
-        url = r.get("url", "")
-        snippet = (r.get("snippet") or "").strip()
-        if snippet:
-            lines.append(f"{i}. {title}\n{url}\n{snippet[:300]}")
-        else:
-            lines.append(f"{i}. {title}\n{url}")
-    return "\n\n".join(lines[:10])
+    return format_search_results(q, results, limit=10)
 
 
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
