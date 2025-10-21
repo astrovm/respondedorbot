@@ -3968,22 +3968,21 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
+def _decode_redis_value(value: Any) -> Optional[str]:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if value is not None:
+        return str(value)
+    return None
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     config = dict(CHAT_CONFIG_DEFAULTS)
     try:
         _log_config_event("Loading chat config", {"chat_id": chat_id})
         raw_value = redis_client.get(_chat_config_key(chat_id))
-        raw_value_text: Optional[str]
-        deserializable_value: Optional[str]
-        if isinstance(raw_value, (bytes, bytearray)):
-            raw_value_text = raw_value.decode("utf-8", errors="replace")
-            deserializable_value = raw_value_text
-        elif raw_value is not None:
-            raw_value_text = str(raw_value)
-            deserializable_value = raw_value_text
-        else:
-            raw_value_text = None
-            deserializable_value = None
+        raw_value_text = _decode_redis_value(raw_value)
+        deserializable_value = raw_value_text
         _log_config_event(
             "Chat config raw value fetched",
             {
@@ -4003,13 +4002,8 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
         else:
             legacy_key = _legacy_link_mode_key(chat_id)
             legacy_value = redis_client.get(legacy_key)
-            if legacy_value:
-                if isinstance(legacy_value, bytes):
-                    legacy_value_text: Optional[str] = legacy_value.decode(
-                        "utf-8", errors="replace"
-                    )
-                else:
-                    legacy_value_text = str(legacy_value)
+            legacy_value_text = _decode_redis_value(legacy_value)
+            if legacy_value_text:
                 _log_config_event(
                     "Using legacy link mode config",
                     {
@@ -4354,13 +4348,7 @@ def get_bot_message_metadata(
 ) -> Optional[Dict[str, Any]]:
     try:
         raw_value = redis_client.get(_bot_message_meta_key(chat_id, message_id))
-        deserializable_value: Optional[str]
-        if isinstance(raw_value, (bytes, bytearray)):
-            deserializable_value = raw_value.decode("utf-8", errors="replace")
-        elif raw_value is not None:
-            deserializable_value = str(raw_value)
-        else:
-            deserializable_value = None
+        deserializable_value = _decode_redis_value(raw_value)
         if deserializable_value:
             try:
                 loaded = json.loads(deserializable_value)
