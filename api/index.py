@@ -23,6 +23,7 @@ from typing import (
     Iterable,
     Mapping,
     Sequence,
+    TypeVar,
 )
 import ast
 import base64
@@ -41,7 +42,7 @@ from decimal import Decimal
 import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
-from functools import lru_cache
+from functools import lru_cache, wraps
 
 from api.utils import (
     fmt_num,
@@ -190,98 +191,110 @@ def _ensure_bcra_config() -> None:
 configure_agent_memory(redis_factory=config_redis, tz=BA_TZ)
 
 
+_T = TypeVar("_T")
+
+
+def _with_bcra_config(func: Callable[..., _T]) -> Callable[..., _T]:
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> _T:
+        _ensure_bcra_config()
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@_with_bcra_config
 def bcra_api_get(
     path: str, params: Optional[Dict[str, Any]] = None, ttl: int = bcra_service.TTL_BCRA
 ) -> Optional[Dict[str, Any]]:
-    _ensure_bcra_config()
     return _bcra_api_get(path, params, ttl)
 
 
+@_with_bcra_config
 def bcra_list_variables(
     category: Optional[str] = "Principales Variables",
 ) -> Optional[List[Dict[str, Any]]]:
-    _ensure_bcra_config()
     return _bcra_list_variables(category)
 
 
+@_with_bcra_config
 def bcra_fetch_latest_variables() -> Optional[Dict[str, Dict[str, str]]]:
-    _ensure_bcra_config()
     return _bcra_fetch_latest_variables()
 
 
+@_with_bcra_config
 def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
-    _ensure_bcra_config()
     return _bcra_get_value_for_date(desc_substr, date_iso)
 
 
+@_with_bcra_config
 def cache_bcra_variables(variables: Dict[str, Any], ttl: int = bcra_service.TTL_BCRA) -> None:
-    _ensure_bcra_config()
     _bcra_cache_bcra_variables(variables, ttl)
 
 
+@_with_bcra_config
 def cache_currency_band_limits(data: Dict[str, Any], ttl: int = bcra_service.TTL_BCRA) -> None:
-    _ensure_bcra_config()
     _bcra_cache_currency_band_limits(data, ttl)
 
 
+@_with_bcra_config
 def cache_mayorista_missing(
     date_key: str, redis_client: Optional[redis.Redis] = None
 ) -> None:
-    _ensure_bcra_config()
     _bcra_cache_mayorista_missing(date_key, redis_client)
 
 
+@_with_bcra_config
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
-    _ensure_bcra_config()
     return _bcra_fetch_currency_band_limits()
 
 
+@_with_bcra_config
 def get_currency_band_limits() -> Optional[Dict[str, Any]]:
-    _ensure_bcra_config()
     return _bcra_get_currency_band_limits()
 
 
+@_with_bcra_config
 def get_cached_bcra_variables(allow_stale: bool = False) -> Optional[Dict[str, Any]]:
-    _ensure_bcra_config()
     return _bcra_get_cached_bcra_variables(allow_stale)
 
 
+@_with_bcra_config
 def get_or_refresh_bcra_variables() -> Optional[Dict[str, Any]]:
-    _ensure_bcra_config()
     return _bcra_get_or_refresh_bcra_variables()
 
 
+@_with_bcra_config
 def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
-    _ensure_bcra_config()
     return _bcra_get_latest_itcrm_details()
 
 
+@_with_bcra_config
 def get_latest_itcrm_value() -> Optional[float]:
-    _ensure_bcra_config()
     return _bcra_get_latest_itcrm_value()
 
 
+@_with_bcra_config
 def get_latest_itcrm_value_and_date() -> Optional[Tuple[float, str]]:
-    _ensure_bcra_config()
     return _bcra_get_latest_itcrm_value_and_date()
 
 
+@_with_bcra_config
 def get_cached_tcrm_100(
     hours_ago: int = 24, expiration_time: int = bcra_service.TTL_BCRA
 ) -> Tuple[Optional[float], Optional[float]]:
-    _ensure_bcra_config()
     return _bcra_get_cached_tcrm_100(hours_ago, expiration_time)
 
 
+@_with_bcra_config
 def calculate_tcrm_100(
     target_date: Optional[Union[str, datetime, date]] = None,
 ) -> Optional[float]:
-    _ensure_bcra_config()
     return _bcra_calculate_tcrm_100(target_date)
 
 
+@_with_bcra_config
 def format_bcra_variables(variables: Dict[str, Any]) -> str:
-    _ensure_bcra_config()
     return _bcra_format_bcra_variables(variables)
 
 
