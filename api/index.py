@@ -24,6 +24,7 @@ from typing import (
     Mapping,
     Sequence,
     TypeVar,
+    NamedTuple,
 )
 import ast
 import base64
@@ -139,6 +140,18 @@ WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
+
+
+def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[str, Any]]:
+    """Retrieve dollar rates from CriptoYa with shared cache semantics."""
+
+    return cached_requests(
+        "https://criptoya.com/api/dolar",
+        None,
+        None,
+        TTL_DOLLAR,
+        hourly_cache,
+    )
 
 
 CHAT_CONFIG_KEY_PREFIX = "chat_config:"
@@ -1112,10 +1125,7 @@ def format_dollar_rates(
 
 
 def get_dollar_rates() -> Optional[str]:
-    cache_expiration_time = TTL_DOLLAR
-    api_url = "https://criptoya.com/api/dolar"
-
-    dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+    dollars = _fetch_criptoya_dollar_data()
 
     tcrm_100, tcrm_history = get_cached_tcrm_100()
 
@@ -1142,11 +1152,7 @@ def get_devo(msg_text: str) -> str:
         if fee != fee or fee > 1 or compra != compra or compra < 0:
             return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a positive number."
 
-        cache_expiration_time = TTL_DOLLAR
-
-        api_url = "https://criptoya.com/api/dolar"
-
-        dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+        dollars = _fetch_criptoya_dollar_data()
 
         if not dollars or "data" not in dollars:
             return "Error getting dollar rates"
@@ -1193,26 +1199,28 @@ def _safe_float(value: Any) -> Optional[float]:
     return None
 
 
+def _format_local_currency(value: float, decimals: int = 2) -> str:
+    formatted = f"{value:,.{decimals}f}"
+    formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
+    if decimals:
+        formatted = formatted.rstrip("0").rstrip(",")
+    return formatted
+
+
+def _format_local_signed(value: float, decimals: int = 2) -> str:
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}{_format_local_currency(abs(value), decimals)}"
+
+
 def _format_spread_line(
     label: str, sell_price: float, oficial_price: float, details: Sequence[str]
 ) -> str:
-    def _format_currency(value: float, decimals: int = 2) -> str:
-        formatted = f"{value:,.{decimals}f}"
-        formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
-        if decimals:
-            formatted = formatted.rstrip("0").rstrip(",")
-        return formatted
-
-    def _format_signed(value: float, decimals: int = 2) -> str:
-        sign = "+" if value >= 0 else "-"
-        return f"{sign}{_format_currency(abs(value), decimals)}"
-
     diff = sell_price - oficial_price
     pct = (diff / oficial_price) * 100 if oficial_price else 0.0
     lines = [
         f"- {label}",
-        f"  • Precio venta: {_format_currency(sell_price)} ARS/USD",
-        f"  • Spread vs oficial: {_format_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
+        f"  • Precio venta: {_format_local_currency(sell_price)} ARS/USD",
+        f"  • Spread vs oficial: {_format_local_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
     ]
     lines.extend(f"  • {detail}" for detail in details)
     return "\n".join(lines)
@@ -1220,13 +1228,12 @@ def _format_spread_line(
 
 def get_rulo() -> str:
     cache_expiration_time = TTL_DOLLAR
-    api_url = "https://criptoya.com/api/dolar"
     usd_amount = 1000.0
     amount_param = (
         f"{int(usd_amount)}" if isinstance(usd_amount, float) and usd_amount.is_integer() else str(usd_amount)
     )
 
-    dollars = cached_requests(api_url, None, None, cache_expiration_time, True)
+    dollars = _fetch_criptoya_dollar_data()
 
     if not dollars or "data" not in dollars:
         return "Error consiguiendo cotizaciones del dólar"
@@ -1239,22 +1246,11 @@ def get_rulo() -> str:
 
     oficial_cost_ars = oficial_price * usd_amount
 
-    def format_currency(value: float, decimals: int = 2) -> str:
-        formatted = f"{value:,.{decimals}f}"
-        formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
-        if decimals:
-            formatted = formatted.rstrip("0").rstrip(",")
-        return formatted
-
-    def format_signed(value: float, decimals: int = 2) -> str:
-        sign = "+" if value >= 0 else "-"
-        return f"{sign}{format_currency(abs(value), decimals)}"
-
-    base_usd = format_currency(usd_amount, 0)
-    base_ars = format_currency(oficial_cost_ars)
+    base_usd = _format_local_currency(usd_amount, 0)
+    base_ars = _format_local_currency(oficial_cost_ars)
 
     lines: List[str] = [
-        f"Rulos desde Oficial (precio oficial: {format_currency(oficial_price)} ARS/USD)",
+        f"Rulos desde Oficial (precio oficial: {_format_local_currency(oficial_price)} ARS/USD)",
         f"Inversión base: {base_usd} USD → {base_ars} ARS",
         "",
     ]
@@ -1278,8 +1274,8 @@ def get_rulo() -> str:
         mep_final_ars = mep_best_price * usd_amount
         mep_profit_ars = mep_final_ars - oficial_cost_ars
         mep_extra = [
-            f"Resultado: {base_usd} USD → {format_currency(mep_final_ars)} ARS",
-            f"Ganancia: {format_signed(mep_profit_ars)} ARS",
+            f"Resultado: {base_usd} USD → {_format_local_currency(mep_final_ars)} ARS",
+            f"Ganancia: {_format_local_signed(mep_profit_ars)} ARS",
         ]
         lines.append(
             _format_spread_line(mep_label, mep_best_price, oficial_price, mep_extra)
@@ -1292,8 +1288,8 @@ def get_rulo() -> str:
         blue_final_ars = blue_price * usd_amount
         blue_profit_ars = blue_final_ars - oficial_cost_ars
         blue_extra = [
-            f"Resultado: {base_usd} USD → {format_currency(blue_final_ars)} ARS",
-            f"Ganancia: {format_signed(blue_profit_ars)} ARS",
+            f"Resultado: {base_usd} USD → {_format_local_currency(blue_final_ars)} ARS",
+            f"Ganancia: {_format_local_signed(blue_profit_ars)} ARS",
         ]
         lines.append(
             _format_spread_line("Blue", blue_price, oficial_price, blue_extra)
@@ -1358,10 +1354,10 @@ def get_rulo() -> str:
         usdt_extra = [
             path_detail,
             (
-                f"Resultado: {base_usd} USD → {format_currency(usdt_obtained, 2)} USDT → "
-                f"{format_currency(ars_obtained)} ARS"
+                f"Resultado: {base_usd} USD → {_format_local_currency(usdt_obtained, 2)} USDT → "
+                f"{_format_local_currency(ars_obtained)} ARS"
             ),
-            f"Ganancia: {format_signed(usdt_profit_ars)} ARS",
+            f"Ganancia: {_format_local_signed(usdt_profit_ars)} ARS",
         ]
         lines.append(
             _format_spread_line("USDT", final_price, oficial_price, usdt_extra)
@@ -1449,6 +1445,34 @@ def _transcription_error_message(
     return transcribe_message or _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
 
 
+def _describe_replied_media(
+    replied_msg: Mapping[str, Any],
+    *,
+    media_key: str,
+    extract_file_id: Callable[[Any], Optional[str]],
+    prompt: str,
+    success_prefix: str,
+    download_error: str,
+    describe_error: str,
+) -> Optional[str]:
+    media = replied_msg.get(media_key)
+    if not media:
+        return None
+
+    file_id = extract_file_id(media)
+    if not file_id:
+        return None
+
+    description, error_code = describe_media_by_id(file_id, prompt)
+    if description:
+        return f"{success_prefix}{description}"
+
+    if error_code == "download":
+        return download_error
+
+    return describe_error
+
+
 def handle_transcribe_with_message(message: Dict) -> str:
     """Transcribe audio or describe image from replied message"""
     try:
@@ -1473,33 +1497,35 @@ def handle_transcribe_with_message(message: Dict) -> str:
                 return error_message
             return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
 
-        # Check for photo in replied message
-        elif "photo" in replied_msg and replied_msg["photo"]:
-            photo_file_id = replied_msg["photo"][-1]["file_id"]
-            desc, err = describe_media_by_id(
-                photo_file_id, "Describe what you see in this image in detail."
-            )
-            if desc:
-                return f"🖼️ Descripción: {desc}"
-            return (
-                "No pude descargar la imagen"
-                if err == "download"
-                else "No pude describir la imagen, intentá más tarde"
-            )
+        photo_response = _describe_replied_media(
+            replied_msg,
+            media_key="photo",
+            extract_file_id=lambda media: media[-1]["file_id"]
+            if isinstance(media, Sequence)
+            and not isinstance(media, (str, bytes))
+            and media
+            else None,
+            prompt="Describe what you see in this image in detail.",
+            success_prefix="🖼️ Descripción: ",
+            download_error="No pude descargar la imagen",
+            describe_error="No pude describir la imagen, intentá más tarde",
+        )
+        if photo_response:
+            return photo_response
 
-        # Check for sticker in replied message
-        elif "sticker" in replied_msg and replied_msg["sticker"]:
-            sticker_file_id = replied_msg["sticker"]["file_id"]
-            desc, err = describe_media_by_id(
-                sticker_file_id, "Describe what you see in this sticker in detail."
-            )
-            if desc:
-                return f"🎨 Descripción del sticker: {desc}"
-            return (
-                "No pude descargar el sticker"
-                if err == "download"
-                else "No pude describir el sticker, intentá más tarde"
-            )
+        sticker_response = _describe_replied_media(
+            replied_msg,
+            media_key="sticker",
+            extract_file_id=lambda media: media.get("file_id")
+            if isinstance(media, Mapping)
+            else None,
+            prompt="Describe what you see in this sticker in detail.",
+            success_prefix="🎨 Descripción del sticker: ",
+            download_error="No pude descargar el sticker",
+            describe_error="No pude describir el sticker, intentá más tarde",
+        )
+        if sticker_response:
+            return sticker_response
 
         else:
             return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
@@ -1702,10 +1728,56 @@ def get_instance_name() -> str:
     return f"estoy corriendo en {instance} boludo"
 
 
+def _telegram_request(
+    endpoint: str,
+    *,
+    method: str = "GET",
+    params: Optional[Dict[str, Any]] = None,
+    json_payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 5,
+    token: Optional[str] = None,
+    log_errors: bool = True,
+) -> Tuple[Optional[requests.Response], Optional[str]]:
+    """Perform a Telegram Bot API request with shared error handling."""
+
+    resolved_token = token or environ.get("TELEGRAM_TOKEN")
+    if not resolved_token:
+        error_msg = "Telegram token not configured"
+        if log_errors:
+            print(error_msg)
+        return None, error_msg
+
+    url = f"https://api.telegram.org/bot{resolved_token}/{endpoint}"
+    method_upper = method.upper()
+    try:
+        if method_upper == "GET" and json_payload is None:
+            response = requests.get(url, params=params, timeout=timeout)
+        elif method_upper == "POST" and params is None:
+            response = requests.post(url, json=json_payload, timeout=timeout)
+        else:
+            response = requests.request(
+                method_upper,
+                url,
+                params=params,
+                json=json_payload,
+                timeout=timeout,
+            )
+        response.raise_for_status()
+        return response, None
+    except requests.RequestException as error:
+        if log_errors:
+            print(f"Telegram request to {endpoint} failed: {error}")
+        return None, str(error)
+
+
 def send_typing(token: str, chat_id: str) -> None:
-    parameters = {"chat_id": chat_id, "action": "typing"}
-    url = f"https://api.telegram.org/bot{token}/sendChatAction"
-    requests.get(url, params=parameters, timeout=5)
+    _telegram_request(
+        "sendChatAction",
+        method="GET",
+        params={"chat_id": chat_id, "action": "typing"},
+        token=token,
+        log_errors=False,
+    )
 
 
 def send_msg(
@@ -1715,7 +1787,6 @@ def send_msg(
     buttons: Optional[List[str]] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
-    token = environ.get("TELEGRAM_TOKEN")
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
     if msg_id:
         payload["reply_to_message_id"] = msg_id
@@ -1728,27 +1799,33 @@ def send_msg(
     if markup is not None:
         payload["reply_markup"] = markup
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("ok") and isinstance(data.get("result"), dict):
-            message_id = data["result"].get("message_id")
-            if isinstance(message_id, int):
-                return message_id
-    except (requests.RequestException, ValueError, KeyError):
+    response, _ = _telegram_request(
+        "sendMessage", method="POST", json_payload=payload
+    )
+    if not response:
         return None
+
+    try:
+        data = response.json()
+    except (ValueError, KeyError):
+        return None
+
+    if data.get("ok") and isinstance(data.get("result"), dict):
+        message_id = data["result"].get("message_id")
+        if isinstance(message_id, int):
+            return message_id
 
     return None
 
 
 def delete_msg(chat_id: str, msg_id: str) -> None:
     """Delete a Telegram message"""
-    token = environ.get("TELEGRAM_TOKEN")
-    url = f"https://api.telegram.org/bot{token}/deleteMessage"
-    parameters = {"chat_id": chat_id, "message_id": msg_id}
-    requests.get(url, params=parameters, timeout=5)
+    _telegram_request(
+        "deleteMessage",
+        method="GET",
+        params={"chat_id": chat_id, "message_id": msg_id},
+        log_errors=False,
+    )
 
 
 def admin_report(
@@ -2076,7 +2153,6 @@ def complete_with_providers(
 ) -> Optional[str]:
     """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
 
-    # Try Groq first
     if is_provider_backoff_active("groq"):
         remaining = int(get_provider_backoff_remaining("groq"))
         print(f"Groq backoff active ({remaining}s remaining), skipping Groq attempts")
@@ -2086,16 +2162,15 @@ def complete_with_providers(
             print("complete_with_providers: got response from Groq")
             return groq_response
 
-    # Try OpenRouter second
-    if is_provider_backoff_active("openrouter"):
-        remaining = int(get_provider_backoff_remaining("openrouter"))
-        print(
-            "OpenRouter backoff active "
-            f"({remaining}s remaining), skipping OpenRouter attempts"
-        )
-    else:
-        openrouter_api_key = environ.get("OPENROUTER_API_KEY")
-        if openrouter_api_key:
+    openrouter_api_key = environ.get("OPENROUTER_API_KEY")
+    if openrouter_api_key:
+        if is_provider_backoff_active("openrouter"):
+            remaining = int(get_provider_backoff_remaining("openrouter"))
+            print(
+                "OpenRouter backoff active "
+                f"({remaining}s remaining), skipping OpenRouter attempts"
+            )
+        else:
             openrouter = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=openrouter_api_key,
@@ -2106,10 +2181,9 @@ def complete_with_providers(
             if response:
                 print("complete_with_providers: got response from OpenRouter")
                 return response
-        else:
-            print("OpenRouter API key not configured")
+    else:
+        print("OpenRouter API key not configured")
 
-    # Fallback to Cloudflare Workers AI
     if is_provider_backoff_active("cloudflare"):
         remaining = int(get_provider_backoff_remaining("cloudflare"))
         print(
@@ -2125,62 +2199,79 @@ def complete_with_providers(
     return None
 
 
+class _ToolLine(NamedTuple):
+    raw: str
+    stripped: str
+    normalized: str
+    in_fence: bool
+    is_fence: bool
+
+
+def _prepare_tool_lines(text: str) -> List[_ToolLine]:
+    in_fence = False
+    prepared: List[_ToolLine] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        is_fence = stripped.startswith("```")
+        normalized = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", stripped)
+        normalized = normalized.strip().strip("`")
+        if is_fence:
+            normalized = ""
+        prepared.append(
+            _ToolLine(
+                raw=raw,
+                stripped=stripped,
+                normalized=normalized,
+                in_fence=in_fence,
+                is_fence=is_fence,
+            )
+        )
+        if is_fence:
+            in_fence = not in_fence
+    return prepared
+
+
 def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
     """Detect a tool call line like: [TOOL] web_search {"query": "..."}"""
     if not text:
         return None
     try:
-        lines = text.splitlines()
+        prepared = _prepare_tool_lines(text)
         i = 0
-        in_fence = False
-        while i < len(lines):
-            raw = lines[i]
-            line = raw.strip()
+        while i < len(prepared):
+            line = prepared[i]
 
-            # Toggle code fence context so [TOOL] inside code blocks is ignored
-            if line.startswith("```"):
-                in_fence = not in_fence
+            if line.is_fence or line.in_fence:
                 i += 1
                 continue
 
-            if in_fence:
-                i += 1
-                continue
-
-            # Normalize common list/code prefixes
-            normalized = line
-            normalized = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", normalized)
-            normalized = normalized.strip().strip("`")
-
-            marker_index = normalized.find("[TOOL]")
+            marker_index = line.normalized.find("[TOOL]")
             if marker_index == -1:
                 i += 1
                 continue
 
-            normalized = normalized[marker_index:]
-
-            # Expected: [TOOL] name {json...}
-            without_prefix = normalized[len("[TOOL]") :].strip()
-            if without_prefix.startswith(":"):
-                without_prefix = without_prefix[1:].strip()
+            normalized = line.normalized[marker_index + len("[TOOL]") :].strip()
+            if normalized.startswith(":"):
+                normalized = normalized[1:].strip()
 
             name_source_index = i
-            if not without_prefix:
+            if not normalized:
                 j = i + 1
-                while j < len(lines):
-                    addition = lines[j].strip().strip("`")
-                    addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
-                    addition = addition.strip()
-                    if addition:
-                        without_prefix = addition
+                while j < len(prepared):
+                    candidate = prepared[j]
+                    if candidate.is_fence or candidate.in_fence:
+                        j += 1
+                        continue
+                    if candidate.normalized:
+                        normalized = candidate.normalized
                         name_source_index = j
                         break
                     j += 1
-                if not without_prefix:
+                if not normalized:
                     i += 1
                     continue
 
-            parts = without_prefix.split(" ", 1)
+            parts = normalized.split(" ", 1)
             if not parts:
                 i += 1
                 continue
@@ -2194,16 +2285,16 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
             if remainder.startswith(":"):
                 remainder = remainder[1:].strip()
 
-            # Gather JSON possibly spanning multiple lines
             json_candidate = remainder
             j = name_source_index + 1
 
-            while "{" not in json_candidate and j < len(lines):
-                addition = lines[j].strip().strip("`")
-                addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
-                addition = addition.strip()
-                if addition:
-                    json_candidate = (json_candidate + " " + addition).strip()
+            while "{" not in json_candidate and j < len(prepared):
+                addition_line = prepared[j]
+                if addition_line.is_fence or addition_line.in_fence:
+                    j += 1
+                    continue
+                if addition_line.normalized:
+                    json_candidate = (json_candidate + " " + addition_line.normalized).strip()
                 j += 1
 
             if "{" not in json_candidate:
@@ -2211,13 +2302,14 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
                 continue
 
             open_count = json_candidate.count("{") - json_candidate.count("}")
-            while open_count > 0 and j < len(lines):
-                addition = lines[j].strip().strip("`")
-                addition = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", addition)
-                addition = addition.strip()
-                if addition:
-                    json_candidate = (json_candidate + " " + addition).strip()
-                    open_count += addition.count("{") - addition.count("}")
+            while open_count > 0 and j < len(prepared):
+                addition_line = prepared[j]
+                if addition_line.is_fence or addition_line.in_fence:
+                    j += 1
+                    continue
+                if addition_line.normalized:
+                    json_candidate = (json_candidate + " " + addition_line.normalized).strip()
+                    open_count += addition_line.normalized.count("{") - addition_line.normalized.count("}")
                 j += 1
 
             closing_index = json_candidate.rfind("}")
@@ -2227,7 +2319,6 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
 
             json_text = json_candidate[: closing_index + 1].strip().rstrip(",")
 
-            # Try parse as JSON first, then fallback to Python literal
             args: Any = None
             try:
                 args = json.loads(json_text)
@@ -2705,41 +2796,37 @@ def sanitize_tool_artifacts(text: Optional[str]) -> str:
     """Remove any visible [TOOL] lines or code blocks that contain them from model output."""
     if not text:
         return ""
-    lines = text.splitlines()
+    prepared = _prepare_tool_lines(text)
     out_lines: List[str] = []
-    in_fence = False
     block_lines: List[str] = []
     block_has_tool = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            if not in_fence:
-                # starting a code fence
-                in_fence = True
-                block_lines = [line]
+    inside_block = False
+
+    for line in prepared:
+        if line.is_fence:
+            if not line.in_fence:
+                inside_block = True
+                block_lines = [line.raw]
                 block_has_tool = False
             else:
-                # closing a code fence
-                block_lines.append(line)
+                block_lines.append(line.raw)
                 if not block_has_tool:
                     out_lines.extend(block_lines)
-                # reset
-                in_fence = False
                 block_lines = []
                 block_has_tool = False
+                inside_block = False
             continue
 
-        if in_fence:
-            block_lines.append(line)
-            if "[TOOL]" in line:
+        if inside_block:
+            block_lines.append(line.raw)
+            if "[TOOL]" in line.raw:
                 block_has_tool = True
-        else:
-            # Outside code blocks: drop any line that contains [TOOL]
-            if "[TOOL]" not in line:
-                out_lines.append(line)
+            continue
 
-    # If an unterminated fence exists, keep it only if it didn't contain [TOOL]
-    if in_fence and not block_has_tool:
+        if "[TOOL]" not in line.raw:
+            out_lines.append(line.raw)
+
+    if inside_block and block_lines and not block_has_tool:
         out_lines.extend(block_lines)
 
     return "\n".join(out_lines).strip()
@@ -2883,12 +2970,7 @@ def get_market_context() -> Dict:
 
     try:
         # Get dollar rates (reuse 5-minute cache)
-        dollar_response = cached_requests(
-            "https://criptoya.com/api/dolar",
-            None,
-            None,
-            TTL_DOLLAR,
-        )
+        dollar_response = _fetch_criptoya_dollar_data(hourly_cache=False)
         if dollar_response and "data" in dollar_response:
             market_data["dollar"] = dollar_response["data"]
     except Exception as e:
@@ -2923,6 +3005,36 @@ def get_time_context() -> Dict:
     return {"datetime": current_time, "formatted": current_time.strftime("%A %d/%m/%Y")}
 
 
+def _invoke_provider(
+    provider_name: str,
+    *,
+    attempt: Callable[[], Optional[str]],
+    rate_limit_backoff: Optional[int] = None,
+    label: Optional[str] = None,
+) -> Optional[str]:
+    """Execute a provider call with shared backoff and error handling."""
+
+    display_name = label or provider_name.capitalize()
+    if is_provider_backoff_active(provider_name):
+        remaining = int(get_provider_backoff_remaining(provider_name))
+        print(
+            f"{display_name} backoff active ({remaining}s remaining), skipping API call"
+        )
+        return None
+
+    try:
+        return attempt()
+    except Exception as error:
+        print(f"{display_name} error: {error}")
+        if _is_rate_limit_error(error):
+            _set_provider_backoff(provider_name, rate_limit_backoff)
+            remaining = int(get_provider_backoff_remaining(provider_name))
+            print(
+                f"{display_name} rate limit detected; backing off for {remaining}s"
+            )
+        return None
+
+
 def get_ai_response(
     client: OpenAI,
     system_msg: Dict[str, Any],
@@ -2933,20 +3045,19 @@ def get_ai_response(
 ) -> Optional[str]:
     """Get AI response (text-only) from a generic OpenAI-compatible provider."""
 
-    if is_provider_backoff_active(provider_name):
-        remaining = int(get_provider_backoff_remaining(provider_name))
-        print(
-            f"{provider_name.capitalize()} backoff active ({remaining}s remaining), skipping API call"
-        )
-        return None
-
     models = [
         "moonshotai/kimi-k2:free",
         "x-ai/grok-4-fast:free",
         "deepseek/deepseek-chat-v3.1:free",
     ]
 
-    try:
+    rate_limit_backoff = (
+        backoff_seconds
+        if backoff_seconds is not None
+        else OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS
+    )
+
+    def _attempt() -> Optional[str]:
         print(f"Attempt 1/1 using model: {models[0]}")
 
         response = client.chat.completions.create(
@@ -2961,22 +3072,14 @@ def get_ai_response(
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason == "stop":
                 return response.choices[0].message.content
+        return None
 
-    except Exception as e:
-        print(f"API error: {e}")
-        if _is_rate_limit_error(e):
-            duration = (
-                backoff_seconds
-                if backoff_seconds is not None
-                else OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS
-            )
-            _set_provider_backoff(provider_name, duration)
-            remaining = int(get_provider_backoff_remaining(provider_name))
-            print(
-                f"{provider_name.capitalize()} rate limit detected; backing off for {remaining}s"
-            )
-
-    return None
+    return _invoke_provider(
+        provider_name,
+        attempt=_attempt,
+        rate_limit_backoff=rate_limit_backoff,
+        label=provider_name.capitalize(),
+    )
 
 
 def get_cloudflare_ai_response(
@@ -2985,30 +3088,20 @@ def get_cloudflare_ai_response(
     """Fallback using Cloudflare Workers AI for text-only"""
     provider_name = "cloudflare"
     try:
-        try:
-            cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
-        except CloudflareCredentialsError:
-            return None
+        cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
+    except CloudflareCredentialsError:
+        return None
 
-        if is_provider_backoff_active(provider_name):
-            remaining = int(get_provider_backoff_remaining(provider_name))
-            print(
-                "Cloudflare backoff active "
-                f"({remaining}s remaining), skipping API call"
-            )
-            return None
-
+    def _attempt() -> Optional[str]:
         print("Trying Cloudflare Workers AI as fallback...")
         cloudflare = OpenAI(
             api_key=cloudflare_api_key,
             base_url=f"{_build_cloudflare_ai_base_url(cloudflare_account_id)}/v1",
         )
 
-        final_messages = [system_msg] + messages
-
         response = cloudflare.chat.completions.create(
             model="@cf/mistralai/mistral-small-3.1-24b-instruct",
-            messages=cast(Any, final_messages),
+            messages=cast(Any, [system_msg] + messages),
             max_tokens=1024,
         )
 
@@ -3016,20 +3109,14 @@ def get_cloudflare_ai_response(
             if response.choices[0].finish_reason == "stop":
                 print("Cloudflare Workers AI response successful")
                 return response.choices[0].message.content
+        return None
 
-    except Exception as e:
-        print(f"Cloudflare Workers AI error: {e}")
-        if _is_rate_limit_error(e):
-            _set_provider_backoff(
-                provider_name, CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS
-            )
-            remaining = int(get_provider_backoff_remaining(provider_name))
-            print(
-                "Cloudflare rate limit detected; backing off for "
-                f"{remaining}s"
-            )
-
-    return None
+    return _invoke_provider(
+        provider_name,
+        attempt=_attempt,
+        rate_limit_backoff=CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS,
+        label="Cloudflare Workers AI",
+    )
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -3056,30 +3143,21 @@ def get_groq_ai_response(
 ) -> Optional[str]:
     """First option using Groq AI"""
     provider_name = "groq"
-    try:
-        groq_api_key = environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            print("Groq API key not configured")
-            return None
+    groq_api_key = environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        print("Groq API key not configured")
+        return None
 
-        if is_provider_backoff_active(provider_name):
-            remaining = int(get_provider_backoff_remaining(provider_name))
-            print(
-                f"Groq backoff active ({remaining}s remaining), skipping API call"
-            )
-            return None
-
+    def _attempt() -> Optional[str]:
         print("Trying Groq AI as first option...")
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
         )
 
-        final_messages = [system_msg] + messages
-
         response = groq_client.chat.completions.create(
             model="moonshotai/kimi-k2-instruct-0905",
-            messages=cast(Any, final_messages),
+            messages=cast(Any, [system_msg] + messages),
             max_tokens=1024,
         )
 
@@ -3087,18 +3165,14 @@ def get_groq_ai_response(
             if response.choices[0].finish_reason == "stop":
                 print("Groq AI response successful")
                 return response.choices[0].message.content
+        return None
 
-    except Exception as e:
-        print(f"Groq AI error: {e}")
-        if _is_rate_limit_error(e):
-            _set_provider_backoff(provider_name, GROQ_RATE_LIMIT_BACKOFF_SECONDS)
-            remaining = int(get_provider_backoff_remaining(provider_name))
-            print(
-                "Groq rate limit detected; backing off for "
-                f"{remaining}s"
-            )
-
-    return None
+    return _invoke_provider(
+        provider_name,
+        attempt=_attempt,
+        rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
+        label="Groq AI",
+    )
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
@@ -3739,146 +3813,236 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
         return None
 
 
+def _cloudflare_cached_invoke(
+    *,
+    model_path: str,
+    file_id: Optional[str],
+    cache_get: Optional[Callable[[str], Optional[str]]] = None,
+    cache_set: Optional[Callable[[str, str], None]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    data: Optional[bytes] = None,
+    content_type: str,
+    timeout: int,
+    missing_credentials_message: Optional[str] = None,
+    retries: int = 1,
+    retry_delay: float = 0.0,
+    should_retry: Optional[Callable[[Exception], bool]] = None,
+    on_request_start: Optional[Callable[[int, int], None]] = None,
+    on_retry: Optional[Callable[[int, int, Exception], None]] = None,
+    on_failure: Optional[Callable[[Exception, bool], None]] = None,
+    action_label: str = "Cloudflare AI call",
+    parse_response: Callable[[requests.Response], Optional[str]],
+) -> Optional[str]:
+    """Shared Cloudflare Workers AI caller with cache and retry support."""
+
+    if file_id and cache_get:
+        cached = cache_get(file_id)
+        if cached:
+            return str(cached)
+
+    try:
+        account_id, api_key = _get_cloudflare_credentials(
+            missing_credentials_message
+            or "Cloudflare Workers AI credentials not configured",
+        )
+    except CloudflareCredentialsError:
+        return None
+
+    url = _build_cloudflare_run_url(account_id, model_path)
+    headers = _build_cloudflare_headers(api_key, content_type=content_type)
+    attempts = max(1, int(retries or 1))
+
+    for attempt_index in range(1, attempts + 1):
+        if on_request_start:
+            on_request_start(attempt_index, attempts)
+
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload if data is None else None,
+                data=data if data is not None else None,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as error:
+            retryable = bool(should_retry and should_retry(error))
+            if retryable:
+                if on_retry:
+                    on_retry(attempt_index, attempts, error)
+                if attempt_index < attempts:
+                    if retry_delay:
+                        time.sleep(retry_delay)
+                    continue
+                if on_failure:
+                    on_failure(error, True)
+                else:
+                    print(f"{action_label} failed after all retries: {error}")
+                return None
+
+            if on_failure:
+                on_failure(error, False)
+            else:
+                print(f"{action_label} error: {error}")
+            return None
+        except Exception as error:
+            if on_failure:
+                on_failure(error, False)
+            else:
+                print(f"{action_label} error: {error}")
+            return None
+
+        try:
+            result_text = parse_response(response)
+        except Exception as error:
+            if on_failure:
+                on_failure(error, False)
+            else:
+                print(f"{action_label} parse error: {error}")
+            return None
+
+        if result_text:
+            if file_id and cache_set:
+                cache_set(file_id, result_text)
+            return result_text
+
+        return None
+
+    return None
+
+
 def describe_image_cloudflare(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
 ) -> Optional[str]:
     """Describe image using Cloudflare Workers AI LLaVA model"""
-    try:
-        # Check cache first if file_id is provided
-        if file_id:
-            cached_description = get_cached_description(file_id)
-            if cached_description:
-                return cached_description
+    image_array = list(image_data)
 
-        try:
-            cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
-        except CloudflareCredentialsError:
+    def _on_request_start(attempt: int, _: int) -> None:
+        if attempt == 1:
+            print("Describing image with LLaVA model...")
+
+    def _parse_response(response: requests.Response) -> Optional[str]:
+        result = response.json()
+        if "result" not in result:
+            print(f"Unexpected LLaVA response format: {result}")
             return None
 
-        url = _build_cloudflare_run_url(
-            cloudflare_account_id, "@cf/llava-hf/llava-1.5-7b-hf"
-        )
-        headers = _build_cloudflare_headers(
-            cloudflare_api_key, content_type="application/json"
-        )
+        payload = result["result"]
+        description = payload.get("response") or payload.get("description")
+        if not description:
+            print(f"Unexpected LLaVA response format: {result}")
+            return None
 
-        # Convert bytes to array of integers (0-255) as expected by LLaVA
-        image_array = list(image_data)
+        print(f"Image description successful: {description[:100]}...")
+        return str(description)
 
-        payload = {"prompt": user_text, "image": image_array, "max_tokens": 1024}
-
-        print(f"Describing image with LLaVA model...")
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-
-        if response.status_code == 200:
-            result = response.json()
-            if "result" in result:
-                # Try both possible response formats
-                if "response" in result["result"]:
-                    description = result["result"]["response"]
-                elif "description" in result["result"]:
-                    description = result["result"]["description"]
-                else:
-                    print(f"Unexpected LLaVA response format: {result}")
-                    return None
-
-                print(f"Image description successful: {description[:100]}...")
-
-                # Cache the description if file_id is provided
-                if file_id and description:
-                    cache_description(file_id, description)
-
-                return description
-            else:
-                print(f"Unexpected LLaVA response format: {result}")
+    def _on_failure(error: Exception, _: bool) -> None:
+        if isinstance(error, requests.HTTPError) and error.response is not None:
+            status_code = error.response.status_code
+            error_text = error.response.text
+            print(f"LLaVA API error {status_code}: {error_text}")
         else:
-            error_text = response.text
-            print(f"LLaVA API error {response.status_code}: {error_text}")
+            print(f"Error describing image: {error}")
 
-            # Parse error details if available
-            try:
-                error_json = response.json()
-                if "errors" in error_json and error_json["errors"]:
-                    pass
-            except:
-                pass
-
-    except Exception as e:
-        print(f"Error describing image: {e}")
-
-    return None
+    return _cloudflare_cached_invoke(
+        model_path="@cf/llava-hf/llava-1.5-7b-hf",
+        file_id=file_id,
+        cache_get=get_cached_description,
+        cache_set=cache_description,
+        payload={"prompt": user_text, "image": image_array, "max_tokens": 1024},
+        content_type="application/json",
+        timeout=15,
+        on_request_start=_on_request_start,
+        on_failure=_on_failure,
+        action_label="Image description",
+        parse_response=_parse_response,
+    )
 
 
 def transcribe_audio_cloudflare(
     audio_data: bytes, file_id: Optional[str] = None
 ) -> Optional[str]:
     """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
+    def _on_request_start(attempt: int, total: int) -> None:
+        if attempt == 1:
+            print("Transcribing audio with Cloudflare Whisper...")
+        else:
+            print(f"Retrying audio transcription (attempt {attempt}/{total})...")
 
-    # Check cache first if file_id is provided
-    if file_id:
-        cached_transcription = get_cached_transcription(file_id)
-        if cached_transcription:
-            return cached_transcription
+    def _should_retry(error: Exception) -> bool:
+        message = str(error).lower()
+        return isinstance(error, requests.exceptions.Timeout) or "timeout" in message or "408" in message
 
-    try:
-        cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials(
-            "Cloudflare credentials not configured for audio transcription"
-        )
-    except CloudflareCredentialsError:
+    def _on_retry(attempt: int, total: int, error: Exception) -> None:
+        print(f"Audio transcription timeout on attempt {attempt}/{total}: {error}")
+
+    def _on_failure(error: Exception, exhausted: bool) -> None:
+        if exhausted:
+            print("Audio transcription failed after all retries")
+        else:
+            print(f"Error transcribing audio: {error}")
+
+    def _parse_response(response: requests.Response) -> Optional[str]:
+        result = response.json()
+        if result.get("success") and "result" in result:
+            transcription = result["result"].get("text", "")
+            if transcription:
+                print(f"Audio transcribed successfully: {transcription[:100]}...")
+                return transcription
+        print(f"Whisper transcription failed: {result}")
         return None
 
-    print("Transcribing audio with Cloudflare Whisper...")
-
-    # Use direct API call to Cloudflare Workers AI for Whisper
-    url = _build_cloudflare_run_url(
-        cloudflare_account_id, "@cf/openai/whisper-large-v3-turbo"
+    return _cloudflare_cached_invoke(
+        model_path="@cf/openai/whisper-large-v3-turbo",
+        file_id=file_id,
+        cache_get=get_cached_transcription,
+        cache_set=cache_transcription,
+        data=audio_data,
+        content_type="application/octet-stream",
+        timeout=30,
+        missing_credentials_message="Cloudflare credentials not configured for audio transcription",
+        retries=2,
+        retry_delay=2,
+        should_retry=_should_retry,
+        on_request_start=_on_request_start,
+        on_retry=_on_retry,
+        on_failure=_on_failure,
+        action_label="Audio transcription",
+        parse_response=_parse_response,
     )
-    headers = _build_cloudflare_headers(
-        cloudflare_api_key, content_type="application/octet-stream"
-    )
 
-    # Retry logic for timeout issues
-    for attempt in range(2):  # 2 attempts total (original + 1 retry)
-        try:
-            if attempt > 0:
-                print(f"Retrying audio transcription (attempt {attempt + 1}/2)...")
-                time.sleep(2)  # Wait 2 seconds before retry
 
-            response = requests.post(url, headers=headers, data=audio_data, timeout=30)
-            response.raise_for_status()
+def _process_media_with_cache(
+    *,
+    file_id: str,
+    use_cache: bool,
+    cache_lookup: Optional[Callable[[str], Optional[str]]],
+    processor: Callable[[bytes], Optional[str]],
+    downloader: Optional[Callable[[str], Optional[bytes]]] = None,
+    failure_code: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Shared helper for cached Telegram media download + processing."""
 
-            result = response.json()
-            if result.get("success") and "result" in result:
-                transcription = result["result"].get("text", "")
-                print(f"Audio transcribed successfully: {transcription[:100]}...")
+    try:
+        if use_cache and cache_lookup:
+            cached_value = cache_lookup(file_id)
+            if cached_value:
+                return str(cached_value), None
 
-                # Cache the transcription if file_id is provided
-                if file_id and transcription:
-                    cache_transcription(file_id, transcription)
+        media_fetcher = downloader or download_telegram_file
+        media_bytes = media_fetcher(file_id)
+        if not media_bytes:
+            return None, "download"
 
-                return transcription
-
-            print(f"Whisper transcription failed: {result}")
-            return None
-
-        except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
-            if "timeout" in str(e).lower() or "408" in str(e):
-                print(f"Audio transcription timeout on attempt {attempt + 1}/2: {e}")
-                if attempt == 1:  # Last attempt
-                    print("Audio transcription failed after all retries")
-                    return None
-                # Continue to retry
-            else:
-                # Non-timeout error, don't retry
-                print(f"Error transcribing audio: {e}")
-                return None
-        except Exception as e:
-            print(f"Error transcribing audio: {e}")
-            return None
-
-    return None
+        result = processor(media_bytes)
+        if result:
+            return result, None
+        return None, failure_code
+    except Exception as error:
+        print(f"Error processing media {file_id}: {error}")
+        return None, failure_code
 
 
 def transcribe_file_by_id(
@@ -3891,23 +4055,13 @@ def transcribe_file_by_id(
     - If download failed: (None, "download")
     - If transcription failed: (None, "transcribe")
     """
-    try:
-        if use_cache:
-            cached = get_cached_transcription(file_id)
-            if cached:
-                return str(cached), None
-
-        audio_data = download_telegram_file(file_id)
-        if not audio_data:
-            return None, "download"
-
-        text = transcribe_audio_cloudflare(audio_data, file_id)
-        if text:
-            return text, None
-        return None, "transcribe"
-    except Exception as e:
-        print(f"Error in transcribe_file_by_id: {e}")
-        return None, "transcribe"
+    return _process_media_with_cache(
+        file_id=file_id,
+        use_cache=use_cache,
+        cache_lookup=get_cached_transcription,
+        processor=lambda media: transcribe_audio_cloudflare(media, file_id),
+        failure_code="transcribe",
+    )
 
 
 def describe_media_by_id(
@@ -3920,23 +4074,17 @@ def describe_media_by_id(
     - If download failed: (None, "download")
     - If description failed: (None, "describe")
     """
-    try:
-        cached = get_cached_description(file_id)
-        if cached:
-            return str(cached), None
+    def _processor(media: bytes) -> Optional[str]:
+        resized = resize_image_if_needed(media)
+        return describe_image_cloudflare(resized, prompt, file_id)
 
-        image_data = download_telegram_file(file_id)
-        if not image_data:
-            return None, "download"
-
-        resized = resize_image_if_needed(image_data)
-        desc = describe_image_cloudflare(resized, prompt, file_id)
-        if desc:
-            return desc, None
-        return None, "describe"
-    except Exception as e:
-        print(f"Error in describe_media_by_id: {e}")
-        return None, "describe"
+    return _process_media_with_cache(
+        file_id=file_id,
+        use_cache=True,
+        cache_lookup=get_cached_description,
+        processor=_processor,
+        failure_code="describe",
+    )
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
@@ -4276,33 +4424,27 @@ def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
 
 
 def _answer_callback_query(callback_query_id: str) -> None:
-    token = environ.get("TELEGRAM_TOKEN")
-    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
-    try:
-        requests.post(
-            url,
-            json={"callback_query_id": callback_query_id},
-            timeout=5,
-        )
-    except requests.RequestException:
-        pass
+    _telegram_request(
+        "answerCallbackQuery",
+        method="POST",
+        json_payload={"callback_query_id": callback_query_id},
+        log_errors=False,
+    )
 
 
 def edit_message(
     chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
 ) -> bool:
-    token = environ.get("TELEGRAM_TOKEN")
-    url = f"https://api.telegram.org/bot{token}/editMessageText"
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "reply_markup": reply_markup,
     }
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException:
+    response, _ = _telegram_request(
+        "editMessageText", method="POST", json_payload=payload
+    )
+    if not response:
         return False
 
     try:
@@ -4861,13 +5003,21 @@ def handle_ai_response(
 
 
 def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
-    request_url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+    response, error = _telegram_request(
+        "getWebhookInfo", token=token, log_errors=False
+    )
+    if not response:
+        return {"error": error or "request failed"}
+
     try:
-        telegram_response = requests.get(request_url, timeout=5)
-        telegram_response.raise_for_status()
-    except RequestException as request_error:
-        return {"error": str(request_error)}
-    return telegram_response.json()["result"]
+        payload = response.json()
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        return result
+    return {"error": "unexpected response"}
 
 
 def set_telegram_webhook(webhook_url: str) -> bool:
@@ -4880,11 +5030,10 @@ def set_telegram_webhook(webhook_url: str) -> bool:
         "secret_token": secret_token,
         "max_connections": 8,
     }
-    request_url = f"https://api.telegram.org/bot{token}/setWebhook"
-    try:
-        telegram_response = requests.get(request_url, params=parameters, timeout=5)
-        telegram_response.raise_for_status()
-    except RequestException:
+    response, _ = _telegram_request(
+        "setWebhook", params=parameters, token=token
+    )
+    if not response:
         return False
     redis_client = config_redis()
     redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
