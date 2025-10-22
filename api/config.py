@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from os import environ
+import os
 from typing import Any, Callable, Dict, Optional
 
 import redis
@@ -30,8 +30,8 @@ def load_bot_config() -> Dict[str, Any]:
     if _bot_config is not None:
         return _bot_config
 
-    system_prompt = environ.get("BOT_SYSTEM_PROMPT")
-    trigger_words_str = environ.get("BOT_TRIGGER_WORDS")
+    system_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
+    trigger_words_str = os.environ.get("BOT_TRIGGER_WORDS")
 
     if not system_prompt:
         raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
@@ -53,9 +53,9 @@ def _admin_report(message: str, error: Optional[Exception], extra: Optional[Dict
 
 def config_redis(host=None, port=None, password=None):
     try:
-        host = host or environ.get("REDIS_HOST", "localhost")
-        port = int(port or environ.get("REDIS_PORT", 6379))
-        password = password or environ.get("REDIS_PASSWORD", None)
+        host = host or os.environ.get("REDIS_HOST", "localhost")
+        port = int(port or os.environ.get("REDIS_PORT", 6379))
+        password = password or os.environ.get("REDIS_PASSWORD", None)
         redis_client = redis.Redis(
             host=host, port=port, password=password, decode_responses=True
         )
