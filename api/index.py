@@ -1418,6 +1418,37 @@ def handle_bcra_variables() -> str:
         return "Error al obtener las variables del BCRA"
 
 
+_DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
+    "download": "No pude descargar el audio",
+    "transcribe": "No pude transcribir el audio, intentá más tarde",
+}
+
+
+def _transcribe_audio_file(
+    file_id: str, *, use_cache: bool
+) -> Tuple[Optional[str], Optional[str]]:
+    """Wrapper for audio transcription with consistent error codes."""
+
+    return transcribe_file_by_id(file_id, use_cache=use_cache)
+
+
+def _transcription_error_message(
+    error_code: Optional[str],
+    *,
+    download_message: Optional[str] = None,
+    transcribe_message: Optional[str] = None,
+) -> Optional[str]:
+    """Map transcription error codes to user-facing messages."""
+
+    if not error_code:
+        return None
+
+    if error_code == "download":
+        return download_message or _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["download"]
+
+    return transcribe_message or _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
+
+
 def handle_transcribe_with_message(message: Dict) -> str:
     """Transcribe audio or describe image from replied message"""
     try:
@@ -1427,29 +1458,20 @@ def handle_transcribe_with_message(message: Dict) -> str:
 
         replied_msg = message["reply_to_message"]
 
-        # Check for audio in replied message
-        if "voice" in replied_msg and replied_msg["voice"]:
-            audio_file_id = replied_msg["voice"]["file_id"]
-            text, err = transcribe_file_by_id(audio_file_id)
-            if text:
-                return f"🎵 Transcripción: {text}"
-            return (
-                "No pude descargar el audio"
-                if err == "download"
-                else "No pude transcribir el audio, intentá más tarde"
-            )
+        audio_file_id: Optional[str] = None
+        if replied_msg.get("voice"):
+            audio_file_id = replied_msg["voice"].get("file_id")
+        elif replied_msg.get("audio"):
+            audio_file_id = replied_msg["audio"].get("file_id")
 
-        # Check for regular audio
-        elif "audio" in replied_msg and replied_msg["audio"]:
-            audio_file_id = replied_msg["audio"]["file_id"]
-            text, err = transcribe_file_by_id(audio_file_id)
+        if audio_file_id:
+            text, error_code = _transcribe_audio_file(audio_file_id, use_cache=True)
             if text:
                 return f"🎵 Transcripción: {text}"
-            return (
-                "No pude descargar el audio"
-                if err == "download"
-                else "No pude transcribir el audio, intentá más tarde"
-            )
+            error_message = _transcription_error_message(error_code)
+            if error_message:
+                return error_message
+            return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
 
         # Check for photo in replied message
         elif "photo" in replied_msg and replied_msg["photo"]:
@@ -4483,16 +4505,16 @@ def handle_msg(message: Dict) -> str:
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
             print(f"Processing audio message: {audio_file_id}")
-            transcription, err = transcribe_file_by_id(audio_file_id, use_cache=False)
+            transcription, err = _transcribe_audio_file(audio_file_id, use_cache=False)
             if transcription:
                 message_text = transcription
                 print(f"Audio transcribed: {message_text[:100]}...")
             else:
-                message_text = (
-                    "no pude bajar tu audio, mandalo de vuelta"
-                    if err == "download"
-                    else "mandame texto que no soy alexa, boludo"
-                )
+                message_text = _transcription_error_message(
+                    err,
+                    download_message="no pude bajar tu audio, mandalo de vuelta",
+                    transcribe_message="mandame texto que no soy alexa, boludo",
+                ) or "mandame texto que no soy alexa, boludo"
 
         # Download image if present
         image_base64 = None
