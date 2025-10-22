@@ -194,6 +194,42 @@ configure_agent_memory(redis_factory=config_redis, tz=BA_TZ)
 _T = TypeVar("_T")
 
 
+class CloudflareCredentialsError(RuntimeError):
+    """Raised when Cloudflare credentials are missing from the environment."""
+
+
+def _get_cloudflare_credentials(
+    missing_message: str = "Cloudflare Workers AI credentials not configured",
+) -> Tuple[str, str]:
+    """Return configured Cloudflare credentials or raise if unavailable."""
+
+    account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_key = environ.get("CLOUDFLARE_API_KEY")
+
+    if not account_id or not api_key:
+        print(missing_message)
+        raise CloudflareCredentialsError(missing_message)
+
+    return account_id, api_key
+
+
+def _build_cloudflare_ai_base_url(account_id: str) -> str:
+    return f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai"
+
+
+def _build_cloudflare_run_url(account_id: str, model_path: str) -> str:
+    return f"{_build_cloudflare_ai_base_url(account_id)}/run/{model_path}"
+
+
+def _build_cloudflare_headers(
+    api_key: str, content_type: Optional[str] = None
+) -> Dict[str, str]:
+    headers: Dict[str, str] = {"Authorization": f"Bearer {api_key}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
 def _with_bcra_config(func: Callable[..., _T]) -> Callable[..., _T]:
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> _T:
@@ -2927,11 +2963,9 @@ def get_cloudflare_ai_response(
     """Fallback using Cloudflare Workers AI for text-only"""
     provider_name = "cloudflare"
     try:
-        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
-        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
-
-        if not cloudflare_account_id or not cloudflare_api_key:
-            print("Cloudflare Workers AI credentials not configured")
+        try:
+            cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
+        except CloudflareCredentialsError:
             return None
 
         if is_provider_backoff_active(provider_name):
@@ -2945,7 +2979,7 @@ def get_cloudflare_ai_response(
         print("Trying Cloudflare Workers AI as fallback...")
         cloudflare = OpenAI(
             api_key=cloudflare_api_key,
-            base_url=f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/v1",
+            base_url=f"{_build_cloudflare_ai_base_url(cloudflare_account_id)}/v1",
         )
 
         final_messages = [system_msg] + messages
@@ -3696,18 +3730,17 @@ def describe_image_cloudflare(
             if cached_description:
                 return cached_description
 
-        cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
-        cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
-
-        if not cloudflare_account_id or not cloudflare_api_key:
-            print("Cloudflare Workers AI credentials not configured")
+        try:
+            cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
+        except CloudflareCredentialsError:
             return None
 
-        url = f"https://api.cloudflare.com/client/v4/accounts/{cloudflare_account_id}/ai/run/@cf/llava-hf/llava-1.5-7b-hf"
-        headers = {
-            "Authorization": f"Bearer {cloudflare_api_key}",
-            "Content-Type": "application/json",
-        }
+        url = _build_cloudflare_run_url(
+            cloudflare_account_id, "@cf/llava-hf/llava-1.5-7b-hf"
+        )
+        headers = _build_cloudflare_headers(
+            cloudflare_api_key, content_type="application/json"
+        )
 
         # Convert bytes to array of integers (0-255) as expected by LLaVA
         image_array = list(image_data)
@@ -3767,24 +3800,22 @@ def transcribe_audio_cloudflare(
         if cached_transcription:
             return cached_transcription
 
-    cloudflare_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
-    cloudflare_api_key = environ.get("CLOUDFLARE_API_KEY")
-
-    if not cloudflare_account_id or not cloudflare_api_key:
-        print("Cloudflare credentials not configured for audio transcription")
+    try:
+        cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials(
+            "Cloudflare credentials not configured for audio transcription"
+        )
+    except CloudflareCredentialsError:
         return None
 
     print("Transcribing audio with Cloudflare Whisper...")
 
     # Use direct API call to Cloudflare Workers AI for Whisper
-    url = (
-        "https://api.cloudflare.com/client/v4/accounts/"
-        f"{cloudflare_account_id}/ai/run/@cf/openai/whisper-large-v3-turbo"
+    url = _build_cloudflare_run_url(
+        cloudflare_account_id, "@cf/openai/whisper-large-v3-turbo"
     )
-    headers = {
-        "Authorization": f"Bearer {cloudflare_api_key}",
-        "Content-Type": "application/octet-stream",
-    }
+    headers = _build_cloudflare_headers(
+        cloudflare_api_key, content_type="application/octet-stream"
+    )
 
     # Retry logic for timeout issues
     for attempt in range(2):  # 2 attempts total (original + 1 retry)
