@@ -310,9 +310,9 @@ def test_get_rulo():
 
     assert result.startswith("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
     assert "Inversión base: 1.000 USD → 1.440.000 ARS" in result
-    assert "- MEP (AL30 24HS)" in result
-    assert "  • Resultado: 1.000 USD → 1.462.320 ARS" in result
-    assert "  • Ganancia: +22.320 ARS" in result
+    assert "- MEP (AL30 CI)" in result
+    assert "  • Resultado: 1.000 USD → 1.459.730 ARS" in result
+    assert "  • Ganancia: +19.730 ARS" in result
     assert "- Blue" in result
     assert "  • Ganancia: -10.000 ARS" in result
     assert "- USDT" in result
@@ -2423,8 +2423,18 @@ def test_get_dollar_rates_basic():
                 "mayorista": {"price": 90.0, "variation": 0.25},
                 "oficial": {"price": 100.0, "variation": 0.5},
                 "tarjeta": {"price": 150.0, "variation": 0.75},
-                "mep": {"al30": {"24hs": {"price": 200.0, "variation": 1.25}}},
-                "ccl": {"al30": {"24hs": {"price": 210.0, "variation": 1.5}}},
+                "mep": {
+                    "al30": {
+                        "24hs": {"price": 200.0, "variation": 1.25},
+                        "ci": {"price": 200.0, "variation": 1.25},
+                    }
+                },
+                "ccl": {
+                    "al30": {
+                        "24hs": {"price": 210.0, "variation": 1.5},
+                        "ci": {"price": 210.0, "variation": 1.5},
+                    }
+                },
                 "blue": {"ask": 220.0, "variation": 2.0},
                 "cripto": {
                     "ccb": {"ask": 230.0, "variation": 2.5},
@@ -4101,8 +4111,18 @@ def test_sort_dollar_rates_success():
             "mayorista": {"price": 900.00, "variation": 1.0},
             "oficial": {"price": 1000.50, "variation": 1.2},
             "tarjeta": {"price": 1600.75, "variation": -0.8},
-            "mep": {"al30": {"24hs": {"price": 1050.25, "variation": 0.5}}},
-            "ccl": {"al30": {"24hs": {"price": 1075.80, "variation": 0.7}}},
+            "mep": {
+                "al30": {
+                    "24hs": {"price": 1050.25, "variation": 0.5},
+                    "ci": {"price": 1050.25, "variation": 0.5},
+                }
+            },
+            "ccl": {
+                "al30": {
+                    "24hs": {"price": 1075.80, "variation": 0.7},
+                    "ci": {"price": 1075.80, "variation": 0.7},
+                }
+            },
             "blue": {"ask": 1200.00, "variation": 2.1},
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": 1.8},
@@ -4133,8 +4153,18 @@ def test_sort_dollar_rates_with_none_variations():
             "mayorista": {"price": 900.00, "variation": None},
             "oficial": {"price": 1000.50, "variation": None},
             "tarjeta": {"price": 1600.75, "variation": None},
-            "mep": {"al30": {"24hs": {"price": 1050.25, "variation": None}}},
-            "ccl": {"al30": {"24hs": {"price": 1075.80, "variation": None}}},
+            "mep": {
+                "al30": {
+                    "24hs": {"price": 1050.25, "variation": None},
+                    "ci": {"price": 1050.25, "variation": None},
+                }
+            },
+            "ccl": {
+                "al30": {
+                    "24hs": {"price": 1075.80, "variation": None},
+                    "ci": {"price": 1075.80, "variation": None},
+                }
+            },
             "blue": {"ask": 1200.00, "variation": None},
             "cripto": {
                 "ccb": {"ask": 1150.90, "variation": None},
@@ -4159,8 +4189,18 @@ def test_sort_dollar_rates_with_tcrm():
             "mayorista": {"price": 90.0, "variation": 0.5},
             "oficial": {"price": 100.0, "variation": 0.5},
             "tarjeta": {"price": 150.0, "variation": 0.5},
-            "mep": {"al30": {"24hs": {"price": 120.0, "variation": 0.5}}},
-            "ccl": {"al30": {"24hs": {"price": 130.0, "variation": 0.5}}},
+            "mep": {
+                "al30": {
+                    "24hs": {"price": 120.0, "variation": 0.5},
+                    "ci": {"price": 120.0, "variation": 0.5},
+                }
+            },
+            "ccl": {
+                "al30": {
+                    "24hs": {"price": 130.0, "variation": 0.5},
+                    "ci": {"price": 130.0, "variation": 0.5},
+                }
+            },
             "blue": {"ask": 140.0, "variation": 0.5},
             "cripto": {
                 "ccb": {"ask": 145.0, "variation": 0.5},
