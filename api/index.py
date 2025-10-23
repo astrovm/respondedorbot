@@ -1044,13 +1044,13 @@ def sort_dollar_rates(
         },
         {
             "name": "MEP",
-            "price": dollars["mep"]["al30"]["24hs"]["price"],
-            "history": dollars["mep"]["al30"]["24hs"]["variation"],
+            "price": dollars["mep"]["al30"]["ci"]["price"],
+            "history": dollars["mep"]["al30"]["ci"]["variation"],
         },
         {
             "name": "CCL",
-            "price": dollars["ccl"]["al30"]["24hs"]["price"],
-            "history": dollars["ccl"]["al30"]["24hs"]["variation"],
+            "price": dollars["ccl"]["al30"]["ci"]["price"],
+            "history": dollars["ccl"]["al30"]["ci"]["variation"],
         },
         {
             "name": "Blue",
@@ -1256,20 +1256,9 @@ def get_rulo() -> str:
     ]
 
     # Oficial -> MEP
-    mep_best_price: Optional[float] = None
-    mep_label = "MEP"
-    for instrument_name, instrument_data in data.get("mep", {}).items():
-        if not isinstance(instrument_data, Mapping):
-            continue
-        for variant_name, variant_data in instrument_data.items():
-            if not isinstance(variant_data, Mapping):
-                continue
-            price = _safe_float(variant_data.get("price"))
-            if price is None:
-                continue
-            if mep_best_price is None or price > mep_best_price:
-                mep_best_price = price
-                mep_label = f"MEP ({instrument_name.upper()} {variant_name.upper()})"
+    mep_best_price = _safe_float(data["mep"]["al30"]["ci"]["price"])
+    mep_label = "MEP (AL30 CI)"
+
     if mep_best_price:
         mep_final_ars = mep_best_price * usd_amount
         mep_profit_ars = mep_final_ars - oficial_cost_ars
