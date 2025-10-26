@@ -134,6 +134,7 @@ TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_WEB_FETCH = 300  # 5 minutes
 TTL_POLYMARKET = 30  # 30 seconds
+TTL_POLYMARKET_STREAM = 5  # 5 seconds for live price lookups
 WEB_FETCH_MAX_BYTES = 250_000
 WEB_FETCH_MIN_CHARS = 500
 WEB_FETCH_MAX_CHARS = 8000
@@ -148,6 +149,63 @@ POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 POLYMARKET_ARGENTINA_ELECTION_SLUG = (
     "which-party-wins-most-seats-in-argentina-deputies-election"
 )
+POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
+POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
+POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
+
+
+def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
+    """Return the latest price and timestamp for a Polymarket CLOB token."""
+
+    if not token_id:
+        return None
+
+    now = int(time.time())
+    start_ts = max(0, now - POLYMARKET_STREAM_LOOKBACK_SECONDS)
+    earliest_ts = max(0, start_ts - POLYMARKET_STREAM_LOOKBACK_SECONDS)
+
+    response = cached_requests(
+        POLYMARKET_PRICES_HISTORY_URL,
+        {
+            "startTs": start_ts,
+            "market": token_id,
+            "earliestTimestamp": earliest_ts,
+            "fidelity": POLYMARKET_STREAM_FIDELITY,
+        },
+        None,
+        TTL_POLYMARKET_STREAM,
+        verify_ssl=False,
+    )
+
+    if not response or "data" not in response:
+        return None
+
+    history_data = response.get("data")
+
+    if not isinstance(history_data, dict):
+        return None
+
+    history = history_data.get("history")
+
+    if not isinstance(history, list) or not history:
+        return None
+
+    latest_entry = history[-1]
+    price = latest_entry.get("p")
+    timestamp = latest_entry.get("t")
+
+    try:
+        price_value = float(price)
+    except (TypeError, ValueError):
+        return None
+
+    entry_timestamp: Optional[int]
+    try:
+        entry_timestamp = int(timestamp) if timestamp is not None else None
+    except (TypeError, ValueError):
+        entry_timestamp = None
+
+    return price_value, entry_timestamp
 
 
 def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[str, Any]]:
@@ -859,9 +917,12 @@ def get_polymarket_argentina_election() -> str:
     markets = event.get("markets") or []
     odds: List[Tuple[str, float]] = []
 
+    latest_stream_timestamp: Optional[int] = None
+
     for market in markets:
         raw_outcomes = market.get("outcomes")
         raw_prices = market.get("outcomePrices")
+        raw_token_ids = market.get("clobTokenIds")
 
         if not raw_outcomes or not raw_prices:
             continue
@@ -871,6 +932,11 @@ def get_polymarket_argentina_election() -> str:
             prices = json.loads(raw_prices)
         except (TypeError, json.JSONDecodeError):
             continue
+
+        try:
+            token_ids = json.loads(raw_token_ids) if raw_token_ids else None
+        except (TypeError, json.JSONDecodeError):
+            token_ids = None
 
         if not outcomes or not prices:
             continue
@@ -883,10 +949,26 @@ def get_polymarket_argentina_election() -> str:
         if yes_index >= len(prices):
             continue
 
-        try:
-            yes_price = float(prices[yes_index])
-        except (TypeError, ValueError):
-            continue
+        yes_price: Optional[float] = None
+        yes_timestamp: Optional[int] = None
+
+        if token_ids and yes_index < len(token_ids):
+            stream_result = _fetch_polymarket_live_price(token_ids[yes_index])
+            if stream_result:
+                yes_price, yes_timestamp = stream_result
+
+        if yes_price is None:
+            try:
+                yes_price = float(prices[yes_index])
+            except (TypeError, ValueError):
+                continue
+
+        if yes_timestamp is not None:
+            latest_stream_timestamp = (
+                yes_timestamp
+                if latest_stream_timestamp is None
+                else max(latest_stream_timestamp, yes_timestamp)
+            )
 
         probability = max(0.0, min(yes_price, 1.0)) * 100
         title = (
@@ -925,7 +1007,7 @@ def get_polymarket_argentina_election() -> str:
         decimals = 2 if probability < 10 else 1
         lines.append(f"- {title}: {fmt_num(probability, decimals)}%")
 
-    timestamp = response.get("timestamp")
+    timestamp = latest_stream_timestamp or response.get("timestamp")
     if isinstance(timestamp, int):
         updated_at_utc = datetime.fromtimestamp(timestamp, timezone.utc)
         updated_at_ba = updated_at_utc.astimezone(BA_TZ)
