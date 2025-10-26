@@ -48,6 +48,7 @@ from api.index import (
     agent_sections_are_valid,
     get_agent_retry_hint,
     _decode_redis_value,
+    get_polymarket_argentina_election,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -269,6 +270,45 @@ def test_get_bot_message_metadata_handles_none():
     msg_text7 = ""
     expected7 = "y que queres que convierta boludo? mandate texto"
     assert convert_to_command(msg_text7) == expected7
+
+
+def test_get_polymarket_argentina_election_filters_and_formats():
+    timestamp = int(
+        datetime(2025, 10, 26, 23, 48, tzinfo=timezone.utc).timestamp()
+    )
+    sample_response = {
+        "data": [
+            {
+                "markets": [
+                    {
+                        "outcomes": json.dumps(["Yes", "No"]),
+                        "outcomePrices": json.dumps([0.62, 0.38]),
+                        "groupItemTitle": "LLA (La Libertad Avanza)",
+                    },
+                    {
+                        "outcomes": json.dumps(["Yes", "No"]),
+                        "outcomePrices": json.dumps([0.325, 0.675]),
+                        "groupItemTitle": "UP (Unión por la Patria)",
+                    },
+                    {
+                        "outcomes": json.dumps(["Yes", "No"]),
+                        "outcomePrices": json.dumps([0.0005, 0.9995]),
+                        "groupItemTitle": "PRO (Propuesta Republicana)",
+                    },
+                ]
+            }
+        ],
+        "timestamp": timestamp,
+    }
+
+    with patch("api.index.cached_requests", return_value=sample_response):
+        result = get_polymarket_argentina_election()
+
+    assert "Polymarket - ¿Quién gana más bancas en Diputados 2025?" in result
+    assert "- LLA (La Libertad Avanza): 62%" in result
+    assert "- UP (Unión por la Patria): 32.5%" in result
+    assert "PRO" not in result
+    assert "Actualizado: 2025-10-26 20:48 UTC-3" in result
 
 
 def test_get_rulo():

@@ -133,6 +133,7 @@ TTL_DOLLAR = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_WEB_FETCH = 300  # 5 minutes
+TTL_POLYMARKET = 300  # 5 minutes
 WEB_FETCH_MAX_BYTES = 250_000
 WEB_FETCH_MIN_CHARS = 500
 WEB_FETCH_MAX_CHARS = 8000
@@ -140,6 +141,14 @@ WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
+
+
+# Polymarket constants
+POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+POLYMARKET_ARGENTINA_ELECTION_SLUG = (
+    "which-party-wins-most-seats-in-argentina-deputies-election"
+)
+POLYMARKET_ALLOWED_PARTY_PREFIXES = ("LLA", "UP")
 
 
 def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[str, Any]]:
@@ -827,6 +836,109 @@ def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
     response = cached_requests(api_url, parameters, headers, TTL_PRICE)
 
     return response["data"] if response else None
+
+
+def get_polymarket_argentina_election() -> str:
+    """Return Polymarket probabilities for Argentina's 2025 deputies election."""
+
+    response = cached_requests(
+        POLYMARKET_EVENTS_URL,
+        {"slug": POLYMARKET_ARGENTINA_ELECTION_SLUG},
+        None,
+        TTL_POLYMARKET,
+    )
+
+    if not response or "data" not in response:
+        return "No pude traer las probabilidades desde Polymarket"
+
+    events = response.get("data")
+
+    if not isinstance(events, list) or not events:
+        return "Polymarket no devolvió datos para esa elección"
+
+    event = events[0]
+    markets = event.get("markets") or []
+    odds: List[Tuple[str, float]] = []
+
+    for market in markets:
+        raw_outcomes = market.get("outcomes")
+        raw_prices = market.get("outcomePrices")
+
+        if not raw_outcomes or not raw_prices:
+            continue
+
+        try:
+            outcomes = json.loads(raw_outcomes)
+            prices = json.loads(raw_prices)
+        except (TypeError, json.JSONDecodeError):
+            continue
+
+        if not outcomes or not prices:
+            continue
+
+        try:
+            yes_index = outcomes.index("Yes")
+        except ValueError:
+            yes_index = 0
+
+        if yes_index >= len(prices):
+            continue
+
+        try:
+            yes_price = float(prices[yes_index])
+        except (TypeError, ValueError):
+            continue
+
+        probability = max(0.0, min(yes_price, 1.0)) * 100
+        title = (
+            market.get("groupItemTitle")
+            or market.get("question")
+            or market.get("slug")
+        )
+
+        if not title:
+            continue
+
+        normalized_title = title.strip()
+        normalized_upper = normalized_title.upper()
+
+        if not any(normalized_upper.startswith(prefix) for prefix in POLYMARKET_ALLOWED_PARTY_PREFIXES):
+            continue
+
+        odds.append((normalized_title, probability))
+
+    if not odds:
+        return "No hay precios cargados todavía en Polymarket"
+
+    odds.sort(key=lambda item: item[1], reverse=True)
+
+    lines = [
+        "Polymarket - ¿Quién gana más bancas en Diputados 2025?",
+        "",
+    ]
+
+    for title, probability in odds:
+        decimals = 2 if probability < 10 else 1
+        lines.append(f"- {title}: {fmt_num(probability, decimals)}%")
+
+    timestamp = response.get("timestamp")
+    if isinstance(timestamp, int):
+        updated_at = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(BA_TZ)
+        lines.extend(
+            [
+                "",
+                f"Actualizado: {updated_at.strftime('%Y-%m-%d %H:%M')} UTC-3",
+            ]
+        )
+
+    lines.extend(
+        [
+            "Fuente: Polymarket",
+            "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election",
+        ]
+    )
+
+    return "\n".join(lines)
 
 
 def get_btc_price(convert_to: str = "USD") -> Optional[float]:
@@ -1679,6 +1791,8 @@ comandos disponibles boludo:
 - /buscar algo: te busco en la web
 
 - /agent: te muestro lo ultimo que penso el agente autonomo
+
+- /eleccion: odds actuales de Polymarket para Diputados 2025
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
 
@@ -3467,6 +3581,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/dolar": (get_dollar_rates, False, False),
         "/dollar": (get_dollar_rates, False, False),
         "/usd": (get_dollar_rates, False, False),
+        "/eleccion": (get_polymarket_argentina_election, False, False),
         "/rulo": (get_rulo, False, False),
         "/devo": (get_devo, False, True),
         "/powerlaw": (powerlaw, False, False),
