@@ -2695,6 +2695,35 @@ def test_send_msg_with_buttons():
         assert result == 77
 
 
+def test_send_msg_disables_preview_for_polymarket_link():
+    from api.index import send_msg
+
+    with patch("requests.post") as mock_post, patch("os.environ.get") as mock_env:
+        mock_env.return_value = "test_token"
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "result": {"message_id": 101}}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        polymarket_text = (
+            "Polymarket - ¿Quién gana más bancas en Diputados 2025?\n"
+            "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election"
+        )
+
+        result = send_msg("12345", polymarket_text)
+
+        mock_post.assert_called_once_with(
+            "https://api.telegram.org/bottest_token/sendMessage",
+            json={
+                "chat_id": "12345",
+                "text": polymarket_text,
+                "disable_web_page_preview": True,
+            },
+            timeout=5,
+        )
+        assert result == 101
+
+
 def test_admin_report_basic():
     from api.index import admin_report
 
