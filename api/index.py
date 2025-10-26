@@ -905,30 +905,39 @@ def get_polymarket_argentina_election() -> str:
 
     odds.sort(key=lambda item: item[1], reverse=True)
 
+    filtered_odds: List[Tuple[str, float]] = []
+    for title, probability in odds:
+        normalized_title = title.strip().upper()
+        if normalized_title.startswith("LLA") or normalized_title.startswith("UP"):
+            filtered_odds.append((title, probability))
+
+    if filtered_odds:
+        odds_to_display = filtered_odds
+    else:
+        odds_to_display = odds
+
     lines = [
         "Polymarket - ¿Quién gana más bancas en Diputados 2025?",
         "",
     ]
 
-    for title, probability in odds:
+    for title, probability in odds_to_display:
         decimals = 2 if probability < 10 else 1
         lines.append(f"- {title}: {fmt_num(probability, decimals)}%")
 
     timestamp = response.get("timestamp")
     if isinstance(timestamp, int):
-        updated_at = datetime.fromtimestamp(timestamp, timezone.utc)
+        updated_at_utc = datetime.fromtimestamp(timestamp, timezone.utc)
+        updated_at_ba = updated_at_utc.astimezone(BA_TZ)
         lines.extend(
             [
                 "",
-                f"Actualizado: {updated_at.strftime('%Y-%m-%d %H:%M')} UTC",
+                f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
             ]
         )
 
-    lines.extend(
-        [
-            "Fuente: Polymarket",
-            "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election",
-        ]
+    lines.append(
+        "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election"
     )
 
     return "\n".join(lines)
