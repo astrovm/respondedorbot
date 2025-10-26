@@ -133,7 +133,7 @@ TTL_DOLLAR = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_WEB_FETCH = 300  # 5 minutes
-TTL_POLYMARKET = 300  # 5 minutes
+TTL_POLYMARKET = 30  # 30 seconds
 WEB_FETCH_MAX_BYTES = 250_000
 WEB_FETCH_MIN_CHARS = 500
 WEB_FETCH_MAX_CHARS = 8000
@@ -1893,6 +1893,8 @@ def send_msg(
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
+    if "polymarket.com" in msg.lower():
+        payload["disable_web_page_preview"] = True
     if msg_id:
         payload["reply_to_message_id"] = msg_id
 
