@@ -149,6 +149,9 @@ POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 POLYMARKET_ARGENTINA_ELECTION_SLUG = (
     "which-party-wins-most-seats-in-argentina-deputies-election"
 )
+POLYMARKET_ARGENTINA_SEATS_AFTER_SLUG = (
+    "which-party-holds-the-most-seats-after-argentina-deputies-election"
+)
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
@@ -895,25 +898,42 @@ def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
     return response["data"] if response else None
 
 
-def get_polymarket_argentina_election() -> str:
-    """Return Polymarket probabilities for Argentina's 2025 deputies election."""
+def _fetch_polymarket_event(
+    slug: str,
+) -> Optional[Tuple[Dict[str, Any], Optional[int]]]:
+    """Fetch a single Polymarket event by slug."""
 
     response = cached_requests(
         POLYMARKET_EVENTS_URL,
-        {"slug": POLYMARKET_ARGENTINA_ELECTION_SLUG},
+        {"slug": slug},
         None,
         TTL_POLYMARKET,
     )
 
     if not response or "data" not in response:
-        return "No pude traer las probabilidades desde Polymarket"
+        return None
 
     events = response.get("data")
 
     if not isinstance(events, list) or not events:
-        return "Polymarket no devolvió datos para esa elección"
+        return None
 
     event = events[0]
+
+    timestamp = response.get("timestamp")
+    if not isinstance(timestamp, int):
+        timestamp = None
+
+    return event, timestamp
+
+
+def _format_polymarket_event_section(
+    event: Dict[str, Any],
+    header: str,
+    filter_prefixes: Sequence[str],
+) -> Optional[Tuple[List[str], Optional[int]]]:
+    """Return formatted lines and timestamp for a Polymarket event."""
+
     markets = event.get("markets") or []
     odds: List[Tuple[str, float]] = []
 
@@ -983,46 +1003,73 @@ def get_polymarket_argentina_election() -> str:
         odds.append((title, probability))
 
     if not odds:
-        return "No hay precios cargados todavía en Polymarket"
+        return None
 
     odds.sort(key=lambda item: item[1], reverse=True)
 
     filtered_odds: List[Tuple[str, float]] = []
     for title, probability in odds:
         normalized_title = title.strip().upper()
-        if normalized_title.startswith("LLA") or normalized_title.startswith("UP"):
+        if any(normalized_title.startswith(prefix.upper()) for prefix in filter_prefixes):
             filtered_odds.append((title, probability))
 
-    if filtered_odds:
-        odds_to_display = filtered_odds
-    else:
-        odds_to_display = odds
+    odds_to_display = filtered_odds or odds
 
-    lines = [
-        "Polymarket - ¿Quién gana más bancas en Diputados 2025?",
-        "",
-    ]
+    lines = [header, ""]
 
     for title, probability in odds_to_display:
         decimals = 2 if probability < 10 else 1
         lines.append(f"- {title}: {fmt_num(probability, decimals)}%")
 
-    timestamp = latest_stream_timestamp or response.get("timestamp")
-    if isinstance(timestamp, int):
-        updated_at_utc = datetime.fromtimestamp(timestamp, timezone.utc)
-        updated_at_ba = updated_at_utc.astimezone(BA_TZ)
-        lines.extend(
-            [
-                "",
-                f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
-            ]
-        )
+    return lines, latest_stream_timestamp
 
-    lines.append(
-        "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election"
-    )
 
-    return "\n".join(lines)
+def get_polymarket_argentina_election() -> str:
+    """Return Polymarket probabilities for Argentina's 2025 deputies election."""
+
+    sections: List[str] = []
+
+    for slug, header, url in [
+        (
+            POLYMARKET_ARGENTINA_ELECTION_SLUG,
+            "Polymarket - ¿Quién gana más bancas en Diputados 2025?",
+            "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election",
+        ),
+        (
+            POLYMARKET_ARGENTINA_SEATS_AFTER_SLUG,
+            "Polymarket - ¿Quién queda con más bancas después de Diputados 2025?",
+            "https://polymarket.com/event/which-party-holds-the-most-seats-after-argentina-deputies-election",
+        ),
+    ]:
+        fetched_event = _fetch_polymarket_event(slug)
+        if not fetched_event:
+            continue
+
+        event, response_timestamp = fetched_event
+        formatted = _format_polymarket_event_section(event, header, ("LLA", "UP"))
+        if not formatted:
+            continue
+
+        lines, latest_stream_timestamp = formatted
+
+        timestamp = latest_stream_timestamp or response_timestamp
+        if isinstance(timestamp, int):
+            updated_at_utc = datetime.fromtimestamp(timestamp, timezone.utc)
+            updated_at_ba = updated_at_utc.astimezone(BA_TZ)
+            lines.extend(
+                [
+                    "",
+                    f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
+                ]
+            )
+
+        lines.append(url)
+        sections.append("\n".join(lines))
+
+    if sections:
+        return "\n\n".join(sections)
+
+    return "No pude traer las probabilidades desde Polymarket"
 
 
 def get_btc_price(convert_to: str = "USD") -> Optional[float]:
