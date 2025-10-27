@@ -1037,7 +1037,7 @@ def get_polymarket_argentina_election() -> str:
         ),
         (
             POLYMARKET_ARGENTINA_SEATS_AFTER_SLUG,
-            "Polymarket - Which party holds the most seats after Argentina Deputies Election?",
+            "Polymarket - ¿Quién queda con más bancas después de Diputados 2025?",
             "https://polymarket.com/event/which-party-holds-the-most-seats-after-argentina-deputies-election",
         ),
     ]:
