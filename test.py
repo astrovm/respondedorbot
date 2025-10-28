@@ -422,6 +422,12 @@ def test_parse_command():
     assert parse_command("/start@bot hello", "@bot") == ("/start", "hello")
 
 
+def test_parse_command_hangul_filler_alias():
+    command, args = parse_command("/ㅤ pregunta", "@bot")
+    assert command == "/ask"
+    assert args == "pregunta"
+
+
 def test_format_user_message():
     # Test with username
     msg = {"from": {"first_name": "John", "username": "john123"}}

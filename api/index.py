@@ -4381,6 +4381,12 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     split_message = message_text.split(" ", 1)
     command = split_message[0].lower().replace(bot_name, "")
 
+    # Normalize Hangul filler alias to /ask
+    if command.startswith("/"):
+        command_body = command[1:]
+        if command_body and all(char == "\u3164" for char in command_body):
+            command = "/ask"
+
     # Get message text and handle extra spaces
     if len(split_message) > 1:
         message_text = split_message[1].lstrip()  # Remove leading spaces only
