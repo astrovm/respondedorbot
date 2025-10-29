@@ -3407,6 +3407,54 @@ def test_format_bcra_variables_includes_currency_bands():
     assert "15/09/25" in result
 
 
+def test_get_country_risk_summary_fallback():
+    from api.services import bcra as bcra_service
+    import pytest
+
+    original_cached = bcra_service._cached_requests_fn
+    original_redis = bcra_service._redis_factory_fn
+    original_admin = bcra_service._admin_reporter_fn
+    original_history = bcra_service._cache_history_fn
+
+    # Configure the service with a cached_requests implementation that fails,
+    # forcing the direct HTTP fallback path.
+    bcra_service.configure(
+        cached_requests=lambda *args, **kwargs: None,
+        redis_factory=lambda *args, **kwargs: MagicMock(),
+    )
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "weightedSpreadBps": "685.21",
+                "deltas": {"oneDay": "-12.3"},
+                "valuationDate": "2025-10-29T15:34:00Z",
+            }
+
+    mock_get = None
+    try:
+        with patch(
+            "api.services.bcra.requests.get", return_value=DummyResponse()
+        ) as patched_get:
+            mock_get = patched_get
+            summary = bcra_service.get_country_risk_summary()
+    finally:
+        bcra_service._cached_requests_fn = original_cached
+        bcra_service._redis_factory_fn = original_redis
+        bcra_service._admin_reporter_fn = original_admin
+        bcra_service._cache_history_fn = original_history
+
+    assert summary is not None
+    assert summary["value_bps"] == pytest.approx(685.21)
+    assert summary["delta_one_day"] == pytest.approx(-12.3)
+    assert summary["valuation_label"] == "29/10 12:34"
+    mock_get.assert_called_once()
+    assert mock_get.call_args.kwargs.get("verify") is False
+
+
 def test_parse_currency_band_rows_skips_future_dates():
     from api.index import _parse_currency_band_rows
     from datetime import date
