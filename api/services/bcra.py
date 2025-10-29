@@ -1192,20 +1192,27 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             TTL_COUNTRY_RISK,
             verify_ssl=False,
         )
-    except Exception:
+    except Exception as exc:
+        print(f"Error requesting country risk data: {exc}")
         return None
 
     if not response or not isinstance(response, Mapping):
+        print(
+            "Unexpected response while fetching country risk: "
+            f"{type(response).__name__}"
+        )
         return None
 
     payload = response.get("data")
     if not isinstance(payload, Mapping):
+        print("Country risk payload missing or invalid")
         return None
 
     value = payload.get("weightedSpreadBps")
     try:
         value_bps = float(value)
-    except Exception:
+    except Exception as exc:
+        print(f"Invalid country risk value: {value} ({exc})")
         return None
 
     delta_raw = None
@@ -1217,12 +1224,20 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
     if delta_raw is not None:
         try:
             delta_value = float(delta_raw)
-        except Exception:
+        except Exception as exc:
+            print(f"Invalid delta for country risk: {delta_raw} ({exc})")
             delta_value = None
 
     valuation_dt: Optional[datetime] = None
     for key in ("valuationDate", "asOf", "lastDataTickIso"):
-        valuation_dt = _parse_iso_datetime(payload.get(key))
+        try:
+            valuation_dt = _parse_iso_datetime(payload.get(key))
+        except Exception as exc:
+            print(
+                "Error parsing country risk valuation datetime "
+                f"from key '{key}': {exc}"
+            )
+            valuation_dt = None
         if valuation_dt:
             break
 
