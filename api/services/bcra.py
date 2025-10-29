@@ -9,7 +9,7 @@ import unicodedata
 import warnings
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union, cast
 
 import redis
 import requests
@@ -1181,8 +1181,29 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
         return None
 
 
+def _fetch_country_risk_direct() -> Optional[Mapping[str, Any]]:
+    """Fetch country risk directly from BondTerminal bypassing Redis cache."""
+
+    try:
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        resp = requests.get(
+            "https://bondterminal.com/api/riesgo-pais",
+            timeout=5,
+            verify=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, Mapping):
+            return data
+    except Exception as exc:
+        print(f"Fallback request for country risk failed: {exc}")
+    return None
+
+
 def get_country_risk_summary() -> Optional[Dict[str, Any]]:
     """Fetch and normalize Argentine country risk from BondTerminal."""
+
+    response_payload: Optional[Mapping[str, Any]] = None
 
     try:
         response = _call_cached_requests(
@@ -1192,23 +1213,26 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             TTL_COUNTRY_RISK,
             verify_ssl=False,
         )
+        if isinstance(response, Mapping):
+            candidate_payload = response.get("data")
+            if isinstance(candidate_payload, Mapping):
+                response_payload = candidate_payload
+            else:
+                print("Country risk payload missing or invalid")
+        else:
+            print(
+                "Unexpected response while fetching country risk: "
+                f"{type(response).__name__}"
+            )
     except Exception as exc:
         print(f"Error requesting country risk data: {exc}")
-        return None
 
-    if not response or not isinstance(response, Mapping):
-        print(
-            "Unexpected response while fetching country risk: "
-            f"{type(response).__name__}"
-        )
-        return None
+    if response_payload is None:
+        response_payload = _fetch_country_risk_direct()
+        if response_payload is None:
+            return None
 
-    payload = response.get("data")
-    if not isinstance(payload, Mapping):
-        print("Country risk payload missing or invalid")
-        return None
-
-    value = payload.get("weightedSpreadBps")
+    value = response_payload.get("weightedSpreadBps")
     try:
         value_bps = float(value)
     except Exception as exc:
@@ -1216,7 +1240,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
         return None
 
     delta_raw = None
-    deltas = payload.get("deltas")
+    deltas = response_payload.get("deltas")
     if isinstance(deltas, Mapping):
         delta_raw = deltas.get("oneDay")
 
@@ -1231,7 +1255,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
     valuation_dt: Optional[datetime] = None
     for key in ("valuationDate", "asOf", "lastDataTickIso"):
         try:
-            valuation_dt = _parse_iso_datetime(payload.get(key))
+            valuation_dt = _parse_iso_datetime(response_payload.get(key))
         except Exception as exc:
             print(
                 "Error parsing country risk valuation datetime "
