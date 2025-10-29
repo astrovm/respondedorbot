@@ -36,6 +36,7 @@ CacheHistoryFn = Callable[[int, str, redis.Redis], Optional[Dict[str, Any]]]
 
 
 TTL_BCRA = 300  # 5 minutes
+TTL_COUNTRY_RISK = 300  # 5 minutes for BondTerminal endpoint
 TTL_MAYORISTA_MISSING = 300  # 5 minutes sentinel for missing mayorista values
 CACHE_STALE_GRACE_BCRA = 6 * 3600  # allow showing last BCRA data up to 6h stale
 CACHE_STALE_GRACE_BANDS = 3600  # currency bands fall back for 1h
@@ -142,6 +143,7 @@ __all__ = [
     "cache_bcra_variables",
     "cache_currency_band_limits",
     "cache_mayorista_missing",
+    "get_country_risk_summary",
     "calculate_tcrm_100",
     "configure",
     "fetch_currency_band_limits",
@@ -1166,6 +1168,76 @@ def get_latest_itcrm_value_and_date() -> Optional[Tuple[float, str]]:
     return value, date_str
 
 
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BA_TZ)
+    except Exception:
+        return None
+
+
+def get_country_risk_summary() -> Optional[Dict[str, Any]]:
+    """Fetch and normalize Argentine country risk from BondTerminal."""
+
+    try:
+        response = _call_cached_requests(
+            "https://bondterminal.com/api/riesgo-pais",
+            None,
+            None,
+            TTL_COUNTRY_RISK,
+            verify_ssl=False,
+        )
+    except Exception:
+        return None
+
+    if not response or not isinstance(response, Mapping):
+        return None
+
+    payload = response.get("data")
+    if not isinstance(payload, Mapping):
+        return None
+
+    value = payload.get("weightedSpreadBps")
+    try:
+        value_bps = float(value)
+    except Exception:
+        return None
+
+    delta_raw = None
+    deltas = payload.get("deltas")
+    if isinstance(deltas, Mapping):
+        delta_raw = deltas.get("oneDay")
+
+    delta_value: Optional[float] = None
+    if delta_raw is not None:
+        try:
+            delta_value = float(delta_raw)
+        except Exception:
+            delta_value = None
+
+    valuation_dt: Optional[datetime] = None
+    for key in ("valuationDate", "asOf", "lastDataTickIso"):
+        valuation_dt = _parse_iso_datetime(payload.get(key))
+        if valuation_dt:
+            break
+
+    label: Optional[str] = None
+    if valuation_dt:
+        label = valuation_dt.strftime("%d/%m %H:%M")
+
+    return {
+        "value_bps": value_bps,
+        "delta_one_day": delta_value,
+        "valuation_datetime": valuation_dt,
+        "valuation_label": label,
+    }
+
+
 def format_bcra_variables(variables: Dict[str, Any]) -> str:
     """Format BCRA variables for display (robust to naming changes)."""
 
@@ -1256,6 +1328,37 @@ def format_bcra_variables(variables: Dict[str, Any]) -> str:
                 if parsed_dt and (latest_dt is None or parsed_dt > latest_dt):
                     latest_dt = parsed_dt
                 break
+
+    try:
+        country_risk = get_country_risk_summary()
+    except Exception:
+        country_risk = None
+
+    if country_risk:
+        value_bps = country_risk.get("value_bps")
+        if isinstance(value_bps, (int, float)):
+            value_decimals = 1 if abs(value_bps) < 100 else 0
+            value_text = fmt_num(float(value_bps), value_decimals).replace(".", ",")
+            risk_line = f"🇦🇷 Riesgo país: {value_text} bps"
+
+            details: List[str] = []
+            label = country_risk.get("valuation_label")
+            if isinstance(label, str) and label:
+                details.append(label)
+
+            delta_value = country_risk.get("delta_one_day")
+            if isinstance(delta_value, (int, float)):
+                abs_delta = abs(delta_value)
+                if abs_delta >= 0.05:
+                    delta_decimals = 1 if abs_delta < 100 else 0
+                    delta_text = fmt_num(abs_delta, delta_decimals).replace(".", ",")
+                    sign = "+" if delta_value > 0 else "-"
+                    details.append(f"{sign}{delta_text} bps vs ayer")
+
+            if details:
+                risk_line += " (" + " | ".join(details) + ")"
+
+            lines.append(risk_line)
 
     band_limits = get_currency_band_limits()
     if band_limits:
