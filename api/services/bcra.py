@@ -1179,7 +1179,7 @@ def get_cached_tcrm_100(
             set_json(redis_client, current_hour + cache_key, redis_value)
             return value
 
-        if not same_day_ok:
+        if not same_day_ok or skip_mayorista_fetch:
             current_value = None
         elif redis_response is None:
             current_value = compute_and_store()
