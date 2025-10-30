@@ -638,7 +638,18 @@ def get_currency_band_limits(
     effective_fetcher = fetcher or fetch_currency_band_limits
 
     def load_cached(allow_stale: bool) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-        return _get_cached_currency_band_entry(allow_stale=allow_stale)
+        cached, meta = _get_cached_currency_band_entry(allow_stale=allow_stale)
+        if cached:
+            date_raw = cast(
+                Optional[str],
+                cached.get("date_iso") or cached.get("date"),
+            )
+            dt = parse_date_string(date_raw or "") if date_raw else None
+            if dt and dt.date() > datetime.now(BA_TZ).date():
+                meta = {**meta, "is_fresh": False}
+                cached = None
+
+        return cached, meta
 
     return _refresh_with_backoff(
         load_cached=load_cached,

@@ -3196,6 +3196,42 @@ def test_get_currency_band_limits_reuses_stale_after_failure():
     assert second_result == band_data
 
 
+def test_get_currency_band_limits_discards_future_cache():
+    from api.index import get_currency_band_limits
+    from api.services import bcra as bcra_service
+    from datetime import datetime, timedelta
+
+    today = datetime.now(bcra_service.BA_TZ).date()
+    future = today + timedelta(days=1)
+
+    future_cache = {
+        "lower": 975.0,
+        "upper": 1480.0,
+        "date": future.strftime("%d/%m/%y"),
+        "date_iso": future.isoformat(),
+    }
+
+    with patch(
+        "api.services.bcra._get_cached_currency_band_entry",
+        return_value=(future_cache, {"is_fresh": True, "fetched_at": None}),
+    ) as mock_cached, patch("api.index.fetch_currency_band_limits") as mock_fetch, patch(
+        "api.index.config_redis"
+    ) as mock_config_redis:
+        mock_fetch.return_value = {
+            "lower": 940.0,
+            "upper": 1475.0,
+            "date": today.strftime("%d/%m/%y"),
+            "date_iso": today.isoformat(),
+        }
+        mock_config_redis.return_value = MagicMock()
+
+        result = get_currency_band_limits()
+
+    mock_cached.assert_called_once()
+    mock_fetch.assert_called_once()
+    assert result == mock_fetch.return_value
+
+
 def test_handle_transcribe_with_message_no_reply():
     from api.index import handle_transcribe_with_message
 
