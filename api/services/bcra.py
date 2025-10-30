@@ -1098,31 +1098,6 @@ def get_cached_tcrm_100(
 
         redis_client = config()
         redis_response = get_json(redis_client, cache_key)
-        history_data = get_history(hours_ago, cache_key, redis_client)
-
-        if history_data is None and hours_ago:
-            try:
-                history_dt = datetime.now(BA_TZ) - timedelta(hours=hours_ago)
-                history_prefix = history_dt.strftime("%Y-%m-%d-%H")
-                history_key = history_prefix + cache_key
-                existing_slot = redis_client.get(history_key)
-                if not existing_slot:
-                    backfill_value = calculate_tcrm(target_date=history_dt)
-                    if backfill_value is not None:
-                        history_timestamp = int(
-                            history_dt.replace(
-                                minute=0, second=0, microsecond=0
-                            ).timestamp()
-                        )
-                        history_data = {
-                            "timestamp": history_timestamp,
-                            "data": backfill_value,
-                        }
-                        set_json(redis_client, history_key, history_data)
-            except Exception:
-                history_data = None
-
-        history_value = history_data["data"] if history_data else None
         timestamp = int(time.time())
 
         same_day_ok = False
@@ -1163,6 +1138,36 @@ def get_cached_tcrm_100(
                         skip_mayorista_fetch = True
         except Exception:
             same_day_ok = False
+
+        history_data: Optional[Dict[str, Any]] = None
+        try:
+            history_data = get_history(hours_ago, cache_key, redis_client)
+        except Exception:
+            history_data = None
+
+        if history_data is None and hours_ago and not skip_mayorista_fetch:
+            try:
+                history_dt = datetime.now(BA_TZ) - timedelta(hours=hours_ago)
+                history_prefix = history_dt.strftime("%Y-%m-%d-%H")
+                history_key = history_prefix + cache_key
+                existing_slot = redis_client.get(history_key)
+                if not existing_slot:
+                    backfill_value = calculate_tcrm(target_date=history_dt)
+                    if backfill_value is not None:
+                        history_timestamp = int(
+                            history_dt.replace(
+                                minute=0, second=0, microsecond=0
+                            ).timestamp()
+                        )
+                        history_data = {
+                            "timestamp": history_timestamp,
+                            "data": backfill_value,
+                        }
+                        set_json(redis_client, history_key, history_data)
+            except Exception:
+                history_data = None
+
+        history_value = history_data["data"] if history_data else None
 
         def compute_and_store() -> Optional[float]:
             value = calculate_tcrm()
