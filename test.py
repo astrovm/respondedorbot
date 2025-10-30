@@ -375,6 +375,46 @@ def test_load_bot_config_missing_env(monkeypatch):
         index.load_bot_config()
 
 
+def test_optional_redis_client_success():
+    from api.index import _optional_redis_client
+
+    with patch("api.index.config_redis") as mock_config:
+        sentinel = MagicMock()
+        mock_config.return_value = sentinel
+
+        result = _optional_redis_client(db=2)
+
+    mock_config.assert_called_once_with(db=2)
+    assert result is sentinel
+
+
+def test_optional_redis_client_handles_failure():
+    from api.index import _optional_redis_client
+
+    with patch("api.index.config_redis") as mock_config:
+        mock_config.side_effect = Exception("boom")
+
+        result = _optional_redis_client()
+
+    mock_config.assert_called_once()
+    assert result is None
+
+
+def test_hash_cache_key_is_stable():
+    from api.index import _hash_cache_key
+
+    payload_one = {"a": 1, "b": 2}
+    payload_two = {"b": 2, "a": 1}
+
+    key_one = _hash_cache_key("prefix", payload_one)
+    key_two = _hash_cache_key("prefix", payload_two)
+    other_key = _hash_cache_key("other", payload_one)
+
+    assert key_one == key_two
+    assert key_one.startswith("prefix:")
+    assert key_one != other_key
+
+
 def test_check_rate_limit():
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -2651,6 +2691,41 @@ def test_send_typing_basic():
             params={"chat_id": "12345", "action": "typing"},
             timeout=5,
         )
+
+
+def test_telegram_request_requires_token():
+    from api.index import _telegram_request
+
+    with patch("api.index.environ.get") as mock_env:
+        mock_env.return_value = None
+        payload, error = _telegram_request("sendMessage")
+
+    mock_env.assert_called_once_with("TELEGRAM_TOKEN")
+    assert payload is None
+    assert error == "Telegram token not configured"
+
+
+def test_telegram_request_handles_ok_false():
+    from api.index import _telegram_request
+
+    with patch("api.index.environ.get") as mock_env, patch(
+        "requests.get"
+    ) as mock_get:
+        mock_env.return_value = "token123"
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"ok": False, "description": "bad"}
+        mock_get.return_value = response
+
+        payload, error = _telegram_request("foo")
+
+    mock_get.assert_called_once_with(
+        "https://api.telegram.org/bottoken123/foo",
+        params=None,
+        timeout=5,
+    )
+    assert payload == {"ok": False, "description": "bad"}
+    assert error == "bad"
 
 
 def test_send_msg_basic():
