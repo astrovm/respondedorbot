@@ -10,6 +10,8 @@ from typing import Dict, List, Any
 import os
 from datetime import datetime
 
+from api.config import load_bot_config as load_core_bot_config
+
 try:  # Optional dependency used in manual benchmarking CLI
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - fallback for environments without python-dotenv
@@ -38,21 +40,11 @@ class GordoBenchmark:
 
     def load_bot_config(self) -> Dict[str, Any]:
         """Cargar configuración del bot desde variables de entorno"""
-        system_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
-        trigger_words_str = os.environ.get("BOT_TRIGGER_WORDS")
-
-        if not system_prompt:
-            print("❌ Error: BOT_SYSTEM_PROMPT environment variable is required")
+        try:
+            return load_core_bot_config()
+        except ValueError as exc:
+            print(f"❌ Error: {exc}")
             exit(1)
-
-        if not trigger_words_str:
-            print("❌ Error: BOT_TRIGGER_WORDS environment variable is required")
-            exit(1)
-
-        return {
-            "trigger_words": [word.strip() for word in trigger_words_str.split(",")],
-            "system_prompt": system_prompt,
-        }
 
     def get_system_prompt(self) -> str:
         """Sistema prompt basado en la configuración del bot"""
