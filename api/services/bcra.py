@@ -1103,7 +1103,7 @@ def get_cached_tcrm_100(
         same_day_ok = False
         skip_mayorista_fetch = False
         try:
-            itcrm_cached = redis_get_json(redis_client, "latest_itcrm_details")
+            itcrm_cached = get_json(redis_client, "latest_itcrm_details")
             itcrm_date_str = None
             if isinstance(itcrm_cached, dict) and "date" in itcrm_cached:
                 itcrm_date_str = str(itcrm_cached.get("date", ""))
@@ -1145,7 +1145,7 @@ def get_cached_tcrm_100(
         except Exception:
             history_data = None
 
-        if history_data is None and hours_ago and not skip_mayorista_fetch:
+        if history_data is None and hours_ago:
             try:
                 history_dt = datetime.now(BA_TZ) - timedelta(hours=hours_ago)
                 history_prefix = history_dt.strftime("%Y-%m-%d-%H")
