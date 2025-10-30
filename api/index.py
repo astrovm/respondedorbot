@@ -8,8 +8,6 @@ from openai import OpenAI
 from os import environ
 from PIL import Image
 from requests.exceptions import RequestException, SSLError
-from urllib3.exceptions import InsecureRequestWarning
-import warnings
 from typing import (
     Dict,
     List,
@@ -43,7 +41,7 @@ from decimal import Decimal
 import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
-from functools import lru_cache, wraps
+from functools import lru_cache
 
 from api.utils import (
     fmt_num,
@@ -67,26 +65,6 @@ from api.config import (
     load_bot_config as _config_load_bot_config,
 )
 from api.services import bcra as bcra_service
-from api.services.bcra import (
-    bcra_api_get as _bcra_api_get,
-    bcra_fetch_latest_variables as _bcra_fetch_latest_variables,
-    bcra_get_value_for_date as _bcra_get_value_for_date,
-    bcra_list_variables as _bcra_list_variables,
-    cache_bcra_variables as _bcra_cache_bcra_variables,
-    cache_currency_band_limits as _bcra_cache_currency_band_limits,
-    cache_mayorista_missing as _bcra_cache_mayorista_missing,
-    calculate_tcrm_100 as _bcra_calculate_tcrm_100,
-    fetch_currency_band_limits as _bcra_fetch_currency_band_limits,
-    format_bcra_variables as _bcra_format_bcra_variables,
-    _parse_currency_band_rows as _bcra_parse_currency_band_rows,
-    get_cached_bcra_variables as _bcra_get_cached_bcra_variables,
-    get_cached_tcrm_100 as _bcra_get_cached_tcrm_100,
-    get_currency_band_limits as _bcra_get_currency_band_limits,
-    get_latest_itcrm_details as _bcra_get_latest_itcrm_details,
-    get_latest_itcrm_value as _bcra_get_latest_itcrm_value,
-    get_latest_itcrm_value_and_date as _bcra_get_latest_itcrm_value_and_date,
-    get_or_refresh_bcra_variables as _bcra_get_or_refresh_bcra_variables,
-)
 from api.agent import (
     AGENT_EMPTY_RESPONSE_FALLBACK,
     AGENT_LOOP_FALLBACK_PREFIX,
@@ -120,6 +98,7 @@ from api.agent import (
     save_agent_thought,
     summarize_recent_agent_topics,
 )
+from api.utils.http import request_with_ssl_fallback
 from api.utils.links import (
     can_embed_url as _links_can_embed_url,
     is_social_frontend as _links_is_social_frontend,
@@ -243,31 +222,21 @@ def load_bot_config() -> Dict[str, Any]:
     return _config_load_bot_config()
 
 
-def _ensure_bcra_config() -> None:
-    bcra_service.configure(
-        cached_requests=cached_requests,
-        redis_factory=config_redis,
-        admin_reporter=globals().get("admin_report"),
-        cache_history=get_cache_history,
-    )
-    bcra_service.bcra_api_get = bcra_api_get  # type: ignore[attr-defined]
-    bcra_service.bcra_list_variables = bcra_list_variables  # type: ignore[attr-defined]
-    bcra_service.fetch_currency_band_limits = fetch_currency_band_limits  # type: ignore[attr-defined]
-    bcra_service.cache_bcra_variables = cache_bcra_variables  # type: ignore[attr-defined]
-    bcra_service.cache_currency_band_limits = cache_currency_band_limits  # type: ignore[attr-defined]
-    bcra_service.cache_mayorista_missing = cache_mayorista_missing  # type: ignore[attr-defined]
-    bcra_service.bcra_get_value_for_date = bcra_get_value_for_date  # type: ignore[attr-defined]
-    bcra_service.calculate_tcrm_100 = calculate_tcrm_100  # type: ignore[attr-defined]
-    bcra_service.get_currency_band_limits = get_currency_band_limits  # type: ignore[attr-defined]
-    bcra_service.get_cached_bcra_variables = get_cached_bcra_variables  # type: ignore[attr-defined]
-    bcra_service.get_cached_tcrm_100 = get_cached_tcrm_100  # type: ignore[attr-defined]
-    bcra_service.get_latest_itcrm_details = get_latest_itcrm_details  # type: ignore[attr-defined]
-    bcra_service.get_latest_itcrm_value = get_latest_itcrm_value  # type: ignore[attr-defined]
-    bcra_service.get_latest_itcrm_value_and_date = get_latest_itcrm_value_and_date  # type: ignore[attr-defined]
-    bcra_service.get_or_refresh_bcra_variables = get_or_refresh_bcra_variables  # type: ignore[attr-defined]
-    bcra_service.redis_get_json = redis_get_json  # type: ignore[attr-defined]
-    bcra_service.redis_set_json = redis_set_json  # type: ignore[attr-defined]
-    bcra_service.redis_setex_json = redis_setex_json  # type: ignore[attr-defined]
+def _optional_redis_client(**kwargs: Any) -> Optional[redis.Redis]:
+    """Return a Redis client when available, otherwise ``None``."""
+
+    try:
+        return config_redis(**kwargs)
+    except Exception:
+        return None
+
+
+def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
+    """Return a stable cache key composed of *prefix* and an MD5 hash of *payload*."""
+
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    digest = hashlib.md5(serialized.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
 
 
 configure_agent_memory(redis_factory=config_redis, tz=BA_TZ)
@@ -312,116 +281,83 @@ def _build_cloudflare_headers(
     return headers
 
 
-def _with_bcra_config(func: Callable[..., _T]) -> Callable[..., _T]:
-    @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> _T:
-        _ensure_bcra_config()
-        return func(*args, **kwargs)
-
-    return wrapper
-
-
-@_with_bcra_config
-def bcra_api_get(
-    path: str, params: Optional[Dict[str, Any]] = None, ttl: int = bcra_service.TTL_BCRA
-) -> Optional[Dict[str, Any]]:
-    return _bcra_api_get(path, params, ttl)
-
-
-@_with_bcra_config
-def bcra_list_variables(
-    category: Optional[str] = "Principales Variables",
-) -> Optional[List[Dict[str, Any]]]:
-    return _bcra_list_variables(category)
+bcra_api_get = bcra_service.bcra_api_get
+bcra_list_variables = bcra_service.bcra_list_variables
+bcra_fetch_latest_variables = bcra_service.bcra_fetch_latest_variables
+bcra_get_value_for_date = bcra_service.bcra_get_value_for_date
+cache_bcra_variables = bcra_service.cache_bcra_variables
+cache_currency_band_limits = bcra_service.cache_currency_band_limits
+cache_mayorista_missing = bcra_service.cache_mayorista_missing
+get_cached_bcra_variables = bcra_service.get_cached_bcra_variables
+get_or_refresh_bcra_variables = bcra_service.get_or_refresh_bcra_variables
+get_latest_itcrm_details = bcra_service.get_latest_itcrm_details
+get_latest_itcrm_value = bcra_service.get_latest_itcrm_value
+get_latest_itcrm_value_and_date = bcra_service.get_latest_itcrm_value_and_date
+get_country_risk_summary = bcra_service.get_country_risk_summary
+_parse_currency_band_rows = bcra_service._parse_currency_band_rows
 
 
-@_with_bcra_config
-def bcra_fetch_latest_variables() -> Optional[Dict[str, Dict[str, str]]]:
-    return _bcra_fetch_latest_variables()
-
-
-@_with_bcra_config
-def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
-    return _bcra_get_value_for_date(desc_substr, date_iso)
-
-
-@_with_bcra_config
-def cache_bcra_variables(variables: Dict[str, Any], ttl: int = bcra_service.TTL_BCRA) -> None:
-    _bcra_cache_bcra_variables(variables, ttl)
-
-
-@_with_bcra_config
-def cache_currency_band_limits(data: Dict[str, Any], ttl: int = bcra_service.TTL_BCRA) -> None:
-    _bcra_cache_currency_band_limits(data, ttl)
-
-
-@_with_bcra_config
-def cache_mayorista_missing(
-    date_key: str, redis_client: Optional[redis.Redis] = None
-) -> None:
-    _bcra_cache_mayorista_missing(date_key, redis_client)
-
-
-@_with_bcra_config
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
-    return _bcra_fetch_currency_band_limits()
+    """Proxy fetch helper to allow patching API dependencies in tests."""
+
+    return bcra_service.fetch_currency_band_limits(
+        list_variables_fn=bcra_list_variables,
+        api_get_fn=bcra_api_get,
+    )
 
 
-@_with_bcra_config
 def get_currency_band_limits() -> Optional[Dict[str, Any]]:
-    return _bcra_get_currency_band_limits()
+    """Proxy to BCRA service allowing tests to patch the fetcher."""
+
+    return bcra_service.get_currency_band_limits(fetcher=fetch_currency_band_limits)
 
 
-@_with_bcra_config
-def get_cached_bcra_variables(allow_stale: bool = False) -> Optional[Dict[str, Any]]:
-    return _bcra_get_cached_bcra_variables(allow_stale)
+def format_bcra_variables(variables: Dict[str, Any]) -> str:
+    """Proxy format helper so tests can patch dependent callables."""
+
+    return bcra_service.format_bcra_variables(
+        variables,
+        band_fetcher=get_currency_band_limits,
+        itcrm_getter=get_latest_itcrm_value_and_date,
+        country_risk_getter=get_country_risk_summary,
+    )
 
 
-@_with_bcra_config
-def get_or_refresh_bcra_variables() -> Optional[Dict[str, Any]]:
-    return _bcra_get_or_refresh_bcra_variables()
-
-
-@_with_bcra_config
-def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
-    return _bcra_get_latest_itcrm_details()
-
-
-@_with_bcra_config
-def get_latest_itcrm_value() -> Optional[float]:
-    return _bcra_get_latest_itcrm_value()
-
-
-@_with_bcra_config
-def get_latest_itcrm_value_and_date() -> Optional[Tuple[float, str]]:
-    return _bcra_get_latest_itcrm_value_and_date()
-
-
-@_with_bcra_config
-def get_cached_tcrm_100(
-    hours_ago: int = 24, expiration_time: int = bcra_service.TTL_BCRA
-) -> Tuple[Optional[float], Optional[float]]:
-    return _bcra_get_cached_tcrm_100(hours_ago, expiration_time)
-
-
-@_with_bcra_config
 def calculate_tcrm_100(
     target_date: Optional[Union[str, datetime, date]] = None,
 ) -> Optional[float]:
-    return _bcra_calculate_tcrm_100(target_date)
+    """Proxy calculator ensuring Redis helpers are patchable in tests."""
+
+    return bcra_service.calculate_tcrm_100(
+        target_date,
+        config_redis_fn=config_redis,
+        redis_get_json_fn=redis_get_json,
+        redis_set_json_fn=redis_set_json,
+        redis_setex_json_fn=redis_setex_json,
+        bcra_get_value_for_date_fn=bcra_get_value_for_date,
+        cache_mayorista_missing_fn=cache_mayorista_missing,
+        itcrm_getter_fn=get_latest_itcrm_value_and_date,
+    )
 
 
-@_with_bcra_config
-def format_bcra_variables(variables: Dict[str, Any]) -> str:
-    return _bcra_format_bcra_variables(variables)
+def get_cached_tcrm_100(
+    hours_ago: int = 24, expiration_time: int = 300
+) -> Tuple[Optional[float], Optional[float]]:
+    """Proxy cache helper exposing injectable dependencies for tests."""
 
-
-def _parse_currency_band_rows(
-    rows: Iterable[Iterable[Union[str, float, int, Decimal]]],
-    *,
-    today: Optional[date] = None,
-) -> Optional[Dict[str, Any]]:
-    return _bcra_parse_currency_band_rows(rows, today=today)
+    return bcra_service.get_cached_tcrm_100(
+        hours_ago,
+        expiration_time,
+        config_redis_fn=config_redis,
+        redis_get_json_fn=redis_get_json,
+        redis_set_json_fn=redis_set_json,
+        redis_setex_json_fn=redis_setex_json,
+        calculate_tcrm_fn=calculate_tcrm_100,
+        get_latest_itcrm_fn=get_latest_itcrm_value_and_date,
+        bcra_get_value_for_date_fn=bcra_get_value_for_date,
+        cache_mayorista_missing_fn=cache_mayorista_missing,
+        get_cache_history_fn=get_cache_history,
+    )
 
 
 def get_agent_memory_context() -> Optional[Dict[str, Any]]:
@@ -840,7 +776,7 @@ def cached_requests(
 
 bcra_service.configure(
     cached_requests=cached_requests,
-    redis_factory=config_redis,
+    redis_factory=lambda *args, **kwargs: config_redis(*args, **kwargs),
     cache_history=get_cache_history,
 )
 
@@ -1714,11 +1650,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
 
         replied_msg = message["reply_to_message"]
 
-        audio_file_id: Optional[str] = None
-        if replied_msg.get("voice"):
-            audio_file_id = replied_msg["voice"].get("file_id")
-        elif replied_msg.get("audio"):
-            audio_file_id = replied_msg["audio"].get("file_id")
+        _, photo_file_id, audio_file_id = extract_message_content(replied_msg)
 
         if audio_file_id:
             text, error_code = _transcribe_audio_file(audio_file_id, use_cache=True)
@@ -1729,38 +1661,65 @@ def handle_transcribe_with_message(message: Dict) -> str:
                 return error_message
             return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
 
-        photo_response = _describe_replied_media(
-            replied_msg,
-            media_key="photo",
-            extract_file_id=lambda media: media[-1]["file_id"]
-            if isinstance(media, Sequence)
-            and not isinstance(media, (str, bytes))
-            and media
-            else None,
-            prompt="Describe what you see in this image in detail.",
-            success_prefix="🖼️ Descripción: ",
-            download_error="No pude descargar la imagen",
-            describe_error="No pude describir la imagen, intentá más tarde",
-        )
-        if photo_response:
-            return photo_response
+        if photo_file_id:
+            def _find_media_message(
+                container: Mapping[str, Any], key: str
+            ) -> Optional[Mapping[str, Any]]:
+                current: Optional[Mapping[str, Any]] = container
+                while isinstance(current, Mapping):
+                    value = current.get(key)
+                    if key == "photo":
+                        if (
+                            isinstance(value, Sequence)
+                            and not isinstance(value, (str, bytes))
+                            and value
+                        ):
+                            return current
+                    elif value:
+                        return current
 
-        sticker_response = _describe_replied_media(
-            replied_msg,
-            media_key="sticker",
-            extract_file_id=lambda media: media.get("file_id")
-            if isinstance(media, Mapping)
-            else None,
-            prompt="Describe what you see in this sticker in detail.",
-            success_prefix="🎨 Descripción del sticker: ",
-            download_error="No pude descargar el sticker",
-            describe_error="No pude describir el sticker, intentá más tarde",
-        )
-        if sticker_response:
-            return sticker_response
+                    next_msg = current.get("reply_to_message")
+                    if isinstance(next_msg, Mapping):
+                        current = next_msg
+                    else:
+                        break
+                return None
 
-        else:
-            return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+            photo_source = _find_media_message(replied_msg, "photo")
+            if photo_source:
+                photo_response = _describe_replied_media(
+                    photo_source,
+                    media_key="photo",
+                    extract_file_id=lambda media: media[-1]["file_id"]
+                    if isinstance(media, Sequence)
+                    and not isinstance(media, (str, bytes))
+                    and media
+                    else None,
+                    prompt="Describe what you see in this image in detail.",
+                    success_prefix="🖼️ Descripción: ",
+                    download_error="No pude descargar la imagen",
+                    describe_error="No pude describir la imagen, intentá más tarde",
+                )
+                if photo_response:
+                    return photo_response
+
+            sticker_source = _find_media_message(replied_msg, "sticker")
+            if sticker_source:
+                sticker_response = _describe_replied_media(
+                    sticker_source,
+                    media_key="sticker",
+                    extract_file_id=lambda media: media.get("file_id")
+                    if isinstance(media, Mapping)
+                    else None,
+                    prompt="Describe what you see in this sticker in detail.",
+                    success_prefix="🎨 Descripción del sticker: ",
+                    download_error="No pude descargar el sticker",
+                    describe_error="No pude describir el sticker, intentá más tarde",
+                )
+                if sticker_response:
+                    return sticker_response
+
+        return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
 
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
@@ -1971,8 +1930,9 @@ def _telegram_request(
     timeout: int = 5,
     token: Optional[str] = None,
     log_errors: bool = True,
-) -> Tuple[Optional[requests.Response], Optional[str]]:
-    """Perform a Telegram Bot API request with shared error handling."""
+    expect_json: bool = True,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Perform a Telegram Bot API request and return the parsed JSON payload."""
 
     resolved_token = token or environ.get("TELEGRAM_TOKEN")
     if not resolved_token:
@@ -1997,11 +1957,36 @@ def _telegram_request(
                 timeout=timeout,
             )
         response.raise_for_status()
-        return response, None
+        if not expect_json:
+            return {}, None
     except requests.RequestException as error:
         if log_errors:
             print(f"Telegram request to {endpoint} failed: {error}")
         return None, str(error)
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned invalid JSON: {exc}")
+        return None, str(exc)
+
+    if not isinstance(payload, dict):
+        if log_errors:
+            print(
+                f"Telegram request to {endpoint} returned unexpected payload type"
+            )
+        return None, "unexpected response"
+
+    if not payload.get("ok"):
+        description = str(payload.get("description") or "telegram request failed")
+        if log_errors:
+            print(
+                f"Telegram request to {endpoint} returned ok=false: {description}"
+            )
+        return payload, description
+
+    return payload, None
 
 
 def send_typing(token: str, chat_id: str) -> None:
@@ -2011,6 +1996,7 @@ def send_typing(token: str, chat_id: str) -> None:
         params={"chat_id": chat_id, "action": "typing"},
         token=token,
         log_errors=False,
+        expect_json=False,
     )
 
 
@@ -2035,19 +2021,15 @@ def send_msg(
     if markup is not None:
         payload["reply_markup"] = markup
 
-    response, _ = _telegram_request(
+    payload_response, error = _telegram_request(
         "sendMessage", method="POST", json_payload=payload
     )
-    if not response:
+    if error or not payload_response:
         return None
 
-    try:
-        data = response.json()
-    except (ValueError, KeyError):
-        return None
-
-    if data.get("ok") and isinstance(data.get("result"), dict):
-        message_id = data["result"].get("message_id")
+    result = payload_response.get("result")
+    if isinstance(result, dict):
+        message_id = result.get("message_id")
         if isinstance(message_id, int):
             return message_id
 
@@ -2061,6 +2043,7 @@ def delete_msg(chat_id: str, msg_id: str) -> None:
         method="GET",
         params={"chat_id": chat_id, "message_id": msg_id},
         log_errors=False,
+        expect_json=False,
     )
 
 
@@ -2098,7 +2081,7 @@ def admin_report(
 
 bcra_service.configure(
     cached_requests=cached_requests,
-    redis_factory=config_redis,
+    redis_factory=lambda *args, **kwargs: config_redis(*args, **kwargs),
     admin_reporter=admin_report,
     cache_history=get_cache_history,
 )
@@ -2389,48 +2372,70 @@ def complete_with_providers(
 ) -> Optional[str]:
     """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
 
-    if is_provider_backoff_active("groq"):
-        remaining = int(get_provider_backoff_remaining("groq"))
-        print(f"Groq backoff active ({remaining}s remaining), skipping Groq attempts")
-    else:
-        groq_response = get_groq_ai_response(system_message, messages)
-        if groq_response:
-            print("complete_with_providers: got response from Groq")
-            return groq_response
+    def _run_provider(
+        *,
+        name: str,
+        backoff_key: str,
+        attempt: Callable[[], Optional[str]],
+        skip_reason: Optional[str] = None,
+    ) -> Optional[str]:
+        if skip_reason:
+            print(skip_reason)
+            return None
+
+        if is_provider_backoff_active(backoff_key):
+            remaining = int(get_provider_backoff_remaining(backoff_key))
+            print(
+                f"{name} backoff active ({remaining}s remaining), skipping {name} attempts"
+            )
+            return None
+
+        response = attempt()
+        if response:
+            print(f"complete_with_providers: got response from {name}")
+            return response
+
+        return None
 
     openrouter_api_key = environ.get("OPENROUTER_API_KEY")
-    if openrouter_api_key:
-        if is_provider_backoff_active("openrouter"):
-            remaining = int(get_provider_backoff_remaining("openrouter"))
-            print(
-                "OpenRouter backoff active "
-                f"({remaining}s remaining), skipping OpenRouter attempts"
-            )
-        else:
-            openrouter = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=openrouter_api_key,
-            )
-            response = get_ai_response(
-                openrouter, system_message, messages, provider_name="openrouter"
-            )
-            if response:
-                print("complete_with_providers: got response from OpenRouter")
-                return response
-    else:
-        print("OpenRouter API key not configured")
 
-    if is_provider_backoff_active("cloudflare"):
-        remaining = int(get_provider_backoff_remaining("cloudflare"))
-        print(
-            "Cloudflare backoff active "
-            f"({remaining}s remaining), skipping Cloudflare attempts"
+    providers: Sequence[Tuple[str, str, Callable[[], Optional[str]], Optional[str]]] = [
+        (
+            "Groq",
+            "groq",
+            lambda: get_groq_ai_response(system_message, messages),
+            None,
+        ),
+        (
+            "OpenRouter",
+            "openrouter",
+            lambda: get_ai_response(
+                OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key),
+                system_message,
+                messages,
+                provider_name="openrouter",
+            )
+            if openrouter_api_key
+            else None,
+            None if openrouter_api_key else "OpenRouter API key not configured",
+        ),
+        (
+            "Cloudflare",
+            "cloudflare",
+            lambda: get_cloudflare_ai_response(system_message, messages),
+            None,
+        ),
+    ]
+
+    for name, backoff_key, attempt, skip_reason in providers:
+        result = _run_provider(
+            name=name,
+            backoff_key=backoff_key,
+            attempt=attempt,
+            skip_reason=skip_reason,
         )
-    else:
-        cloudflare_response = get_cloudflare_ai_response(system_message, messages)
-        if cloudflare_response:
-            print("complete_with_providers: got response from Cloudflare AI")
-            return cloudflare_response
+        if result:
+            return result
 
     return None
 
@@ -2724,22 +2729,16 @@ def fetch_url_content(
 
     requested_max = max(WEB_FETCH_MIN_CHARS, min(requested_max, WEB_FETCH_MAX_CHARS))
 
-    cache_key = None
-    redis_client: Optional[redis.Redis] = None
-    try:
-        cache_payload = {"url": normalized, "max": requested_max}
-        cache_key = (
-            "fetch_url:"
-            + hashlib.md5(
-                json.dumps(cache_payload, sort_keys=True).encode()
-            ).hexdigest()
-        )
-        redis_client = config_redis()
-        cached = redis_get_json(redis_client, cache_key)
-        if isinstance(cached, dict):
-            return cached
-    except Exception:
-        redis_client = None
+    cache_payload = {"url": normalized, "max": requested_max}
+    cache_key = _hash_cache_key("fetch_url", cache_payload)
+    redis_client = _optional_redis_client()
+    if redis_client is not None:
+        try:
+            cached = redis_get_json(redis_client, cache_key)
+            if isinstance(cached, dict):
+                return cached
+        except Exception:
+            redis_client = None
 
     headers = {
         "User-Agent": (
@@ -2814,7 +2813,7 @@ def fetch_url_content(
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "max_chars": requested_max,
         }
-        if redis_client and cache_key:
+        if redis_client:
             try:
                 redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
             except Exception:
@@ -2888,7 +2887,7 @@ def fetch_url_content(
         "max_chars": requested_max,
     }
 
-    if redis_client and cache_key:
+    if redis_client:
         try:
             redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
         except Exception:
@@ -2935,19 +2934,16 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
     query = query.strip()
     limit = max(1, min(int(limit), 15))
 
-    # Try cache first
-    cache_key = None
-    redis_client = None
-    try:
-        # Cache key prefix: 'web_search'
-        cache_key = f"web_search:{hashlib.md5(json.dumps({'q': query, 'limit': limit}).encode()).hexdigest()}"
-        redis_client = config_redis()
-        cached = redis_get_json(redis_client, cache_key)
-        if isinstance(cached, list):
-            return cached
-    except Exception:
-        # Cache unavailable or invalid; continue without failing
-        redis_client = None
+    cache_payload = {"q": query, "limit": limit}
+    cache_key = _hash_cache_key("web_search", cache_payload)
+    redis_client = _optional_redis_client()
+    if redis_client is not None:
+        try:
+            cached = redis_get_json(redis_client, cache_key)
+            if isinstance(cached, list):
+                return cached
+        except Exception:
+            redis_client = None
 
     try:
         from ddgs import DDGS
@@ -2982,11 +2978,11 @@ def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
             )
 
         # Store in cache for 5 minutes
-        try:
-            if redis_client and cache_key:
+        if redis_client is not None:
+            try:
                 redis_setex_json(redis_client, cache_key, TTL_WEB_SEARCH, results)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         return results
     except Exception:
@@ -3090,11 +3086,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
     if limit > HACKER_NEWS_MAX_ITEMS:
         limit = HACKER_NEWS_MAX_ITEMS
 
-    redis_client: Optional[redis.Redis]
-    try:
-        redis_client = config_redis()
-    except Exception:
-        redis_client = None
+    redis_client = _optional_redis_client()
 
     cached_items: Optional[List[Dict[str, Any]]] = None
     if redis_client:
@@ -3104,27 +3096,14 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
             if cached_items:
                 return cached_items[:limit]
 
-    response_text: Optional[str] = None
     try:
-        response = requests.get(HACKER_NEWS_RSS_URL, timeout=5)
+        response = request_with_ssl_fallback(HACKER_NEWS_RSS_URL, timeout=5)
         response.raise_for_status()
-        response_text = response.text
-    except SSLError:
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                response = requests.get(HACKER_NEWS_RSS_URL, timeout=5, verify=False)
-                response.raise_for_status()
-                response_text = response.text
-        except Exception as ssl_error:
-            print(f"Error fetching Hacker News RSS (SSL fallback): {ssl_error}")
-            return (cached_items or [])[:limit]
     except RequestException as request_error:
         print(f"Error fetching Hacker News RSS: {request_error}")
         return (cached_items or [])[:limit]
 
-    if not response_text:
-        return (cached_items or [])[:limit]
+    response_text = response.text
 
     try:
         root = ET.fromstring(response_text)
@@ -4672,6 +4651,7 @@ def _answer_callback_query(callback_query_id: str) -> None:
         method="POST",
         json_payload={"callback_query_id": callback_query_id},
         log_errors=False,
+        expect_json=False,
     )
 
 
@@ -4684,18 +4664,10 @@ def edit_message(
         "text": text,
         "reply_markup": reply_markup,
     }
-    response, _ = _telegram_request(
+    payload_response, error = _telegram_request(
         "editMessageText", method="POST", json_payload=payload
     )
-    if not response:
-        return False
-
-    try:
-        data = response.json()
-    except ValueError:
-        return False
-
-    return bool(data.get("ok"))
+    return error is None and bool(payload_response)
 
 
 def handle_callback_query(callback_query: Dict[str, Any]) -> None:
@@ -5246,16 +5218,11 @@ def handle_ai_response(
 
 
 def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
-    response, error = _telegram_request(
+    payload, error = _telegram_request(
         "getWebhookInfo", token=token, log_errors=False
     )
-    if not response:
+    if not payload:
         return {"error": error or "request failed"}
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        return {"error": str(exc)}
 
     result = payload.get("result")
     if isinstance(result, dict):
@@ -5273,10 +5240,10 @@ def set_telegram_webhook(webhook_url: str) -> bool:
         "secret_token": secret_token,
         "max_connections": 8,
     }
-    response, _ = _telegram_request(
-        "setWebhook", params=parameters, token=token
+    payload_response, error = _telegram_request(
+        "setWebhook", params=parameters, token=token, expect_json=False
     )
-    if not response:
+    if error is not None:
         return False
     redis_client = config_redis()
     redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)

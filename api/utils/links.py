@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-import warnings
 from html.parser import HTMLParser
 from typing import Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import requests
-from requests.exceptions import RequestException, SSLError
-from urllib3.exceptions import InsecureRequestWarning
+from requests.exceptions import RequestException
+
+from api.utils.http import request_with_ssl_fallback
 
 ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
@@ -105,16 +105,9 @@ def can_embed_url(url: str) -> bool:
     """Return True when the target page exposes OpenGraph/Twitter metadata."""
     headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
-        response = requests.get(url, allow_redirects=True, timeout=5, headers=headers)
-    except SSLError:
-        try:
-            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-            response = requests.get(
-                url, allow_redirects=True, timeout=5, verify=False, headers=headers
-            )
-        except RequestException as exc:
-            print(f"[EMBED] {url} request failed after SSL error: {exc}")
-            return False
+        response = request_with_ssl_fallback(
+            url, allow_redirects=True, timeout=5, headers=headers
+        )
     except RequestException as exc:
         print(f"[EMBED] {url} request failed: {exc}")
         return False

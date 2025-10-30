@@ -9,6 +9,7 @@ from api.utils.formatting import (
     to_ddmmyy,
 )
 from api.utils.caching import now_utc_iso, update_local_cache, local_cache_get
+from api.utils.http import request_with_ssl_fallback
 from api.utils.links import (
     ALTERNATIVE_FRONTENDS,
     ORIGINAL_FRONTENDS,
@@ -28,6 +29,7 @@ __all__ = [
     "now_utc_iso",
     "update_local_cache",
     "local_cache_get",
+    "request_with_ssl_fallback",
     "ALTERNATIVE_FRONTENDS",
     "ORIGINAL_FRONTENDS",
     "can_embed_url",
