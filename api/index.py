@@ -208,6 +208,7 @@ CHAT_CONFIG_DEFAULTS = {
     "ai_random_replies": True,
     "ai_command_followups": True,
 }
+CHAT_ADMIN_STATUS_TTL = 300
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60  # 3 days
 
@@ -2077,6 +2078,89 @@ def admin_report(
 
     if admin_chat_id:
         send_msg(admin_chat_id, formatted_message)
+
+
+def _chat_admin_cache_key(chat_id: str, user_id: Union[str, int]) -> str:
+    return f"chat_admin:{chat_id}:{user_id}"
+
+
+def is_chat_admin(
+    chat_id: str,
+    user_id: Optional[Union[str, int]],
+    *,
+    redis_client: Optional[redis.Redis] = None,
+) -> bool:
+    """Return ``True`` if *user_id* is an admin of the chat."""
+
+    if not chat_id or user_id is None:
+        return False
+
+    redis_client = redis_client or _optional_redis_client()
+    cache_key = _chat_admin_cache_key(chat_id, user_id)
+
+    if redis_client:
+        cached_value = redis_get_json(redis_client, cache_key)
+        cached_flag = (
+            cached_value.get("is_admin")
+            if isinstance(cached_value, Mapping)
+            else cached_value
+        )
+        if isinstance(cached_flag, bool):
+            return cached_flag
+
+    payload, error = _telegram_request(
+        "getChatMember",
+        method="GET",
+        params={"chat_id": chat_id, "user_id": user_id},
+        log_errors=False,
+    )
+
+    is_admin = False
+    if payload and payload.get("ok"):
+        result = payload.get("result") or {}
+        status = str(result.get("status") or "").lower()
+        is_admin = status in {"administrator", "creator"}
+    else:
+        _log_config_event(
+            "Failed to verify chat admin status",
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "error": error or (payload or {}).get("description"),
+            },
+        )
+
+    if redis_client:
+        redis_setex_json(
+            redis_client,
+            cache_key,
+            CHAT_ADMIN_STATUS_TTL,
+            {"is_admin": is_admin},
+        )
+
+    return is_admin
+
+
+def _report_unauthorized_config_attempt(
+    chat_id: str,
+    user: Mapping[str, Any],
+    *,
+    chat_type: Optional[str],
+    action: str,
+    callback_data: Optional[str] = None,
+) -> None:
+    context: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "user_id": user.get("id"),
+        "username": user.get("username"),
+        "action": action,
+    }
+    if callback_data:
+        context["callback_data"] = callback_data
+
+    _log_config_event("Unauthorized config attempt", context)
+    admin_report("Unauthorized config attempt", None, context)
 
 
 bcra_service.configure(
@@ -4399,6 +4483,10 @@ def _decode_redis_value(value: Any) -> Optional[str]:
     return None
 
 
+def _is_group_chat_type(chat_type: Optional[str]) -> bool:
+    return str(chat_type) in {"group", "supergroup"}
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     config = dict(CHAT_CONFIG_DEFAULTS)
     try:
@@ -4675,6 +4763,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     callback_id = callback_query.get("id")
     message = callback_query.get("message") or {}
     chat = message.get("chat") or {}
+    user = callback_query.get("from") or {}
     chat_id = chat.get("id")
     message_id = message.get("message_id")
 
@@ -4685,6 +4774,24 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
 
     redis_client = config_redis()
     chat_id_str = str(chat_id)
+    chat_type = str(chat.get("type", ""))
+
+    is_config_callback = str(callback_data).startswith("cfg:")
+    if is_config_callback and _is_group_chat_type(chat_type):
+        if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
+            denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+            if callback_id:
+                _answer_callback_query(callback_id)
+            send_msg(chat_id_str, denial_message, str(message_id))
+            _report_unauthorized_config_attempt(
+                chat_id_str,
+                user,
+                chat_type=chat_type,
+                action="callback:config",
+                callback_data=str(callback_data),
+            )
+            return
+
     config = get_chat_config(redis_client, chat_id_str)
 
     try:
@@ -4854,8 +4961,10 @@ def handle_msg(message: Dict) -> str:
     try:
         # Extract multimedia content
         message_text, photo_file_id, audio_file_id = extract_message_content(message)
-        message_id = str(message["message_id"])
-        chat_id = str(message["chat"]["id"])
+        chat = cast(Dict[str, Any], message.get("chat", {}))
+        message_id = str(message.get("message_id"))
+        chat_id = str(chat.get("id"))
+        chat_type = str(chat.get("type", ""))
 
         # Process audio first if present (but not for /transcribe commands)
         if audio_file_id and not (
@@ -5006,6 +5115,23 @@ def handle_msg(message: Dict) -> str:
         response_markup: Optional[Dict[str, Any]] = None
         response_uses_ai = False
         response_command: Optional[str] = None
+
+        if (
+            command == "/config"
+            and _is_group_chat_type(chat_type)
+            and not is_chat_admin(
+                chat_id, message.get("from", {}).get("id"), redis_client=redis_client
+            )
+        ):
+            denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+            send_msg(chat_id, denial_message, message_id)
+            _report_unauthorized_config_attempt(
+                chat_id,
+                message.get("from", {}),
+                chat_type=chat_type,
+                action="command:/config",
+            )
+            return "ok"
 
         if command == "/config":
             response_command = command
