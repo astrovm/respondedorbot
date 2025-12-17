@@ -38,6 +38,7 @@ from api.index import (
     save_bot_message_metadata,
     get_bot_message_metadata,
     CHAT_CONFIG_DEFAULTS,
+    CHAT_ADMIN_STATUS_TTL,
     TTL_MEDIA_CACHE,
     get_rulo,
     is_repetitive_thought,
@@ -48,6 +49,7 @@ from api.index import (
     agent_sections_are_valid,
     get_agent_retry_hint,
     _decode_redis_value,
+    is_chat_admin,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -235,6 +237,38 @@ def test_get_chat_config_legacy_bytes():
 
     assert config["link_mode"] == "delete"
     assert config["ai_random_replies"] is True
+
+
+def test_is_chat_admin_uses_cache():
+    redis_client = MagicMock(spec=redis.Redis)
+
+    with patch("api.index._optional_redis_client", return_value=redis_client), patch(
+        "api.index.redis_get_json", return_value={"is_admin": True}
+    ), patch("api.index._telegram_request") as mock_request:
+        assert is_chat_admin("chat-1", 42) is True
+
+    mock_request.assert_not_called()
+
+
+def test_is_chat_admin_fetches_and_caches():
+    redis_client = MagicMock(spec=redis.Redis)
+
+    with patch("api.index._optional_redis_client", return_value=redis_client), patch(
+        "api.index.redis_get_json", return_value=None
+    ), patch("api.index._telegram_request") as mock_request, patch(
+        "api.index.redis_setex_json"
+    ) as mock_set:
+        mock_request.return_value = (
+            {"ok": True, "result": {"status": "administrator"}},
+            None,
+        )
+
+        assert is_chat_admin("chat-1", 99) is True
+
+    mock_request.assert_called_once()
+    mock_set.assert_called_once_with(
+        redis_client, ANY, CHAT_ADMIN_STATUS_TTL, {"is_admin": True}
+    )
 
 
 def test_get_bot_message_metadata_decodes_bytes():
@@ -1300,6 +1334,80 @@ def test_handle_msg():
         assert handle_msg(message) == "ok"
         mock_send_typing.assert_called_once()
         mock_ask_ai.assert_not_called()
+
+
+def test_handle_msg_blocks_config_for_non_admin_group():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("api.index.is_chat_admin", return_value=False), patch(
+        "api.index._report_unauthorized_config_attempt"
+    ) as mock_report, patch(
+        "api.index.handle_config_command"
+    ) as mock_handle_config, patch(
+        "api.index.get_chat_config", return_value=CHAT_CONFIG_DEFAULTS
+    ), patch(
+        "api.index.should_gordo_respond", return_value=True
+    ), patch(
+        "os.environ.get"
+    ) as mock_env:
+
+        mock_env.return_value = "testbot"
+
+        redis_instance = MagicMock()
+        mock_config_redis.return_value = redis_instance
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "group"},
+            "from": {"id": 5, "first_name": "John"},
+            "text": "/config",
+        }
+
+        assert handle_msg(message) == "ok"
+
+    mock_send_msg.assert_called_once()
+    mock_report.assert_called_once()
+    mock_handle_config.assert_not_called()
+
+
+def test_handle_callback_query_blocks_non_admin():
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.is_chat_admin", return_value=False
+    ) as mock_is_admin, patch(
+        "api.index._report_unauthorized_config_attempt"
+    ) as mock_report, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index._answer_callback_query"
+    ) as mock_answer, patch(
+        "api.index.get_chat_config"
+    ) as mock_get_chat_config, patch(
+        "api.index.set_chat_config"
+    ) as mock_set_chat_config:
+
+        redis_instance = MagicMock()
+        mock_config_redis.return_value = redis_instance
+
+        callback_query = {
+            "id": "cb-1",
+            "from": {"id": 7, "username": "intruder"},
+            "message": {
+                "message_id": 99,
+                "chat": {"id": 456, "type": "group"},
+            },
+            "data": "cfg:link:reply",
+        }
+
+        handle_callback_query(callback_query)
+
+    mock_is_admin.assert_called_once_with("456", 7, redis_client=redis_instance)
+    mock_answer.assert_called_once_with("cb-1")
+    mock_send_msg.assert_called_once()
+    mock_report.assert_called_once()
+    mock_get_chat_config.assert_not_called()
+    mock_set_chat_config.assert_not_called()
 
 
 def test_handle_msg_with_crypto_command():
