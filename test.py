@@ -939,7 +939,7 @@ def test_verify_webhook():
         assert verify_webhook() == False
 
         # Test when missing environment variables
-        mock_env.side_effect = lambda key: None
+        mock_env.side_effect = lambda key, default=None: default
         assert verify_webhook() == False
 
 
@@ -1513,11 +1513,11 @@ def test_handle_msg_with_audio():
         "api.index.download_telegram_file"
     ) as mock_download:
 
-        mock_env.side_effect = lambda key: {
+        mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
             "CLOUDFLARE_API_KEY": "test_key",
             "CLOUDFLARE_ACCOUNT_ID": "test_account",
-        }.get(key)
+        }.get(key, default)
         mock_rate_limit.return_value = True
         mock_download.return_value = b"audio data"
         mock_transcribe.return_value = "transcribed text"
@@ -1550,7 +1550,7 @@ def test_handle_msg_with_transcribe_command():
         "api.index.handle_transcribe_with_message"
     ) as mock_handle_transcribe:
 
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
         mock_rate_limit.return_value = True
         mock_handle_transcribe.return_value = "Transcription result"
 
@@ -1583,7 +1583,7 @@ def test_handle_msg_with_unknown_command():
         "api.index.should_gordo_respond"
     ) as mock_should_respond:
 
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
         mock_rate_limit.return_value = True
         mock_should_respond.return_value = False
 
@@ -1610,7 +1610,7 @@ def test_handle_msg_with_exception():
         "api.index.admin_report"
     ) as mock_admin_report, patch("os.environ.get") as mock_env:
 
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
         mock_config_redis.side_effect = Exception("Redis error")
 
         message = {
@@ -1691,7 +1691,6 @@ def test_set_telegram_webhook():
         "redis.Redis"
     ) as mock_redis, patch("os.environ.get") as mock_env:
 
-        # Fix: lambda to handle both arguments
         mock_env.side_effect = lambda key, default=None: {
             "WEBHOOK_AUTH_KEY": "test_key",
             "TELEGRAM_TOKEN": "test_token",
@@ -2384,7 +2383,7 @@ def test_ask_ai_with_openrouter_success():
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"OPENROUTER_API_KEY": "test_key"}.get(key, default)
 
         messages = [{"role": "user", "content": "hello"}]
         result = ask_ai(messages)
@@ -2416,7 +2415,7 @@ def test_ask_ai_with_cloudflare_fallback():
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"OPENROUTER_API_KEY": "test_key"}.get(key, default)
 
         messages = [{"role": "user", "content": "hello"}]
         result = ask_ai(messages)
@@ -2448,7 +2447,7 @@ def test_ask_ai_with_all_failures():
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"OPENROUTER_API_KEY": "test_key"}.get(key, default)
 
         messages = [{"role": "user", "content": "hello"}]
         result = ask_ai(messages)
@@ -2480,7 +2479,7 @@ def test_ask_ai_with_image():
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
         mock_describe_image.return_value = "A beautiful landscape"
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"OPENROUTER_API_KEY": "test_key"}.get(key, default)
 
         messages = [{"role": "user", "content": "what do you see in this image?"}]
         image_data = b"fake_image_data"
