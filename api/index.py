@@ -5151,12 +5151,18 @@ def handle_msg(message: Dict) -> str:
                         sanitized_message_text,
                         reply_context_text,
                     )
+                    user_context_text = format_user_message(
+                        message,
+                        sanitized_message_text or message_text or "",
+                        reply_context_text,
+                    )
                     response_msg = handle_ai_response(
                         chat_id,
                         handler_func,
                         messages,
                         image_data=resized_image_data if photo_file_id else None,
                         image_file_id=photo_file_id or None,
+                        context_texts=[reply_context_text, user_context_text],
                     )
                     response_uses_ai = True
             else:
@@ -5178,12 +5184,16 @@ def handle_msg(message: Dict) -> str:
                     message_text,
                     reply_context_text,
                 )
+                user_context_text = format_user_message(
+                    message, message_text or "", reply_context_text
+                )
                 response_msg = handle_ai_response(
                     chat_id,
                     ask_ai,
                     messages,
                     image_data=resized_image_data if photo_file_id else None,
                     image_file_id=photo_file_id or None,
+                    context_texts=[reply_context_text, user_context_text],
                 )
                 response_uses_ai = True
 
@@ -5292,12 +5302,48 @@ def clean_duplicate_response(response: str) -> str:
     return final_response
 
 
+def _strip_leading_context(
+    response: str, contexts: Optional[Sequence[Optional[str]]]
+) -> str:
+    """Remove leading echoes of known context strings from an AI response."""
+
+    if not response or not contexts:
+        return response
+
+    trimmed_response = response
+    normalized_contexts = [
+        str(context).strip()
+        for context in contexts
+        if context is not None and str(context).strip()
+    ]
+
+    if not normalized_contexts:
+        return trimmed_response
+
+    changed = True
+    max_passes = len(normalized_contexts)
+    passes = 0
+
+    while changed and passes < max_passes:
+        changed = False
+        passes += 1
+        for context in normalized_contexts:
+            context_lower = context.lower()
+            if trimmed_response.lower().startswith(context_lower):
+                trimmed_response = trimmed_response[len(context) :].lstrip(" \t:-\n")
+                changed = True
+                break
+
+    return trimmed_response
+
+
 def handle_ai_response(
     chat_id: str,
     handler_func: Callable,
     messages: List[Dict],
     image_data: Optional[bytes] = None,
     image_file_id: Optional[str] = None,
+    context_texts: Optional[Sequence[Optional[str]]] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
@@ -5327,8 +5373,13 @@ def handle_ai_response(
     # Strip persona prefixes that sometimes leak into completions
     persona_stripped_response = remove_gordo_prefix(sanitized_response)
 
+    # Remove echoes of the original user/context text
+    context_stripped_response = _strip_leading_context(
+        persona_stripped_response, context_texts
+    )
+
     # Clean any duplicate text
-    cleaned_response = clean_duplicate_response(persona_stripped_response)
+    cleaned_response = clean_duplicate_response(context_stripped_response)
     try:
         print(
             f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'"

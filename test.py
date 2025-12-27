@@ -5435,6 +5435,42 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
     assert result == "no pude generar respuesta, intentá de nuevo"
 
 
+def test_handle_ai_response_strips_context_echo(monkeypatch):
+    """Responses echoing user context should have the echo stripped"""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    def fake_handler(_messages):
+        return "usuario_prueba: che gordo dame timba\nAcá va la respuesta posta"
+
+    result = handle_ai_response(
+        "123",
+        fake_handler,
+        [],
+        context_texts=["usuario_prueba: che gordo dame timba"],
+    )
+
+    assert result == "Acá va la respuesta posta"
+
+
+def test_handle_ai_response_strips_formatted_user_prefix(monkeypatch):
+    """Responses echoing formatted user name should be stripped"""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    def fake_handler(_messages):
+        return "Usuario X (usuariox): respuesta final"
+
+    result = handle_ai_response(
+        "123",
+        fake_handler,
+        [],
+        context_texts=["Usuario X (usuariox): che gordo dame timba", "Usuario X (usuariox):"],
+    )
+
+    assert result == "respuesta final"
+
+
 # Tests for complete_with_providers function
 def test_complete_with_providers_groq_success():
     """Test complete_with_providers when Groq succeeds"""
