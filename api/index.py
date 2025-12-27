@@ -4882,16 +4882,25 @@ def get_bot_message_metadata(
     return None
 
 
-def _format_user_identity(user: Mapping[str, Any]) -> str:
-    """Build a display name for a Telegram user"""
+def _format_user_identity(user: Optional[Mapping[str, Any]]) -> str:
+    """Build a display name for a Telegram user with sensible fallbacks."""
 
-    first_name = user.get("first_name", "") if user else ""
-    username = user.get("username", "") if user else ""
+    if not user:
+        return "usuario"
 
-    first_name = "" if first_name is None else str(first_name)
-    username = "" if username is None else str(username)
+    first_name = str(user.get("first_name") or "").strip()
+    username = str(user.get("username") or "").strip()
 
-    return f"{first_name}" + (f" ({username})" if username else "")
+    if first_name and username:
+        return f"{first_name} ({username})"
+
+    if first_name:
+        return first_name
+
+    if username:
+        return username
+
+    return "usuario"
 
 
 def _describe_replied_message(reply_msg: Mapping[str, Any]) -> Optional[str]:

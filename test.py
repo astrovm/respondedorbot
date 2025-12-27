@@ -50,6 +50,7 @@ from api.index import (
     get_agent_retry_hint,
     _decode_redis_value,
     is_chat_admin,
+    _format_user_identity,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -237,6 +238,19 @@ def test_get_chat_config_legacy_bytes():
 
     assert config["link_mode"] == "delete"
     assert config["ai_random_replies"] is True
+
+
+def test_format_user_identity_prioritizes_first_name_and_username():
+    user = {"first_name": "Gonza", "username": "gonza123"}
+    assert _format_user_identity(user) == "Gonza (gonza123)"
+
+
+def test_format_user_identity_handles_missing_fields():
+    assert _format_user_identity({"first_name": "Gonza"}) == "Gonza"
+    assert _format_user_identity({"username": "gonza123"}) == "gonza123"
+    assert _format_user_identity({"first_name": None, "username": ""}) == "usuario"
+    assert _format_user_identity({}) == "usuario"
+    assert _format_user_identity(None) == "usuario"
 
 
 def test_is_chat_admin_uses_cache():
@@ -1866,11 +1880,11 @@ def test_extract_message_text_edge_cases():
 def test_format_user_message_edge_cases():
     # Test with minimal user info
     msg = {"from": {"first_name": ""}}
-    assert format_user_message(msg, "hello") == ": hello"
+    assert format_user_message(msg, "hello") == "usuario: hello"
 
     # Test with None values
     msg = {"from": {"first_name": None, "username": None}}
-    assert format_user_message(msg, "hello") == ": hello"
+    assert format_user_message(msg, "hello") == "usuario: hello"
 
     # Test with special characters in names
     msg = {"from": {"first_name": "John<>&", "username": "user!@#"}}
@@ -2176,7 +2190,7 @@ def test_format_user_message_complex_cases():
 
     # Test with missing fields
     msg = {"from": {}}
-    assert format_user_message(msg, "Test message") == ": Test message"
+    assert format_user_message(msg, "Test message") == "usuario: Test message"
 
     # Test with additional fields that should be ignored
     msg = {
