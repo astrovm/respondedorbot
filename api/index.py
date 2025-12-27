@@ -4965,6 +4965,7 @@ def handle_msg(message: Dict) -> str:
         message_id = str(message.get("message_id"))
         chat_id = str(chat.get("id"))
         chat_type = str(chat.get("type", ""))
+        user_identity = _format_user_identity(message.get("from", {})).strip()
 
         # Process audio first if present (but not for /transcribe commands)
         if audio_file_id and not (
@@ -5158,6 +5159,7 @@ def handle_msg(message: Dict) -> str:
                         image_data=resized_image_data if photo_file_id else None,
                         image_file_id=photo_file_id or None,
                         context_texts=[reply_context_text],
+                        user_identity=user_identity,
                     )
                     response_uses_ai = True
             else:
@@ -5186,6 +5188,7 @@ def handle_msg(message: Dict) -> str:
                     image_data=resized_image_data if photo_file_id else None,
                     image_file_id=photo_file_id or None,
                     context_texts=[reply_context_text],
+                    user_identity=user_identity,
                 )
                 response_uses_ai = True
 
@@ -5329,6 +5332,22 @@ def _strip_leading_context(
     return trimmed_response
 
 
+def _strip_user_identity_prefix(response: str, user_identity: Optional[str]) -> str:
+    """Remove a leading '<user>:' prefix that sometimes leaks into completions."""
+
+    if not response or not user_identity:
+        return response
+
+    normalized_identity = str(user_identity).strip()
+    if not normalized_identity:
+        return response
+
+    pattern = re.compile(
+        rf"^\s*{re.escape(normalized_identity)}\s*:\s*", flags=re.IGNORECASE
+    )
+    return pattern.sub("", response, count=1).lstrip()
+
+
 def handle_ai_response(
     chat_id: str,
     handler_func: Callable,
@@ -5336,6 +5355,7 @@ def handle_ai_response(
     image_data: Optional[bytes] = None,
     image_file_id: Optional[str] = None,
     context_texts: Optional[Sequence[Optional[str]]] = None,
+    user_identity: Optional[str] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
@@ -5370,8 +5390,13 @@ def handle_ai_response(
         persona_stripped_response, context_texts
     )
 
+    # Remove leading user prefixes like "nombre (alias):"
+    prefix_stripped_response = _strip_user_identity_prefix(
+        context_stripped_response, user_identity
+    )
+
     # Clean any duplicate text
-    cleaned_response = clean_duplicate_response(context_stripped_response)
+    cleaned_response = clean_duplicate_response(prefix_stripped_response)
     try:
         print(
             f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'"
