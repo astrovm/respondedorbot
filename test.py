@@ -5453,6 +5453,21 @@ def test_handle_ai_response_strips_context_echo(monkeypatch):
     assert result == "Acá va la respuesta posta"
 
 
+def test_handle_ai_response_strips_user_identity_prefix(monkeypatch):
+    """Responses should not repeat the calling user's identity as a prefix"""
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    def fake_handler(_messages):
+        return "Test User (handle123): acá está la posta"
+
+    result = handle_ai_response(
+        "123", fake_handler, [], user_identity="Test User (handle123)"
+    )
+
+    assert result == "acá está la posta"
+
+
 # Tests for complete_with_providers function
 def test_complete_with_providers_groq_success():
     """Test complete_with_providers when Groq succeeds"""
