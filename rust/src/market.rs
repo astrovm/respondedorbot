@@ -275,36 +275,7 @@ pub async fn get_devo(
     let oficial = data["oficial"]["price"].as_f64().unwrap_or(0.0);
     let tarjeta = data["tarjeta"]["price"].as_f64().unwrap_or(0.0);
 
-    let profit = -(fee * usdt + oficial - usdt) / tarjeta;
-
-    let mut msg = format!(
-        "Profit: {:.2}%\n\nFee: {:.2}%\nOficial: {}\nUSDT: {}\nTarjeta: {}",
-        profit * 100.0,
-        fee * 100.0,
-        trim_float(oficial, 2),
-        trim_float(usdt, 2),
-        trim_float(tarjeta, 2)
-    );
-
-    if compra > 0.0 {
-        let compra_ars = compra * tarjeta;
-        let compra_usdt = compra_ars / usdt;
-        let ganancia_ars = compra_ars * profit;
-        let ganancia_usdt = ganancia_ars / usdt;
-        msg = format!(
-            "{} USD Tarjeta = {} ARS = {} USDT\nGanarias {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
-            trim_float(compra, 2),
-            trim_float(compra_ars, 2),
-            trim_float(compra_usdt, 2),
-            trim_float(ganancia_ars, 2),
-            trim_float(ganancia_usdt, 2),
-            trim_float(compra_ars + ganancia_ars, 2),
-            trim_float(compra_usdt + ganancia_usdt, 2),
-            msg
-        );
-    }
-
-    msg
+    compute_devo_message(fee, compra, usdt, oficial, tarjeta)
 }
 
 pub async fn get_rulo(
@@ -338,40 +309,17 @@ pub async fn get_rulo(
         return "No pude conseguir el oficial para armar el rulo".to_string();
     }
 
-    let oficial_cost_ars = oficial_price * usd_amount;
-    let base_usd = format_local_currency(usd_amount, 0);
-    let base_ars = format_local_currency(oficial_cost_ars, 2);
-
-    let mut lines = vec![
-        format!(
-            "Rulos desde Oficial (precio oficial: {} ARS/USD)",
-            format_local_currency(oficial_price, 2)
-        ),
-        format!("Inversión base: {} USD → {} ARS", base_usd, base_ars),
-        "".to_string(),
-    ];
-
-    let mep_price = safe_float(data.get("mep").and_then(|v| v.get("al30")).and_then(|v| v.get("ci")).and_then(|v| v.get("price")));
-    if mep_price > 0.0 {
-        let mep_final = mep_price * usd_amount;
-        let mep_profit = mep_final - oficial_cost_ars;
-        let extra = vec![
-            format!("Resultado: {} USD → {} ARS", base_usd, format_local_currency(mep_final, 2)),
-            format!("Ganancia: {} ARS", format_local_signed(mep_profit, 2)),
-        ];
-        lines.push(format_spread_line("MEP (AL30 CI)", mep_price, oficial_price, &extra));
-    }
-
-    let blue_price = safe_float(data.get("blue").and_then(|v| v.get("bid")).or_else(|| data.get("blue").and_then(|v| v.get("price"))));
-    if blue_price > 0.0 {
-        let blue_final = blue_price * usd_amount;
-        let blue_profit = blue_final - oficial_cost_ars;
-        let extra = vec![
-            format!("Resultado: {} USD → {} ARS", base_usd, format_local_currency(blue_final, 2)),
-            format!("Ganancia: {} ARS", format_local_signed(blue_profit, 2)),
-        ];
-        lines.push(format_spread_line("Blue", blue_price, oficial_price, &extra));
-    }
+    let mep_price = safe_float(
+        data.get("mep")
+            .and_then(|v| v.get("al30"))
+            .and_then(|v| v.get("ci"))
+            .and_then(|v| v.get("price")),
+    );
+    let blue_price = safe_float(
+        data.get("blue")
+            .and_then(|v| v.get("bid"))
+            .or_else(|| data.get("blue").and_then(|v| v.get("price"))),
+    );
 
     let usd_usdt = cached_get_json(
         http,
@@ -431,26 +379,187 @@ pub async fn get_rulo(
         }
     }
 
-    if let (Some(best_usd_to_usdt), Some(best_usdt_to_ars)) = (best_usd_to_usdt, best_usdt_to_ars) {
-        let usd_to_usdt_rate = best_usd_to_usdt.1;
-        let usdt_to_ars_rate = best_usdt_to_ars.1;
-        let usdt_obtained = usd_amount / usd_to_usdt_rate;
-        let ars_obtained = usdt_obtained * usdt_to_ars_rate;
+    let path = match (best_usd_to_usdt, best_usdt_to_ars) {
+        (Some((ex_usd, rate_usd)), Some((ex_ars, rate_ars))) => Some(RuloPath {
+            usd_to_usdt_exchange: ex_usd,
+            usd_to_usdt_rate: rate_usd,
+            usdt_to_ars_exchange: ex_ars,
+            usdt_to_ars_rate: rate_ars,
+        }),
+        _ => None,
+    };
+
+    let lines = build_rulo_lines(usd_amount, oficial_price, mep_price, blue_price, path);
+    if lines.len() <= 2 {
+        "No encontré ningún rulo potable".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn compute_devo_message(
+    fee: f64,
+    compra: f64,
+    usdt: f64,
+    oficial: f64,
+    tarjeta: f64,
+) -> String {
+    let profit = -(fee * usdt + oficial - usdt) / tarjeta;
+
+    let mut msg = format!(
+        "Profit: {:.2}%\n\nFee: {:.2}%\nOficial: {}\nUSDT: {}\nTarjeta: {}",
+        profit * 100.0,
+        fee * 100.0,
+        trim_float(oficial, 2),
+        trim_float(usdt, 2),
+        trim_float(tarjeta, 2)
+    );
+
+    if compra > 0.0 {
+        let compra_ars = compra * tarjeta;
+        let compra_usdt = compra_ars / usdt;
+        let ganancia_ars = compra_ars * profit;
+        let ganancia_usdt = ganancia_ars / usdt;
+        msg = format!(
+            "{} USD Tarjeta = {} ARS = {} USDT\nGanarias {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
+            trim_float(compra, 2),
+            trim_float(compra_ars, 2),
+            trim_float(compra_usdt, 2),
+            trim_float(ganancia_ars, 2),
+            trim_float(ganancia_usdt, 2),
+            trim_float(compra_ars + ganancia_ars, 2),
+            trim_float(compra_usdt + ganancia_usdt, 2),
+            msg
+        );
+    }
+
+    msg
+}
+
+struct RuloPath {
+    usd_to_usdt_exchange: String,
+    usd_to_usdt_rate: f64,
+    usdt_to_ars_exchange: String,
+    usdt_to_ars_rate: f64,
+}
+
+fn build_rulo_lines(
+    usd_amount: f64,
+    oficial_price: f64,
+    mep_price: f64,
+    blue_price: f64,
+    path: Option<RuloPath>,
+) -> Vec<String> {
+    let oficial_cost_ars = oficial_price * usd_amount;
+    let base_usd = format_local_currency(usd_amount, 0);
+    let base_ars = format_local_currency(oficial_cost_ars, 2);
+
+    let mut lines = vec![
+        format!(
+            "Rulos desde Oficial (precio oficial: {} ARS/USD)",
+            format_local_currency(oficial_price, 2)
+        ),
+        format!("Inversión base: {} USD → {} ARS", base_usd, base_ars),
+        "".to_string(),
+    ];
+
+    if mep_price > 0.0 {
+        let mep_final = mep_price * usd_amount;
+        let mep_profit = mep_final - oficial_cost_ars;
+        let extra = vec![
+            format!(
+                "Resultado: {} USD → {} ARS",
+                base_usd,
+                format_local_currency(mep_final, 2)
+            ),
+            format!("Ganancia: {} ARS", format_local_signed(mep_profit, 2)),
+        ];
+        lines.push(format_spread_line(
+            "MEP (AL30 CI)",
+            mep_price,
+            oficial_price,
+            &extra,
+        ));
+    }
+
+    if blue_price > 0.0 {
+        let blue_final = blue_price * usd_amount;
+        let blue_profit = blue_final - oficial_cost_ars;
+        let extra = vec![
+            format!(
+                "Resultado: {} USD → {} ARS",
+                base_usd,
+                format_local_currency(blue_final, 2)
+            ),
+            format!("Ganancia: {} ARS", format_local_signed(blue_profit, 2)),
+        ];
+        lines.push(format_spread_line(
+            "Blue",
+            blue_price,
+            oficial_price,
+            &extra,
+        ));
+    }
+
+    if let Some(path) = path {
+        let usdt_obtained = usd_amount / path.usd_to_usdt_rate;
+        let ars_obtained = usdt_obtained * path.usdt_to_ars_rate;
         let final_price = ars_obtained / usd_amount;
         let profit = ars_obtained - oficial_cost_ars;
         let extra = vec![
-            format!("Tramos: USD→USDT {}, USDT→ARS {}", best_usd_to_usdt.0.to_uppercase(), best_usdt_to_ars.0.to_uppercase()),
-            format!("Resultado: {} USD → {} USDT → {} ARS", base_usd, format_local_currency(usdt_obtained, 2), format_local_currency(ars_obtained, 2)),
+            format!(
+                "Tramos: USD→USDT {}, USDT→ARS {}",
+                path.usd_to_usdt_exchange.to_uppercase(),
+                path.usdt_to_ars_exchange.to_uppercase()
+            ),
+            format!(
+                "Resultado: {} USD → {} USDT → {} ARS",
+                base_usd,
+                format_local_currency(usdt_obtained, 2),
+                format_local_currency(ars_obtained, 2)
+            ),
             format!("Ganancia: {} ARS", format_local_signed(profit, 2)),
         ];
-        lines.push(format_spread_line("USDT", final_price, oficial_price, &extra));
+        lines.push(format_spread_line(
+            "USDT",
+            final_price,
+            oficial_price,
+            &extra,
+        ));
     }
 
-    if lines.len() <= 2 {
-        return "No encontré ningún rulo potable".to_string();
-    }
+    lines
+}
 
-    lines.join("\n")
+fn powerlaw_model(days_since: i64) -> f64 {
+    1.0117e-17 * (days_since as f64).powf(5.82)
+}
+
+fn rainbow_model(days_since: i64) -> f64 {
+    10f64.powf(2.66167155005961 * (days_since as f64).ln() - 17.9183761889864)
+}
+
+fn powerlaw_message(price: f64, value: f64) -> String {
+    let percentage = ((price - value) / value) * 100.0;
+    let percentage_txt = if percentage > 0.0 {
+        format!("{percentage:.2}% caro boludo")
+    } else {
+        format!("{:.2}% regalado gordo", percentage.abs())
+    };
+    format!("segun power law btc deberia estar en {:.2} usd ({})", value, percentage_txt)
+}
+
+fn rainbow_message(price: f64, value: f64) -> String {
+    let percentage = ((price - value) / value) * 100.0;
+    let percentage_txt = if percentage > 0.0 {
+        format!("{percentage:.2}% caro boludo")
+    } else {
+        format!("{:.2}% regalado gordo", percentage.abs())
+    };
+    format!(
+        "segun rainbow chart btc deberia estar en {:.2} usd ({})",
+        value, percentage_txt
+    )
 }
 
 pub async fn powerlaw(
@@ -462,21 +571,14 @@ pub async fn powerlaw(
         .unwrap()
         .with_timezone(&chrono::Utc);
     let days_since = (today - since).num_days();
-    let value = 1.0117e-17 * (days_since as f64).powf(5.82);
+    let value = powerlaw_model(days_since);
 
     let price = get_btc_price(http, redis).await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for power law calculation".to_string();
     }
 
-    let percentage = ((price - value) / value) * 100.0;
-    let percentage_txt = if percentage > 0.0 {
-        format!("{percentage:.2}% caro boludo")
-    } else {
-        format!("{:.2}% regalado gordo", percentage.abs())
-    };
-
-    format!("segun power law btc deberia estar en {:.2} usd ({})", value, percentage_txt)
+    powerlaw_message(price, value)
 }
 
 pub async fn rainbow(
@@ -488,21 +590,14 @@ pub async fn rainbow(
         .unwrap()
         .with_timezone(&chrono::Utc);
     let days_since = (today - since).num_days();
-    let value = 10f64.powf(2.66167155005961 * (days_since as f64).ln() - 17.9183761889864);
+    let value = rainbow_model(days_since);
 
     let price = get_btc_price(http, redis).await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for rainbow calculation".to_string();
     }
 
-    let percentage = ((price - value) / value) * 100.0;
-    let percentage_txt = if percentage > 0.0 {
-        format!("{percentage:.2}% caro boludo")
-    } else {
-        format!("{:.2}% regalado gordo", percentage.abs())
-    };
-
-    format!("segun rainbow chart btc deberia estar en {:.2} usd ({})", value, percentage_txt)
+    rainbow_message(price, value)
 }
 
 pub fn convert_base(msg_text: &str) -> String {
@@ -673,4 +768,53 @@ fn format_spread_line(label: &str, sell_price: f64, oficial_price: f64, details:
         lines.push(format!("  • {detail}"));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_devo_message() {
+        let msg = compute_devo_message(0.05, 0.0, 1000.0, 900.0, 1200.0);
+        assert!(msg.contains("Profit: 4.17%"));
+        assert!(msg.contains("Fee: 5.00%"));
+    }
+
+    #[test]
+    fn test_compute_devo_with_compra() {
+        let msg = compute_devo_message(0.05, 100.0, 1000.0, 900.0, 1200.0);
+        assert!(msg.contains("Ganarias"));
+    }
+
+    #[test]
+    fn test_build_rulo_lines() {
+        let lines = build_rulo_lines(
+            1000.0,
+            1000.0,
+            1100.0,
+            1200.0,
+            Some(RuloPath {
+                usd_to_usdt_exchange: "binance".to_string(),
+                usd_to_usdt_rate: 1.0,
+                usdt_to_ars_exchange: "belo".to_string(),
+                usdt_to_ars_rate: 1300.0,
+            }),
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("USDT"));
+        assert!(joined.contains("Ganancia"));
+    }
+
+    #[test]
+    fn test_powerlaw_message() {
+        let msg = powerlaw_message(120.0, 100.0);
+        assert!(msg.contains("caro"));
+    }
+
+    #[test]
+    fn test_rainbow_message() {
+        let msg = rainbow_message(80.0, 100.0);
+        assert!(msg.contains("regalado"));
+    }
 }

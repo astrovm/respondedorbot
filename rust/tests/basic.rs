@@ -1,4 +1,5 @@
 use respondedorbot::{commands, market, tools};
+use respondedorbot::links;
 
 #[test]
 fn test_parse_command_basic() {
@@ -27,4 +28,20 @@ fn test_format_search_results_empty() {
     let results: Vec<tools::SearchResult> = vec![];
     let formatted = tools::format_search_results("consulta", &results);
     assert!(formatted.contains("No encontré"));
+}
+
+#[tokio::test]
+async fn test_replace_links_twitter() {
+    let text = "mirá esto https://twitter.com/user/status/123";
+    let (out, changed, _) = links::replace_links_with_checker(text, |_| async { true }).await;
+    assert!(changed);
+    assert!(out.contains("fxtwitter.com"));
+}
+
+#[tokio::test]
+async fn test_replace_links_profile_ignored() {
+    let text = "perfil https://twitter.com/usuario";
+    let (out, changed, _) = links::replace_links_with_checker(text, |_| async { true }).await;
+    assert!(!changed);
+    assert!(out.contains("twitter.com/usuario"));
 }

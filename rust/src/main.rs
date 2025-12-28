@@ -21,6 +21,7 @@ mod tools;
 mod weather;
 mod hacker_news;
 mod media;
+mod links;
 mod models;
 
 use crate::models::Update;
@@ -265,6 +266,44 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
     let chat_id = message.chat.id;
     let message_id = message.message_id;
     let text = message.text.clone().unwrap_or_default();
+    let user_id = message.from.as_ref().map(|u| u.id).unwrap_or(0);
+    let username = message
+        .from
+        .as_ref()
+        .and_then(|u| u.username.as_deref())
+        .unwrap_or("");
+    tracing::info!(chat_id, message_id, user_id, username, "message received");
+
+    let chat_config = chat_config::get_chat_config(&state.redis, chat_id).await;
+    if !text.is_empty() && chat_config.link_mode != "off" {
+        let (rewritten, changed, _) = links::replace_links(&state.http, &text).await;
+        if changed {
+            tracing::info!(chat_id, message_id, "link rewrite applied");
+            let reply_to = if chat_config.link_mode == "reply" {
+                Some(message_id)
+            } else {
+                None
+            };
+            let response_id = telegram::send_message(
+                &state.http,
+                token,
+                chat_id,
+                &rewritten,
+                None,
+                reply_to,
+            )
+            .await
+            .ok()
+            .flatten();
+            if let Some(bot_id) = response_id {
+                save_message_to_redis(state, chat_id, format!("bot_{bot_id}"), &rewritten).await;
+            }
+            if chat_config.link_mode == "delete" {
+                let _ = telegram::delete_message(&state.http, token, chat_id, message_id).await;
+            }
+            return Ok(());
+        }
+    }
 
     if rate_limited(state, chat_id).await {
         let _ = telegram::send_message(
@@ -282,6 +321,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
     save_message_to_redis(state, chat_id, format!("user_{message_id}"), &text).await;
 
     if let Some((command, args)) = commands::parse_command(&text, state.bot_username.as_deref()) {
+        tracing::info!(chat_id, message_id, command = %command, "command received");
         if command == "/config" {
             let ctx = config_context(state);
             if let Ok((config_text, keyboard)) =
@@ -360,11 +400,13 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
                 return Ok(());
             }
             "/transcribe" => {
+                tracing::info!(chat_id, message_id, "transcribe command");
                 let reply = handle_transcribe(state, token, &message).await;
                 send_and_track(state, token, chat_id, &reply).await;
                 return Ok(());
             }
             "/ask" | "/pregunta" | "/che" | "/gordo" => {
+                tracing::info!(chat_id, message_id, "ask command");
                 let system_prompt = config::load_bot_config()
                     .map(|cfg| cfg.system_prompt)
                     .unwrap_or_else(|_| "Sos un asistente útil.".to_string());

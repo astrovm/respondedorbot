@@ -153,6 +153,22 @@ pub async fn get_chat_member_status(
     Ok(status)
 }
 
+pub async fn delete_message(
+    http: &Client,
+    token: &str,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<bool, reqwest::Error> {
+    let url = format!("{}/deleteMessage", api_base(token));
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "message_id": message_id,
+    });
+    let response = http.post(url).json(&payload).send().await?;
+    let body = response.json::<serde_json::Value>().await?;
+    Ok(body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
 pub async fn get_file_path(
     http: &Client,
     token: &str,
