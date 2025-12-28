@@ -153,7 +153,7 @@ async fn can_embed_url(http: &reqwest::Client, url: &str) -> bool {
     meta_re.is_match(sample)
 }
 
-fn strip_tracking(url: &str) -> String {
+pub fn strip_tracking(url: &str) -> String {
     if let Ok(parsed) = Url::parse(url) {
         if is_social_frontend(parsed.host_str().unwrap_or("")) {
             let mut clean = parsed.clone();
@@ -164,6 +164,7 @@ fn strip_tracking(url: &str) -> String {
     }
     url.to_string()
 }
+
 
 fn is_twitter_user_profile(url: &str) -> bool {
     let parsed = match Url::parse(url) {

@@ -397,7 +397,7 @@ pub async fn get_rulo(
     }
 }
 
-fn compute_devo_message(
+pub fn compute_devo_message(
     fee: f64,
     compra: f64,
     usdt: f64,
@@ -436,14 +436,14 @@ fn compute_devo_message(
     msg
 }
 
-struct RuloPath {
-    usd_to_usdt_exchange: String,
-    usd_to_usdt_rate: f64,
-    usdt_to_ars_exchange: String,
-    usdt_to_ars_rate: f64,
+pub struct RuloPath {
+    pub usd_to_usdt_exchange: String,
+    pub usd_to_usdt_rate: f64,
+    pub usdt_to_ars_exchange: String,
+    pub usdt_to_ars_rate: f64,
 }
 
-fn build_rulo_lines(
+pub fn build_rulo_lines(
     usd_amount: f64,
     oficial_price: f64,
     mep_price: f64,
@@ -539,7 +539,7 @@ fn rainbow_model(days_since: i64) -> f64 {
     10f64.powf(2.66167155005961 * (days_since as f64).ln() - 17.9183761889864)
 }
 
-fn powerlaw_message(price: f64, value: f64) -> String {
+pub fn powerlaw_message(price: f64, value: f64) -> String {
     let percentage = ((price - value) / value) * 100.0;
     let percentage_txt = if percentage > 0.0 {
         format!("{percentage:.2}% caro boludo")
@@ -549,7 +549,7 @@ fn powerlaw_message(price: f64, value: f64) -> String {
     format!("segun power law btc deberia estar en {:.2} usd ({})", value, percentage_txt)
 }
 
-fn rainbow_message(price: f64, value: f64) -> String {
+pub fn rainbow_message(price: f64, value: f64) -> String {
     let percentage = ((price - value) / value) * 100.0;
     let percentage_txt = if percentage > 0.0 {
         format!("{percentage:.2}% caro boludo")
@@ -812,53 +812,4 @@ fn format_number(value: i64) -> String {
         out.push(*ch);
     }
     out.chars().rev().collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_devo_message() {
-        let msg = compute_devo_message(0.05, 0.0, 1000.0, 900.0, 1200.0);
-        assert!(msg.contains("Profit: 4.17%"));
-        assert!(msg.contains("Fee: 5.00%"));
-    }
-
-    #[test]
-    fn test_compute_devo_with_compra() {
-        let msg = compute_devo_message(0.05, 100.0, 1000.0, 900.0, 1200.0);
-        assert!(msg.contains("Ganarias"));
-    }
-
-    #[test]
-    fn test_build_rulo_lines() {
-        let lines = build_rulo_lines(
-            1000.0,
-            1000.0,
-            1100.0,
-            1200.0,
-            Some(RuloPath {
-                usd_to_usdt_exchange: "binance".to_string(),
-                usd_to_usdt_rate: 1.0,
-                usdt_to_ars_exchange: "belo".to_string(),
-                usdt_to_ars_rate: 1300.0,
-            }),
-        );
-        let joined = lines.join("\n");
-        assert!(joined.contains("USDT"));
-        assert!(joined.contains("Ganancia"));
-    }
-
-    #[test]
-    fn test_powerlaw_message() {
-        let msg = powerlaw_message(120.0, 100.0);
-        assert!(msg.contains("caro"));
-    }
-
-    #[test]
-    fn test_rainbow_message() {
-        let msg = rainbow_message(80.0, 100.0);
-        assert!(msg.contains("regalado"));
-    }
 }

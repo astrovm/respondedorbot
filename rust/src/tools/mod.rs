@@ -273,7 +273,7 @@ async fn set_cached_value(
     Some(())
 }
 
-fn parse_cached_results(value: &serde_json::Value) -> Option<Vec<SearchResult>> {
+pub fn parse_cached_results(value: &serde_json::Value) -> Option<Vec<SearchResult>> {
     let results = value.get("results")?.as_array()?;
     let mut out = Vec::new();
     for item in results {
@@ -295,7 +295,8 @@ fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-fn strip_html(input: &str) -> String {
+
+pub fn strip_html(input: &str) -> String {
     let script_re = Regex::new(r"(?is)<script.*?>.*?</script>").ok();
     let style_re = Regex::new(r"(?is)<style.*?>.*?</style>").ok();
     let tag_re = Regex::new(r"(?is)<[^>]+>").ok();
@@ -312,7 +313,7 @@ fn strip_html(input: &str) -> String {
     decode_html_entities(&text).to_string()
 }
 
-fn extract_title(input: &str) -> String {
+pub fn extract_title(input: &str) -> String {
     let title_re = Regex::new(r"(?is)<title>(.*?)</title>").ok();
     if let Some(re) = title_re {
         if let Some(cap) = re.captures(input) {

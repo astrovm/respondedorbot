@@ -1,5 +1,4 @@
-use respondedorbot::{commands, market, tools};
-use respondedorbot::links;
+use respondedorbot::{commands, links, market, tools};
 
 #[test]
 fn test_parse_command_basic() {

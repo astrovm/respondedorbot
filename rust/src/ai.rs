@@ -67,7 +67,7 @@ pub async fn ask_ai(
     }
 }
 
-fn build_system_message(context: &AiContext) -> String {
+pub fn build_system_message(context: &AiContext) -> String {
     let mut blocks = Vec::new();
     blocks.push(context.system_prompt.clone());
     blocks.push(format!("FECHA ACTUAL:\n{}", context.time_label));
@@ -215,7 +215,7 @@ fn build_messages(system_prompt: &str, messages: &[ChatMessage]) -> Vec<serde_js
     out
 }
 
-fn sanitize_tool_artifacts(text: &str) -> String {
+pub fn sanitize_tool_artifacts(text: &str) -> String {
     let mut output = text.to_string();
     if let Some(pos) = output.find("[TOOL]") {
         output.truncate(pos);

@@ -10,6 +10,7 @@ pub mod http_cache;
 pub mod links;
 pub mod market;
 pub mod media;
+pub mod message_utils;
 pub mod models;
 pub mod polymarket;
 pub mod redis_store;
