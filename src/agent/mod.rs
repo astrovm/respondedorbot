@@ -1120,16 +1120,17 @@ fn find_longest_match(
     let mut best_size = 0;
 
     let mut prev = vec![0usize; b_len + 1];
-    for i in alo..ahi {
+    for (i_offset, a_char) in a[alo..ahi].iter().enumerate() {
+        let i = alo + i_offset;
         let mut current = vec![0usize; b_len + 1];
-        for (offset, j) in (blo..bhi).enumerate() {
-            if a[i] == b[j] {
+        for (offset, b_char) in b[blo..bhi].iter().enumerate() {
+            if a_char == b_char {
                 let size = prev[offset] + 1;
                 current[offset + 1] = size;
                 if size > best_size {
                     best_size = size;
                     best_i = i + 1 - size;
-                    best_j = j + 1 - size;
+                    best_j = blo + offset + 1 - size;
                 }
             }
         }

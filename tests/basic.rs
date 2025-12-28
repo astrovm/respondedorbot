@@ -10,6 +10,31 @@ fn test_parse_command_basic() {
 }
 
 #[test]
+fn test_parse_command_with_username_match() {
+    let result = commands::parse_command("/help@mybot", Some("mybot"));
+    let (cmd, args) = result.expect("command should be parsed for matching bot");
+    assert_eq!(cmd, "/help");
+    assert_eq!(args, "");
+}
+
+#[test]
+fn test_parse_command_ignores_other_bot() {
+    let result = commands::parse_command("/help@otherbot", Some("mybot"));
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_help_text_lists_main_features() {
+    let text = commands::help_text();
+    for cmd in ["/transcribe", "/agent", "/eleccion", "/prices", "/random", "/powerlaw", "/rainbow", "/convertbase"] {
+        assert!(
+            text.contains(cmd),
+            "help text should mention {cmd}"
+        );
+    }
+}
+
+#[test]
 fn test_convert_base_ok() {
     let result = market::convert_base("101, 2, 10");
     assert!(result.contains("101"));
@@ -27,6 +52,12 @@ fn test_select_random_range() {
     let result = commands::select_random("1-3");
     let value: i64 = result.parse().unwrap();
     assert!((1..=3).contains(&value));
+}
+
+#[test]
+fn test_select_random_invalid_hint() {
+    let result = commands::select_random("   ");
+    assert!(result.contains("mandate algo"));
 }
 
 #[test]

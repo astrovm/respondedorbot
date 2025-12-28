@@ -137,6 +137,24 @@ fn test_build_ai_messages_includes_context() {
 }
 
 #[test]
+fn test_build_ai_messages_limits_history() {
+    let msg = base_message();
+    let mut history: Vec<ChatHistoryEntry> = Vec::new();
+    for i in 0..10 {
+        history.push(ChatHistoryEntry {
+            role: "user".to_string(),
+            text: format!("msg{i}"),
+        });
+    }
+
+    let messages = build_ai_messages(&msg, &history, "ultima", None);
+    assert_eq!(messages.len(), 8);
+    assert!(messages.first().unwrap().content.contains("msg3"));
+    assert!(messages.last().unwrap().content.contains("MENSAJE:"));
+    assert!(messages.last().unwrap().content.contains("ultima"));
+}
+
+#[test]
 fn test_should_gordo_respond_block_followups() {
     let mut reply = base_message();
     reply.from = Some(base_user("bot"));
