@@ -474,14 +474,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
         } else if command == "/convertbase" {
             response_msg = Some(market::convert_base(&args));
         } else if command == "/agent" {
-            response_msg = Some(
-                agent::get_agent_memory(&state.redis, 5)
-                    .await
-                    .unwrap_or_else(|| {
-                        "todavía no tengo pensamientos guardados, dejame que labure un toque."
-                            .to_string()
-                    }),
-            );
+            response_msg = Some(agent::show_agent_thoughts(&state.redis).await);
         } else if command == "/transcribe" {
             tracing::info!(chat_id, message_id, "transcribe command");
             response_msg = Some(handle_transcribe(state, token, &message).await);
