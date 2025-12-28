@@ -8,22 +8,25 @@ on:
   pull_request:
 
 jobs:
-  pytest:
+  rust:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
         with:
-          python-version: "3.x"
+          toolchain: stable
+          profile: minimal
+          override: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+        run: sudo apt-get update
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run test suite
-        run: python -m pytest -q test.py
+        run: cargo test
