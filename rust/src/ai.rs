@@ -53,7 +53,10 @@ pub async fn ask_ai(
 
             attempts += 1;
             if attempts >= 3 {
-                return Some(format!("Resultado de herramienta:\n{}", tool_output));
+                return Some(format_tool_fallback(
+                    Some(tool_name),
+                    Some(tool_output),
+                ));
             }
 
             if let Some(next) = complete_with_providers(http, &system_message, &conversation).await
@@ -61,7 +64,10 @@ pub async fn ask_ai(
                 current = next;
                 continue;
             }
-            return Some(format!("Resultado de herramienta:\n{}", tool_output));
+            return Some(format_tool_fallback(
+                Some(tool_name),
+                Some(tool_output),
+            ));
         }
         return Some(current);
     }
@@ -221,4 +227,98 @@ pub fn sanitize_tool_artifacts(text: &str) -> String {
         output.truncate(pos);
     }
     output.trim().to_string()
+}
+
+fn format_tool_fallback(
+    last_tool_name: Option<String>,
+    last_tool_output: Option<String>,
+) -> String {
+    let Some(tool_name) = last_tool_name else {
+        return "tuve un problema usando la herramienta, probá de nuevo más tarde".to_string();
+    };
+    let Some(tool_output) = last_tool_output else {
+        return format!("Resultado de {tool_name}:\n");
+    };
+
+    if tool_name == "web_search" {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&tool_output) {
+            let query = value
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut results = Vec::new();
+            if let Some(items) = value.get("results").and_then(|v| v.as_array()) {
+                for item in items {
+                    let title = item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let url = item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if title.is_empty() || url.is_empty() {
+                        continue;
+                    }
+                    let snippet = item
+                        .get("snippet")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    results.push(tools::SearchResult { title, url, snippet });
+                }
+            }
+            return tools::format_search_results(&query, &results);
+        }
+        return tool_output.chars().take(1500).collect();
+    }
+
+    if tool_name == "fetch_url" {
+        let parsed = serde_json::from_str::<serde_json::Value>(&tool_output).ok();
+        if let Some(data) = parsed {
+            let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let error_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !error_msg.is_empty() {
+                if !url.is_empty() {
+                    return format!("no pude leer {url}: {error_msg}");
+                }
+                return format!("no pude leer la URL: {error_msg}");
+            }
+            let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let content = data
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let truncated_flag = data.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut lines = Vec::new();
+            if !title.is_empty() {
+                lines.push(format!("📄 {title}"));
+            }
+            if !url.is_empty() {
+                lines.push(url.to_string());
+            }
+            if !content.is_empty() {
+                lines.push(String::new());
+                lines.push(content.to_string());
+            }
+            if truncated_flag && !content.is_empty() {
+                lines.push(String::new());
+                lines.push("(texto recortado)".to_string());
+            }
+            let formatted = lines.into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
+            if !formatted.is_empty() {
+                return formatted;
+            }
+            if !url.is_empty() {
+                return format!("leí {url} pero no encontré texto para mostrar");
+            }
+            return "no había texto legible en la página".to_string();
+        }
+        return tool_output.chars().take(1500).collect();
+    }
+
+    format!("Resultado de {tool_name}:\n{}", tool_output.chars().take(1500).collect::<String>())
 }

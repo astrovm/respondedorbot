@@ -1,4 +1,4 @@
-use crate::http_cache::cached_get_json;
+use crate::http_cache::{cached_get_json, cached_get_json_full, CacheOptions};
 use crate::bcra;
 
 const TTL_PRICE: u64 = 300;
@@ -149,13 +149,17 @@ pub async fn get_dollar_rates(
     http: &reqwest::Client,
     redis: &redis::Client,
 ) -> Option<String> {
-    let data = cached_get_json(
+    let data = cached_get_json_full(
         http,
         redis,
         "https://criptoya.com/api/dolar",
         None,
         None,
-        TTL_DOLLAR,
+        CacheOptions {
+            ttl_seconds: TTL_DOLLAR,
+            hourly_cache: true,
+            history_hours_ago: None,
+        },
     )
     .await?;
 

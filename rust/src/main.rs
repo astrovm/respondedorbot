@@ -920,6 +920,33 @@ async fn save_message_to_redis(
     let _: () = redis::AsyncCommands::ltrim(&mut redis, &history_key, 0, 31)
         .await
         .unwrap_or(());
+
+    let history_entries: Vec<String> = redis::AsyncCommands::lrange(
+        &mut redis,
+        &history_key,
+        0,
+        -1,
+    )
+    .await
+    .unwrap_or_default();
+    let mut valid_ids = std::collections::HashSet::new();
+    for item in history_entries {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&item) {
+            if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
+                valid_ids.insert(id.to_string());
+            }
+        }
+    }
+    let current_ids: Vec<String> = redis::AsyncCommands::smembers(&mut redis, &message_ids_key)
+        .await
+        .unwrap_or_default();
+    for id in current_ids {
+        if !valid_ids.contains(&id) {
+            let _: () = redis::AsyncCommands::srem(&mut redis, &message_ids_key, &id)
+                .await
+                .unwrap_or(());
+        }
+    }
 }
 
 async fn admin_report(state: &AppState, message: &str) {
