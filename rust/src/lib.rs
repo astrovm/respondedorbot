@@ -5,6 +5,7 @@ pub mod chat_config;
 pub mod config;
 pub mod commands;
 pub mod hacker_news;
+pub mod http;
 pub mod http_cache;
 pub mod links;
 pub mod market;

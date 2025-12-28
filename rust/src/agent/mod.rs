@@ -111,7 +111,7 @@ Maximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         content: prompt,
     };
 
-    let reply = ai::ask_ai(http, &context, vec![user_message])
+    let reply = ai::ask_ai(http, redis, &context, vec![user_message])
         .await
         .ok_or_else(|| "Autonomous agent execution failed".to_string())?;
 

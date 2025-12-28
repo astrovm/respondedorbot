@@ -17,6 +17,8 @@ pub struct Message {
     pub voice: Option<FileRef>,
     pub audio: Option<FileRef>,
     pub sticker: Option<FileRef>,
+    pub video: Option<FileRef>,
+    pub document: Option<FileRef>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

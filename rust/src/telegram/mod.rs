@@ -74,8 +74,10 @@ pub async fn send_message(
     let mut payload = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
-        "disable_web_page_preview": true,
     });
+    if text.to_lowercase().contains("polymarket.com") {
+        payload["disable_web_page_preview"] = serde_json::Value::from(true);
+    }
     if let Some(markup) = reply_markup {
         payload["reply_markup"] = markup;
     }
@@ -124,11 +126,26 @@ pub async fn edit_message_text(
         "message_id": message_id,
         "text": text,
         "reply_markup": reply_markup,
-        "disable_web_page_preview": true,
     });
     let response = http.post(url).json(&payload).send().await?;
     let body = response.json::<serde_json::Value>().await?;
     Ok(body.get("ok").and_then(|value| value.as_bool()).unwrap_or(false))
+}
+
+pub async fn send_chat_action(
+    http: &Client,
+    token: &str,
+    chat_id: i64,
+    action: &str,
+) -> Result<bool, reqwest::Error> {
+    let url = format!("{}/sendChatAction", api_base(token));
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "action": action,
+    });
+    let response = http.post(url).json(&payload).send().await?;
+    let body = response.json::<serde_json::Value>().await?;
+    Ok(body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
 pub async fn get_chat_member_status(

@@ -14,6 +14,7 @@ mod redis_store;
 mod telegram;
 mod commands;
 mod chat_config;
+mod http;
 mod http_cache;
 mod market;
 mod ai;
@@ -292,6 +293,12 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
     tracing::info!(chat_id, message_id, user_id, username, "message received");
 
     let chat_config = chat_config::get_chat_config(&state.redis, chat_id).await;
+    let user_identity = format_user_identity(message.from.as_ref());
+    let user_identity_opt = if user_identity.trim().is_empty() {
+        None
+    } else {
+        Some(user_identity.as_str())
+    };
 
     let is_transcribe_command = text.trim().to_lowercase().starts_with("/transcribe");
     if !is_transcribe_command {
@@ -434,7 +441,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
             let instance = std::env::var("FRIENDLY_INSTANCE_NAME").unwrap_or_default();
             response_msg = Some(format!("estoy corriendo en {} boludo", instance));
         } else if command == "/search" || command == "/buscar" {
-            let results = tools::web_search(&state.http, &args, 5).await;
+            let results = tools::web_search(&state.http, &state.redis, &args, 5).await;
             response_msg = Some(tools::format_search_results(&args, &results));
         } else if matches!(command.as_str(), "/prices" | "/precio" | "/precios" | "/presio" | "/presios") {
             response_msg = market::get_prices(&state.http, &state.redis, &args).await;
@@ -477,14 +484,16 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
         } else if matches!(command.as_str(), "/ask" | "/pregunta" | "/che" | "/gordo") {
             tracing::info!(chat_id, message_id, "ask command");
             if rate_limited(state, chat_id).await {
-                response_msg = Some("Estás mandando demasiados mensajes, bancá un toque.".to_string());
+                response_msg = Some(handle_rate_limit(state, token, &message).await);
             } else {
                 response_uses_ai = true;
                 response_msg = run_ai_with_context(
                     state,
+                    token,
                     &message,
                     &args,
                     reply_context_text.as_deref(),
+                    user_identity_opt,
                 )
                 .await;
             }
@@ -501,14 +510,16 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
 
         if should_respond {
             if rate_limited(state, chat_id).await {
-                response_msg = Some("Estás mandando demasiados mensajes, bancá un toque.".to_string());
+                response_msg = Some(handle_rate_limit(state, token, &message).await);
             } else {
                 response_uses_ai = true;
                 response_msg = run_ai_with_context(
                     state,
+                    token,
                     &message,
                     &text,
                     reply_context_text.as_deref(),
+                    user_identity_opt,
                 )
                 .await;
             }
@@ -564,9 +575,11 @@ struct ChatHistoryEntry {
 
 async fn run_ai_with_context(
     state: &AppState,
+    token: &str,
     message: &crate::models::Message,
     message_text: &str,
     reply_context: Option<&str>,
+    user_identity: Option<&str>,
 ) -> Option<String> {
     let system_prompt = config::load_bot_config()
         .map(|cfg| cfg.system_prompt)
@@ -590,9 +603,42 @@ async fn run_ai_with_context(
         agent_memory,
     };
 
+    let mut enriched_text = message_text.to_string();
+    if let Some(photo) = message.photo.as_ref().and_then(|list| list.last()) {
+        if let Ok(Some(description)) = media::describe_media_by_id(
+            &state.http,
+            &state.redis,
+            token,
+            &photo.file_id,
+            "Describe what you see in this image in detail.",
+        )
+        .await
+        {
+            let image_context = format!("[Imagen: {}]", description);
+            if !enriched_text.trim().is_empty() {
+                enriched_text.push_str("\n\n");
+            }
+            enriched_text.push_str(&image_context);
+        }
+    }
+
+    if let Some(token) = state.telegram_token.as_deref() {
+        let _ = telegram::send_chat_action(&state.http, token, message.chat.id, "typing").await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(
+        (rand::random::<f64>() * 1000.0) as u64,
+    ))
+    .await;
+
     let history = get_chat_history(&state.redis, message.chat.id, 8).await;
-    let messages = build_ai_messages(message, &history, message_text, reply_context);
-    ai::ask_ai(&state.http, &context, messages).await
+    let messages = build_ai_messages(message, &history, &enriched_text, reply_context);
+    let raw = ai::ask_ai(&state.http, &state.redis, &context, messages).await?;
+    let cleaned = post_process_ai_response(&raw, &[reply_context.map(|s| s.to_string())], user_identity);
+    if cleaned.trim().is_empty() {
+        Some("no pude generar respuesta, intentá de nuevo".to_string())
+    } else {
+        Some(cleaned)
+    }
 }
 
 async fn get_chat_history(
@@ -707,6 +753,107 @@ fn build_ai_messages(
     messages.into_iter().skip(keep_from).collect()
 }
 
+fn post_process_ai_response(
+    raw: &str,
+    contexts: &[Option<String>],
+    user_identity: Option<&str>,
+) -> String {
+    let sanitized = sanitize_tool_artifacts(raw);
+    let no_gordo = remove_gordo_prefix(&sanitized);
+    let context_stripped = strip_leading_context(&no_gordo, contexts);
+    let prefix_stripped = strip_user_identity_prefix(&context_stripped, user_identity);
+    clean_duplicate_response(&prefix_stripped)
+}
+
+fn sanitize_tool_artifacts(text: &str) -> String {
+    if let Some(pos) = text.find("[TOOL]") {
+        return text[..pos].trim().to_string();
+    }
+    text.trim().to_string()
+}
+
+fn remove_gordo_prefix(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let re = Regex::new(r"(?i)^\s*gordo\b\s*:\s*").unwrap();
+    let mut cleaned = Vec::new();
+    for line in text.lines() {
+        cleaned.push(re.replace(line, "").to_string());
+    }
+    cleaned.join("\n").trim().to_string()
+}
+
+fn clean_duplicate_response(response: &str) -> String {
+    if response.trim().is_empty() {
+        return response.to_string();
+    }
+    let mut cleaned_lines: Vec<String> = Vec::new();
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && cleaned_lines.last().map(|v| v.as_str()) != Some(trimmed) {
+            cleaned_lines.push(trimmed.to_string());
+        }
+    }
+    let cleaned = cleaned_lines.join("\n");
+    let mut cleaned_sentences: Vec<String> = Vec::new();
+    for sentence in cleaned.split(". ") {
+        let trimmed = sentence.trim();
+        if !trimmed.is_empty()
+            && cleaned_sentences.last().map(|v| v.as_str()) != Some(trimmed)
+        {
+            cleaned_sentences.push(trimmed.to_string());
+        }
+    }
+    cleaned_sentences.join(". ").replace("..", ".")
+}
+
+fn strip_leading_context(response: &str, contexts: &[Option<String>]) -> String {
+    if response.trim().is_empty() {
+        return response.to_string();
+    }
+    let normalized: Vec<String> = contexts
+        .iter()
+        .filter_map(|c| c.as_ref())
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if normalized.is_empty() {
+        return response.to_string();
+    }
+    let mut trimmed = response.to_string();
+    let mut passes = 0;
+    let max_passes = normalized.len();
+    loop {
+        let mut changed = false;
+        passes += 1;
+        for context in &normalized {
+            if trimmed.to_lowercase().starts_with(&context.to_lowercase()) {
+                trimmed = trimmed[context.len()..].trim_start_matches([' ', '\t', ':', '-', '\n']).to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed || passes >= max_passes {
+            break;
+        }
+    }
+    trimmed
+}
+
+fn strip_user_identity_prefix(response: &str, user_identity: Option<&str>) -> String {
+    let Some(identity) = user_identity else {
+        return response.to_string();
+    };
+    let identity = identity.trim();
+    if identity.is_empty() {
+        return response.to_string();
+    }
+    let pattern = format!(r"(?i)^\s*{}\s*:\s*", regex::escape(identity));
+    let re = Regex::new(&pattern).unwrap();
+    re.replace(response, "").to_string().trim_start().to_string()
+}
+
 fn format_user_identity(user: Option<&crate::models::User>) -> String {
     let Some(user) = user else {
         return String::new();
@@ -775,6 +922,12 @@ fn describe_replied_message(reply: &crate::models::Message) -> Option<String> {
     }
     if reply.audio.as_ref().is_some() {
         return Some("un archivo de audio".to_string());
+    }
+    if reply.video.as_ref().is_some() {
+        return Some("un video".to_string());
+    }
+    if reply.document.as_ref().is_some() {
+        return Some("un archivo adjunto".to_string());
     }
     None
 }
@@ -1064,6 +1217,42 @@ async fn rate_limited(state: &AppState, chat_id: i64) -> bool {
         chat_config::increment_rate_limit(&state.redis, &chat_key, TTL_RATE_CHAT).await;
 
     global_count > RATE_LIMIT_GLOBAL_MAX || chat_count > RATE_LIMIT_CHAT_MAX
+}
+
+async fn handle_rate_limit(
+    state: &AppState,
+    token: &str,
+    message: &crate::models::Message,
+) -> String {
+    let _ = telegram::send_chat_action(&state.http, token, message.chat.id, "typing").await;
+    tokio::time::sleep(std::time::Duration::from_millis(
+        (rand::random::<f64>() * 1000.0) as u64,
+    ))
+    .await;
+    let name = message
+        .from
+        .as_ref()
+        .map(|u| u.first_name.as_str())
+        .unwrap_or("");
+    gen_random(name)
+}
+
+fn gen_random(name: &str) -> String {
+    let rand_res = rand::random::<bool>();
+    let rand_name = rand::random::<u8>() % 3;
+    let mut msg = if rand_res { "si" } else { "no" }.to_string();
+    match rand_name {
+        1 => {
+            msg = format!("{msg} boludo");
+        }
+        2 => {
+            if !name.trim().is_empty() {
+                msg = format!("{msg} {name}");
+            }
+        }
+        _ => {}
+    }
+    msg
 }
 
 async fn save_message_to_redis(

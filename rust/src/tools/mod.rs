@@ -4,7 +4,14 @@ use serde_json::json;
 use url::Url;
 use urlencoding::decode;
 
-#[derive(Debug, Clone)]
+use crate::redis_store::{redis_get_string, redis_set_string};
+
+const TTL_WEB_SEARCH: u64 = 300;
+const TTL_WEB_FETCH: u64 = 300;
+const WEB_FETCH_MAX_BYTES: usize = 250_000;
+const WEB_FETCH_MAX_CHARS: usize = 4000;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
@@ -24,6 +31,7 @@ pub fn parse_tool_call(text: &str) -> Option<(String, serde_json::Value)> {
 
 pub async fn execute_tool(
     http: &reqwest::Client,
+    redis: &redis::Client,
     name: &str,
     args: &serde_json::Value,
 ) -> String {
@@ -34,7 +42,7 @@ pub async fn execute_tool(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
-            let results = web_search(http, query, limit).await;
+            let results = web_search(http, redis, query, limit).await;
             let payload = json!({
                 "query": query,
                 "results": results.iter().map(|r| {
@@ -49,23 +57,38 @@ pub async fn execute_tool(
         }
         "fetch_url" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let payload = fetch_url(http, url).await;
+            let payload = fetch_url(http, redis, url).await;
             payload.to_string()
         }
         _ => json!({"error": "unknown tool"}).to_string(),
     }
 }
 
-pub async fn web_search(http: &reqwest::Client, query: &str, limit: usize) -> Vec<SearchResult> {
+pub async fn web_search(
+    http: &reqwest::Client,
+    redis: &redis::Client,
+    query: &str,
+    limit: usize,
+) -> Vec<SearchResult> {
     if query.trim().is_empty() {
         return vec![];
     }
+    let cache_key = tool_cache_key("web_search", query);
+    if let Some(cached) = get_cached_value(redis, &cache_key, TTL_WEB_SEARCH).await {
+        if let Some(results) = parse_cached_results(&cached) {
+            return results.into_iter().take(limit).collect();
+        }
+    }
+
     let encoded = urlencoding::encode(query);
     let url = format!("https://duckduckgo.com/html/?q={}", encoded);
 
-    let response = match http.get(url).send().await {
+    let response = match http.get(&url).send().await {
         Ok(resp) => resp,
-        Err(_) => return vec![],
+        Err(_) => match crate::http::get_with_ssl_fallback(&url).await {
+            Ok(resp) => resp,
+            Err(_) => return vec![],
+        },
     };
 
     let body = match response.text().await {
@@ -114,7 +137,8 @@ pub async fn web_search(http: &reqwest::Client, query: &str, limit: usize) -> Ve
         }
     }
 
-    results
+    let _ = set_cached_value(redis, &cache_key, json!({ "query": query, "results": results })).await;
+    results.into_iter().take(limit).collect()
 }
 
 pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
@@ -146,16 +170,28 @@ pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
     lines.join("\n")
 }
 
-pub async fn fetch_url(http: &reqwest::Client, url: &str) -> serde_json::Value {
+pub async fn fetch_url(
+    http: &reqwest::Client,
+    redis: &redis::Client,
+    url: &str,
+) -> serde_json::Value {
     if url.trim().is_empty() {
         return json!({"url": url, "error": "missing url"});
     }
 
+    let cache_key = tool_cache_key("fetch_url", url);
+    if let Some(cached) = get_cached_value(redis, &cache_key, TTL_WEB_FETCH).await {
+        return cached;
+    }
+
     let response = match http.get(url).send().await {
         Ok(resp) => resp,
-        Err(err) => {
-            return json!({"url": url, "error": err.to_string()});
-        }
+        Err(_) => match crate::http::get_with_ssl_fallback(url).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                return json!({"url": url, "error": err.to_string()});
+            }
+        },
     };
 
     let content_type = response
@@ -172,22 +208,91 @@ pub async fn fetch_url(http: &reqwest::Client, url: &str) -> serde_json::Value {
         }
     };
 
+    let mut data = bytes.to_vec();
+    if data.len() > WEB_FETCH_MAX_BYTES {
+        data.truncate(WEB_FETCH_MAX_BYTES);
+    }
+
     let mut text = String::new();
     if content_type.contains("text/") || content_type.contains("html") {
-        text = String::from_utf8_lossy(&bytes).to_string();
+        text = String::from_utf8_lossy(&data).to_string();
     }
 
     let title = extract_title(&text);
     let content = strip_html(&text);
-    let truncated = content.len() > 4000;
-    let content = if truncated { content[..4000].to_string() } else { content };
+    let truncated = content.len() > WEB_FETCH_MAX_CHARS;
+    let content = if truncated {
+        content.chars().take(WEB_FETCH_MAX_CHARS).collect::<String>()
+    } else {
+        content
+    };
 
-    json!({
+    let payload = json!({
         "url": url,
         "title": title,
         "content": content,
         "truncated": truncated,
     })
+    ;
+    let _ = set_cached_value(redis, &cache_key, payload.clone()).await;
+    payload
+}
+
+fn tool_cache_key(prefix: &str, input: &str) -> String {
+    let digest = md5::compute(input.as_bytes());
+    format!("tool:{prefix}:{:x}", digest)
+}
+
+async fn get_cached_value(
+    redis: &redis::Client,
+    key: &str,
+    ttl_seconds: u64,
+) -> Option<serde_json::Value> {
+    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
+    let raw = redis_get_string(&mut conn, key).await.ok().flatten()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let ts = value.get("timestamp").and_then(|v| v.as_i64())?;
+    let now = current_timestamp();
+    if now - ts > ttl_seconds as i64 {
+        return None;
+    }
+    value.get("data").cloned()
+}
+
+async fn set_cached_value(
+    redis: &redis::Client,
+    key: &str,
+    data: serde_json::Value,
+) -> Option<()> {
+    let payload = json!({
+        "timestamp": current_timestamp(),
+        "data": data,
+    });
+    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
+    let _ = redis_set_string(&mut conn, key, &payload.to_string()).await.ok()?;
+    Some(())
+}
+
+fn parse_cached_results(value: &serde_json::Value) -> Option<Vec<SearchResult>> {
+    let results = value.get("results")?.as_array()?;
+    let mut out = Vec::new();
+    for item in results {
+        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let snippet = item.get("snippet").and_then(|v| v.as_str()).map(|s| s.to_string());
+        if !title.is_empty() && !url.is_empty() {
+            out.push(SearchResult { title, url, snippet });
+        }
+    }
+    Some(out)
+}
+
+fn current_timestamp() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn strip_html(input: &str) -> String {
