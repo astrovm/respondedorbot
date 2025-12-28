@@ -17,6 +17,7 @@ mod market;
 mod ai;
 mod agent;
 mod bcra;
+mod polymarket;
 mod tools;
 mod weather;
 mod hacker_news;
@@ -121,11 +122,24 @@ async fn handle_get(
     }
 
     if is_true(&query.update_dollars) {
-        return (StatusCode::NOT_IMPLEMENTED, "Not implemented".to_string());
+        let updated = market::get_dollar_rates(&state.http, &state.redis)
+            .await
+            .is_some();
+        if updated {
+            return (StatusCode::OK, "Dollars updated".to_string());
+        }
+        return (StatusCode::BAD_REQUEST, "Dollars update error".to_string());
     }
 
     if is_true(&query.run_agent) {
-        return (StatusCode::NOT_IMPLEMENTED, "Not implemented".to_string());
+        match agent::run_agent_cycle(&state.http, &state.redis).await {
+            Ok(payload) => return (StatusCode::OK, payload.to_string()),
+            Err(err) => {
+                tracing::error!(error = %err, "run_agent failed");
+                admin_report(&state, "Agent run failed").await;
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Agent run failed".to_string());
+            }
+        }
     }
 
     (StatusCode::OK, "Ok".to_string())
@@ -350,6 +364,12 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
                 send_and_track(state, token, chat_id, &reply).await;
                 return Ok(());
             }
+            "/instance" => {
+                let instance = std::env::var("FRIENDLY_INSTANCE_NAME").unwrap_or_default();
+                let reply = format!("estoy corriendo en {} boludo", instance);
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
             "/search" | "/buscar" => {
                 let results = tools::web_search(&state.http, &args, 5).await;
                 let reply = tools::format_search_results(&args, &results);
@@ -374,6 +394,11 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
                 }
                 return Ok(());
             }
+            "/eleccion" => {
+                let reply = polymarket::get_polymarket_argentina_election(&state.http, &state.redis).await;
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
             "/devo" => {
                 let reply = market::get_devo(&state.http, &state.redis, &args).await;
                 send_and_track(state, token, chat_id, &reply).await;
@@ -381,6 +406,21 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
             }
             "/rulo" => {
                 let reply = market::get_rulo(&state.http, &state.redis).await;
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
+            "/satoshi" | "/sat" | "/sats" => {
+                let reply = market::satoshi(&state.http, &state.redis).await;
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
+            "/random" => {
+                let reply = commands::select_random(&args);
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
+            "/comando" | "/command" => {
+                let reply = commands::convert_to_command(&args);
                 send_and_track(state, token, chat_id, &reply).await;
                 return Ok(());
             }
@@ -396,6 +436,13 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
             }
             "/convertbase" => {
                 let reply = market::convert_base(&args);
+                send_and_track(state, token, chat_id, &reply).await;
+                return Ok(());
+            }
+            "/agent" => {
+                let reply = agent::get_agent_memory(&state.redis, 5)
+                    .await
+                    .unwrap_or_else(|| "todavía no tengo pensamientos guardados, dejame que labure un toque.".to_string());
                 send_and_track(state, token, chat_id, &reply).await;
                 return Ok(());
             }
@@ -438,7 +485,112 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
         }
     }
 
+    if should_gordo_respond(state, &message, &text, &chat_config).await {
+        let system_prompt = config::load_bot_config()
+            .map(|cfg| cfg.system_prompt)
+            .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
+        let time_label = chrono::Local::now().format("%A %d/%m/%Y").to_string();
+        let market_info = market::get_market_context(&state.http, &state.redis).await;
+        let weather_info = weather::get_weather_context(&state.http, &state.redis).await;
+        let hn_items = hacker_news::get_hn_context(&state.http).await;
+        let hn_info = if hn_items.is_empty() {
+            None
+        } else {
+            Some(hacker_news::format_hn_items(&hn_items))
+        };
+        let agent_memory = agent::get_agent_memory(&state.redis, 5).await;
+        let context = ai::AiContext {
+            system_prompt,
+            time_label,
+            market_info,
+            weather_info,
+            hn_info,
+            agent_memory,
+        };
+
+        let mut content = text.clone();
+        if let Some(reply) = message.reply_to_message.as_ref() {
+            if let Some(reply_text) = reply.text.as_ref() {
+                content = format!(
+                    "MENSAJE AL QUE RESPONDE:\n{}\n\nMENSAJE:\n{}",
+                    reply_text, content
+                );
+            }
+        }
+
+        let user_message = ai::ChatMessage {
+            role: "user".to_string(),
+            content,
+        };
+        if let Some(reply) = ai::ask_ai(&state.http, &context, vec![user_message]).await {
+            send_and_track(state, token, chat_id, &reply).await;
+        }
+    }
+
     Ok(())
+}
+
+async fn should_gordo_respond(
+    state: &AppState,
+    message: &crate::models::Message,
+    text: &str,
+    chat_config: &chat_config::ChatConfig,
+) -> bool {
+    let chat_type = message.chat.kind.as_str();
+    let is_private = chat_type == "private";
+
+    let bot_username = state.bot_username.as_deref().unwrap_or("");
+    let bot_name = if bot_username.is_empty() {
+        "".to_string()
+    } else {
+        format!("@{}", bot_username)
+    };
+
+    if let Some(reply) = message.reply_to_message.as_ref() {
+        if let Some(reply_user) = reply.from.as_ref() {
+            if reply_user.username.as_deref() == Some(bot_username) {
+                if let Some(reply_text) = reply.text.as_ref() {
+                    let replacement_domains = [
+                        "fxtwitter.com",
+                        "fixupx.com",
+                        "fxbsky.app",
+                        "kkinstagram.com",
+                        "rxddit.com",
+                        "vxtiktok.com",
+                    ];
+                    if replacement_domains.iter().any(|d| reply_text.contains(d)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    let is_mention = !bot_name.is_empty() && text.to_lowercase().contains(&bot_name);
+    let is_reply = message
+        .reply_to_message
+        .as_ref()
+        .and_then(|reply| reply.from.as_ref())
+        .and_then(|u| u.username.as_deref())
+        == Some(bot_username);
+
+    if is_reply && !chat_config.ai_command_followups {
+        return false;
+    }
+
+    let mut is_trigger = false;
+    if chat_config.ai_random_replies {
+        if let Ok(cfg) = config::load_bot_config() {
+            let message_lower = text.to_lowercase();
+            if cfg.trigger_words.iter().any(|w| message_lower.contains(w)) {
+                if rand::random::<f64>() < 0.1 {
+                    is_trigger = true;
+                }
+            }
+        }
+    }
+
+    is_private || is_mention || is_reply || is_trigger
 }
 
 async fn handle_transcribe(

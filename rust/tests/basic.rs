@@ -24,6 +24,25 @@ fn test_convert_base_invalid() {
 }
 
 #[test]
+fn test_select_random_range() {
+    let result = commands::select_random("1-3");
+    let value: i64 = result.parse().unwrap();
+    assert!((1..=3).contains(&value));
+}
+
+#[test]
+fn test_convert_to_command_basic() {
+    let result = commands::convert_to_command("hola ñandú ñ");
+    assert_eq!(result, "/HOLA_NIANDU_ENIE");
+}
+
+#[test]
+fn test_convert_to_command_emoji() {
+    let result = commands::convert_to_command("😄hello 😄 world");
+    assert!(result.contains("CARA_SONRIENDO_CON_OJOS_SONRIENTES"));
+}
+
+#[test]
 fn test_format_search_results_empty() {
     let results: Vec<tools::SearchResult> = vec![];
     let formatted = tools::format_search_results("consulta", &results);

@@ -217,7 +217,7 @@ pub async fn get_market_context(
     redis: &redis::Client,
 ) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(btc) = get_btc_price(http, redis).await {
+    if let Some(btc) = get_btc_price(http, redis, "USD").await {
         parts.push(format!("BTC: {}", trim_float(btc, 2)));
     }
     if let Some(dollar) = get_dollar_rates(http, redis).await {
@@ -573,7 +573,7 @@ pub async fn powerlaw(
     let days_since = (today - since).num_days();
     let value = powerlaw_model(days_since);
 
-    let price = get_btc_price(http, redis).await.unwrap_or(0.0);
+    let price = get_btc_price(http, redis, "USD").await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for power law calculation".to_string();
     }
@@ -592,7 +592,7 @@ pub async fn rainbow(
     let days_since = (today - since).num_days();
     let value = rainbow_model(days_since);
 
-    let price = get_btc_price(http, redis).await.unwrap_or(0.0);
+    let price = get_btc_price(http, redis, "USD").await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for rainbow calculation".to_string();
     }
@@ -653,11 +653,43 @@ pub fn convert_base(msg_text: &str) -> String {
     )
 }
 
-async fn get_btc_price(http: &reqwest::Client, redis: &redis::Client) -> Option<f64> {
+pub async fn satoshi(
+    http: &reqwest::Client,
+    redis: &redis::Client,
+) -> String {
+    let btc_usd = get_btc_price(http, redis, "USD").await;
+    let btc_ars = get_btc_price(http, redis, "ARS").await;
+
+    let Some(btc_usd) = btc_usd else {
+        return "Error getting BTC USD price".to_string();
+    };
+    let Some(btc_ars) = btc_ars else {
+        return "Error getting BTC ARS price".to_string();
+    };
+
+    let sat_value_usd = btc_usd / 100_000_000.0;
+    let sat_value_ars = btc_ars / 100_000_000.0;
+    let sats_per_dollar = (100_000_000.0 / btc_usd).floor() as i64;
+    let sats_per_peso = 100_000_000.0 / btc_ars;
+
+    format!(
+        "1 satoshi = ${:.8} USD\n1 satoshi = ${:.4} ARS\n\n$1 USD = {} sats\n$1 ARS = {:.3} sats",
+        sat_value_usd,
+        sat_value_ars,
+        format_number(sats_per_dollar),
+        sats_per_peso
+    )
+}
+
+async fn get_btc_price(
+    http: &reqwest::Client,
+    redis: &redis::Client,
+    convert: &str,
+) -> Option<f64> {
     let params = vec![
         ("start", "1".to_string()),
         ("limit", "1".to_string()),
-        ("convert", "USD".to_string()),
+        ("convert", convert.to_string()),
     ];
     let headers = vec![
         (
@@ -676,7 +708,7 @@ async fn get_btc_price(http: &reqwest::Client, redis: &redis::Client) -> Option<
     )
     .await?;
     let first = data.get("data")?.as_array()?.get(0)?.clone();
-    let quote = first.get("quote")?.get("USD")?;
+    let quote = first.get("quote")?.get(convert)?;
     quote.get("price").and_then(|v| v.as_f64())
 }
 
@@ -768,6 +800,18 @@ fn format_spread_line(label: &str, sell_price: f64, oficial_price: f64, details:
         lines.push(format!("  • {detail}"));
     }
     lines.join("\n")
+}
+
+fn format_number(value: i64) -> String {
+    let s = value.to_string().chars().rev().collect::<Vec<_>>();
+    let mut out = String::new();
+    for (i, ch) in s.iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*ch);
+    }
+    out.chars().rev().collect()
 }
 
 #[cfg(test)]
