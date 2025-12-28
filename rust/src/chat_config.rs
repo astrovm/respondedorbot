@@ -275,7 +275,7 @@ fn build_toggle_button(label: &str, enabled: bool, action: &str) -> Value {
     })
 }
 
-async fn is_chat_admin(ctx: &ConfigContext<'_>, chat_id: i64, user_id: i64) -> bool {
+pub async fn is_chat_admin(ctx: &ConfigContext<'_>, chat_id: i64, user_id: i64) -> bool {
     let Some(token) = ctx.token else {
         return false;
     };
@@ -301,7 +301,7 @@ async fn is_chat_admin(ctx: &ConfigContext<'_>, chat_id: i64, user_id: i64) -> b
     is_admin
 }
 
-async fn report_unauthorized(
+pub async fn report_unauthorized(
     ctx: &ConfigContext<'_>,
     chat_id: i64,
     chat_type: &str,

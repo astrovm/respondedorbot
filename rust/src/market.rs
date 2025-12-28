@@ -241,7 +241,7 @@ pub async fn get_devo(
     let text = msg_text.trim();
     if text.contains(',') {
         let parts: Vec<&str> = text.split(',').collect();
-        if let Some(first) = parts.get(0) {
+        if let Some(first) = parts.first() {
             fee = first.trim().parse::<f64>().unwrap_or(0.0) / 100.0;
         }
         if let Some(second) = parts.get(1) {
@@ -707,7 +707,7 @@ async fn get_btc_price(
         TTL_PRICE,
     )
     .await?;
-    let first = data.get("data")?.as_array()?.get(0)?.clone();
+    let first = data.get("data")?.as_array()?.first()?.clone();
     let quote = first.get("quote")?.get(convert)?;
     quote.get("price").and_then(|v| v.as_f64())
 }

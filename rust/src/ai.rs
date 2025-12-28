@@ -117,7 +117,7 @@ async fn openrouter_request(
     let api_key = std::env::var("OPENROUTER_API_KEY").ok()?;
     let url = "https://openrouter.ai/api/v1/chat/completions";
 
-    let models = vec![
+    let models = [
         "moonshotai/kimi-k2:free",
         "x-ai/grok-4-fast:free",
         "deepseek/deepseek-chat-v3.1:free",

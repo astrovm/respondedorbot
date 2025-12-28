@@ -4,7 +4,9 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::FixedOffset;
 use serde::Deserialize;
+use regex::Regex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -26,7 +28,7 @@ mod links;
 mod models;
 
 use crate::models::Update;
-use crate::redis_store::{create_redis_client, redis_get_string};
+use crate::redis_store::{create_redis_client, redis_get_string, redis_setex_string};
 
 #[derive(Clone)]
 struct AppState {
@@ -253,10 +255,9 @@ async fn is_secret_token_valid(state: &AppState, headers: &HeaderMap) -> bool {
     };
 
     let stored: Option<String> =
-        match redis_get_string(&mut redis, "X-Telegram-Bot-Api-Secret-Token").await {
-            Ok(value) => value,
-            Err(_) => None,
-        };
+        redis_get_string(&mut redis, "X-Telegram-Bot-Api-Secret-Token")
+            .await
+            .unwrap_or_default();
 
     match stored {
         Some(value) => value == secret_header,
@@ -272,6 +273,8 @@ const RATE_LIMIT_GLOBAL_MAX: i64 = 1024;
 const RATE_LIMIT_CHAT_MAX: i64 = 128;
 const TTL_RATE_GLOBAL: u64 = 3600;
 const TTL_RATE_CHAT: u64 = 600;
+const BOT_MESSAGE_META_PREFIX: &str = "bot_message_meta:";
+const BOT_MESSAGE_META_TTL: u64 = 3 * 24 * 60 * 60;
 
 async fn handle_message(state: &AppState, message: crate::models::Message) -> Result<(), String> {
     let Some(token) = state.telegram_token.as_deref() else {
@@ -279,7 +282,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
     };
     let chat_id = message.chat.id;
     let message_id = message.message_id;
-    let text = message.text.clone().unwrap_or_default();
+    let mut text = message.text.clone().unwrap_or_default();
     let user_id = message.from.as_ref().map(|u| u.id).unwrap_or(0);
     let username = message
         .from
@@ -289,245 +292,565 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
     tracing::info!(chat_id, message_id, user_id, username, "message received");
 
     let chat_config = chat_config::get_chat_config(&state.redis, chat_id).await;
-    if !text.is_empty() && chat_config.link_mode != "off" {
-        let (rewritten, changed, _) = links::replace_links(&state.http, &text).await;
+
+    let is_transcribe_command = text.trim().to_lowercase().starts_with("/transcribe");
+    if !is_transcribe_command {
+        if let Some(audio) = message.audio.as_ref().or(message.voice.as_ref()) {
+            match media::transcribe_file_by_id(
+                &state.http,
+                &state.redis,
+                token,
+                &audio.file_id,
+                false,
+            )
+            .await
+            {
+                Ok(Some(transcription)) => {
+                    text = transcription;
+                }
+                Err(code) if code == "download" => {
+                    text = "no pude bajar tu audio, mandalo de vuelta".to_string();
+                }
+                Err(_) => {
+                    text = "mandame texto que no soy alexa, boludo".to_string();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if text.trim().is_empty() && message.photo.as_ref().is_some() {
+        text = "que onda con esta foto".to_string();
+    }
+
+    if !text.is_empty() && chat_config.link_mode != "off" && !text.trim().starts_with('/') {
+        let (rewritten, changed, original_links) = links::replace_links(&state.http, &text).await;
         if changed {
             tracing::info!(chat_id, message_id, "link rewrite applied");
+            let mut final_text = rewritten;
+            if let Some(shared_by) = format_shared_by(message.from.as_ref()) {
+                if !shared_by.is_empty() {
+                    final_text.push_str(&format!("\n\nShared by {shared_by}"));
+                }
+            }
             let reply_to = if chat_config.link_mode == "reply" {
-                Some(message_id)
+                message
+                    .reply_to_message
+                    .as_ref()
+                    .map(|msg| msg.message_id)
+                    .or(Some(message_id))
             } else {
+                message.reply_to_message.as_ref().map(|msg| msg.message_id)
+            };
+            let keyboard = if original_links.is_empty() {
                 None
+            } else {
+                Some(build_link_keyboard(&original_links))
             };
             let response_id = telegram::send_message(
                 &state.http,
                 token,
                 chat_id,
-                &rewritten,
-                None,
+                &final_text,
+                keyboard,
                 reply_to,
             )
             .await
             .ok()
             .flatten();
             if let Some(bot_id) = response_id {
-                save_message_to_redis(state, chat_id, format!("bot_{bot_id}"), &rewritten).await;
+                track_bot_response(
+                    state,
+                    chat_id,
+                    bot_id,
+                    &final_text,
+                    Some(serde_json::json!({"type": "link_fix"})),
+                )
+                .await;
             }
             if chat_config.link_mode == "delete" {
                 let _ = telegram::delete_message(&state.http, token, chat_id, message_id).await;
             }
             return Ok(());
         }
+        if contains_url(&text) {
+            return Ok(());
+        }
     }
 
-    if rate_limited(state, chat_id).await {
-        let _ = telegram::send_message(
-            &state.http,
-            token,
-            chat_id,
-            "Estás mandando demasiados mensajes, bancá un toque.",
-            None,
-            None,
-        )
-        .await;
-        return Ok(());
-    }
+    let reply_context_text = build_reply_context_text(&message);
+    let reply_metadata = load_reply_metadata(state, &message).await;
 
-    save_message_to_redis(state, chat_id, format!("user_{message_id}"), &text).await;
+    let mut response_msg: Option<String> = None;
+    let mut response_command: Option<String> = None;
+    let mut response_uses_ai = false;
+    let mut response_markup: Option<serde_json::Value> = None;
 
     if let Some((command, args)) = commands::parse_command(&text, state.bot_username.as_deref()) {
         tracing::info!(chat_id, message_id, command = %command, "command received");
+        response_command = Some(command.clone());
+
+        if command == "/config" && is_group_chat(&message) {
+            let Some(user_id) = message.from.as_ref().map(|u| u.id) else {
+                return Ok(());
+            };
+            let ctx = config_context(state);
+            let is_admin = chat_config::is_chat_admin(&ctx, chat_id, user_id).await;
+            if !is_admin {
+                let denial = "Solo los admins pueden cambiar la config del gordo acá.";
+                let _ = telegram::send_message(
+                    &state.http,
+                    token,
+                    chat_id,
+                    denial,
+                    None,
+                    Some(message_id),
+                )
+                .await;
+                chat_config::report_unauthorized(
+                    &ctx,
+                    chat_id,
+                    message.chat.kind.as_str(),
+                    message.from.as_ref().and_then(|u| u.username.as_deref()),
+                )
+                .await;
+                return Ok(());
+            }
+        }
+
         if command == "/config" {
             let ctx = config_context(state);
             if let Ok((config_text, keyboard)) =
                 chat_config::handle_config_command(&ctx, chat_id).await
             {
-                let _ = telegram::send_message(
-                    &state.http,
-                    token,
-                    chat_id,
-                    &config_text,
-                    Some(keyboard),
-                    None,
+                response_msg = Some(config_text);
+                response_markup = Some(keyboard);
+            }
+        } else if command == "/help" || command == "/start" {
+            response_msg = Some(commands::help_text());
+        } else if command == "/time" {
+            response_msg = Some(format!("{}", chrono::Utc::now().timestamp()));
+        } else if command == "/instance" {
+            let instance = std::env::var("FRIENDLY_INSTANCE_NAME").unwrap_or_default();
+            response_msg = Some(format!("estoy corriendo en {} boludo", instance));
+        } else if command == "/search" || command == "/buscar" {
+            let results = tools::web_search(&state.http, &args, 5).await;
+            response_msg = Some(tools::format_search_results(&args, &results));
+        } else if matches!(command.as_str(), "/prices" | "/precio" | "/precios" | "/presio" | "/presios") {
+            response_msg = market::get_prices(&state.http, &state.redis, &args).await;
+        } else if matches!(command.as_str(), "/dolar" | "/dollar" | "/usd") {
+            response_msg = market::get_dollar_rates(&state.http, &state.redis).await;
+        } else if matches!(command.as_str(), "/bcra" | "/variables") {
+            response_msg = bcra::get_bcra_variables(&state.http, &state.redis).await;
+        } else if command == "/eleccion" {
+            response_msg = Some(
+                polymarket::get_polymarket_argentina_election(&state.http, &state.redis).await,
+            );
+        } else if command == "/devo" {
+            response_msg = Some(market::get_devo(&state.http, &state.redis, &args).await);
+        } else if command == "/rulo" {
+            response_msg = Some(market::get_rulo(&state.http, &state.redis).await);
+        } else if matches!(command.as_str(), "/satoshi" | "/sat" | "/sats") {
+            response_msg = Some(market::satoshi(&state.http, &state.redis).await);
+        } else if command == "/random" {
+            response_msg = Some(commands::select_random(&args));
+        } else if matches!(command.as_str(), "/comando" | "/command") {
+            response_msg = Some(commands::convert_to_command(&args));
+        } else if command == "/powerlaw" {
+            response_msg = Some(market::powerlaw(&state.http, &state.redis).await);
+        } else if command == "/rainbow" {
+            response_msg = Some(market::rainbow(&state.http, &state.redis).await);
+        } else if command == "/convertbase" {
+            response_msg = Some(market::convert_base(&args));
+        } else if command == "/agent" {
+            response_msg = Some(
+                agent::get_agent_memory(&state.redis, 5)
+                    .await
+                    .unwrap_or_else(|| {
+                        "todavía no tengo pensamientos guardados, dejame que labure un toque."
+                            .to_string()
+                    }),
+            );
+        } else if command == "/transcribe" {
+            tracing::info!(chat_id, message_id, "transcribe command");
+            response_msg = Some(handle_transcribe(state, token, &message).await);
+        } else if matches!(command.as_str(), "/ask" | "/pregunta" | "/che" | "/gordo") {
+            tracing::info!(chat_id, message_id, "ask command");
+            if rate_limited(state, chat_id).await {
+                response_msg = Some("Estás mandando demasiados mensajes, bancá un toque.".to_string());
+            } else {
+                response_uses_ai = true;
+                response_msg = run_ai_with_context(
+                    state,
+                    &message,
+                    &args,
+                    reply_context_text.as_deref(),
                 )
                 .await;
             }
-            return Ok(());
         }
-        match command.as_str() {
-            "/help" | "/start" => {
-                let reply = commands::help_text();
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
+    } else {
+        let should_respond = should_gordo_respond(
+            state,
+            &message,
+            &text,
+            &chat_config,
+            reply_metadata.as_ref(),
+        )
+        .await;
+
+        if should_respond {
+            if rate_limited(state, chat_id).await {
+                response_msg = Some("Estás mandando demasiados mensajes, bancá un toque.".to_string());
+            } else {
+                response_uses_ai = true;
+                response_msg = run_ai_with_context(
+                    state,
+                    &message,
+                    &text,
+                    reply_context_text.as_deref(),
+                )
+                .await;
             }
-            "/time" => {
-                let reply = format!("{}", chrono::Utc::now().timestamp());
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/instance" => {
-                let instance = std::env::var("FRIENDLY_INSTANCE_NAME").unwrap_or_default();
-                let reply = format!("estoy corriendo en {} boludo", instance);
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/search" | "/buscar" => {
-                let results = tools::web_search(&state.http, &args, 5).await;
-                let reply = tools::format_search_results(&args, &results);
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/prices" | "/precio" | "/precios" | "/presio" | "/presios" => {
-                if let Some(reply) = market::get_prices(&state.http, &state.redis, &args).await {
-                    send_and_track(state, token, chat_id, &reply).await;
-                }
-                return Ok(());
-            }
-            "/dolar" | "/dollar" | "/usd" => {
-                if let Some(reply) = market::get_dollar_rates(&state.http, &state.redis).await {
-                    send_and_track(state, token, chat_id, &reply).await;
-                }
-                return Ok(());
-            }
-            "/bcra" | "/variables" => {
-                if let Some(reply) = bcra::get_bcra_variables(&state.http, &state.redis).await {
-                    send_and_track(state, token, chat_id, &reply).await;
-                }
-                return Ok(());
-            }
-            "/eleccion" => {
-                let reply = polymarket::get_polymarket_argentina_election(&state.http, &state.redis).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/devo" => {
-                let reply = market::get_devo(&state.http, &state.redis, &args).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/rulo" => {
-                let reply = market::get_rulo(&state.http, &state.redis).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/satoshi" | "/sat" | "/sats" => {
-                let reply = market::satoshi(&state.http, &state.redis).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/random" => {
-                let reply = commands::select_random(&args);
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/comando" | "/command" => {
-                let reply = commands::convert_to_command(&args);
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/powerlaw" => {
-                let reply = market::powerlaw(&state.http, &state.redis).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/rainbow" => {
-                let reply = market::rainbow(&state.http, &state.redis).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/convertbase" => {
-                let reply = market::convert_base(&args);
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/agent" => {
-                let reply = agent::get_agent_memory(&state.redis, 5)
-                    .await
-                    .unwrap_or_else(|| "todavía no tengo pensamientos guardados, dejame que labure un toque.".to_string());
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/transcribe" => {
-                tracing::info!(chat_id, message_id, "transcribe command");
-                let reply = handle_transcribe(state, token, &message).await;
-                send_and_track(state, token, chat_id, &reply).await;
-                return Ok(());
-            }
-            "/ask" | "/pregunta" | "/che" | "/gordo" => {
-                tracing::info!(chat_id, message_id, "ask command");
-                let system_prompt = config::load_bot_config()
-                    .map(|cfg| cfg.system_prompt)
-                    .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
-                let time_label = chrono::Local::now().format("%A %d/%m/%Y").to_string();
-                let market_info = market::get_market_context(&state.http, &state.redis).await;
-                let weather_info = weather::get_weather_context(&state.http, &state.redis).await;
-                let hn_items = hacker_news::get_hn_context(&state.http).await;
-                let hn_info = if hn_items.is_empty() {
-                    None
-                } else {
-                    Some(hacker_news::format_hn_items(&hn_items))
-                };
-                let agent_memory = agent::get_agent_memory(&state.redis, 5).await;
-                let context = ai::AiContext {
-                    system_prompt,
-                    time_label,
-                    market_info,
-                    weather_info,
-                    hn_info,
-                    agent_memory,
-                };
-                let user_message = ai::ChatMessage { role: "user".to_string(), content: args };
-                if let Some(reply) = ai::ask_ai(&state.http, &context, vec![user_message]).await {
-                    send_and_track(state, token, chat_id, &reply).await;
-                }
-                return Ok(());
-            }
-            _ => {}
         }
     }
 
-    if should_gordo_respond(state, &message, &text, &chat_config).await {
-        let system_prompt = config::load_bot_config()
-            .map(|cfg| cfg.system_prompt)
-            .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
-        let time_label = chrono::Local::now().format("%A %d/%m/%Y").to_string();
-        let market_info = market::get_market_context(&state.http, &state.redis).await;
-        let weather_info = weather::get_weather_context(&state.http, &state.redis).await;
-        let hn_items = hacker_news::get_hn_context(&state.http).await;
-        let hn_info = if hn_items.is_empty() {
-            None
-        } else {
-            Some(hacker_news::format_hn_items(&hn_items))
-        };
-        let agent_memory = agent::get_agent_memory(&state.redis, 5).await;
-        let context = ai::AiContext {
-            system_prompt,
-            time_label,
-            market_info,
-            weather_info,
-            hn_info,
-            agent_memory,
-        };
-
-        let mut content = text.clone();
-        if let Some(reply) = message.reply_to_message.as_ref() {
-            if let Some(reply_text) = reply.text.as_ref() {
-                content = format!(
-                    "MENSAJE AL QUE RESPONDE:\n{}\n\nMENSAJE:\n{}",
-                    reply_text, content
-                );
+    if let Some(reply) = response_msg {
+        if let Some(markup) = response_markup {
+            let response_id = telegram::send_message(
+                &state.http,
+                token,
+                chat_id,
+                &reply,
+                Some(markup),
+                Some(message_id),
+            )
+            .await
+            .ok()
+            .flatten();
+            if let Some(bot_id) = response_id {
+                let metadata = response_command.as_ref().map(|cmd| {
+                    serde_json::json!({"type": "command", "command": cmd, "uses_ai": response_uses_ai})
+                }).unwrap_or_else(|| serde_json::json!({"type": "ai"}));
+                track_bot_response(state, chat_id, bot_id, &reply, Some(metadata)).await;
             }
+        } else {
+            let metadata = response_command.as_ref().map(|cmd| {
+                serde_json::json!({"type": "command", "command": cmd, "uses_ai": response_uses_ai})
+            }).unwrap_or_else(|| serde_json::json!({"type": "ai"}));
+            send_and_track(state, token, chat_id, &reply, Some(metadata), Some(message_id)).await;
         }
 
-        let user_message = ai::ChatMessage {
-            role: "user".to_string(),
-            content,
-        };
-        if let Some(reply) = ai::ask_ai(&state.http, &context, vec![user_message]).await {
-            send_and_track(state, token, chat_id, &reply).await;
+        if !text.is_empty() {
+            let formatted = format_user_message(&message, &text, reply_context_text.as_deref());
+            save_message_to_redis(state, chat_id, format!("user_{message_id}"), &formatted).await;
         }
+        return Ok(());
+    }
+
+    if !text.is_empty() {
+        let formatted = format_user_message(&message, &text, reply_context_text.as_deref());
+        save_message_to_redis(state, chat_id, format!("user_{message_id}"), &formatted).await;
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ChatHistoryEntry {
+    role: String,
+    text: String,
+}
+
+async fn run_ai_with_context(
+    state: &AppState,
+    message: &crate::models::Message,
+    message_text: &str,
+    reply_context: Option<&str>,
+) -> Option<String> {
+    let system_prompt = config::load_bot_config()
+        .map(|cfg| cfg.system_prompt)
+        .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
+    let time_label = chrono::Local::now().format("%A %d/%m/%Y").to_string();
+    let market_info = market::get_market_context(&state.http, &state.redis).await;
+    let weather_info = weather::get_weather_context(&state.http, &state.redis).await;
+    let hn_items = hacker_news::get_hn_context(&state.http).await;
+    let hn_info = if hn_items.is_empty() {
+        None
+    } else {
+        Some(hacker_news::format_hn_items(&hn_items))
+    };
+    let agent_memory = agent::get_agent_memory(&state.redis, 5).await;
+    let context = ai::AiContext {
+        system_prompt,
+        time_label,
+        market_info,
+        weather_info,
+        hn_info,
+        agent_memory,
+    };
+
+    let history = get_chat_history(&state.redis, message.chat.id, 8).await;
+    let messages = build_ai_messages(message, &history, message_text, reply_context);
+    ai::ask_ai(&state.http, &context, messages).await
+}
+
+async fn get_chat_history(
+    redis: &redis::Client,
+    chat_id: i64,
+    max_messages: usize,
+) -> Vec<ChatHistoryEntry> {
+    let mut conn = match redis.get_multiplexed_async_connection().await {
+        Ok(conn) => conn,
+        Err(_) => return Vec::new(),
+    };
+    let history_key = format!("chat_history:{chat_id}");
+    let raw: Vec<String> = match redis::AsyncCommands::lrange(
+        &mut conn,
+        &history_key,
+        0,
+        (max_messages.saturating_sub(1)) as isize,
+    )
+    .await
+    {
+        Ok(values) => values,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries = Vec::new();
+    for entry in raw {
+        let value = serde_json::from_str::<serde_json::Value>(&entry).ok();
+        let text = value
+            .as_ref()
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let id = value
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let role = if id.starts_with("bot_") {
+            "assistant".to_string()
+        } else {
+            "user".to_string()
+        };
+        entries.push(ChatHistoryEntry { role, text });
+    }
+    entries.reverse();
+    entries
+}
+
+fn build_ai_messages(
+    message: &crate::models::Message,
+    history: &[ChatHistoryEntry],
+    message_text: &str,
+    reply_context: Option<&str>,
+) -> Vec<ai::ChatMessage> {
+    let mut messages = Vec::new();
+    for entry in history {
+        messages.push(ai::ChatMessage {
+            role: entry.role.clone(),
+            content: entry.text.clone(),
+        });
+    }
+
+    let chat_type = message.chat.kind.as_str();
+    let chat_title = if chat_type == "private" {
+        None
+    } else {
+        message.chat.title.as_deref()
+    };
+    let user_name = format_user_identity(message.from.as_ref());
+    let now = chrono::Utc::now();
+    let tz = FixedOffset::west_opt(3 * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let local = now.with_timezone(&tz);
+
+    let mut context_parts = Vec::new();
+    context_parts.push("CONTEXTO:".to_string());
+    if let Some(title) = chat_title {
+        context_parts.push(format!("- Chat: {chat_type} ({title})"));
+    } else {
+        context_parts.push(format!("- Chat: {chat_type}"));
+    }
+    if user_name.is_empty() {
+        context_parts.push("- Usuario: (desconocido)".to_string());
+    } else {
+        context_parts.push(format!("- Usuario: {user_name}"));
+    }
+    context_parts.push(format!("- Hora: {}", local.format("%H:%M")));
+
+    if let Some(context) = reply_context {
+        context_parts.push("".to_string());
+        context_parts.push("MENSAJE AL QUE RESPONDE:".to_string());
+        context_parts.push(truncate_text(context, 512));
+    }
+
+    context_parts.push("".to_string());
+    context_parts.push("MENSAJE:".to_string());
+    context_parts.push(truncate_text(message_text, 512));
+    context_parts.push("".to_string());
+    context_parts.push("INSTRUCCIONES:".to_string());
+    context_parts.push("- Mantené el personaje del gordo".to_string());
+    context_parts.push("- Usá lenguaje coloquial argentino".to_string());
+
+    messages.push(ai::ChatMessage {
+        role: "user".to_string(),
+        content: context_parts.join("\n"),
+    });
+
+    let keep_from = messages.len().saturating_sub(8);
+    messages.into_iter().skip(keep_from).collect()
+}
+
+fn format_user_identity(user: Option<&crate::models::User>) -> String {
+    let Some(user) = user else {
+        return String::new();
+    };
+    let mut name = user.first_name.trim().to_string();
+    if let Some(last) = user.last_name.as_deref() {
+        let last = last.trim();
+        if !last.is_empty() {
+            if !name.is_empty() {
+                name.push(' ');
+            }
+            name.push_str(last);
+        }
+    }
+    if let Some(username) = user.username.as_deref() {
+        let username = username.trim();
+        if !username.is_empty() {
+            if name.is_empty() {
+                return username.to_string();
+            }
+            return format!("{name} ({username})");
+        }
+    }
+    name
+}
+
+fn format_shared_by(user: Option<&crate::models::User>) -> Option<String> {
+    let user = user?;
+    if let Some(username) = user.username.as_deref() {
+        let username = username.trim();
+        if !username.is_empty() {
+            return Some(format!("@{username}"));
+        }
+    }
+    let mut parts = Vec::new();
+    if !user.first_name.trim().is_empty() {
+        parts.push(user.first_name.trim().to_string());
+    }
+    if let Some(last) = user.last_name.as_deref() {
+        if !last.trim().is_empty() {
+            parts.push(last.trim().to_string());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn describe_replied_message(reply: &crate::models::Message) -> Option<String> {
+    if let Some(text) = reply.text.as_deref() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if reply.photo.as_ref().is_some() {
+        return Some("una foto sin texto".to_string());
+    }
+    if reply.sticker.as_ref().is_some() {
+        return Some("un sticker".to_string());
+    }
+    if reply.voice.as_ref().is_some() {
+        return Some("un audio de voz".to_string());
+    }
+    if reply.audio.as_ref().is_some() {
+        return Some("un archivo de audio".to_string());
+    }
+    None
+}
+
+fn build_reply_context_text(message: &crate::models::Message) -> Option<String> {
+    let reply = message.reply_to_message.as_ref()?;
+    let description = describe_replied_message(reply)?;
+    let reply_user = format_user_identity(reply.from.as_ref());
+    if reply_user.is_empty() {
+        Some(description)
+    } else {
+        Some(format!("{reply_user}: {description}"))
+    }
+}
+
+fn format_user_message(
+    message: &crate::models::Message,
+    message_text: &str,
+    reply_context: Option<&str>,
+) -> String {
+    let formatted_user = format_user_identity(message.from.as_ref());
+    if let Some(context) = reply_context {
+        if formatted_user.is_empty() {
+            return format!("(en respuesta a {context}): {message_text}");
+        }
+        return format!("{formatted_user} (en respuesta a {context}): {message_text}");
+    }
+    if formatted_user.is_empty() {
+        message_text.to_string()
+    } else {
+        format!("{formatted_user}: {message_text}")
+    }
+}
+
+fn truncate_text(text: &str, max_length: usize) -> String {
+    if max_length == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_length {
+        return text.to_string();
+    }
+    if max_length <= 3 {
+        return ".".repeat(max_length);
+    }
+    let truncated: String = text.chars().take(max_length - 3).collect();
+    format!("{truncated}...")
+}
+
+fn build_link_keyboard(urls: &[String]) -> serde_json::Value {
+    let keyboard: Vec<Vec<serde_json::Value>> = urls
+        .iter()
+        .map(|url| vec![serde_json::json!({"text": "Open in app", "url": url})])
+        .collect();
+    serde_json::json!({ "inline_keyboard": keyboard })
+}
+
+fn contains_url(text: &str) -> bool {
+    let re = Regex::new(r"https?://\\S+").unwrap();
+    re.is_match(text)
+}
+
+fn is_group_chat(message: &crate::models::Message) -> bool {
+    matches!(message.chat.kind.as_str(), "group" | "supergroup")
+}
+
+async fn load_reply_metadata(
+    state: &AppState,
+    message: &crate::models::Message,
+) -> Option<serde_json::Value> {
+    let reply = message.reply_to_message.as_ref()?;
+    let bot_username = state.bot_username.as_deref()?;
+    let reply_user = reply.from.as_ref()?;
+    if reply_user.username.as_deref() != Some(bot_username) {
+        return None;
+    }
+    get_bot_message_metadata(&state.redis, message.chat.id, reply.message_id).await
 }
 
 async fn should_gordo_respond(
@@ -535,6 +858,7 @@ async fn should_gordo_respond(
     message: &crate::models::Message,
     text: &str,
     chat_config: &chat_config::ChatConfig,
+    reply_metadata: Option<&serde_json::Value>,
 ) -> bool {
     let chat_type = message.chat.kind.as_str();
     let is_private = chat_type == "private";
@@ -549,6 +873,11 @@ async fn should_gordo_respond(
     if let Some(reply) = message.reply_to_message.as_ref() {
         if let Some(reply_user) = reply.from.as_ref() {
             if reply_user.username.as_deref() == Some(bot_username) {
+                if let Some(meta) = reply_metadata {
+                    if meta.get("type").and_then(|v| v.as_str()) == Some("link_fix") {
+                        return false;
+                    }
+                }
                 if let Some(reply_text) = reply.text.as_ref() {
                     let replacement_domains = [
                         "fxtwitter.com",
@@ -575,17 +904,23 @@ async fn should_gordo_respond(
         == Some(bot_username);
 
     if is_reply && !chat_config.ai_command_followups {
-        return false;
+        if let Some(meta) = reply_metadata {
+            let meta_type = meta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let uses_ai = meta.get("uses_ai").and_then(|v| v.as_bool()).unwrap_or(false);
+            if meta_type == "command" && !uses_ai {
+                return false;
+            }
+        }
     }
 
     let mut is_trigger = false;
     if chat_config.ai_random_replies {
         if let Ok(cfg) = config::load_bot_config() {
             let message_lower = text.to_lowercase();
-            if cfg.trigger_words.iter().any(|w| message_lower.contains(w)) {
-                if rand::random::<f64>() < 0.1 {
-                    is_trigger = true;
-                }
+            if cfg.trigger_words.iter().any(|w| message_lower.contains(w))
+                && rand::random::<f64>() < 0.1
+            {
+                is_trigger = true;
             }
         }
     }
@@ -652,14 +987,67 @@ async fn send_and_track(
     token: &str,
     chat_id: i64,
     reply: &str,
-) {
-    let response_id = telegram::send_message(&state.http, token, chat_id, reply, None, None)
+    metadata: Option<serde_json::Value>,
+    reply_to: Option<i64>,
+) -> Option<i64> {
+    let response_id = telegram::send_message(&state.http, token, chat_id, reply, None, reply_to)
         .await
         .ok()
         .flatten();
     if let Some(bot_id) = response_id {
-        save_message_to_redis(state, chat_id, format!("bot_{bot_id}"), reply).await;
+        track_bot_response(state, chat_id, bot_id, reply, metadata).await;
+        return Some(bot_id);
     }
+    None
+}
+
+async fn track_bot_response(
+    state: &AppState,
+    chat_id: i64,
+    message_id: i64,
+    text: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    save_message_to_redis(state, chat_id, format!("bot_{message_id}"), text).await;
+    if let Some(meta) = metadata {
+        save_bot_message_metadata(&state.redis, chat_id, message_id, &meta).await;
+    }
+}
+
+fn bot_message_meta_key(chat_id: i64, message_id: i64) -> String {
+    format!("{BOT_MESSAGE_META_PREFIX}{chat_id}:{message_id}")
+}
+
+async fn save_bot_message_metadata(
+    redis: &redis::Client,
+    chat_id: i64,
+    message_id: i64,
+    metadata: &serde_json::Value,
+) {
+    let mut conn = match redis.get_multiplexed_async_connection().await {
+        Ok(conn) => conn,
+        Err(_) => return,
+    };
+    let _ = redis_setex_string(
+        &mut conn,
+        &bot_message_meta_key(chat_id, message_id),
+        BOT_MESSAGE_META_TTL,
+        &metadata.to_string(),
+    )
+    .await;
+}
+
+async fn get_bot_message_metadata(
+    redis: &redis::Client,
+    chat_id: i64,
+    message_id: i64,
+) -> Option<serde_json::Value> {
+    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
+    let raw = redis_get_string(&mut conn, &bot_message_meta_key(chat_id, message_id))
+        .await
+        .ok()
+        .flatten()?;
+    serde_json::from_str::<serde_json::Value>(&raw).ok()
 }
 
 async fn rate_limited(state: &AppState, chat_id: i64) -> bool {
@@ -701,7 +1089,7 @@ async fn save_message_to_redis(
 
     let payload = serde_json::json!({
         "id": message_id,
-        "text": text,
+        "text": truncate_text(text, 512),
         "timestamp": chrono::Utc::now().timestamp(),
     });
 

@@ -35,12 +35,12 @@ pub fn select_random(msg_text: &str) -> String {
         return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo".to_string();
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     if trimmed.contains(',') {
         let values: Vec<&str> = trimmed.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
         if values.len() >= 2 {
-            let idx = rng.gen_range(0..values.len());
+            let idx = rng.random_range(0..values.len());
             return values[idx].to_string();
         }
     }
@@ -50,7 +50,7 @@ pub fn select_random(msg_text: &str) -> String {
         if parts.len() == 2 {
             if let (Ok(start), Ok(end)) = (parts[0].trim().parse::<i64>(), parts[1].trim().parse::<i64>()) {
                 if start < end {
-                    let value = rng.gen_range(start..=end);
+                    let value = rng.random_range(start..=end);
                     return value.to_string();
                 }
             }
@@ -79,9 +79,7 @@ pub fn convert_to_command(msg_text: &str) -> String {
 
     let single_spaced = Regex::new(r"\s+").unwrap().replace_all(&normalized, " ");
     let mut translated = single_spaced.replace("...", "_PUNTOSSUSPENSIVOS_");
-    translated = translated
-        .replace(' ', "_")
-        .replace('\n', "_")
+    translated = translated.replace([' ', '\n'], "_")
         .replace('?', "_SIGNODEPREGUNTA_")
         .replace('!', "_SIGNODEEXCLAMACION_")
         .replace('.', "_PUNTO_");

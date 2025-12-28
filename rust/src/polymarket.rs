@@ -59,7 +59,7 @@ async fn fetch_event_section(
     if events.is_empty() {
         return None;
     }
-    let event = events.get(0)?;
+    let event = events.first()?;
 
     let markets = event.get("markets").and_then(|v| v.as_array())?;
     if markets.is_empty() {
@@ -86,7 +86,7 @@ async fn fetch_event_section(
             continue;
         }
         let price = prices[yes_index];
-        let probability = (price.max(0.0).min(1.0)) * 100.0;
+        let probability = price.clamp(0.0, 1.0) * 100.0;
         let title = market
             .get("groupItemTitle")
             .and_then(|v| v.as_str())

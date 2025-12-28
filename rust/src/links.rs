@@ -183,7 +183,7 @@ fn is_twitter_user_profile(url: &str) -> bool {
     if segments.is_empty() {
         return false;
     }
-    if segments.iter().any(|s| *s == "status") {
+    if segments.contains(&"status") {
         return false;
     }
     let reserved = [

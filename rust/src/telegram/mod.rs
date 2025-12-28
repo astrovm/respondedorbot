@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::TryRngCore;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 
@@ -53,7 +53,9 @@ pub async fn set_webhook(
 
 fn generate_secret_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let mut rng = rand::rngs::OsRng;
+    rng.try_fill_bytes(&mut bytes)
+        .expect("failed to generate secret token");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();

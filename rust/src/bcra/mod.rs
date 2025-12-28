@@ -158,6 +158,8 @@ async fn fetch_latest_variables(
     Some(out)
 }
 
+type BcraSpec = (Regex, Box<dyn Fn(&str) -> String>);
+
 fn format_bcra_variables(
     variables: &[(String, String, String)],
     itcrm: Option<(f64, String)>,
@@ -167,7 +169,7 @@ fn format_bcra_variables(
         return "No se pudieron obtener las variables del BCRA".to_string();
     }
 
-    let specs: Vec<(Regex, Box<dyn Fn(&str) -> String>)> = vec![
+    let specs: Vec<BcraSpec> = vec![
         (
             Regex::new(r"base\s*monetaria").unwrap(),
             Box::new(|v| format!("🏦 Base monetaria: ${} mill. pesos", format_value(v, false))),
@@ -339,16 +341,16 @@ async fn get_latest_itcrm_value_and_date(
     let bytes = http.get(ITCRM_URL).send().await.ok()?.bytes().await.ok()?;
     let cursor = std::io::Cursor::new(bytes);
     let mut workbook: calamine::Xlsx<_> = calamine::Xlsx::new(cursor).ok()?;
-    let sheet_name = workbook.sheet_names().get(0).cloned()?;
+    let sheet_name = workbook.sheet_names().first().cloned()?;
     let range = workbook.worksheet_range(&sheet_name).ok()?;
 
     for row in range.rows().rev() {
-        let date_cell = row.get(0);
+        let date_cell = row.first();
         let value_cell = row.get(1);
         if let Some(value_cell) = value_cell {
             if let Some(val) = parse_numeric_cell(value_cell) {
                 let date_str = date_cell
-                    .and_then(|d| parse_date_cell(d))
+                    .and_then(parse_date_cell)
                     .unwrap_or_else(|| "".to_string());
                 let payload = serde_json::json!({"value": val, "date": date_str});
                 let _ = cache_string(redis, "latest_itcrm_details", &payload.to_string(), 1800).await;
@@ -412,7 +414,7 @@ async fn get_variable_value_for_date(
         return None;
     }
     let detalle = results[0].get("detalle").and_then(|v| v.as_array())?;
-    let row = detalle.get(0)?;
+    let row = detalle.first()?;
     row.get("valor").and_then(|v| v.as_f64())
 }
 
