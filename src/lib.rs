@@ -1,9 +1,9 @@
-pub mod ai;
 pub mod agent;
+pub mod ai;
 pub mod bcra;
 pub mod chat_config;
-pub mod config;
 pub mod commands;
+pub mod config;
 pub mod hacker_news;
 pub mod http;
 pub mod http_cache;
@@ -17,3 +17,6 @@ pub mod redis_store;
 pub mod telegram;
 pub mod tools;
 pub mod weather;
+pub mod webhook;
+#[cfg(target_arch = "wasm32")]
+pub mod worker;
