@@ -10,7 +10,7 @@ A configurable Telegram bot built with Rust and Axum. The service listens on `0.
    ```bash
    cargo run
    ```
-4. Configure the Telegram webhook once the server is reachable:
+4. Configure the Telegram webhook once the server or Worker is reachable:
    - Set webhook: `{FUNCTION_URL}/?update_webhook=true&key={WEBHOOK_AUTH_KEY}`
    - Check webhook: `{FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}`
 
@@ -39,9 +39,36 @@ All configuration is via environment variables (see `.env.example` for the full 
 
 - Bot: `BOT_SYSTEM_PROMPT`, `BOT_TRIGGER_WORDS`
 - Telegram: `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`, `WEBHOOK_AUTH_KEY`
-- Infrastructure: `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `FUNCTION_URL`
-- APIs: `OPENROUTER_API_KEY`, `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `COINMARKETCAP_KEY`
+- Hosting: `FUNCTION_URL` (public URL of your Cloudflare Worker)
+- APIs: `OPENROUTER_API_KEY`, `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `COINMARKETCAP_KEY`, `GROQ_API_KEY`
 - Monitoring: `ADMIN_CHAT_ID`, `FRIENDLY_INSTANCE_NAME`
+
+### Cloudflare Worker bindings
+
+- `BOT_KV` (KV Namespace): Required for caching, rate limiting, and storing the Telegram webhook secret token. The Worker code expects this exact binding name.
+
+### Cloudflare Workers deployment
+
+The included `wrangler.toml` defines the Worker name (`respondedorbot`), entry file (`build/worker/shim.mjs`), and the `BOT_KV` binding produced by `worker-build`.
+
+1. Install the Cloudflare CLI: `npm install -g wrangler`.
+2. Create the KV namespace binding expected by the code:
+   ```bash
+   wrangler kv:namespace create BOT_KV
+   wrangler kv:namespace create BOT_KV --preview
+   ```
+   Update `wrangler.toml` with the generated IDs if they differ.
+3. Build and deploy the Worker:
+   ```bash
+   wrangler publish
+   ```
+4. Set your public Worker URL in `FUNCTION_URL` (e.g., `https://<worker>.<account>.workers.dev` or your custom domain).
+5. Configure the Telegram webhook to point to the Worker (after deployment):
+   ```bash
+   curl -X GET "$FUNCTION_URL/?update_webhook=true&key=$WEBHOOK_AUTH_KEY"
+   curl -X GET "$FUNCTION_URL/?check_webhook=true&key=$WEBHOOK_AUTH_KEY"
+   ```
+   The Worker sets the Telegram `secret_token` to `WEBHOOK_AUTH_KEY`, which must match the `X-Telegram-Bot-Api-Secret-Token` header on incoming updates.
 
 ## Development
 
