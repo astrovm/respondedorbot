@@ -1,13 +1,12 @@
 use chrono::{DateTime, FixedOffset, Local};
 use rand::prelude::IndexedRandom;
 use rand::Rng;
-use redis::AsyncCommands;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::{ai, config, hacker_news, message_utils};
+use crate::{ai, config, hacker_news, message_utils, storage::Storage};
 
 const AGENT_THOUGHTS_KEY: &str = "agent:thoughts";
 const MAX_AGENT_THOUGHTS: usize = 10;
@@ -94,17 +93,17 @@ pub struct AgentThought {
     pub timestamp: Option<i64>,
 }
 
-pub async fn get_agent_thoughts(redis: &redis::Client) -> Vec<AgentThought> {
-    load_agent_thoughts(redis, MAX_AGENT_THOUGHTS).await
+pub async fn get_agent_thoughts(storage: &Storage) -> Vec<AgentThought> {
+    load_agent_thoughts(storage, MAX_AGENT_THOUGHTS).await
 }
 
-pub async fn get_agent_memory(redis: &redis::Client, limit: usize) -> Option<String> {
-    let thoughts = load_agent_thoughts(redis, limit).await;
+pub async fn get_agent_memory(storage: &Storage, limit: usize) -> Option<String> {
+    let thoughts = load_agent_thoughts(storage, limit).await;
     build_agent_thoughts_context_message(&thoughts)
 }
 
-pub async fn show_agent_thoughts(redis: &redis::Client) -> String {
-    let thoughts = get_agent_thoughts(redis).await;
+pub async fn show_agent_thoughts(storage: &Storage) -> String {
+    let thoughts = get_agent_thoughts(storage).await;
     let visible: Vec<AgentThought> = thoughts
         .into_iter()
         .take(AGENT_THOUGHT_DISPLAY_LIMIT)
@@ -186,9 +185,9 @@ pub fn format_agent_thoughts(thoughts: &[AgentThought]) -> String {
 
 pub async fn run_agent_cycle(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Result<Value, String> {
-    let thoughts = load_agent_thoughts(redis, MAX_AGENT_THOUGHTS).await;
+    let thoughts = load_agent_thoughts(storage, MAX_AGENT_THOUGHTS).await;
     let recent_thoughts: Vec<AgentThought> = thoughts
         .iter()
         .take(AGENT_RECENT_THOUGHT_WINDOW)
@@ -257,7 +256,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         .map(|cfg| cfg.system_prompt)
         .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
     let time_label = Local::now().format("%A %d/%m/%Y").to_string();
-    let agent_memory = get_agent_memory(redis, AGENT_RECENT_THOUGHT_WINDOW).await;
+    let agent_memory = get_agent_memory(storage, AGENT_RECENT_THOUGHT_WINDOW).await;
 
     let context = ai::AiContext {
         system_prompt,
@@ -275,7 +274,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
 
     let mut cleaned = request_agent_response(
         http,
-        redis,
+        storage,
         &context,
         base_messages.clone(),
         "Autonomous agent execution failed",
@@ -306,7 +305,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         );
         cleaned = request_agent_response(
             http,
-            redis,
+            storage,
             &context,
             retry_messages,
             "Autonomous agent execution failed (structure retry)",
@@ -333,7 +332,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
             build_agent_retry_messages(&base_messages, &cleaned, &corrective_prompt);
         cleaned = request_agent_response(
             http,
-            redis,
+            storage,
             &context,
             retry_messages,
             "Autonomous agent execution failed (retry)",
@@ -392,7 +391,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         }));
     }
 
-    let entry = save_agent_thought(redis, &cleaned)
+    let entry = save_agent_thought(storage, &cleaned)
         .await
         .ok_or_else(|| "Failed to persist autonomous agent thought".to_string())?;
 
@@ -413,24 +412,20 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
     Ok(result)
 }
 
-async fn load_agent_thoughts(redis: &redis::Client, limit: usize) -> Vec<AgentThought> {
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-
-    let raw: Vec<String> = match conn
-        .lrange(AGENT_THOUGHTS_KEY, 0, (limit.saturating_sub(1)) as isize)
+async fn load_agent_thoughts(storage: &Storage, limit: usize) -> Vec<AgentThought> {
+    let raw: Vec<String> = storage
+        .get_json(AGENT_THOUGHTS_KEY)
         .await
-    {
-        Ok(items) => items,
-        Err(_) => return Vec::new(),
-    };
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
 
-    raw.into_iter().filter_map(parse_thought).collect()
+    raw.into_iter()
+        .take(limit)
+        .filter_map(parse_thought)
+        .collect()
 }
 
-async fn save_agent_thought(redis: &redis::Client, text: &str) -> Option<AgentThought> {
+async fn save_agent_thought(storage: &Storage, text: &str) -> Option<AgentThought> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -443,12 +438,16 @@ async fn save_agent_thought(redis: &redis::Client, text: &str) -> Option<AgentTh
         "timestamp": timestamp,
     });
 
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let _: () = conn.lpush(AGENT_THOUGHTS_KEY, payload.to_string()).await.ok()?;
-    let _: () = conn
-        .ltrim(AGENT_THOUGHTS_KEY, 0, (MAX_AGENT_THOUGHTS - 1) as isize)
+    let mut thoughts: Vec<String> = storage
+        .get_json(AGENT_THOUGHTS_KEY)
         .await
-        .ok()?;
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    thoughts.insert(0, payload.to_string());
+    thoughts.truncate(MAX_AGENT_THOUGHTS);
+    let _ = storage
+        .set_json(AGENT_THOUGHTS_KEY, &serde_json::json!(thoughts), None)
+        .await;
 
     Some(AgentThought {
         text,
@@ -1027,12 +1026,12 @@ pub fn build_agent_retry_messages(
 
 async fn request_agent_response(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     context: &ai::AiContext,
     messages: Vec<ai::ChatMessage>,
     error_context: &str,
 ) -> Result<String, String> {
-    let response = ai::ask_ai(http, redis, context, messages)
+    let response = ai::ask_ai(http, storage, context, messages)
         .await
         .ok_or_else(|| error_context.to_string())?;
     let sanitized = message_utils::sanitize_tool_artifacts(&response);

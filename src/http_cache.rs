@@ -1,8 +1,7 @@
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::redis_store::redis_get_string;
-use crate::redis_store::redis_set_string;
+use crate::storage::Storage;
 
 pub struct CacheOptions {
     pub ttl_seconds: u64,
@@ -12,7 +11,7 @@ pub struct CacheOptions {
 
 pub async fn cached_get_json(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     url: &str,
     params: Option<&[(&str, String)]>,
     headers: Option<&[(&str, String)]>,
@@ -20,7 +19,7 @@ pub async fn cached_get_json(
 ) -> Option<serde_json::Value> {
     cached_get_json_full(
         http,
-        redis,
+        storage,
         url,
         params,
         headers,
@@ -30,13 +29,13 @@ pub async fn cached_get_json(
             history_hours_ago: None,
         },
     )
-        .await
-        .and_then(|value| value.get("data").cloned())
+    .await
+    .and_then(|value| value.get("data").cloned())
 }
 
 pub async fn cached_get_json_full(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     url: &str,
     params: Option<&[(&str, String)]>,
     headers: Option<&[(&str, String)]>,
@@ -46,9 +45,9 @@ pub async fn cached_get_json_full(
     let cache_key = format!("cache:{hash_key}");
     let now = current_timestamp();
 
-    let cached = fetch_cached(redis, &cache_key).await.ok().flatten();
+    let cached = storage.get_string(&cache_key).await;
     let cache_history = if let Some(hours) = options.history_hours_ago {
-        get_cache_history(hours, &hash_key, redis).await
+        get_cache_history(hours, &hash_key, storage).await
     } else {
         None
     };
@@ -86,15 +85,13 @@ pub async fn cached_get_json_full(
     });
     if options.hourly_cache {
         let hour_key = hourly_cache_key(now, &hash_key);
-        let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-        let _ = redis_set_string(&mut conn, &hour_key, &payload.to_string()).await;
+        let _ = storage.set_string(&hour_key, &payload.to_string()).await;
     }
     if let Some(history) = cache_history {
         payload["history"] = history;
     }
 
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let _ = redis_set_string(&mut conn, &cache_key, &payload.to_string()).await;
+    let _ = storage.set_string(&cache_key, &payload.to_string()).await;
 
     Some(payload)
 }
@@ -139,14 +136,6 @@ fn build_headers(headers: Option<&[(&str, String)]>) -> reqwest::header::HeaderM
     map
 }
 
-async fn fetch_cached(
-    redis: &redis::Client,
-    key: &str,
-) -> redis::RedisResult<Option<String>> {
-    let mut conn = redis.get_multiplexed_async_connection().await?;
-    redis_get_string(&mut conn, key).await
-}
-
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,13 +152,12 @@ fn hourly_cache_key(timestamp: i64, hash_key: &str) -> String {
 pub async fn get_cache_history(
     hours_ago: u32,
     hash_key: &str,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<serde_json::Value> {
     let now = chrono::Utc::now();
     let ts = now - chrono::Duration::hours(hours_ago as i64);
     let key = format!("{}{}", ts.format("%Y-%m-%d-%H"), hash_key);
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let raw = redis_get_string(&mut conn, &key).await.ok().flatten()?;
+    let raw = storage.get_string(&key).await?;
     let parsed = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
     if parsed.get("timestamp").is_some() {
         Some(parsed)

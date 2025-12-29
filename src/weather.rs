@@ -1,10 +1,11 @@
 use crate::http_cache::cached_get_json;
+use crate::storage::Storage;
 
 const TTL_WEATHER: u64 = 1800;
 
 pub async fn get_weather_context(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<String> {
     let params = [
         ("latitude", "-34.5429".to_string()),
@@ -19,7 +20,7 @@ pub async fn get_weather_context(
 
     let data = cached_get_json(
         http,
-        redis,
+        storage,
         "https://api.open-meteo.com/v1/forecast",
         Some(&params),
         None,

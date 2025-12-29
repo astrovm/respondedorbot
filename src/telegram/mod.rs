@@ -2,7 +2,7 @@ use rand::TryRngCore;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 
-use crate::redis_store::redis_set_string;
+use crate::storage::Storage;
 
 fn api_base(token: &str) -> String {
     format!("https://api.telegram.org/bot{token}")
@@ -22,7 +22,7 @@ pub async fn set_webhook(
     token: &str,
     function_url: &str,
     webhook_key: &str,
-    redis: &mut redis::aio::MultiplexedConnection,
+    storage: &Storage,
 ) -> Result<bool, reqwest::Error> {
     let url = format!("{}/setWebhook", api_base(token));
 
@@ -45,7 +45,9 @@ pub async fn set_webhook(
         .unwrap_or(false);
 
     if ok {
-        let _ = redis_set_string(redis, "X-Telegram-Bot-Api-Secret-Token", &secret_token).await;
+        let _ = storage
+            .set_string("X-Telegram-Bot-Api-Secret-Token", &secret_token)
+            .await;
     }
 
     Ok(ok)

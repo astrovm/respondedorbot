@@ -5,7 +5,7 @@ use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::http_cache::cached_get_json;
-use crate::redis_store::{redis_get_string, redis_setex_string};
+use crate::storage::Storage;
 
 const TTL_BCRA: u64 = 300;
 const ITCRM_URL: &str = "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx";
@@ -21,19 +21,19 @@ pub struct BandLimits {
 
 pub async fn get_bcra_variables(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<String> {
-    let variables = fetch_latest_variables(http, redis).await?;
-    let itcrm = get_latest_itcrm_value_and_date(http, redis).await;
-    let tcrm = get_tcrm_100(http, redis).await;
+    let variables = fetch_latest_variables(http, storage).await?;
+    let itcrm = get_latest_itcrm_value_and_date(http, storage).await;
+    let tcrm = get_tcrm_100(http, storage).await;
     Some(format_bcra_variables(&variables, itcrm, tcrm))
 }
 
 pub async fn get_currency_band_limits(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<BandLimits> {
-    let variables = bcra_list_variables(http, redis, Some("Principales Variables")).await?;
+    let variables = bcra_list_variables(http, storage, Some("Principales Variables")).await?;
 
     let mut lower_id = None;
     let mut upper_id = None;
@@ -57,8 +57,8 @@ pub async fn get_currency_band_limits(
         return None;
     };
 
-    let lower_series = fetch_series(http, redis, lower_id, 200).await?;
-    let upper_series = fetch_series(http, redis, upper_id, 200).await?;
+    let lower_series = fetch_series(http, storage, lower_id, 200).await?;
+    let upper_series = fetch_series(http, storage, upper_id, 200).await?;
 
     let mut dates: Vec<String> = lower_series
         .keys()
@@ -95,7 +95,7 @@ pub async fn get_currency_band_limits(
 
 async fn bcra_list_variables(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     category: Option<&str>,
 ) -> Option<Vec<Value>> {
     let params = if category.is_some() {
@@ -106,7 +106,7 @@ async fn bcra_list_variables(
 
     let data = cached_get_json(
         http,
-        redis,
+        storage,
         "https://api.bcra.gob.ar/estadisticas/v4.0/monetarias",
         params,
         None,
@@ -134,9 +134,9 @@ async fn bcra_list_variables(
 
 async fn fetch_latest_variables(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<Vec<(String, String, String)>> {
-    let variables = bcra_list_variables(http, redis, Some("Principales Variables")).await?;
+    let variables = bcra_list_variables(http, storage, Some("Principales Variables")).await?;
     let mut out = Vec::new();
     for item in variables {
         let name = item.get("descripcion").and_then(|v| v.as_str()).unwrap_or("");
@@ -243,13 +243,13 @@ fn format_bcra_variables(
 
 async fn fetch_series(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     var_id: i64,
     limit: usize,
 ) -> Option<std::collections::HashMap<String, f64>> {
     let params = Some(&[("limit", limit.to_string())][..]);
     let url = format!("https://api.bcra.gob.ar/estadisticas/v4.0/monetarias/{var_id}");
-    let data = cached_get_json(http, redis, &url, params, None, TTL_BCRA).await?;
+    let data = cached_get_json(http, storage, &url, params, None, TTL_BCRA).await?;
     let results = data.get("results").and_then(|v| v.as_array())?;
 
     let mut series = std::collections::HashMap::new();
@@ -325,9 +325,9 @@ fn to_ddmmyy(date_iso: &str) -> String {
 
 async fn get_latest_itcrm_value_and_date(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<(f64, String)> {
-    if let Ok(Some(raw)) = get_cached_string(redis, "latest_itcrm_details").await {
+    if let Some(raw) = get_cached_string(storage, "latest_itcrm_details").await {
         if let Ok(value) = serde_json::from_str::<Value>(&raw) {
             if let (Some(val), Some(date)) = (
                 value.get("value").and_then(|v| v.as_f64()),
@@ -353,7 +353,7 @@ async fn get_latest_itcrm_value_and_date(
                     .and_then(parse_date_cell)
                     .unwrap_or_else(|| "".to_string());
                 let payload = serde_json::json!({"value": val, "date": date_str});
-                let _ = cache_string(redis, "latest_itcrm_details", &payload.to_string(), 1800).await;
+                let _ = cache_string(storage, "latest_itcrm_details", &payload.to_string(), 1800).await;
                 return Some((val, date_str));
             }
         }
@@ -362,8 +362,8 @@ async fn get_latest_itcrm_value_and_date(
     None
 }
 
-async fn get_tcrm_100(http: &reqwest::Client, redis: &redis::Client) -> Option<f64> {
-    if let Ok(Some(raw)) = get_cached_string(redis, "tcrm_100").await {
+async fn get_tcrm_100(http: &reqwest::Client, storage: &Storage) -> Option<f64> {
+    if let Some(raw) = get_cached_string(storage, "tcrm_100").await {
         if let Ok(value) = serde_json::from_str::<Value>(&raw) {
             if let Some(val) = value.get("data").and_then(|v| v.as_f64()) {
                 return Some(val);
@@ -371,27 +371,27 @@ async fn get_tcrm_100(http: &reqwest::Client, redis: &redis::Client) -> Option<f
         }
     }
 
-    let (itcrm_value, itcrm_date) = get_latest_itcrm_value_and_date(http, redis).await?;
+    let (itcrm_value, itcrm_date) = get_latest_itcrm_value_and_date(http, storage).await?;
     let date_iso = to_iso_date(&itcrm_date)?;
-    let mayorista = get_variable_value_for_date(http, redis, "tipo de cambio mayorista", &date_iso).await?;
+    let mayorista = get_variable_value_for_date(http, storage, "tipo de cambio mayorista", &date_iso).await?;
     if itcrm_value == 0.0 {
         return None;
     }
     let result = mayorista * 100.0 / itcrm_value;
 
     let payload = serde_json::json!({"timestamp": chrono::Utc::now().timestamp(), "data": result});
-    let _ = cache_string(redis, "tcrm_100", &payload.to_string(), 300).await;
+    let _ = cache_string(storage, "tcrm_100", &payload.to_string(), 300).await;
 
     Some(result)
 }
 
 async fn get_variable_value_for_date(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     desc_substr: &str,
     date_iso: &str,
 ) -> Option<f64> {
-    let vars = bcra_list_variables(http, redis, Some("Principales Variables")).await?;
+    let vars = bcra_list_variables(http, storage, Some("Principales Variables")).await?;
     let target = normalize_text(desc_substr);
     let mut var_id = None;
     for entry in vars {
@@ -408,7 +408,7 @@ async fn get_variable_value_for_date(
         ("limit", "1".to_string()),
     ][..]);
     let url = format!("https://api.bcra.gob.ar/estadisticas/v4.0/monetarias/{var_id}");
-    let data = cached_get_json(http, redis, &url, params, None, TTL_BCRA).await?;
+    let data = cached_get_json(http, storage, &url, params, None, TTL_BCRA).await?;
     let results = data.get("results").and_then(|v| v.as_array())?;
     if results.is_empty() {
         return None;
@@ -460,20 +460,17 @@ fn to_iso_date(ddmmyy: &str) -> Option<String> {
     Some(format!("{}-{}-{}", year_full, month, day))
 }
 
-async fn get_cached_string(
-    redis: &redis::Client,
-    key: &str,
-) -> redis::RedisResult<Option<String>> {
-    let mut conn = redis.get_multiplexed_async_connection().await?;
-    redis_get_string(&mut conn, key).await
+async fn get_cached_string(storage: &Storage, key: &str) -> Option<String> {
+    storage.get_string(key).await
 }
 
 async fn cache_string(
-    redis: &redis::Client,
+    storage: &Storage,
     key: &str,
     value: &str,
     ttl_seconds: u64,
-) -> redis::RedisResult<bool> {
-    let mut conn = redis.get_multiplexed_async_connection().await?;
-    redis_setex_string(&mut conn, key, ttl_seconds, value).await
+) -> bool {
+    storage
+        .set_string_with_ttl(key, ttl_seconds, value)
+        .await
 }

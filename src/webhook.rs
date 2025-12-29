@@ -17,11 +17,11 @@ use crate::media;
 use crate::message_utils::{
     build_ai_messages, build_link_keyboard, build_reply_context_text, contains_url,
     format_shared_by, format_user_identity, format_user_message, gen_random, is_group_chat,
-    post_process_ai_response, should_gordo_respond_core, truncate_text, ChatHistoryEntry,
+    post_process_ai_response, should_gordo_respond_core, ChatHistoryEntry,
 };
 use crate::models::Update;
 use crate::polymarket;
-use crate::redis_store::{create_redis_client, redis_get_string, redis_setex_string};
+use crate::storage::Storage;
 use crate::telegram;
 use crate::tools;
 use crate::weather;
@@ -29,7 +29,7 @@ use crate::weather;
 #[derive(Clone)]
 pub struct AppState {
     http: reqwest::Client,
-    redis: redis::Client,
+    storage: Storage,
     telegram_token: Option<String>,
     webhook_key: Option<String>,
     function_url: Option<String>,
@@ -51,8 +51,10 @@ pub struct WebhookResponse {
     pub body: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static APP_STATE: OnceLock<AppState> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_state_from_env() -> AppState {
     let http = reqwest::Client::new();
     let redis_host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".to_string());
@@ -61,12 +63,12 @@ pub fn build_state_from_env() -> AppState {
         .and_then(|value| value.parse().ok())
         .unwrap_or(6379);
     let redis_password = std::env::var("REDIS_PASSWORD").ok();
-    let redis = create_redis_client(&redis_host, redis_port, redis_password.as_deref())
+    let redis = Storage::create_redis_client(&redis_host, redis_port, redis_password.as_deref())
         .expect("failed to create redis client");
 
     AppState {
         http,
-        redis,
+        storage: Storage::from_redis_client(redis),
         telegram_token: std::env::var("TELEGRAM_TOKEN").ok(),
         webhook_key: std::env::var("WEBHOOK_AUTH_KEY").ok(),
         function_url: std::env::var("FUNCTION_URL").ok(),
@@ -77,6 +79,25 @@ pub fn build_state_from_env() -> AppState {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn app_state(env: &worker::Env) -> AppState {
+    let http = reqwest::Client::new();
+    let kv = env.kv("STORAGE").expect("KV binding STORAGE is required");
+    AppState {
+        http,
+        storage: Storage::from_kv(kv),
+        telegram_token: env.var("TELEGRAM_TOKEN").ok().map(|v| v.to_string()),
+        webhook_key: env.var("WEBHOOK_AUTH_KEY").ok().map(|v| v.to_string()),
+        function_url: env.var("FUNCTION_URL").ok().map(|v| v.to_string()),
+        admin_chat_id: env
+            .var("ADMIN_CHAT_ID")
+            .ok()
+            .and_then(|v| v.to_string().parse().ok()),
+        bot_username: env.var("TELEGRAM_USERNAME").ok().map(|v| v.to_string()),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn app_state() -> AppState {
     APP_STATE.get_or_init(build_state_from_env).clone()
 }
@@ -123,7 +144,7 @@ pub async fn handle_get(state: &AppState, query: WebhookQuery) -> WebhookRespons
     }
 
     if is_true(&query.update_dollars) {
-        let updated = market::get_dollar_rates(&state.http, &state.redis)
+        let updated = market::get_dollar_rates(&state.http, &state.storage)
             .await
             .is_some();
         if updated {
@@ -133,7 +154,7 @@ pub async fn handle_get(state: &AppState, query: WebhookQuery) -> WebhookRespons
     }
 
     if is_true(&query.run_agent) {
-        match agent::run_agent_cycle(&state.http, &state.redis).await {
+        match agent::run_agent_cycle(&state.http, &state.storage).await {
             Ok(payload) => return response(StatusCode::OK, payload.to_string()),
             Err(err) => {
                 tracing::error!(error = %err, "run_agent failed");
@@ -227,12 +248,7 @@ async fn handle_update_webhook(state: &AppState) -> WebhookResponse {
         return response(StatusCode::BAD_REQUEST, "Webhook update error");
     };
 
-    let mut redis = match state.redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return response(StatusCode::BAD_REQUEST, "Webhook update error"),
-    };
-
-    match telegram::set_webhook(&state.http, token, function_url, webhook_key, &mut redis).await {
+    match telegram::set_webhook(&state.http, token, function_url, webhook_key, &state.storage).await {
         Ok(true) => response(StatusCode::OK, "Webhook updated"),
         _ => response(StatusCode::BAD_REQUEST, "Webhook update error"),
     }
@@ -243,14 +259,10 @@ async fn is_secret_token_valid(state: &AppState, secret_header: Option<&str>) ->
         return false;
     };
 
-    let mut redis = match state.redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-
-    let stored: Option<String> = redis_get_string(&mut redis, "X-Telegram-Bot-Api-Secret-Token")
-        .await
-        .unwrap_or_default();
+    let stored = state
+        .storage
+        .get_string("X-Telegram-Bot-Api-Secret-Token")
+        .await;
 
     match stored {
         Some(value) => value == secret_header,
@@ -276,7 +288,6 @@ const RATE_LIMIT_GLOBAL_MAX: i64 = 1024;
 const RATE_LIMIT_CHAT_MAX: i64 = 128;
 const TTL_RATE_GLOBAL: u64 = 3600;
 const TTL_RATE_CHAT: u64 = 600;
-const BOT_MESSAGE_META_PREFIX: &str = "bot_message_meta:";
 const BOT_MESSAGE_META_TTL: u64 = 3 * 24 * 60 * 60;
 
 async fn handle_message(state: &AppState, message: crate::models::Message) -> Result<(), String> {
@@ -294,7 +305,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
         .unwrap_or("");
     tracing::info!(chat_id, message_id, user_id, username, "message received");
 
-    let chat_config = chat_config::get_chat_config(&state.redis, chat_id).await;
+    let chat_config = chat_config::get_chat_config(&state.storage, chat_id).await;
     let user_identity = format_user_identity(message.from.as_ref());
     let user_identity_opt = if user_identity.trim().is_empty() {
         None
@@ -307,7 +318,7 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
         if let Some(audio) = message.audio.as_ref().or(message.voice.as_ref()) {
             match media::transcribe_file_by_id(
                 &state.http,
-                &state.redis,
+                &state.storage,
                 token,
                 &audio.file_id,
                 false,
@@ -443,39 +454,39 @@ async fn handle_message(state: &AppState, message: crate::models::Message) -> Re
             let instance = std::env::var("FRIENDLY_INSTANCE_NAME").unwrap_or_default();
             response_msg = Some(format!("estoy corriendo en {} boludo", instance));
         } else if command == "/search" || command == "/buscar" {
-            let results = tools::web_search(&state.http, &state.redis, &args, 5).await;
+            let results = tools::web_search(&state.http, &state.storage, &args, 5).await;
             response_msg = Some(tools::format_search_results(&args, &results));
         } else if matches!(
             command.as_str(),
             "/prices" | "/precio" | "/precios" | "/presio" | "/presios"
         ) {
-            response_msg = market::get_prices(&state.http, &state.redis, &args).await;
+            response_msg = market::get_prices(&state.http, &state.storage, &args).await;
         } else if matches!(command.as_str(), "/dolar" | "/dollar" | "/usd") {
-            response_msg = market::get_dollar_rates(&state.http, &state.redis).await;
+            response_msg = market::get_dollar_rates(&state.http, &state.storage).await;
         } else if matches!(command.as_str(), "/bcra" | "/variables") {
-            response_msg = bcra::get_bcra_variables(&state.http, &state.redis).await;
+            response_msg = bcra::get_bcra_variables(&state.http, &state.storage).await;
         } else if command == "/eleccion" {
             response_msg = Some(
-                polymarket::get_polymarket_argentina_election(&state.http, &state.redis).await,
+                polymarket::get_polymarket_argentina_election(&state.http, &state.storage).await,
             );
         } else if command == "/devo" {
-            response_msg = Some(market::get_devo(&state.http, &state.redis, &args).await);
+            response_msg = Some(market::get_devo(&state.http, &state.storage, &args).await);
         } else if command == "/rulo" {
-            response_msg = Some(market::get_rulo(&state.http, &state.redis).await);
+            response_msg = Some(market::get_rulo(&state.http, &state.storage).await);
         } else if matches!(command.as_str(), "/satoshi" | "/sat" | "/sats") {
-            response_msg = Some(market::satoshi(&state.http, &state.redis).await);
+            response_msg = Some(market::satoshi(&state.http, &state.storage).await);
         } else if command == "/random" {
             response_msg = Some(commands::select_random(&args));
         } else if matches!(command.as_str(), "/comando" | "/command") {
             response_msg = Some(commands::convert_to_command(&args));
         } else if command == "/powerlaw" {
-            response_msg = Some(market::powerlaw(&state.http, &state.redis).await);
+            response_msg = Some(market::powerlaw(&state.http, &state.storage).await);
         } else if command == "/rainbow" {
-            response_msg = Some(market::rainbow(&state.http, &state.redis).await);
+            response_msg = Some(market::rainbow(&state.http, &state.storage).await);
         } else if command == "/convertbase" {
             response_msg = Some(market::convert_base(&args));
         } else if command == "/agent" {
-            response_msg = Some(agent::show_agent_thoughts(&state.redis).await);
+            response_msg = Some(agent::show_agent_thoughts(&state.storage).await);
         } else if command == "/transcribe" {
             tracing::info!(chat_id, message_id, "transcribe command");
             response_msg = Some(handle_transcribe(state, token, &message).await);
@@ -585,15 +596,15 @@ async fn run_ai_with_context(
         .map(|cfg| cfg.system_prompt)
         .unwrap_or_else(|_| "Sos un asistente útil.".to_string());
     let time_label = chrono::Local::now().format("%A %d/%m/%Y").to_string();
-    let market_info = market::get_market_context(&state.http, &state.redis).await;
-    let weather_info = weather::get_weather_context(&state.http, &state.redis).await;
+    let market_info = market::get_market_context(&state.http, &state.storage).await;
+    let weather_info = weather::get_weather_context(&state.http, &state.storage).await;
     let hn_items = hacker_news::get_hn_context(&state.http).await;
     let hn_info = if hn_items.is_empty() {
         None
     } else {
         Some(hacker_news::format_hn_items(&hn_items))
     };
-    let agent_memory = agent::get_agent_memory(&state.redis, 5).await;
+    let agent_memory = agent::get_agent_memory(&state.storage, 5).await;
     let context = ai::AiContext {
         system_prompt,
         time_label,
@@ -607,7 +618,7 @@ async fn run_ai_with_context(
     if let Some(photo) = message.photo.as_ref().and_then(|list| list.last()) {
         if let Ok(Some(description)) = media::describe_media_by_id(
             &state.http,
-            &state.redis,
+            &state.storage,
             token,
             &photo.file_id,
             "Describe what you see in this image in detail.",
@@ -630,9 +641,9 @@ async fn run_ai_with_context(
     ))
     .await;
 
-    let history = get_chat_history(&state.redis, message.chat.id, 8).await;
+    let history = get_chat_history(&state.storage, message.chat.id, 8).await;
     let messages = build_ai_messages(message, &history, &enriched_text, reply_context);
-    let raw = ai::ask_ai(&state.http, &state.redis, &context, messages).await?;
+    let raw = ai::ask_ai(&state.http, &state.storage, &context, messages).await?;
     let cleaned =
         post_process_ai_response(&raw, &[reply_context.map(|s| s.to_string())], user_identity);
     if cleaned.trim().is_empty() {
@@ -643,53 +654,11 @@ async fn run_ai_with_context(
 }
 
 async fn get_chat_history(
-    redis: &redis::Client,
+    storage: &Storage,
     chat_id: i64,
     max_messages: usize,
 ) -> Vec<ChatHistoryEntry> {
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let history_key = format!("chat_history:{chat_id}");
-    let raw: Vec<String> = match redis::AsyncCommands::lrange(
-        &mut conn,
-        &history_key,
-        0,
-        (max_messages.saturating_sub(1)) as isize,
-    )
-    .await
-    {
-        Ok(values) => values,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for entry in raw {
-        let value = serde_json::from_str::<serde_json::Value>(&entry).ok();
-        let text = value
-            .as_ref()
-            .and_then(|v| v.get("text"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if text.is_empty() {
-            continue;
-        }
-        let id = value
-            .as_ref()
-            .and_then(|v| v.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let role = if id.starts_with("bot_") {
-            "assistant".to_string()
-        } else {
-            "user".to_string()
-        };
-        entries.push(ChatHistoryEntry { role, text });
-    }
-    entries.reverse();
-    entries
+    storage.load_chat_history(chat_id, max_messages).await
 }
 
 async fn load_reply_metadata(
@@ -702,7 +671,7 @@ async fn load_reply_metadata(
     if reply_user.username.as_deref() != Some(bot_username) {
         return None;
     }
-    get_bot_message_metadata(&state.redis, message.chat.id, reply.message_id).await
+    get_bot_message_metadata(&state.storage, message.chat.id, reply.message_id).await
 }
 
 async fn should_gordo_respond(
@@ -738,7 +707,7 @@ async fn handle_transcribe(
     };
 
     if let Some(audio) = reply.audio.as_ref().or(reply.voice.as_ref()) {
-        match media::transcribe_file_by_id(&state.http, &state.redis, token, &audio.file_id, true)
+        match media::transcribe_file_by_id(&state.http, &state.storage, token, &audio.file_id, true)
             .await
         {
             Ok(Some(text)) => return format!("🎵 Transcripción: {}", text),
@@ -750,7 +719,7 @@ async fn handle_transcribe(
     if let Some(photo) = reply.photo.as_ref().and_then(|photos| photos.last()) {
         match media::describe_media_by_id(
             &state.http,
-            &state.redis,
+            &state.storage,
             token,
             &photo.file_id,
             "Describe what you see in this image in detail.",
@@ -766,7 +735,7 @@ async fn handle_transcribe(
     if let Some(sticker) = reply.sticker.as_ref() {
         match media::describe_media_by_id(
             &state.http,
-            &state.redis,
+            &state.storage,
             token,
             &sticker.file_id,
             "Describe what you see in this sticker in detail.",
@@ -810,44 +779,27 @@ async fn track_bot_response(
 ) {
     save_message_to_redis(state, chat_id, format!("bot_{message_id}"), text).await;
     if let Some(meta) = metadata {
-        save_bot_message_metadata(&state.redis, chat_id, message_id, &meta).await;
+        save_bot_message_metadata(&state.storage, chat_id, message_id, &meta).await;
     }
 }
 
-fn bot_message_meta_key(chat_id: i64, message_id: i64) -> String {
-    format!("{BOT_MESSAGE_META_PREFIX}{chat_id}:{message_id}")
-}
-
 async fn save_bot_message_metadata(
-    redis: &redis::Client,
+    storage: &Storage,
     chat_id: i64,
     message_id: i64,
     metadata: &serde_json::Value,
 ) {
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
-    let _ = redis_setex_string(
-        &mut conn,
-        &bot_message_meta_key(chat_id, message_id),
-        BOT_MESSAGE_META_TTL,
-        &metadata.to_string(),
-    )
-    .await;
+    storage
+        .save_bot_message_metadata(chat_id, message_id, metadata, BOT_MESSAGE_META_TTL)
+        .await;
 }
 
 async fn get_bot_message_metadata(
-    redis: &redis::Client,
+    storage: &Storage,
     chat_id: i64,
     message_id: i64,
 ) -> Option<serde_json::Value> {
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let raw = redis_get_string(&mut conn, &bot_message_meta_key(chat_id, message_id))
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str::<serde_json::Value>(&raw).ok()
+    storage.load_bot_message_metadata(chat_id, message_id).await
 }
 
 async fn rate_limited(state: &AppState, chat_id: i64) -> bool {
@@ -855,9 +807,9 @@ async fn rate_limited(state: &AppState, chat_id: i64) -> bool {
     let chat_key = format!("rate:chat:{chat_id}");
 
     let global_count =
-        chat_config::increment_rate_limit(&state.redis, global_key, TTL_RATE_GLOBAL).await;
+        chat_config::increment_rate_limit(&state.storage, global_key, TTL_RATE_GLOBAL).await;
     let chat_count =
-        chat_config::increment_rate_limit(&state.redis, &chat_key, TTL_RATE_CHAT).await;
+        chat_config::increment_rate_limit(&state.storage, &chat_key, TTL_RATE_CHAT).await;
 
     global_count > RATE_LIMIT_GLOBAL_MAX || chat_count > RATE_LIMIT_CHAT_MAX
 }
@@ -881,60 +833,10 @@ async fn handle_rate_limit(
 }
 
 async fn save_message_to_redis(state: &AppState, chat_id: i64, message_id: String, text: &str) {
-    let mut redis = match state.redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
-
-    let history_key = format!("chat_history:{chat_id}");
-    let message_ids_key = format!("chat_message_ids:{chat_id}");
-
-    let exists: bool = redis::AsyncCommands::sismember(&mut redis, &message_ids_key, &message_id)
-        .await
-        .unwrap_or(false);
-    if exists {
-        return;
-    }
-
-    let payload = serde_json::json!({
-        "id": message_id,
-        "text": truncate_text(text, 512),
-        "timestamp": chrono::Utc::now().timestamp(),
-    });
-
-    let entry = payload.to_string();
-    let _: () = redis::AsyncCommands::lpush(&mut redis, &history_key, entry)
-        .await
-        .unwrap_or(());
-    let _: () = redis::AsyncCommands::sadd(&mut redis, &message_ids_key, &message_id)
-        .await
-        .unwrap_or(());
-    let _: () = redis::AsyncCommands::ltrim(&mut redis, &history_key, 0, 31)
-        .await
-        .unwrap_or(());
-
-    let history_entries: Vec<String> =
-        redis::AsyncCommands::lrange(&mut redis, &history_key, 0, -1)
-            .await
-            .unwrap_or_default();
-    let mut valid_ids = std::collections::HashSet::new();
-    for item in history_entries {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&item) {
-            if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
-                valid_ids.insert(id.to_string());
-            }
-        }
-    }
-    let current_ids: Vec<String> = redis::AsyncCommands::smembers(&mut redis, &message_ids_key)
-        .await
-        .unwrap_or_default();
-    for id in current_ids {
-        if !valid_ids.contains(&id) {
-            let _: () = redis::AsyncCommands::srem(&mut redis, &message_ids_key, &id)
-                .await
-                .unwrap_or(());
-        }
-    }
+    state
+        .storage
+        .append_chat_history(chat_id, &message_id, text)
+        .await;
 }
 
 async fn admin_report(state: &AppState, message: &str) {
@@ -951,7 +853,7 @@ async fn admin_report(state: &AppState, message: &str) {
 fn config_context(state: &AppState) -> chat_config::ConfigContext<'_> {
     chat_config::ConfigContext {
         http: &state.http,
-        redis: &state.redis,
+        storage: &state.storage,
         token: state.telegram_token.as_deref(),
         webhook_key: state.webhook_key.as_deref(),
         function_url: state.function_url.as_deref(),

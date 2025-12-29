@@ -11,7 +11,9 @@ use worker::{Env, Request, Response, Result, Router};
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     log_bot_config();
 
-    Router::with_data(app_state())
+    let state = app_state(&env);
+
+    Router::with_data(state)
         .get_async("/", handle_get_request)
         .post_async("/", handle_post_request)
         .run(req, env)

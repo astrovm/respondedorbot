@@ -1,9 +1,7 @@
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::redis_store::{
-    redis_get_string, redis_incr_with_ttl, redis_set_string, redis_setex_string,
-};
+use crate::storage::Storage;
 use crate::telegram;
 
 static CALLBACKS_CHECKED: AtomicBool = AtomicBool::new(false);
@@ -31,7 +29,7 @@ impl Default for ChatConfig {
 
 pub struct ConfigContext<'a> {
     pub http: &'a reqwest::Client,
-    pub redis: &'a redis::Client,
+    pub storage: &'a Storage,
     pub token: Option<&'a str>,
     pub webhook_key: Option<&'a str>,
     pub function_url: Option<&'a str>,
@@ -43,7 +41,7 @@ pub async fn handle_config_command(
     chat_id: i64,
 ) -> Result<(String, Value), String> {
     ensure_callback_updates_enabled(ctx).await;
-    let config = get_chat_config(ctx.redis, chat_id).await;
+    let config = get_chat_config(ctx.storage, chat_id).await;
     Ok((build_config_text(&config), build_config_keyboard(&config)))
 }
 
@@ -95,7 +93,7 @@ pub async fn handle_callback_query(
     let action = parts[1];
     let value = parts[2];
 
-    let mut config = get_chat_config(ctx.redis, chat_id).await;
+    let mut config = get_chat_config(ctx.storage, chat_id).await;
     if action == "link" && matches!(value, "reply" | "delete" | "off") {
         config.link_mode = value.to_string();
     } else if action == "random" {
@@ -104,7 +102,7 @@ pub async fn handle_callback_query(
         config.ai_command_followups = !config.ai_command_followups;
     }
 
-    config = set_chat_config(ctx.redis, chat_id, config).await;
+    config = set_chat_config(ctx.storage, chat_id, config).await;
 
     let text = build_config_text(&config);
     let keyboard = build_config_keyboard(&config);
@@ -149,28 +147,21 @@ fn is_group_chat_type(chat_type: &str) -> bool {
     matches!(chat_type, "group" | "supergroup")
 }
 
-pub async fn get_chat_config(redis: &redis::Client, chat_id: i64) -> ChatConfig {
+pub async fn get_chat_config(storage: &Storage, chat_id: i64) -> ChatConfig {
     let mut config = ChatConfig::default();
 
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return config,
-    };
-
-    if let Ok(Some(raw)) = redis_get_string(&mut conn, &chat_config_key(chat_id)).await {
-        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-            if let Some(obj) = value.as_object() {
-                if let Some(mode) = obj.get("link_mode").and_then(|v| v.as_str()) {
-                    config.link_mode = mode.to_string();
-                }
-                config.ai_random_replies = coerce_bool(obj.get("ai_random_replies"), true);
-                config.ai_command_followups = coerce_bool(obj.get("ai_command_followups"), true);
+    if let Some(value) = storage.get_json(&chat_config_key(chat_id)).await {
+        if let Some(obj) = value.as_object() {
+            if let Some(mode) = obj.get("link_mode").and_then(|v| v.as_str()) {
+                config.link_mode = mode.to_string();
             }
+            config.ai_random_replies = coerce_bool(obj.get("ai_random_replies"), true);
+            config.ai_command_followups = coerce_bool(obj.get("ai_command_followups"), true);
         }
         return config;
     }
 
-    if let Ok(Some(legacy)) = redis_get_string(&mut conn, &legacy_link_mode_key(chat_id)).await {
+    if let Some(legacy) = storage.get_string(&legacy_link_mode_key(chat_id)).await {
         if !legacy.trim().is_empty() {
             config.link_mode = legacy;
         }
@@ -180,27 +171,26 @@ pub async fn get_chat_config(redis: &redis::Client, chat_id: i64) -> ChatConfig 
 }
 
 pub async fn set_chat_config(
-    redis: &redis::Client,
+    storage: &Storage,
     chat_id: i64,
     config: ChatConfig,
 ) -> ChatConfig {
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return config,
-    };
-
     let payload = json!({
         "link_mode": config.link_mode,
         "ai_random_replies": config.ai_random_replies,
         "ai_command_followups": config.ai_command_followups,
     });
-    let _ = redis_set_string(&mut conn, &chat_config_key(chat_id), &payload.to_string()).await;
+    let _ = storage
+        .set_json(&chat_config_key(chat_id), &payload, None)
+        .await;
 
     let legacy_key = legacy_link_mode_key(chat_id);
     if matches!(config.link_mode.as_str(), "reply" | "delete") {
-        let _ = redis_set_string(&mut conn, &legacy_key, &config.link_mode).await;
+        let _ = storage
+            .set_string(&legacy_key, &config.link_mode)
+            .await;
     } else {
-        let _: redis::RedisResult<()> = redis::AsyncCommands::del(&mut conn, legacy_key).await;
+        let _ = storage.set_string(&legacy_key, "").await;
     }
 
     config
@@ -281,12 +271,7 @@ pub async fn is_chat_admin(ctx: &ConfigContext<'_>, chat_id: i64, user_id: i64) 
     };
 
     let cache_key = format!("chat_admin:{chat_id}:{user_id}");
-    let mut conn = match ctx.redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return false,
-    };
-
-    if let Ok(Some(cached)) = redis_get_string(&mut conn, &cache_key).await {
+    if let Some(cached) = ctx.storage.get_string(&cache_key).await {
         return cached == "1";
     }
 
@@ -296,7 +281,10 @@ pub async fn is_chat_admin(ctx: &ConfigContext<'_>, chat_id: i64, user_id: i64) 
     let is_admin = matches!(status.as_deref(), Some("administrator") | Some("creator"));
 
     let cached_value = if is_admin { "1" } else { "0" };
-    let _ = redis_setex_string(&mut conn, &cache_key, CHAT_ADMIN_STATUS_TTL, cached_value).await;
+    let _ = ctx
+        .storage
+        .set_string_with_ttl(&cache_key, CHAT_ADMIN_STATUS_TTL, cached_value)
+        .await;
 
     is_admin
 }
@@ -356,21 +344,13 @@ async fn ensure_callback_updates_enabled(ctx: &ConfigContext<'_>) {
         return;
     }
 
-    let mut conn = match ctx.redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
-    let _ = telegram::set_webhook(ctx.http, token, function_url, webhook_key, &mut conn).await;
+    let _ = telegram::set_webhook(ctx.http, token, function_url, webhook_key, ctx.storage).await;
 }
 
 pub async fn increment_rate_limit(
-    redis: &redis::Client,
+    storage: &Storage,
     key: &str,
     ttl_seconds: u64,
 ) -> i64 {
-    let mut conn = match redis.get_multiplexed_async_connection().await {
-        Ok(conn) => conn,
-        Err(_) => return 0,
-    };
-    redis_incr_with_ttl(&mut conn, key, ttl_seconds).await.unwrap_or(0)
+    storage.incr_with_ttl(key, ttl_seconds).await
 }

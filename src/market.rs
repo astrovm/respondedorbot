@@ -1,12 +1,13 @@
-use crate::http_cache::{cached_get_json, cached_get_json_full, CacheOptions};
 use crate::bcra;
+use crate::http_cache::{cached_get_json, cached_get_json_full, CacheOptions};
+use crate::storage::Storage;
 
 const TTL_PRICE: u64 = 300;
 const TTL_DOLLAR: u64 = 300;
 
 pub async fn get_prices(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     msg_text: &str,
 ) -> Option<String> {
     let mut convert_to = "USD".to_string();
@@ -53,7 +54,7 @@ pub async fn get_prices(
 
     let data = cached_get_json(
         http,
-        redis,
+        storage,
         "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
         Some(&params),
         Some(&headers),
@@ -147,11 +148,11 @@ pub async fn get_prices(
 
 pub async fn get_dollar_rates(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<String> {
     let data = cached_get_json_full(
         http,
-        redis,
+        storage,
         "https://criptoya.com/api/dolar",
         None,
         None,
@@ -178,7 +179,7 @@ pub async fn get_dollar_rates(
     ];
 
     let mut bands_date: Option<String> = None;
-    if let Some(bands) = bcra::get_currency_band_limits(http, redis).await {
+    if let Some(bands) = bcra::get_currency_band_limits(http, storage).await {
         bands_date = bands.date.clone();
         if let Some(lower) = bands.lower {
             rates.push(DollarRate {
@@ -218,13 +219,13 @@ pub async fn get_dollar_rates(
 
 pub async fn get_market_context(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(btc) = get_btc_price(http, redis, "USD").await {
+    if let Some(btc) = get_btc_price(http, storage, "USD").await {
         parts.push(format!("BTC: {}", trim_float(btc, 2)));
     }
-    if let Some(dollar) = get_dollar_rates(http, redis).await {
+    if let Some(dollar) = get_dollar_rates(http, storage).await {
         parts.push(dollar);
     }
     if parts.is_empty() {
@@ -236,7 +237,7 @@ pub async fn get_market_context(
 
 pub async fn get_devo(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     msg_text: &str,
 ) -> String {
     let mut fee = 0.0;
@@ -261,7 +262,7 @@ pub async fn get_devo(
 
     let dollars = cached_get_json(
         http,
-        redis,
+        storage,
         "https://criptoya.com/api/dolar",
         None,
         None,
@@ -284,7 +285,7 @@ pub async fn get_devo(
 
 pub async fn get_rulo(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> String {
     let usd_amount: f64 = 1000.0;
     let amount_param = if usd_amount.fract() == 0.0 {
@@ -295,7 +296,7 @@ pub async fn get_rulo(
 
     let dollars = cached_get_json(
         http,
-        redis,
+        storage,
         "https://criptoya.com/api/dolar",
         None,
         None,
@@ -327,7 +328,7 @@ pub async fn get_rulo(
 
     let usd_usdt = cached_get_json(
         http,
-        redis,
+        storage,
         &format!("https://criptoya.com/api/USDT/USD/{}", amount_param),
         None,
         None,
@@ -336,7 +337,7 @@ pub async fn get_rulo(
     .await;
     let usdt_ars = cached_get_json(
         http,
-        redis,
+        storage,
         &format!("https://criptoya.com/api/USDT/ARS/{}", amount_param),
         None,
         None,
@@ -568,7 +569,7 @@ pub fn rainbow_message(price: f64, value: f64) -> String {
 
 pub async fn powerlaw(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> String {
     let today = chrono::Utc::now();
     let since = chrono::DateTime::parse_from_rfc3339("2009-01-04T00:00:00Z")
@@ -577,7 +578,7 @@ pub async fn powerlaw(
     let days_since = (today - since).num_days();
     let value = powerlaw_model(days_since);
 
-    let price = get_btc_price(http, redis, "USD").await.unwrap_or(0.0);
+    let price = get_btc_price(http, storage, "USD").await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for power law calculation".to_string();
     }
@@ -587,7 +588,7 @@ pub async fn powerlaw(
 
 pub async fn rainbow(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> String {
     let today = chrono::Utc::now();
     let since = chrono::DateTime::parse_from_rfc3339("2009-01-09T00:00:00Z")
@@ -596,7 +597,7 @@ pub async fn rainbow(
     let days_since = (today - since).num_days();
     let value = rainbow_model(days_since);
 
-    let price = get_btc_price(http, redis, "USD").await.unwrap_or(0.0);
+    let price = get_btc_price(http, storage, "USD").await.unwrap_or(0.0);
     if price <= 0.0 {
         return "Error getting BTC price for rainbow calculation".to_string();
     }
@@ -659,10 +660,10 @@ pub fn convert_base(msg_text: &str) -> String {
 
 pub async fn satoshi(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> String {
-    let btc_usd = get_btc_price(http, redis, "USD").await;
-    let btc_ars = get_btc_price(http, redis, "ARS").await;
+    let btc_usd = get_btc_price(http, storage, "USD").await;
+    let btc_ars = get_btc_price(http, storage, "ARS").await;
 
     let Some(btc_usd) = btc_usd else {
         return "Error getting BTC USD price".to_string();
@@ -687,7 +688,7 @@ pub async fn satoshi(
 
 async fn get_btc_price(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     convert: &str,
 ) -> Option<f64> {
     let params = vec![
@@ -704,7 +705,7 @@ async fn get_btc_price(
     ];
     let data = cached_get_json(
         http,
-        redis,
+        storage,
         "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
         Some(&params),
         Some(&headers),

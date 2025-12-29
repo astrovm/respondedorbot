@@ -13,7 +13,7 @@ pub mod media;
 pub mod message_utils;
 pub mod models;
 pub mod polymarket;
-pub mod redis_store;
+pub mod storage;
 pub mod telegram;
 pub mod tools;
 pub mod weather;
