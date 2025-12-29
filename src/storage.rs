@@ -19,8 +19,8 @@ enum StorageBackend {
     Kv(worker::kv::KvStore),
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 struct StoredCounter {
     value: i64,
     expires_at: i64,
