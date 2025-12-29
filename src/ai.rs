@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::time::{Duration, Instant};
 
+use crate::http::HttpClient;
 use crate::tools;
 
 #[derive(Debug, Clone)]
@@ -19,7 +20,7 @@ pub struct AiContext {
 }
 
 pub async fn ask_ai(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &crate::storage::Storage,
     context: &AiContext,
     messages: Vec<ChatMessage>,
@@ -47,16 +48,17 @@ pub async fn ask_ai(
                 role: "user".to_string(),
                 content: format!(
                     "RESULTADO DE HERRAMIENTA:\n{}",
-                    tool_context.to_string().chars().take(4000).collect::<String>()
+                    tool_context
+                        .to_string()
+                        .chars()
+                        .take(4000)
+                        .collect::<String>()
                 ),
             });
 
             attempts += 1;
             if attempts >= 3 {
-                return Some(format_tool_fallback(
-                    Some(tool_name),
-                    Some(tool_output),
-                ));
+                return Some(format_tool_fallback(Some(tool_name), Some(tool_output)));
             }
 
             if let Some(next) = complete_with_providers(http, &system_message, &conversation).await
@@ -64,10 +66,7 @@ pub async fn ask_ai(
                 current = next;
                 continue;
             }
-            return Some(format_tool_fallback(
-                Some(tool_name),
-                Some(tool_output),
-            ));
+            return Some(format_tool_fallback(Some(tool_name), Some(tool_output)));
         }
         return Some(current);
     }
@@ -96,7 +95,7 @@ pub fn build_system_message(context: &AiContext) -> String {
 }
 
 async fn complete_with_providers(
-    http: &reqwest::Client,
+    http: &HttpClient,
     system_prompt: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
@@ -117,7 +116,7 @@ async fn complete_with_providers(
 }
 
 async fn openrouter_request(
-    http: &reqwest::Client,
+    http: &HttpClient,
     system_prompt: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
@@ -154,7 +153,7 @@ async fn openrouter_request(
 }
 
 async fn groq_request(
-    http: &reqwest::Client,
+    http: &HttpClient,
     system_prompt: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
@@ -184,7 +183,7 @@ async fn groq_request(
 }
 
 async fn cloudflare_request(
-    http: &reqwest::Client,
+    http: &HttpClient,
     system_prompt: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
@@ -267,7 +266,11 @@ fn format_tool_fallback(
                         .get("snippet")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    results.push(tools::SearchResult { title, url, snippet });
+                    results.push(tools::SearchResult {
+                        title,
+                        url,
+                        snippet,
+                    });
                 }
             }
             return tools::format_search_results(&query, &results);
@@ -278,21 +281,36 @@ fn format_tool_fallback(
     if tool_name == "fetch_url" {
         let parsed = serde_json::from_str::<serde_json::Value>(&tool_output).ok();
         if let Some(data) = parsed {
-            let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let error_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let url = data
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let error_msg = data
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if !error_msg.is_empty() {
                 if !url.is_empty() {
                     return format!("no pude leer {url}: {error_msg}");
                 }
                 return format!("no pude leer la URL: {error_msg}");
             }
-            let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let title = data
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             let content = data
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            let truncated_flag = data.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+            let truncated_flag = data
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let mut lines = Vec::new();
             if !title.is_empty() {
                 lines.push(format!("📄 {title}"));
@@ -308,7 +326,11 @@ fn format_tool_fallback(
                 lines.push(String::new());
                 lines.push("(texto recortado)".to_string());
             }
-            let formatted = lines.into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
+            let formatted = lines
+                .into_iter()
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
             if !formatted.is_empty() {
                 return formatted;
             }
@@ -320,5 +342,8 @@ fn format_tool_fallback(
         return tool_output.chars().take(1500).collect();
     }
 
-    format!("Resultado de {tool_name}:\n{}", tool_output.chars().take(1500).collect::<String>())
+    format!(
+        "Resultado de {tool_name}:\n{}",
+        tool_output.chars().take(1500).collect::<String>()
+    )
 }

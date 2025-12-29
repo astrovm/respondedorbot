@@ -1,18 +1,17 @@
+use crate::http::HttpClient;
 use crate::http_cache::cached_get_json;
 use crate::storage::Storage;
 
 const TTL_WEATHER: u64 = 1800;
 
-pub async fn get_weather_context(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Option<String> {
+pub async fn get_weather_context(http: &HttpClient, storage: &Storage) -> Option<String> {
     let params = [
         ("latitude", "-34.5429".to_string()),
         ("longitude", "-58.7119".to_string()),
         (
             "hourly",
-            "apparent_temperature,precipitation_probability,weather_code,cloud_cover,visibility".to_string(),
+            "apparent_temperature,precipitation_probability,weather_code,cloud_cover,visibility"
+                .to_string(),
         ),
         ("timezone", "auto".to_string()),
         ("forecast_days", "2".to_string()),

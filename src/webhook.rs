@@ -11,6 +11,7 @@ use crate::chat_config;
 use crate::commands;
 use crate::config;
 use crate::hacker_news;
+use crate::http::HttpClient;
 use crate::links;
 use crate::market;
 use crate::media;
@@ -28,7 +29,7 @@ use crate::weather;
 
 #[derive(Clone)]
 pub struct AppState {
-    http: reqwest::Client,
+    http: HttpClient,
     storage: Storage,
     telegram_token: Option<String>,
     webhook_key: Option<String>,
@@ -56,7 +57,7 @@ static APP_STATE: OnceLock<AppState> = OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_state_from_env() -> AppState {
-    let http = reqwest::Client::new();
+    let http = HttpClient::new();
     let redis_host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".to_string());
     let redis_port: u16 = std::env::var("REDIS_PORT")
         .ok()
@@ -81,7 +82,7 @@ pub fn build_state_from_env() -> AppState {
 
 #[cfg(target_arch = "wasm32")]
 pub fn app_state(env: &worker::Env) -> AppState {
-    let http = reqwest::Client::new();
+    let http = HttpClient::new();
     let kv = env.kv("STORAGE").expect("KV binding STORAGE is required");
     AppState {
         http,
@@ -136,11 +137,11 @@ pub async fn handle_get(state: &AppState, query: WebhookQuery) -> WebhookRespons
     }
 
     if is_true(&query.check_webhook) {
-        return handle_check_webhook(&state).await;
+        return handle_check_webhook(state).await;
     }
 
     if is_true(&query.update_webhook) {
-        return handle_update_webhook(&state).await;
+        return handle_update_webhook(state).await;
     }
 
     if is_true(&query.update_dollars) {
@@ -158,7 +159,7 @@ pub async fn handle_get(state: &AppState, query: WebhookQuery) -> WebhookRespons
             Ok(payload) => return response(StatusCode::OK, payload.to_string()),
             Err(err) => {
                 tracing::error!(error = %err, "run_agent failed");
-                admin_report(&state, "Agent run failed").await;
+                admin_report(state, "Agent run failed").await;
                 return response(StatusCode::INTERNAL_SERVER_ERROR, "Agent run failed");
             }
         }
@@ -180,7 +181,7 @@ pub async fn handle_post(
         return response(StatusCode::BAD_REQUEST, "Wrong key");
     }
 
-    if !is_secret_token_valid(&state, secret_header.as_deref()).await {
+    if !is_secret_token_valid(state, secret_header.as_deref()).await {
         return response(StatusCode::BAD_REQUEST, "Wrong secret token");
     }
 
@@ -191,7 +192,7 @@ pub async fn handle_post(
 
     if let Some(callback) = update.callback_query {
         tracing::info!(callback_id = %callback.id, "callback query received");
-        let ctx = config_context(&state);
+        let ctx = config_context(state);
         let _ = chat_config::handle_callback_query(&ctx, &callback).await;
         return response(StatusCode::OK, "Ok");
     }
@@ -200,9 +201,9 @@ pub async fn handle_post(
         return response(StatusCode::OK, "No message");
     };
 
-    if let Err(err) = handle_message(&state, message).await {
+    if let Err(err) = handle_message(state, message).await {
         tracing::error!(error = %err, "handle_message failed");
-        admin_report(&state, "Error processing message").await;
+        admin_report(state, "Error processing message").await;
     }
     response(StatusCode::OK, "Ok")
 }
@@ -248,7 +249,15 @@ async fn handle_update_webhook(state: &AppState) -> WebhookResponse {
         return response(StatusCode::BAD_REQUEST, "Webhook update error");
     };
 
-    match telegram::set_webhook(&state.http, token, function_url, webhook_key, &state.storage).await {
+    match telegram::set_webhook(
+        &state.http,
+        token,
+        function_url,
+        webhook_key,
+        &state.storage,
+    )
+    .await
+    {
         Ok(true) => response(StatusCode::OK, "Webhook updated"),
         _ => response(StatusCode::BAD_REQUEST, "Webhook update error"),
     }

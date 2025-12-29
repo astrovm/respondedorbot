@@ -1,9 +1,10 @@
-use chrono::Datelike;
 use calamine::Reader;
+use chrono::Datelike;
 use regex::Regex;
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::http::HttpClient;
 use crate::http_cache::cached_get_json;
 use crate::storage::Storage;
 
@@ -19,26 +20,23 @@ pub struct BandLimits {
     pub date: Option<String>,
 }
 
-pub async fn get_bcra_variables(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Option<String> {
+pub async fn get_bcra_variables(http: &HttpClient, storage: &Storage) -> Option<String> {
     let variables = fetch_latest_variables(http, storage).await?;
     let itcrm = get_latest_itcrm_value_and_date(http, storage).await;
     let tcrm = get_tcrm_100(http, storage).await;
     Some(format_bcra_variables(&variables, itcrm, tcrm))
 }
 
-pub async fn get_currency_band_limits(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Option<BandLimits> {
+pub async fn get_currency_band_limits(http: &HttpClient, storage: &Storage) -> Option<BandLimits> {
     let variables = bcra_list_variables(http, storage, Some("Principales Variables")).await?;
 
     let mut lower_id = None;
     let mut upper_id = None;
     for item in variables {
-        let desc = item.get("descripcion").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = item
+            .get("descripcion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let normalized = normalize_text(desc);
         if !normalized.contains("bandas cambiarias") {
             continue;
@@ -94,7 +92,7 @@ pub async fn get_currency_band_limits(
 }
 
 async fn bcra_list_variables(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     category: Option<&str>,
 ) -> Option<Vec<Value>> {
@@ -133,13 +131,16 @@ async fn bcra_list_variables(
 }
 
 async fn fetch_latest_variables(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
 ) -> Option<Vec<(String, String, String)>> {
     let variables = bcra_list_variables(http, storage, Some("Principales Variables")).await?;
     let mut out = Vec::new();
     for item in variables {
-        let name = item.get("descripcion").and_then(|v| v.as_str()).unwrap_or("");
+        let name = item
+            .get("descripcion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let date = item
             .get("ultFechaInformada")
             .and_then(|v| v.as_str())
@@ -242,7 +243,7 @@ fn format_bcra_variables(
 }
 
 async fn fetch_series(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     var_id: i64,
     limit: usize,
@@ -324,7 +325,7 @@ fn to_ddmmyy(date_iso: &str) -> String {
 }
 
 async fn get_latest_itcrm_value_and_date(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
 ) -> Option<(f64, String)> {
     if let Some(raw) = get_cached_string(storage, "latest_itcrm_details").await {
@@ -353,7 +354,8 @@ async fn get_latest_itcrm_value_and_date(
                     .and_then(parse_date_cell)
                     .unwrap_or_else(|| "".to_string());
                 let payload = serde_json::json!({"value": val, "date": date_str});
-                let _ = cache_string(storage, "latest_itcrm_details", &payload.to_string(), 1800).await;
+                let _ =
+                    cache_string(storage, "latest_itcrm_details", &payload.to_string(), 1800).await;
                 return Some((val, date_str));
             }
         }
@@ -362,7 +364,7 @@ async fn get_latest_itcrm_value_and_date(
     None
 }
 
-async fn get_tcrm_100(http: &reqwest::Client, storage: &Storage) -> Option<f64> {
+async fn get_tcrm_100(http: &HttpClient, storage: &Storage) -> Option<f64> {
     if let Some(raw) = get_cached_string(storage, "tcrm_100").await {
         if let Ok(value) = serde_json::from_str::<Value>(&raw) {
             if let Some(val) = value.get("data").and_then(|v| v.as_f64()) {
@@ -373,7 +375,8 @@ async fn get_tcrm_100(http: &reqwest::Client, storage: &Storage) -> Option<f64> 
 
     let (itcrm_value, itcrm_date) = get_latest_itcrm_value_and_date(http, storage).await?;
     let date_iso = to_iso_date(&itcrm_date)?;
-    let mayorista = get_variable_value_for_date(http, storage, "tipo de cambio mayorista", &date_iso).await?;
+    let mayorista =
+        get_variable_value_for_date(http, storage, "tipo de cambio mayorista", &date_iso).await?;
     if itcrm_value == 0.0 {
         return None;
     }
@@ -386,7 +389,7 @@ async fn get_tcrm_100(http: &reqwest::Client, storage: &Storage) -> Option<f64> 
 }
 
 async fn get_variable_value_for_date(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     desc_substr: &str,
     date_iso: &str,
@@ -395,18 +398,23 @@ async fn get_variable_value_for_date(
     let target = normalize_text(desc_substr);
     let mut var_id = None;
     for entry in vars {
-        let desc = entry.get("descripcion").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = entry
+            .get("descripcion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if normalize_text(desc).contains(&target) {
             var_id = entry.get("idVariable").and_then(|v| v.as_i64());
             break;
         }
     }
     let var_id = var_id?;
-    let params = Some(&[
-        ("desde", date_iso.to_string()),
-        ("hasta", date_iso.to_string()),
-        ("limit", "1".to_string()),
-    ][..]);
+    let params = Some(
+        &[
+            ("desde", date_iso.to_string()),
+            ("hasta", date_iso.to_string()),
+            ("limit", "1".to_string()),
+        ][..],
+    );
     let url = format!("https://api.bcra.gob.ar/estadisticas/v4.0/monetarias/{var_id}");
     let data = cached_get_json(http, storage, &url, params, None, TTL_BCRA).await?;
     let results = data.get("results").and_then(|v| v.as_array())?;
@@ -464,13 +472,6 @@ async fn get_cached_string(storage: &Storage, key: &str) -> Option<String> {
     storage.get_string(key).await
 }
 
-async fn cache_string(
-    storage: &Storage,
-    key: &str,
-    value: &str,
-    ttl_seconds: u64,
-) -> bool {
-    storage
-        .set_string_with_ttl(key, ttl_seconds, value)
-        .await
+async fn cache_string(storage: &Storage, key: &str, value: &str, ttl_seconds: u64) -> bool {
+    storage.set_string_with_ttl(key, ttl_seconds, value).await
 }

@@ -2,6 +2,8 @@ use regex::Regex;
 use std::time::Duration;
 use url::{ParseError, Url};
 
+use crate::http::{self, HttpClient, CONTENT_TYPE};
+
 const ALTERNATIVE_FRONTENDS: &[&str] = &[
     "fxtwitter.com",
     "fixupx.com",
@@ -21,10 +23,7 @@ const ORIGINAL_FRONTENDS: &[&str] = &[
     "tiktok.com",
 ];
 
-pub async fn replace_links(
-    http: &reqwest::Client,
-    text: &str,
-) -> (String, bool, Vec<String>) {
+pub async fn replace_links(http: &HttpClient, text: &str) -> (String, bool, Vec<String>) {
     let wrapped = |url: String| {
         let http = http.clone();
         async move { can_embed_url(&http, &url).await }
@@ -41,13 +40,34 @@ where
     Fut: std::future::Future<Output = bool>,
 {
     let patterns = [
-        (r"(https?://)(?:www\.)?twitter\.com([^\s]*)", r"${1}fxtwitter.com${2}"),
-        (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"${1}fixupx.com${2}"),
-        (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"${1}fixupx.com${2}"),
-        (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"${1}fxbsky.app${2}"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"${1}kkinstagram.com${2}"),
-        (r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)", r"${1}${2}rxddit.com${3}"),
-        (r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com([^\s]*)", r"${1}${2}vxtiktok.com${3}"),
+        (
+            r"(https?://)(?:www\.)?twitter\.com([^\s]*)",
+            r"${1}fxtwitter.com${2}",
+        ),
+        (
+            r"(https?://)(?:www\.)?x\.com([^\s]*)",
+            r"${1}fixupx.com${2}",
+        ),
+        (
+            r"(https?://)(?:www\.)?xcancel\.com([^\s]*)",
+            r"${1}fixupx.com${2}",
+        ),
+        (
+            r"(https?://)(?:www\.)?bsky\.app([^\s]*)",
+            r"${1}fxbsky.app${2}",
+        ),
+        (
+            r"(https?://)(?:www\.)?instagram\.com([^\s]*)",
+            r"${1}kkinstagram.com${2}",
+        ),
+        (
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
+            r"${1}${2}rxddit.com${3}",
+        ),
+        (
+            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com([^\s]*)",
+            r"${1}${2}vxtiktok.com${3}",
+        ),
     ];
 
     let mut changed = false;
@@ -105,28 +125,18 @@ pub fn is_social_frontend(host: &str) -> bool {
         .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
-async fn can_embed_url(http: &reqwest::Client, url: &str) -> bool {
+async fn can_embed_url(http: &HttpClient, url: &str) -> bool {
     let response = match http.get(url).timeout(Duration::from_secs(5)).send().await {
         Ok(resp) => resp,
-        Err(_) => {
-            let fallback = reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .build();
-            let Ok(fallback) = fallback else {
-                return false;
-            };
-            match fallback.get(url).timeout(Duration::from_secs(5)).send().await {
-                Ok(resp) => resp,
-                Err(_) => return false,
-            }
-        }
+        Err(_) => match http::get_with_ssl_fallback(http, url).await {
+            Ok(resp) => resp,
+            Err(_) => return false,
+        },
     };
 
     let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
+        .header(CONTENT_TYPE)
+        .unwrap_or_default()
         .to_lowercase();
 
     if content_type.starts_with("image/")
@@ -165,7 +175,6 @@ pub fn strip_tracking(url: &str) -> String {
     url.to_string()
 }
 
-
 fn is_twitter_user_profile(url: &str) -> bool {
     let parsed = match Url::parse(url) {
         Ok(parsed) => parsed,
@@ -188,8 +197,18 @@ fn is_twitter_user_profile(url: &str) -> bool {
         return false;
     }
     let reserved = [
-        "home", "share", "intent", "i", "search", "explore", "notifications", "messages",
-        "settings", "compose", "privacy", "tos",
+        "home",
+        "share",
+        "intent",
+        "i",
+        "search",
+        "explore",
+        "notifications",
+        "messages",
+        "settings",
+        "compose",
+        "privacy",
+        "tos",
     ];
     let first = segments[0].trim_start_matches('@');
     if reserved.contains(&first) {

@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::http::HttpClient;
 use crate::storage::Storage;
 use crate::telegram;
 
@@ -28,7 +29,7 @@ impl Default for ChatConfig {
 }
 
 pub struct ConfigContext<'a> {
-    pub http: &'a reqwest::Client,
+    pub http: &'a HttpClient,
     pub storage: &'a Storage,
     pub token: Option<&'a str>,
     pub webhook_key: Option<&'a str>,
@@ -108,20 +109,14 @@ pub async fn handle_callback_query(
     let keyboard = build_config_keyboard(&config);
 
     if let Some(token) = ctx.token {
-        let edited = telegram::edit_message_text(
-            ctx.http,
-            token,
-            chat_id,
-            message_id,
-            &text,
-            &keyboard,
-        )
-        .await
-        .unwrap_or(false);
+        let edited =
+            telegram::edit_message_text(ctx.http, token, chat_id, message_id, &text, &keyboard)
+                .await
+                .unwrap_or(false);
 
         if !edited {
-            let _ = telegram::send_message(ctx.http, token, chat_id, &text, Some(keyboard), None)
-                .await;
+            let _ =
+                telegram::send_message(ctx.http, token, chat_id, &text, Some(keyboard), None).await;
         }
     }
 
@@ -170,11 +165,7 @@ pub async fn get_chat_config(storage: &Storage, chat_id: i64) -> ChatConfig {
     config
 }
 
-pub async fn set_chat_config(
-    storage: &Storage,
-    chat_id: i64,
-    config: ChatConfig,
-) -> ChatConfig {
+pub async fn set_chat_config(storage: &Storage, chat_id: i64, config: ChatConfig) -> ChatConfig {
     let payload = json!({
         "link_mode": config.link_mode,
         "ai_random_replies": config.ai_random_replies,
@@ -186,9 +177,7 @@ pub async fn set_chat_config(
 
     let legacy_key = legacy_link_mode_key(chat_id);
     if matches!(config.link_mode.as_str(), "reply" | "delete") {
-        let _ = storage
-            .set_string(&legacy_key, &config.link_mode)
-            .await;
+        let _ = storage.set_string(&legacy_key, &config.link_mode).await;
     } else {
         let _ = storage.set_string(&legacy_key, "").await;
     }
@@ -219,8 +208,16 @@ pub fn build_config_text(config: &ChatConfig) -> String {
         "reply" => "Reply to original message",
         _ => "Off",
     };
-    let random_label = if config.ai_random_replies { "✅ enabled" } else { "▫️ disabled" };
-    let followups_label = if config.ai_command_followups { "✅ enabled" } else { "▫️ disabled" };
+    let random_label = if config.ai_random_replies {
+        "✅ enabled"
+    } else {
+        "▫️ disabled"
+    };
+    let followups_label = if config.ai_command_followups {
+        "✅ enabled"
+    } else {
+        "▫️ disabled"
+    };
 
     format!(
         "Gordo config:\n\nLink fixer: {link_label}\nRandom AI replies: {random_label}\nFollow-ups for non-AI commands: {followups_label}\n\nUse the buttons below to change the settings.",
@@ -330,7 +327,10 @@ async fn ensure_callback_updates_enabled(ctx: &ConfigContext<'_>) {
     let result = info.get("result").cloned().unwrap_or(Value::Null);
     let allowed = result.get("allowed_updates");
     let expected_url = format!("{function_url}?key={webhook_key}");
-    let current_url = result.get("url").and_then(|value| value.as_str()).unwrap_or("");
+    let current_url = result
+        .get("url")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
 
     if let Some(Value::Array(list)) = allowed {
         if list.is_empty() || list.iter().any(|v| v.as_str() == Some("callback_query")) {
@@ -347,10 +347,6 @@ async fn ensure_callback_updates_enabled(ctx: &ConfigContext<'_>) {
     let _ = telegram::set_webhook(ctx.http, token, function_url, webhook_key, ctx.storage).await;
 }
 
-pub async fn increment_rate_limit(
-    storage: &Storage,
-    key: &str,
-    ttl_seconds: u64,
-) -> i64 {
+pub async fn increment_rate_limit(storage: &Storage, key: &str, ttl_seconds: u64) -> i64 {
     storage.incr_with_ttl(key, ttl_seconds).await
 }

@@ -1,41 +1,28 @@
+use crate::http::{HttpClient, CONTENT_TYPE};
 use crate::storage::Storage;
 use crate::telegram;
 use image::GenericImageView;
 
 const TTL_MEDIA_CACHE: u64 = 7 * 24 * 60 * 60;
 
-pub async fn get_cached_transcription(
-    storage: &Storage,
-    file_id: &str,
-) -> Option<String> {
+pub async fn get_cached_transcription(storage: &Storage, file_id: &str) -> Option<String> {
     let key = format!("audio_transcription:{file_id}");
     storage.get_string(&key).await
 }
 
-pub async fn cache_transcription(
-    storage: &Storage,
-    file_id: &str,
-    text: &str,
-) {
+pub async fn cache_transcription(storage: &Storage, file_id: &str, text: &str) {
     let key = format!("audio_transcription:{file_id}");
     let _ = storage
         .set_string_with_ttl(&key, TTL_MEDIA_CACHE, text)
         .await;
 }
 
-pub async fn get_cached_description(
-    storage: &Storage,
-    file_id: &str,
-) -> Option<String> {
+pub async fn get_cached_description(storage: &Storage, file_id: &str) -> Option<String> {
     let key = format!("image_description:{file_id}");
     storage.get_string(&key).await
 }
 
-pub async fn cache_description(
-    storage: &Storage,
-    file_id: &str,
-    text: &str,
-) {
+pub async fn cache_description(storage: &Storage, file_id: &str, text: &str) {
     let key = format!("image_description:{file_id}");
     let _ = storage
         .set_string_with_ttl(&key, TTL_MEDIA_CACHE, text)
@@ -43,7 +30,7 @@ pub async fn cache_description(
 }
 
 pub async fn transcribe_file_by_id(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     token: &str,
     file_id: &str,
@@ -67,7 +54,7 @@ pub async fn transcribe_file_by_id(
 }
 
 pub async fn describe_media_by_id(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     token: &str,
     file_id: &str,
@@ -90,7 +77,7 @@ pub async fn describe_media_by_id(
 }
 
 async fn describe_image_cloudflare(
-    http: &reqwest::Client,
+    http: &HttpClient,
     image_data: &[u8],
     prompt: &str,
 ) -> Option<String> {
@@ -124,10 +111,7 @@ async fn describe_image_cloudflare(
     Some(description.to_string())
 }
 
-async fn transcribe_audio_cloudflare(
-    http: &reqwest::Client,
-    audio_data: &[u8],
-) -> Option<String> {
+async fn transcribe_audio_cloudflare(http: &HttpClient, audio_data: &[u8]) -> Option<String> {
     let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").ok()?;
     let api_key = std::env::var("CLOUDFLARE_API_KEY").ok()?;
     let url = format!(
@@ -137,7 +121,7 @@ async fn transcribe_audio_cloudflare(
     let resp = http
         .post(url)
         .bearer_auth(api_key)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_TYPE, "application/octet-stream")
         .body(audio_data.to_vec())
         .send()
         .await

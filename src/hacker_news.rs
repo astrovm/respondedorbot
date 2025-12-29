@@ -1,5 +1,7 @@
 use regex::Regex;
 
+use crate::http::HttpClient;
+
 const HN_RSS_URL: &str = "https://hnrss.org/best";
 
 #[derive(Debug, Clone)]
@@ -8,7 +10,7 @@ pub struct HnItem {
     pub link: String,
 }
 
-pub async fn get_hn_context(http: &reqwest::Client) -> Vec<HnItem> {
+pub async fn get_hn_context(http: &HttpClient) -> Vec<HnItem> {
     let response = match http.get(HN_RSS_URL).send().await {
         Ok(resp) => resp,
         Err(_) => return vec![],

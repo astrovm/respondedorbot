@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
+use crate::http::HttpClient;
 use crate::{ai, config, hacker_news, message_utils, storage::Storage};
 
 const AGENT_THOUGHTS_KEY: &str = "agent:thoughts";
@@ -17,8 +18,7 @@ const AGENT_REQUIRED_SECTIONS: [&str; 2] = ["HALLAZGOS", "PRÓXIMO PASO"];
 const AGENT_EMPTY_RESPONSE_FALLBACK: &str =
     "HALLAZGOS: no se me ocurrió nada nuevo, pintó el vacío.\nPRÓXIMO PASO: meter una búsqueda puntual para traer un dato real y salir de la fiaca.";
 const AGENT_REPETITION_RETRY_LIMIT: usize = 3;
-const AGENT_LOOP_FALLBACK_PREFIX: &str =
-    "HALLAZGOS: registré que estaba en un loop repitiendo";
+const AGENT_LOOP_FALLBACK_PREFIX: &str = "HALLAZGOS: registré que estaba en un loop repitiendo";
 const AGENT_REPETITION_ESCALATION_HINT: &str =
     "No escribas que estás trabado o en un loop. Ejecutá de inmediato una herramienta \
 (web_search o fetch_url) con un tema distinto y registrá datos nuevos \
@@ -183,10 +183,7 @@ pub fn format_agent_thoughts(thoughts: &[AgentThought]) -> String {
     lines.join("\n")
 }
 
-pub async fn run_agent_cycle(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Result<Value, String> {
+pub async fn run_agent_cycle(http: &HttpClient, storage: &Storage) -> Result<Value, String> {
     let thoughts = load_agent_thoughts(storage, MAX_AGENT_THOUGHTS).await;
     let recent_thoughts: Vec<AgentThought> = thoughts
         .iter()
@@ -298,11 +295,8 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
             ));
         }
 
-        let retry_messages = build_agent_retry_messages(
-            &base_messages,
-            &original_attempt,
-            &corrective_prompt,
-        );
+        let retry_messages =
+            build_agent_retry_messages(&base_messages, &original_attempt, &corrective_prompt);
         cleaned = request_agent_response(
             http,
             storage,
@@ -317,8 +311,7 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         }
     }
 
-    let mut matching_recent_text =
-        find_repetitive_recent_thought(&cleaned, &recent_entry_texts);
+    let mut matching_recent_text = find_repetitive_recent_thought(&cleaned, &recent_entry_texts);
     let mut repetition_attempt = 0;
     while matching_recent_text.is_some() && repetition_attempt < AGENT_REPETITION_RETRY_LIMIT {
         let matching_text = matching_recent_text.clone().unwrap_or_default();
@@ -346,14 +339,12 @@ Máximo 500 caracteres, sin saludar a nadie: es un apunte privado.",
         }
 
         repetition_attempt += 1;
-        matching_recent_text =
-            find_repetitive_recent_thought(&cleaned, &recent_entry_texts);
+        matching_recent_text = find_repetitive_recent_thought(&cleaned, &recent_entry_texts);
     }
 
     if let Some(matching_text) = matching_recent_text.clone() {
-        let fallback = message_utils::clean_duplicate_response(
-            &build_agent_fallback_entry(&matching_text),
-        );
+        let fallback =
+            message_utils::clean_duplicate_response(&build_agent_fallback_entry(&matching_text));
         let fallback_entry = ensure_agent_response_text(&fallback);
 
         let comparison_texts: Vec<String> = if recent_entry_texts.is_empty() {
@@ -577,9 +568,7 @@ fn agent_keywords_are_repetitive(
         return false;
     }
 
-    let overlap: HashSet<&String> = new_keywords
-        .intersection(previous_keywords)
-        .collect();
+    let overlap: HashSet<&String> = new_keywords.intersection(previous_keywords).collect();
     if overlap.len() >= 3 {
         return true;
     }
@@ -643,10 +632,7 @@ pub fn is_repetitive_thought(new_text: &str, previous_text: Option<&str>) -> boo
     agent_keywords_are_repetitive(&new_keywords, &prev_keywords)
 }
 
-pub fn find_repetitive_recent_thought(
-    new_text: &str,
-    previous_texts: &[String],
-) -> Option<String> {
+pub fn find_repetitive_recent_thought(new_text: &str, previous_texts: &[String]) -> Option<String> {
     for candidate in previous_texts {
         let sanitized = candidate.trim();
         if sanitized.is_empty() {
@@ -673,11 +659,8 @@ pub fn summarize_recent_agent_topics(thoughts: &[AgentThought], limit: usize) ->
             continue;
         }
 
-        let section_content = extract_agent_section_content(
-            text,
-            "HALLAZGOS",
-            &["PRÓXIMO PASO", "PROXIMO PASO"],
-        );
+        let section_content =
+            extract_agent_section_content(text, "HALLAZGOS", &["PRÓXIMO PASO", "PROXIMO PASO"]);
         let snippet_source = section_content.unwrap_or_else(|| text.to_string());
         let snippet_source = snippet_source
             .split_whitespace()
@@ -744,11 +727,18 @@ pub fn extract_agent_section_content(
     let mut sections: HashMap<String, Vec<String>> = HashMap::new();
     let mut current_norm: Option<String> = None;
 
-    for raw_line in sanitized.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+    for raw_line in sanitized
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+    {
         let stripped = raw_line.trim();
         if stripped.is_empty() {
             if let Some(current) = &current_norm {
-                sections.entry(current.clone()).or_default().push(String::new());
+                sections
+                    .entry(current.clone())
+                    .or_default()
+                    .push(String::new());
             }
             continue;
         }
@@ -1025,7 +1015,7 @@ pub fn build_agent_retry_messages(
 }
 
 async fn request_agent_response(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     context: &ai::AiContext,
     messages: Vec<ai::ChatMessage>,

@@ -4,6 +4,7 @@ use serde_json::json;
 use url::Url;
 use urlencoding::decode;
 
+use crate::http::{HttpClient, CONTENT_TYPE};
 use crate::storage::Storage;
 
 const TTL_WEB_SEARCH: u64 = 300;
@@ -19,7 +20,9 @@ pub struct SearchResult {
 }
 
 pub fn parse_tool_call(text: &str) -> Option<(String, serde_json::Value)> {
-    let line = text.lines().find(|line| line.trim_start().starts_with("[TOOL]"))?;
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("[TOOL]"))?;
     let trimmed = line.trim();
     let rest = trimmed.strip_prefix("[TOOL]")?.trim();
     let mut parts = rest.splitn(2, ' ');
@@ -30,7 +33,7 @@ pub fn parse_tool_call(text: &str) -> Option<(String, serde_json::Value)> {
 }
 
 pub async fn execute_tool(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     name: &str,
     args: &serde_json::Value,
@@ -38,10 +41,7 @@ pub async fn execute_tool(
     match name {
         "web_search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let results = web_search(http, storage, query, limit).await;
             let payload = json!({
                 "query": query,
@@ -65,7 +65,7 @@ pub async fn execute_tool(
 }
 
 pub async fn web_search(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     query: &str,
     limit: usize,
@@ -85,10 +85,7 @@ pub async fn web_search(
 
     let response = match http.get(&url).send().await {
         Ok(resp) => resp,
-        Err(_) => match crate::http::get_with_ssl_fallback(&url).await {
-            Ok(resp) => resp,
-            Err(_) => return vec![],
-        },
+        Err(_) => return vec![],
     };
 
     let body = match response.text().await {
@@ -96,7 +93,8 @@ pub async fn web_search(
         Err(_) => return vec![],
     };
 
-    let link_re = Regex::new(r#"<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>"#).ok();
+    let link_re =
+        Regex::new(r#"<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>"#).ok();
     let snippet_re = Regex::new(r#"<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>"#).ok();
 
     let mut results = Vec::new();
@@ -116,8 +114,8 @@ pub async fn web_search(
                     }
                 }
             }
-            let title = decode_html_entities(caps.get(2).map(|m| m.as_str()).unwrap_or(""))
-                .to_string();
+            let title =
+                decode_html_entities(caps.get(2).map(|m| m.as_str()).unwrap_or("")).to_string();
 
             let snippet = snippet_re
                 .as_ref()
@@ -137,7 +135,12 @@ pub async fn web_search(
         }
     }
 
-    let _ = set_cached_value(storage, &cache_key, json!({ "query": query, "results": results })).await;
+    let _ = set_cached_value(
+        storage,
+        &cache_key,
+        json!({ "query": query, "results": results }),
+    )
+    .await;
     results.into_iter().take(limit).collect()
 }
 
@@ -170,11 +173,7 @@ pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
     lines.join("\n")
 }
 
-pub async fn fetch_url(
-    http: &reqwest::Client,
-    storage: &Storage,
-    url: &str,
-) -> serde_json::Value {
+pub async fn fetch_url(http: &HttpClient, storage: &Storage, url: &str) -> serde_json::Value {
     if url.trim().is_empty() {
         return json!({"url": url, "error": "missing url"});
     }
@@ -186,19 +185,14 @@ pub async fn fetch_url(
 
     let response = match http.get(url).send().await {
         Ok(resp) => resp,
-        Err(_) => match crate::http::get_with_ssl_fallback(url).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                return json!({"url": url, "error": err.to_string()});
-            }
-        },
+        Err(err) => {
+            return json!({"url": url, "error": err.to_string()});
+        }
     };
 
     let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
+        .header(CONTENT_TYPE)
+        .unwrap_or_default()
         .to_lowercase();
 
     let bytes = match response.bytes().await {
@@ -222,7 +216,10 @@ pub async fn fetch_url(
     let content = strip_html(&text);
     let truncated = content.len() > WEB_FETCH_MAX_CHARS;
     let content = if truncated {
-        content.chars().take(WEB_FETCH_MAX_CHARS).collect::<String>()
+        content
+            .chars()
+            .take(WEB_FETCH_MAX_CHARS)
+            .collect::<String>()
     } else {
         content
     };
@@ -232,8 +229,7 @@ pub async fn fetch_url(
         "title": title,
         "content": content,
         "truncated": truncated,
-    })
-    ;
+    });
     let _ = set_cached_value(storage, &cache_key, payload.clone()).await;
     payload
 }
@@ -258,11 +254,7 @@ async fn get_cached_value(
     value.get("data").cloned()
 }
 
-async fn set_cached_value(
-    storage: &Storage,
-    key: &str,
-    data: serde_json::Value,
-) -> Option<()> {
+async fn set_cached_value(storage: &Storage, key: &str, data: serde_json::Value) -> Option<()> {
     let payload = json!({
         "timestamp": current_timestamp(),
         "data": data,
@@ -275,11 +267,26 @@ pub fn parse_cached_results(value: &serde_json::Value) -> Option<Vec<SearchResul
     let results = value.get("results")?.as_array()?;
     let mut out = Vec::new();
     for item in results {
-        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let snippet = item.get("snippet").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = item
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let snippet = item
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if !title.is_empty() && !url.is_empty() {
-            out.push(SearchResult { title, url, snippet });
+            out.push(SearchResult {
+                title,
+                url,
+                snippet,
+            });
         }
     }
     Some(out)
@@ -292,7 +299,6 @@ fn current_timestamp() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-
 
 pub fn strip_html(input: &str) -> String {
     let script_re = Regex::new(r"(?is)<script.*?>.*?</script>").ok();
@@ -315,8 +321,7 @@ pub fn extract_title(input: &str) -> String {
     let title_re = Regex::new(r"(?is)<title>(.*?)</title>").ok();
     if let Some(re) = title_re {
         if let Some(cap) = re.captures(input) {
-            return decode_html_entities(cap.get(1).map(|m| m.as_str()).unwrap_or(""))
-                .to_string();
+            return decode_html_entities(cap.get(1).map(|m| m.as_str()).unwrap_or("")).to_string();
         }
     }
     "".to_string()
