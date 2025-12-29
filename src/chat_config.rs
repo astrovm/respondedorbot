@@ -348,5 +348,5 @@ async fn ensure_callback_updates_enabled(ctx: &ConfigContext<'_>) {
 }
 
 pub async fn increment_rate_limit(storage: &Storage, key: &str, ttl_seconds: u64) -> i64 {
-    storage.incr_with_ttl(key, ttl_seconds).await
+    storage.increment_counter(key, ttl_seconds).await
 }

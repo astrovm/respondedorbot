@@ -208,6 +208,40 @@ pub async fn handle_post(
     response(StatusCode::OK, "Ok")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn handle_get_http(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<WebhookQuery>,
+) -> (StatusCode, String) {
+    let response = handle_get(&state, query).await;
+    (response.status, response.body)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn handle_post_http(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<WebhookQuery>,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::Json<Update>, axum::extract::rejection::JsonRejection>,
+) -> (StatusCode, String) {
+    let secret_header = headers
+        .get("X-Telegram-Bot-Api-Secret-Token")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let update = body.ok().map(|axum::Json(value)| value);
+
+    let response = handle_post(&state, query, secret_header, update).await;
+    (response.status, response.body)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_axum_router(app_state: AppState) -> axum::Router {
+    use axum::routing::get;
+    axum::Router::new()
+        .route("/", get(handle_get_http).post(handle_post_http))
+        .with_state(app_state)
+}
+
 async fn handle_check_webhook(state: &AppState) -> WebhookResponse {
     let Some(token) = state.telegram_token.as_deref() else {
         return response(StatusCode::BAD_REQUEST, "Webhook check error");
