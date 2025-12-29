@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::http_cache::cached_get_json;
+use crate::storage::Storage;
 
 const TTL_POLYMARKET: u64 = 5;
 const EVENTS_URL: &str = "https://gamma-api.polymarket.com/events";
@@ -10,7 +11,7 @@ const SLUG_SEATS_AFTER: &str = "which-party-holds-the-most-seats-after-argentina
 
 pub async fn get_polymarket_argentina_election(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
 ) -> String {
     let mut sections = Vec::new();
 
@@ -26,7 +27,7 @@ pub async fn get_polymarket_argentina_election(
             "https://polymarket.com/event/which-party-holds-the-most-seats-after-argentina-deputies-election",
         ),
     ] {
-        if let Some(section) = fetch_event_section(http, redis, slug, header, url).await {
+        if let Some(section) = fetch_event_section(http, storage, slug, header, url).await {
             sections.push(section);
         }
     }
@@ -40,14 +41,14 @@ pub async fn get_polymarket_argentina_election(
 
 async fn fetch_event_section(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     slug: &str,
     header: &str,
     url: &str,
 ) -> Option<String> {
     let data = cached_get_json(
         http,
-        redis,
+        storage,
         EVENTS_URL,
         Some(&[("slug", slug.to_string())][..]),
         None,

@@ -20,7 +20,7 @@ pub struct AiContext {
 
 pub async fn ask_ai(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &crate::storage::Storage,
     context: &AiContext,
     messages: Vec<ChatMessage>,
 ) -> Option<String> {
@@ -32,7 +32,7 @@ pub async fn ask_ai(
 
     loop {
         if let Some((tool_name, tool_args)) = tools::parse_tool_call(&current) {
-            let tool_output = tools::execute_tool(http, redis, &tool_name, &tool_args).await;
+            let tool_output = tools::execute_tool(http, storage, &tool_name, &tool_args).await;
             let tool_context = json!({
                 "tool": tool_name,
                 "args": tool_args,

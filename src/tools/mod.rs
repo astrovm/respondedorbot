@@ -4,7 +4,7 @@ use serde_json::json;
 use url::Url;
 use urlencoding::decode;
 
-use crate::redis_store::{redis_get_string, redis_set_string};
+use crate::storage::Storage;
 
 const TTL_WEB_SEARCH: u64 = 300;
 const TTL_WEB_FETCH: u64 = 300;
@@ -31,7 +31,7 @@ pub fn parse_tool_call(text: &str) -> Option<(String, serde_json::Value)> {
 
 pub async fn execute_tool(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     name: &str,
     args: &serde_json::Value,
 ) -> String {
@@ -42,7 +42,7 @@ pub async fn execute_tool(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
-            let results = web_search(http, redis, query, limit).await;
+            let results = web_search(http, storage, query, limit).await;
             let payload = json!({
                 "query": query,
                 "results": results.iter().map(|r| {
@@ -57,7 +57,7 @@ pub async fn execute_tool(
         }
         "fetch_url" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let payload = fetch_url(http, redis, url).await;
+            let payload = fetch_url(http, storage, url).await;
             payload.to_string()
         }
         _ => json!({"error": "unknown tool"}).to_string(),
@@ -66,7 +66,7 @@ pub async fn execute_tool(
 
 pub async fn web_search(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     query: &str,
     limit: usize,
 ) -> Vec<SearchResult> {
@@ -74,7 +74,7 @@ pub async fn web_search(
         return vec![];
     }
     let cache_key = tool_cache_key("web_search", query);
-    if let Some(cached) = get_cached_value(redis, &cache_key, TTL_WEB_SEARCH).await {
+    if let Some(cached) = get_cached_value(storage, &cache_key, TTL_WEB_SEARCH).await {
         if let Some(results) = parse_cached_results(&cached) {
             return results.into_iter().take(limit).collect();
         }
@@ -137,7 +137,7 @@ pub async fn web_search(
         }
     }
 
-    let _ = set_cached_value(redis, &cache_key, json!({ "query": query, "results": results })).await;
+    let _ = set_cached_value(storage, &cache_key, json!({ "query": query, "results": results })).await;
     results.into_iter().take(limit).collect()
 }
 
@@ -172,7 +172,7 @@ pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
 
 pub async fn fetch_url(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     url: &str,
 ) -> serde_json::Value {
     if url.trim().is_empty() {
@@ -180,7 +180,7 @@ pub async fn fetch_url(
     }
 
     let cache_key = tool_cache_key("fetch_url", url);
-    if let Some(cached) = get_cached_value(redis, &cache_key, TTL_WEB_FETCH).await {
+    if let Some(cached) = get_cached_value(storage, &cache_key, TTL_WEB_FETCH).await {
         return cached;
     }
 
@@ -234,7 +234,7 @@ pub async fn fetch_url(
         "truncated": truncated,
     })
     ;
-    let _ = set_cached_value(redis, &cache_key, payload.clone()).await;
+    let _ = set_cached_value(storage, &cache_key, payload.clone()).await;
     payload
 }
 
@@ -244,12 +244,11 @@ fn tool_cache_key(prefix: &str, input: &str) -> String {
 }
 
 async fn get_cached_value(
-    redis: &redis::Client,
+    storage: &Storage,
     key: &str,
     ttl_seconds: u64,
 ) -> Option<serde_json::Value> {
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let raw = redis_get_string(&mut conn, key).await.ok().flatten()?;
+    let raw = storage.get_string(key).await?;
     let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
     let ts = value.get("timestamp").and_then(|v| v.as_i64())?;
     let now = current_timestamp();
@@ -260,7 +259,7 @@ async fn get_cached_value(
 }
 
 async fn set_cached_value(
-    redis: &redis::Client,
+    storage: &Storage,
     key: &str,
     data: serde_json::Value,
 ) -> Option<()> {
@@ -268,8 +267,7 @@ async fn set_cached_value(
         "timestamp": current_timestamp(),
         "data": data,
     });
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    let _ = redis_set_string(&mut conn, key, &payload.to_string()).await.ok()?;
+    let _ = storage.set_string(key, &payload.to_string()).await;
     Some(())
 }
 

@@ -1,58 +1,56 @@
-use crate::redis_store::{redis_get_string, redis_setex_string};
+use crate::storage::Storage;
 use crate::telegram;
 use image::GenericImageView;
 
 const TTL_MEDIA_CACHE: u64 = 7 * 24 * 60 * 60;
 
 pub async fn get_cached_transcription(
-    redis: &redis::Client,
+    storage: &Storage,
     file_id: &str,
 ) -> Option<String> {
     let key = format!("audio_transcription:{file_id}");
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    redis_get_string(&mut conn, &key).await.ok().flatten()
+    storage.get_string(&key).await
 }
 
 pub async fn cache_transcription(
-    redis: &redis::Client,
+    storage: &Storage,
     file_id: &str,
     text: &str,
 ) {
     let key = format!("audio_transcription:{file_id}");
-    if let Ok(mut conn) = redis.get_multiplexed_async_connection().await {
-        let _ = redis_setex_string(&mut conn, &key, TTL_MEDIA_CACHE, text).await;
-    }
+    let _ = storage
+        .set_string_with_ttl(&key, TTL_MEDIA_CACHE, text)
+        .await;
 }
 
 pub async fn get_cached_description(
-    redis: &redis::Client,
+    storage: &Storage,
     file_id: &str,
 ) -> Option<String> {
     let key = format!("image_description:{file_id}");
-    let mut conn = redis.get_multiplexed_async_connection().await.ok()?;
-    redis_get_string(&mut conn, &key).await.ok().flatten()
+    storage.get_string(&key).await
 }
 
 pub async fn cache_description(
-    redis: &redis::Client,
+    storage: &Storage,
     file_id: &str,
     text: &str,
 ) {
     let key = format!("image_description:{file_id}");
-    if let Ok(mut conn) = redis.get_multiplexed_async_connection().await {
-        let _ = redis_setex_string(&mut conn, &key, TTL_MEDIA_CACHE, text).await;
-    }
+    let _ = storage
+        .set_string_with_ttl(&key, TTL_MEDIA_CACHE, text)
+        .await;
 }
 
 pub async fn transcribe_file_by_id(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     token: &str,
     file_id: &str,
     use_cache: bool,
 ) -> Result<Option<String>, String> {
     if use_cache {
-        if let Some(cached) = get_cached_transcription(redis, file_id).await {
+        if let Some(cached) = get_cached_transcription(storage, file_id).await {
             return Ok(Some(cached));
         }
     }
@@ -62,7 +60,7 @@ pub async fn transcribe_file_by_id(
         .map_err(|_| "download".to_string())?;
     let text = transcribe_audio_cloudflare(http, &bytes).await;
     if let Some(text) = text.clone() {
-        cache_transcription(redis, file_id, &text).await;
+        cache_transcription(storage, file_id, &text).await;
         return Ok(Some(text));
     }
     Err("transcribe".to_string())
@@ -70,12 +68,12 @@ pub async fn transcribe_file_by_id(
 
 pub async fn describe_media_by_id(
     http: &reqwest::Client,
-    redis: &redis::Client,
+    storage: &Storage,
     token: &str,
     file_id: &str,
     prompt: &str,
 ) -> Result<Option<String>, String> {
-    if let Some(cached) = get_cached_description(redis, file_id).await {
+    if let Some(cached) = get_cached_description(storage, file_id).await {
         return Ok(Some(cached));
     }
 
@@ -85,7 +83,7 @@ pub async fn describe_media_by_id(
     let resized = resize_image_if_needed(&bytes, 512);
     let text = describe_image_cloudflare(http, &resized, prompt).await;
     if let Some(text) = text.clone() {
-        cache_description(redis, file_id, &text).await;
+        cache_description(storage, file_id, &text).await;
         return Ok(Some(text));
     }
     Err("describe".to_string())
