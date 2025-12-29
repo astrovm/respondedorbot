@@ -4,6 +4,9 @@ use sha2::{Digest, Sha256};
 use crate::http::{HttpClient, HttpResult};
 use crate::storage::Storage;
 
+pub const TELEGRAM_SECRET_TOKEN_KEY: &str = "X-Telegram-Bot-Api-Secret-Token";
+const TELEGRAM_SECRET_TOKEN_TTL: u64 = 90 * 24 * 60 * 60;
+
 fn api_base(token: &str) -> String {
     format!("https://api.telegram.org/bot{token}")
 }
@@ -42,9 +45,20 @@ pub async fn set_webhook(
         .unwrap_or(false);
 
     if ok {
-        let _ = storage
-            .set_string("X-Telegram-Bot-Api-Secret-Token", &secret_token)
-            .await;
+        let stored = storage
+            .set_string_with_ttl(
+                TELEGRAM_SECRET_TOKEN_KEY,
+                TELEGRAM_SECRET_TOKEN_TTL,
+                &secret_token,
+            )
+            .await
+            || storage
+                .set_string(TELEGRAM_SECRET_TOKEN_KEY, &secret_token)
+                .await;
+
+        if !stored {
+            tracing::warn!("failed to persist Telegram webhook secret token");
+        }
     }
 
     Ok(ok)

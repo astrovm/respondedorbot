@@ -268,14 +268,16 @@ async fn is_secret_token_valid(state: &AppState, secret_header: Option<&str>) ->
         return false;
     };
 
-    let stored = state
+    match state
         .storage
-        .get_string("X-Telegram-Bot-Api-Secret-Token")
-        .await;
-
-    match stored {
+        .get_string(telegram::TELEGRAM_SECRET_TOKEN_KEY)
+        .await
+    {
         Some(value) => value == secret_header,
-        None => false,
+        None => {
+            tracing::warn!("missing Telegram webhook secret token in storage");
+            false
+        }
     }
 }
 
