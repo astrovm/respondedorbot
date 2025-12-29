@@ -7,6 +7,6 @@ workers_dev = true
 command = "cargo install -q worker-build && worker-build --release --features worker --no-default-features"
 
 [[kv_namespaces]]
-binding = "STORAGE"
-id = "respondedorbot-storage"
-preview_id = "respondedorbot-storage-preview"
+binding = "BOT_KV"
+id = "respondedorbot-kv"
+preview_id = "respondedorbot-kv-preview"

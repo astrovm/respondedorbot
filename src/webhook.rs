@@ -83,7 +83,7 @@ pub fn build_state_from_env() -> AppState {
 #[cfg(target_arch = "wasm32")]
 pub fn app_state(env: &worker::Env) -> AppState {
     let http = HttpClient::new();
-    let kv = env.kv("STORAGE").expect("KV binding STORAGE is required");
+    let kv = env.kv("BOT_KV").expect("KV binding BOT_KV is required");
     AppState {
         http,
         storage: Storage::from_kv(kv),
