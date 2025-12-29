@@ -201,12 +201,13 @@ impl Storage {
                     }
 
                     let remaining_ttl = expires_at.saturating_sub(now).max(1) as u64;
-                    let payload = serde_json::json!({
-                        "value": value,
-                        "expires_at": expires_at,
-                    });
+                    let payload = StoredCounter { value, expires_at };
                     let stored = kv
-                        .put(key, payload.to_string())
+                        .put(
+                            key,
+                            serde_json::to_string(&payload)
+                                .unwrap_or_else(|_| "{\"value\":0,\"expires_at\":0}".to_string()),
+                        )
                         .and_then(|builder| Ok(builder.expiration_ttl(remaining_ttl)))
                         .and_then(|builder| builder.execute())
                         .await;
