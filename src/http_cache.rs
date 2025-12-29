@@ -1,6 +1,8 @@
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::http::{self as http_client, HttpClient, HttpResponse};
 use crate::storage::Storage;
 
 pub struct CacheOptions {
@@ -10,7 +12,7 @@ pub struct CacheOptions {
 }
 
 pub async fn cached_get_json(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     url: &str,
     params: Option<&[(&str, String)]>,
@@ -34,7 +36,7 @@ pub async fn cached_get_json(
 }
 
 pub async fn cached_get_json_full(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     url: &str,
     params: Option<&[(&str, String)]>,
@@ -121,13 +123,13 @@ fn build_cache_key(
     format!("{:x}", digest)
 }
 
-fn build_headers(headers: Option<&[(&str, String)]>) -> reqwest::header::HeaderMap {
-    let mut map = reqwest::header::HeaderMap::new();
+fn build_headers(headers: Option<&[(&str, String)]>) -> HeaderMap {
+    let mut map = HeaderMap::new();
     if let Some(headers) = headers {
         for (key, value) in headers {
             if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
+                HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(value),
             ) {
                 map.insert(name, val);
             }
@@ -167,17 +169,17 @@ pub async fn get_cache_history(
 }
 
 async fn make_request(
-    http: &reqwest::Client,
+    http: &HttpClient,
     url: &str,
     params: Option<&[(&str, String)]>,
     headers: Option<&[(&str, String)]>,
-) -> Result<reqwest::Response, reqwest::Error> {
+) -> Result<HttpResponse, http_client::HttpError> {
     let request = http
         .get(url)
         .headers(build_headers(headers))
-        .query(&params.unwrap_or_default());
+        .query(params.unwrap_or_default());
     match request.send().await {
         Ok(resp) => Ok(resp),
-        Err(_) => crate::http::get_with_ssl_fallback(url).await,
+        Err(_) => http_client::get_with_ssl_fallback(http, url).await,
     }
 }

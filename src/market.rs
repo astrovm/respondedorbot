@@ -1,15 +1,12 @@
 use crate::bcra;
+use crate::http::HttpClient;
 use crate::http_cache::{cached_get_json, cached_get_json_full, CacheOptions};
 use crate::storage::Storage;
 
 const TTL_PRICE: u64 = 300;
 const TTL_DOLLAR: u64 = 300;
 
-pub async fn get_prices(
-    http: &reqwest::Client,
-    storage: &Storage,
-    msg_text: &str,
-) -> Option<String> {
+pub async fn get_prices(http: &HttpClient, storage: &Storage, msg_text: &str) -> Option<String> {
     let mut convert_to = "USD".to_string();
     let mut convert_param = "USD".to_string();
 
@@ -87,7 +84,10 @@ pub async fn get_prices(
             .map(|v| v.to_uppercase())
             .collect();
 
-        if requested.iter().any(|v| v == "STABLES" || v == "STABLECOINS") {
+        if requested
+            .iter()
+            .any(|v| v == "STABLES" || v == "STABLECOINS")
+        {
             requested.extend(stablecoin_list().iter().map(|v| v.to_string()));
         }
 
@@ -122,10 +122,7 @@ pub async fn get_prices(
 
     let mut lines = Vec::new();
     for coin in coins.iter().take(limit) {
-        let symbol = coin
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let symbol = coin.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
         let quote = coin.get("quote")?.get(&convert_param)?;
         let price = quote.get("price")?.as_f64()?;
         let pct = quote
@@ -140,16 +137,16 @@ pub async fn get_prices(
 
         let price_text = trim_float(price_value, 6);
         let pct_text = format_signed(pct, 2);
-        lines.push(format!("{}: {} {} ({}% 24hs)", symbol, price_text, convert_to, pct_text));
+        lines.push(format!(
+            "{}: {} {} ({}% 24hs)",
+            symbol, price_text, convert_to, pct_text
+        ));
     }
 
     Some(lines.join("\n"))
 }
 
-pub async fn get_dollar_rates(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Option<String> {
+pub async fn get_dollar_rates(http: &HttpClient, storage: &Storage) -> Option<String> {
     let data = cached_get_json_full(
         http,
         storage,
@@ -167,15 +164,55 @@ pub async fn get_dollar_rates(
     let data = data.get("data").cloned().unwrap_or(data);
 
     let mut rates = vec![
-        rate(&data, "Mayorista", &["mayorista", "price"], &["mayorista", "variation"]),
-        rate(&data, "Oficial", &["oficial", "price"], &["oficial", "variation"]),
-        rate(&data, "Tarjeta", &["tarjeta", "price"], &["tarjeta", "variation"]),
-        rate(&data, "MEP", &["mep", "al30", "ci", "price"], &["mep", "al30", "ci", "variation"]),
-        rate(&data, "CCL", &["ccl", "al30", "ci", "price"], &["ccl", "al30", "ci", "variation"]),
+        rate(
+            &data,
+            "Mayorista",
+            &["mayorista", "price"],
+            &["mayorista", "variation"],
+        ),
+        rate(
+            &data,
+            "Oficial",
+            &["oficial", "price"],
+            &["oficial", "variation"],
+        ),
+        rate(
+            &data,
+            "Tarjeta",
+            &["tarjeta", "price"],
+            &["tarjeta", "variation"],
+        ),
+        rate(
+            &data,
+            "MEP",
+            &["mep", "al30", "ci", "price"],
+            &["mep", "al30", "ci", "variation"],
+        ),
+        rate(
+            &data,
+            "CCL",
+            &["ccl", "al30", "ci", "price"],
+            &["ccl", "al30", "ci", "variation"],
+        ),
         rate(&data, "Blue", &["blue", "ask"], &["blue", "variation"]),
-        rate(&data, "Bitcoin", &["cripto", "ccb", "ask"], &["cripto", "ccb", "variation"]),
-        rate(&data, "USDC", &["cripto", "usdc", "ask"], &["cripto", "usdc", "variation"]),
-        rate(&data, "USDT", &["cripto", "usdt", "ask"], &["cripto", "usdt", "variation"]),
+        rate(
+            &data,
+            "Bitcoin",
+            &["cripto", "ccb", "ask"],
+            &["cripto", "ccb", "variation"],
+        ),
+        rate(
+            &data,
+            "USDC",
+            &["cripto", "usdc", "ask"],
+            &["cripto", "usdc", "variation"],
+        ),
+        rate(
+            &data,
+            "USDT",
+            &["cripto", "usdt", "ask"],
+            &["cripto", "usdt", "variation"],
+        ),
     ];
 
     let mut bands_date: Option<String> = None;
@@ -198,7 +235,11 @@ pub async fn get_dollar_rates(
     }
 
     rates.retain(|r| r.price > 0.0);
-    rates.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+    rates.sort_by(|a, b| {
+        a.price
+            .partial_cmp(&b.price)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut lines = Vec::new();
     for rate in rates {
@@ -217,10 +258,7 @@ pub async fn get_dollar_rates(
     Some(lines.join("\n"))
 }
 
-pub async fn get_market_context(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> Option<String> {
+pub async fn get_market_context(http: &HttpClient, storage: &Storage) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(btc) = get_btc_price(http, storage, "USD").await {
         parts.push(format!("BTC: {}", trim_float(btc, 2)));
@@ -235,11 +273,7 @@ pub async fn get_market_context(
     }
 }
 
-pub async fn get_devo(
-    http: &reqwest::Client,
-    storage: &Storage,
-    msg_text: &str,
-) -> String {
+pub async fn get_devo(http: &HttpClient, storage: &Storage, msg_text: &str) -> String {
     let mut fee = 0.0;
     let mut compra = 0.0;
 
@@ -283,10 +317,7 @@ pub async fn get_devo(
     compute_devo_message(fee, compra, usdt, oficial, tarjeta)
 }
 
-pub async fn get_rulo(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> String {
+pub async fn get_rulo(http: &HttpClient, storage: &Storage) -> String {
     let usd_amount: f64 = 1000.0;
     let amount_param = if usd_amount.fract() == 0.0 {
         format!("{}", usd_amount as i64)
@@ -352,14 +383,21 @@ pub async fn get_rulo(
     if let Some(usd_usdt) = usd_usdt {
         if let Some(map) = usd_usdt.get("data").and_then(|v| v.as_object()) {
             for (exchange, quote) in map {
-                if excluded_usd_to_usdt.iter().any(|e| e.eq_ignore_ascii_case(exchange)) {
+                if excluded_usd_to_usdt
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(exchange))
+                {
                     continue;
                 }
                 let ask = safe_float(quote.get("totalAsk").or_else(|| quote.get("ask")));
                 if ask <= 0.0 {
                     continue;
                 }
-                if best_usd_to_usdt.as_ref().map(|(_, v)| ask < *v).unwrap_or(true) {
+                if best_usd_to_usdt
+                    .as_ref()
+                    .map(|(_, v)| ask < *v)
+                    .unwrap_or(true)
+                {
                     best_usd_to_usdt = Some((exchange.to_string(), ask));
                 }
             }
@@ -370,14 +408,21 @@ pub async fn get_rulo(
     if let Some(usdt_ars) = usdt_ars {
         if let Some(map) = usdt_ars.get("data").and_then(|v| v.as_object()) {
             for (exchange, quote) in map {
-                if excluded_usdt_to_ars.iter().any(|e| e.eq_ignore_ascii_case(exchange)) {
+                if excluded_usdt_to_ars
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(exchange))
+                {
                     continue;
                 }
                 let bid = safe_float(quote.get("totalBid").or_else(|| quote.get("bid")));
                 if bid <= 0.0 {
                     continue;
                 }
-                if best_usdt_to_ars.as_ref().map(|(_, v)| bid > *v).unwrap_or(true) {
+                if best_usdt_to_ars
+                    .as_ref()
+                    .map(|(_, v)| bid > *v)
+                    .unwrap_or(true)
+                {
                     best_usdt_to_ars = Some((exchange.to_string(), bid));
                 }
             }
@@ -551,7 +596,10 @@ pub fn powerlaw_message(price: f64, value: f64) -> String {
     } else {
         format!("{:.2}% regalado gordo", percentage.abs())
     };
-    format!("segun power law btc deberia estar en {:.2} usd ({})", value, percentage_txt)
+    format!(
+        "segun power law btc deberia estar en {:.2} usd ({})",
+        value, percentage_txt
+    )
 }
 
 pub fn rainbow_message(price: f64, value: f64) -> String {
@@ -567,10 +615,7 @@ pub fn rainbow_message(price: f64, value: f64) -> String {
     )
 }
 
-pub async fn powerlaw(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> String {
+pub async fn powerlaw(http: &HttpClient, storage: &Storage) -> String {
     let today = chrono::Utc::now();
     let since = chrono::DateTime::parse_from_rfc3339("2009-01-04T00:00:00Z")
         .unwrap()
@@ -586,10 +631,7 @@ pub async fn powerlaw(
     powerlaw_message(price, value)
 }
 
-pub async fn rainbow(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> String {
+pub async fn rainbow(http: &HttpClient, storage: &Storage) -> String {
     let today = chrono::Utc::now();
     let since = chrono::DateTime::parse_from_rfc3339("2009-01-09T00:00:00Z")
         .unwrap()
@@ -608,7 +650,8 @@ pub async fn rainbow(
 pub fn convert_base(msg_text: &str) -> String {
     let input_parts: Vec<&str> = msg_text.split(',').collect();
     if input_parts.len() != 3 {
-        return "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal".to_string();
+        return "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
+            .to_string();
     }
     let number_str = input_parts[0].trim();
     let base_from: i32 = input_parts[1].trim().parse().unwrap_or(0);
@@ -618,10 +661,16 @@ pub fn convert_base(msg_text: &str) -> String {
         return "el numero tiene que ser alfanumerico boludo".to_string();
     }
     if !(2..=36).contains(&base_from) {
-        return format!("base origen '{}' tiene que ser entre 2 y 36 gordo", input_parts[1].trim());
+        return format!(
+            "base origen '{}' tiene que ser entre 2 y 36 gordo",
+            input_parts[1].trim()
+        );
     }
     if !(2..=36).contains(&base_to) {
-        return format!("base destino '{}' tiene que ser entre 2 y 36 boludo", input_parts[2].trim());
+        return format!(
+            "base destino '{}' tiene que ser entre 2 y 36 boludo",
+            input_parts[2].trim()
+        );
     }
 
     let mut value: i128 = 0;
@@ -635,7 +684,10 @@ pub fn convert_base(msg_text: &str) -> String {
     }
 
     if value == 0 {
-        return format!("ahi tenes boludo, {} en base {} es 0 en base {}", number_str, base_from, base_to);
+        return format!(
+            "ahi tenes boludo, {} en base {} es 0 en base {}",
+            number_str, base_from, base_to
+        );
     }
 
     let mut digits = Vec::new();
@@ -658,10 +710,7 @@ pub fn convert_base(msg_text: &str) -> String {
     )
 }
 
-pub async fn satoshi(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> String {
+pub async fn satoshi(http: &HttpClient, storage: &Storage) -> String {
     let btc_usd = get_btc_price(http, storage, "USD").await;
     let btc_ars = get_btc_price(http, storage, "ARS").await;
 
@@ -686,11 +735,7 @@ pub async fn satoshi(
     )
 }
 
-async fn get_btc_price(
-    http: &reqwest::Client,
-    storage: &Storage,
-    convert: &str,
-) -> Option<f64> {
+async fn get_btc_price(http: &HttpClient, storage: &Storage, convert: &str) -> Option<f64> {
     let params = vec![
         ("start", "1".to_string()),
         ("limit", "1".to_string()),
@@ -744,7 +789,10 @@ fn dig(value: &serde_json::Value, path: &[&str]) -> Option<f64> {
 
 fn trim_float(value: f64, decimals: usize) -> String {
     let formatted = format!("{:.*}", decimals, value);
-    formatted.trim_end_matches('0').trim_end_matches('.').to_string()
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn format_signed(value: f64, decimals: usize) -> String {
@@ -757,18 +805,17 @@ fn format_signed(value: f64, decimals: usize) -> String {
 
 fn supported_currencies() -> Vec<&'static str> {
     vec![
-        "ARS", "AUD", "BRL", "BTC", "BUSD", "CAD", "CHF", "CLP", "CNY", "COP", "CZK",
-        "DAI", "DKK", "ETH", "EUR", "GBP", "HKD", "ILS", "INR", "ISK", "JPY", "KRW",
-        "MXN", "NZD", "PEN", "SATS", "SEK", "SGD", "TWD", "USD", "USDC", "USDT", "UYU",
-        "XAU", "XMR",
+        "ARS", "AUD", "BRL", "BTC", "BUSD", "CAD", "CHF", "CLP", "CNY", "COP", "CZK", "DAI", "DKK",
+        "ETH", "EUR", "GBP", "HKD", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "NZD", "PEN", "SATS",
+        "SEK", "SGD", "TWD", "USD", "USDC", "USDT", "UYU", "XAU", "XMR",
     ]
 }
 
 fn stablecoin_list() -> Vec<&'static str> {
     vec![
-        "BUSD", "DAI", "DOC", "EURT", "FDUSD", "FRAX", "GHO", "GUSD", "LUSD", "MAI",
-        "MIM", "MIMATIC", "NUARS", "PAXG", "PYUSD", "RAI", "SUSD", "TUSD", "USDC", "USDD",
-        "USDM", "USDP", "USDT", "UXD", "XAUT", "XSGD",
+        "BUSD", "DAI", "DOC", "EURT", "FDUSD", "FRAX", "GHO", "GUSD", "LUSD", "MAI", "MIM",
+        "MIMATIC", "NUARS", "PAXG", "PYUSD", "RAI", "SUSD", "TUSD", "USDC", "USDD", "USDM", "USDP",
+        "USDT", "UXD", "XAUT", "XSGD",
     ]
 }
 
@@ -789,12 +836,24 @@ fn format_local_signed(value: f64, decimals: usize) -> String {
     format!("{}{:.*}", sign, decimals, value.abs()).replace('.', ",")
 }
 
-fn format_spread_line(label: &str, sell_price: f64, oficial_price: f64, details: &[String]) -> String {
+fn format_spread_line(
+    label: &str,
+    sell_price: f64,
+    oficial_price: f64,
+    details: &[String],
+) -> String {
     let diff = sell_price - oficial_price;
-    let pct = if oficial_price != 0.0 { diff / oficial_price * 100.0 } else { 0.0 };
+    let pct = if oficial_price != 0.0 {
+        diff / oficial_price * 100.0
+    } else {
+        0.0
+    };
     let mut lines = vec![
         format!("- {label}"),
-        format!("  • Precio venta: {} ARS/USD", format_local_currency(sell_price, 2)),
+        format!(
+            "  • Precio venta: {} ARS/USD",
+            format_local_currency(sell_price, 2)
+        ),
         format!(
             "  • Spread vs oficial: {} ARS ({}%)",
             format_local_signed(diff, 2),

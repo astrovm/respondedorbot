@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::http::HttpClient;
 use crate::http_cache::cached_get_json;
 use crate::storage::Storage;
 
@@ -9,10 +10,7 @@ const EVENTS_URL: &str = "https://gamma-api.polymarket.com/events";
 const SLUG_ELECTION: &str = "which-party-wins-most-seats-in-argentina-deputies-election";
 const SLUG_SEATS_AFTER: &str = "which-party-holds-the-most-seats-after-argentina-deputies-election";
 
-pub async fn get_polymarket_argentina_election(
-    http: &reqwest::Client,
-    storage: &Storage,
-) -> String {
+pub async fn get_polymarket_argentina_election(http: &HttpClient, storage: &Storage) -> String {
     let mut sections = Vec::new();
 
     for (slug, header, url) in [
@@ -40,7 +38,7 @@ pub async fn get_polymarket_argentina_election(
 }
 
 async fn fetch_event_section(
-    http: &reqwest::Client,
+    http: &HttpClient,
     storage: &Storage,
     slug: &str,
     header: &str,

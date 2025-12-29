@@ -1,29 +1,26 @@
 use rand::TryRngCore;
-use reqwest::Client;
 use sha2::{Digest, Sha256};
 
+use crate::http::{HttpClient, HttpResult};
 use crate::storage::Storage;
 
 fn api_base(token: &str) -> String {
     format!("https://api.telegram.org/bot{token}")
 }
 
-pub async fn get_webhook_info(
-    http: &Client,
-    token: &str,
-) -> Result<serde_json::Value, reqwest::Error> {
+pub async fn get_webhook_info(http: &HttpClient, token: &str) -> HttpResult<serde_json::Value> {
     let url = format!("{}/getWebhookInfo", api_base(token));
     let response = http.get(url).send().await?;
     response.json::<serde_json::Value>().await
 }
 
 pub async fn set_webhook(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     function_url: &str,
     webhook_key: &str,
     storage: &Storage,
-) -> Result<bool, reqwest::Error> {
+) -> HttpResult<bool> {
     let url = format!("{}/setWebhook", api_base(token));
 
     let secret_token = generate_secret_token();
@@ -65,13 +62,13 @@ fn generate_secret_token() -> String {
 }
 
 pub async fn send_message(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     chat_id: i64,
     text: &str,
     reply_markup: Option<serde_json::Value>,
     reply_to: Option<i64>,
-) -> Result<Option<i64>, reqwest::Error> {
+) -> HttpResult<Option<i64>> {
     let url = format!("{}/sendMessage", api_base(token));
     let mut payload = serde_json::json!({
         "chat_id": chat_id,
@@ -98,11 +95,11 @@ pub async fn send_message(
 }
 
 pub async fn answer_callback_query(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     callback_id: &str,
     text: Option<&str>,
-) -> Result<bool, reqwest::Error> {
+) -> HttpResult<bool> {
     let url = format!("{}/answerCallbackQuery", api_base(token));
     let payload = serde_json::json!({
         "callback_query_id": callback_id,
@@ -111,17 +108,20 @@ pub async fn answer_callback_query(
     });
     let response = http.post(url).json(&payload).send().await?;
     let body = response.json::<serde_json::Value>().await?;
-    Ok(body.get("ok").and_then(|value| value.as_bool()).unwrap_or(false))
+    Ok(body
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false))
 }
 
 pub async fn edit_message_text(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     chat_id: i64,
     message_id: i64,
     text: &str,
     reply_markup: &serde_json::Value,
-) -> Result<bool, reqwest::Error> {
+) -> HttpResult<bool> {
     let url = format!("{}/editMessageText", api_base(token));
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -131,15 +131,18 @@ pub async fn edit_message_text(
     });
     let response = http.post(url).json(&payload).send().await?;
     let body = response.json::<serde_json::Value>().await?;
-    Ok(body.get("ok").and_then(|value| value.as_bool()).unwrap_or(false))
+    Ok(body
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false))
 }
 
 pub async fn send_chat_action(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     chat_id: i64,
     action: &str,
-) -> Result<bool, reqwest::Error> {
+) -> HttpResult<bool> {
     let url = format!("{}/sendChatAction", api_base(token));
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -151,11 +154,11 @@ pub async fn send_chat_action(
 }
 
 pub async fn get_chat_member_status(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     chat_id: i64,
     user_id: i64,
-) -> Result<Option<String>, reqwest::Error> {
+) -> HttpResult<Option<String>> {
     let url = format!("{}/getChatMember", api_base(token));
     let response = http
         .get(url)
@@ -175,11 +178,11 @@ pub async fn get_chat_member_status(
 }
 
 pub async fn delete_message(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     chat_id: i64,
     message_id: i64,
-) -> Result<bool, reqwest::Error> {
+) -> HttpResult<bool> {
     let url = format!("{}/deleteMessage", api_base(token));
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -191,16 +194,12 @@ pub async fn delete_message(
 }
 
 pub async fn get_file_path(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     file_id: &str,
-) -> Result<Option<String>, reqwest::Error> {
+) -> HttpResult<Option<String>> {
     let url = format!("{}/getFile", api_base(token));
-    let response = http
-        .get(url)
-        .query(&[("file_id", file_id)])
-        .send()
-        .await?;
+    let response = http.get(url).query(&[("file_id", file_id)]).send().await?;
     let body = response.json::<serde_json::Value>().await?;
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Ok(None);
@@ -214,7 +213,7 @@ pub async fn get_file_path(
 }
 
 pub async fn download_file(
-    http: &Client,
+    http: &HttpClient,
     token: &str,
     file_id: &str,
 ) -> Result<Vec<u8>, String> {
