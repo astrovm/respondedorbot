@@ -1,11 +1,11 @@
 #![cfg(target_arch = "wasm32")]
 
-use respondedorbot::models::Update;
-use respondedorbot::webhook::{
+use crate::models::Update;
+use crate::webhook::{
     app_state, handle_get, handle_post, log_bot_config, AppState, WebhookQuery, WebhookResponse,
 };
 use serde_urlencoded::from_str;
-use worker::{Env, Request, Response, Result, Router};
+use worker::{event, Env, Request, Response, Result, Router};
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
@@ -58,7 +58,5 @@ fn parse_query(req: &Request) -> std::result::Result<WebhookQuery, Response> {
 }
 
 fn build_response(webhook_response: WebhookResponse) -> Result<Response> {
-    let response =
-        Response::from_body(webhook_response.body)?.with_status(webhook_response.status.as_u16());
-    Ok(response)
+    Ok(Response::ok(webhook_response.body)?.with_status(webhook_response.status.as_u16()))
 }

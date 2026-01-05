@@ -114,11 +114,10 @@ impl Storage {
                     .unwrap_or(false)
             }
             #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => kv
-                .put(key, value)
-                .and_then(|builder| builder.execute())
-                .await
-                .is_ok(),
+            StorageBackend::Kv(kv) => match kv.put(key, value) {
+                Ok(builder) => builder.execute().await.is_ok(),
+                Err(_) => false,
+            },
         }
     }
 
@@ -135,12 +134,10 @@ impl Storage {
                     .unwrap_or(false)
             }
             #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => kv
-                .put(key, value)
-                .and_then(|builder| Ok(builder.expiration_ttl(ttl_seconds)))
-                .and_then(|builder| builder.execute())
-                .await
-                .is_ok(),
+            StorageBackend::Kv(kv) => match kv.put(key, value) {
+                Ok(builder) => builder.expiration_ttl(ttl_seconds).execute().await.is_ok(),
+                Err(_) => false,
+            },
         }
     }
 
@@ -203,15 +200,14 @@ impl Storage {
 
                     let remaining_ttl = expires_at.saturating_sub(now).max(1) as u64;
                     let payload = StoredCounter { value, expires_at };
-                    let stored = kv
-                        .put(
-                            key,
-                            serde_json::to_string(&payload)
-                                .unwrap_or_else(|_| "{\"value\":0,\"expires_at\":0}".to_string()),
-                        )
-                        .and_then(|builder| Ok(builder.expiration_ttl(remaining_ttl)))
-                        .and_then(|builder| builder.execute())
-                        .await;
+                    let stored = match kv.put(
+                        key,
+                        serde_json::to_string(&payload)
+                            .unwrap_or_else(|_| "{\"value\":0,\"expires_at\":0}".to_string()),
+                    ) {
+                        Ok(builder) => builder.expiration_ttl(remaining_ttl).execute().await,
+                        Err(err) => Err(err),
+                    };
 
                     if stored.is_ok() || attempts >= 3 {
                         return value;

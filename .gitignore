@@ -6,3 +6,5 @@
 .venv/
 target/
 .vercel/
+node_modules/
+.wrangler/

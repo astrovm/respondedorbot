@@ -2,11 +2,10 @@ use http::Method;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::time::Duration;
+use url::Url;
 
 #[cfg(target_arch = "wasm32")]
 use futures::{future, pin_mut};
-#[cfg(target_arch = "wasm32")]
-use url::Url;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
@@ -95,6 +94,7 @@ impl HttpClient {
 }
 
 pub struct HttpRequestBuilder {
+    #[cfg(not(target_arch = "wasm32"))]
     client: HttpClient,
     method: Method,
     url: String,
@@ -112,7 +112,10 @@ enum RequestBody {
 
 impl HttpRequestBuilder {
     fn new(client: HttpClient, method: Method, url: String) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = client;
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             client,
             method,
             url,
@@ -170,14 +173,26 @@ impl HttpRequestBuilder {
         self
     }
 
+    fn build_url(&self) -> HttpResult<Url> {
+        let mut url = Url::parse(&self.url)
+            .map_err(|err| HttpError::Message(format!("invalid url {}: {}", self.url, err)))?;
+        if !self.query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in &self.query {
+                pairs.append_pair(key, value);
+            }
+        }
+        Ok(url)
+    }
+
     pub async fn send(self) -> HttpResult<HttpResponse> {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let url = self.build_url()?;
             let mut builder = self
                 .client
                 .inner
-                .request(self.method.clone(), self.url)
-                .query(&self.query);
+                .request(self.method.clone(), url);
             for (key, value) in self.headers {
                 builder = builder.header(key, value);
             }
@@ -203,17 +218,10 @@ impl HttpRequestBuilder {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let mut url = Url::parse(&self.url)
-                .map_err(|err| HttpError::Message(format!("invalid url {}: {}", self.url, err)))?;
-            if !self.query.is_empty() {
-                let mut pairs = url.query_pairs_mut();
-                for (key, value) in &self.query {
-                    pairs.append_pair(key, value);
-                }
-            }
+            let url = self.build_url()?;
 
             let mut init = RequestInit::new();
-            let mut headers = Headers::new();
+            let headers = Headers::new();
             for (key, value) in &self.headers {
                 headers.set(key, value)?;
             }
