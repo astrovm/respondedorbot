@@ -1,5 +1,5 @@
-use respondedorbot::{commands, links, market, tools};
 use wasm_bindgen_test::wasm_bindgen_test;
+use respondedorbot::{commands, links, market, tools};
 
 #[wasm_bindgen_test]
 fn test_parse_command_basic() {

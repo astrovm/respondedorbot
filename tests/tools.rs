@@ -1,16 +1,17 @@
+use wasm_bindgen_test::wasm_bindgen_test;
 use respondedorbot::tools::{
     extract_title, format_search_results, parse_cached_results, parse_tool_call, strip_html,
     SearchResult,
 };
 
-#[test]
+#[wasm_bindgen_test]
 fn test_extract_title() {
     let html = "<html><head><title>Hola</title></head><body>ok</body></html>";
     let title = extract_title(html);
     assert_eq!(title, "Hola");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_strip_html() {
     let html = "<p>hola</p><script>bad</script><style>nope</style>";
     let cleaned = strip_html(html);
@@ -18,7 +19,7 @@ fn test_strip_html() {
     assert!(!cleaned.contains("bad"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_parse_tool_call() {
     let input = "[TOOL] web_search {\"query\":\"hola\"}";
     let parsed = parse_tool_call(input).unwrap();
@@ -26,7 +27,7 @@ fn test_parse_tool_call() {
     assert_eq!(parsed.1.get("query").and_then(|v| v.as_str()), Some("hola"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_format_search_results_with_snippet() {
     let results = vec![SearchResult {
         title: "Titulo".to_string(),
@@ -40,7 +41,7 @@ fn test_format_search_results_with_snippet() {
     assert!(formatted.contains("Snippet"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_parse_cached_results() {
     let value = serde_json::json!({
         "results": [

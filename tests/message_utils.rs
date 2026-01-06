@@ -1,3 +1,4 @@
+use wasm_bindgen_test::wasm_bindgen_test;
 use respondedorbot::chat_config::ChatConfig;
 use respondedorbot::message_utils::{
     build_ai_messages, build_reply_context_text, clean_duplicate_response, contains_url,
@@ -35,21 +36,21 @@ fn base_message() -> Message {
     }
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_remove_gordo_prefix() {
     let raw = "gordo: hola\nGORDO: che";
     let cleaned = remove_gordo_prefix(raw);
     assert_eq!(cleaned, "hola\nche");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_strip_user_identity_prefix() {
     let response = "Pepe Gomez (pepe): hola";
     let cleaned = strip_user_identity_prefix(response, Some("Pepe Gomez (pepe)"));
     assert_eq!(cleaned, "hola");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_clean_duplicate_response_lines_and_sentences() {
     let raw = "hola\nhola\nchau\nchau\n\nhola. hola. chau. chau.";
     let cleaned = clean_duplicate_response(raw);
@@ -57,7 +58,7 @@ fn test_clean_duplicate_response_lines_and_sentences() {
     assert!(cleaned.contains("hola. chau"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_strip_leading_context() {
     let response = "Contexto largo: hola boludo";
     let cleaned = strip_leading_context(
@@ -67,7 +68,7 @@ fn test_strip_leading_context() {
     assert_eq!(cleaned, "hola boludo");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_post_process_ai_response_combined() {
     let raw = "gordo: Pepe: hola\nhola";
     let cleaned =
@@ -75,14 +76,14 @@ fn test_post_process_ai_response_combined() {
     assert_eq!(cleaned, "hola");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_format_user_identity() {
     let user = base_user("pepe");
     let formatted = format_user_identity(Some(&user));
     assert_eq!(formatted, "Pepe Gomez (pepe)");
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_reply_context_text_video_document() {
     let mut reply = base_message();
     reply.text = None;
@@ -105,13 +106,13 @@ fn test_build_reply_context_text_video_document() {
     assert!(context.contains("un archivo adjunto"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_contains_url() {
     assert!(contains_url("mirá https://example.com"));
     assert!(!contains_url("nada aca"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_gen_random_variants() {
     let mut observed_ok = true;
     for _ in 0..50 {
@@ -125,7 +126,7 @@ fn test_gen_random_variants() {
     assert!(observed_ok);
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_ai_messages_includes_context() {
     let msg = base_message();
     let history: Vec<ChatHistoryEntry> = Vec::new();
@@ -136,7 +137,7 @@ fn test_build_ai_messages_includes_context() {
     assert!(last.contains("MENSAJE:"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_ai_messages_limits_history() {
     let msg = base_message();
     let mut history: Vec<ChatHistoryEntry> = Vec::new();
@@ -154,7 +155,7 @@ fn test_build_ai_messages_limits_history() {
     assert!(messages.last().unwrap().content.contains("ultima"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_should_gordo_respond_block_followups() {
     let mut reply = base_message();
     reply.from = Some(base_user("bot"));
@@ -178,7 +179,7 @@ fn test_should_gordo_respond_block_followups() {
     assert!(!should);
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_should_gordo_respond_block_link_fix() {
     let mut reply = base_message();
     reply.from = Some(base_user("bot"));
@@ -199,7 +200,7 @@ fn test_should_gordo_respond_block_link_fix() {
     assert!(!should);
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_should_gordo_respond_trigger() {
     let msg = base_message();
     let chat_config = ChatConfig::default();

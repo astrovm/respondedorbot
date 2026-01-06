@@ -1,6 +1,7 @@
+use wasm_bindgen_test::wasm_bindgen_test;
 use respondedorbot::chat_config::{build_config_keyboard, build_config_text, ChatConfig};
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_config_text() {
     let config = ChatConfig {
         link_mode: "reply".to_string(),
@@ -13,7 +14,7 @@ fn test_build_config_text() {
     assert!(text.contains("Random AI replies"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_config_keyboard() {
     let config = ChatConfig::default();
     let keyboard = build_config_keyboard(&config);

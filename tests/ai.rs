@@ -1,6 +1,7 @@
+use wasm_bindgen_test::wasm_bindgen_test;
 use respondedorbot::ai::{build_system_message, sanitize_tool_artifacts, AiContext};
 
-#[test]
+#[wasm_bindgen_test]
 fn test_build_system_message_includes_context() {
     let ctx = AiContext {
         system_prompt: "Prompt".to_string(),
@@ -20,7 +21,7 @@ fn test_build_system_message_includes_context() {
     assert!(msg.contains("HERRAMIENTAS DISPONIBLES"));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_sanitize_tool_artifacts() {
     let raw = "hola\n[TOOL] web_search {}";
     let cleaned = sanitize_tool_artifacts(raw);
