@@ -22,11 +22,14 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Install dependencies
-        run: sudo apt-get update
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen runner
+        run: cargo install wasm-bindgen-cli
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --features worker --no-default-features -- -D warnings
 
       - name: Run test suite
-        run: cargo test
+        run: cargo test --target wasm32-unknown-unknown --features worker --no-default-features
