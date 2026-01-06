@@ -52,35 +52,6 @@ pub struct WebhookResponse {
     pub body: String,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static APP_STATE: OnceLock<AppState> = OnceLock::new();
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_state_from_env() -> AppState {
-    let http = HttpClient::new();
-    let redis_host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".to_string());
-    let redis_port: u16 = std::env::var("REDIS_PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(6379);
-    let redis_password = std::env::var("REDIS_PASSWORD").ok();
-    let redis = Storage::create_redis_client(&redis_host, redis_port, redis_password.as_deref())
-        .expect("failed to create redis client");
-
-    AppState {
-        http,
-        storage: Storage::from_redis_client(redis),
-        telegram_token: std::env::var("TELEGRAM_TOKEN").ok(),
-        webhook_key: std::env::var("WEBHOOK_AUTH_KEY").ok(),
-        function_url: std::env::var("FUNCTION_URL").ok(),
-        admin_chat_id: std::env::var("ADMIN_CHAT_ID")
-            .ok()
-            .and_then(|value| value.parse().ok()),
-        bot_username: std::env::var("TELEGRAM_USERNAME").ok(),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
 pub fn app_state(env: &worker::Env) -> AppState {
     let http = HttpClient::new();
     let kv = env.kv("BOT_KV").expect("KV binding BOT_KV is required");
@@ -96,11 +67,6 @@ pub fn app_state(env: &worker::Env) -> AppState {
             .and_then(|v| v.to_string().parse().ok()),
         bot_username: env.var("TELEGRAM_USERNAME").ok().map(|v| v.to_string()),
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn app_state() -> AppState {
-    APP_STATE.get_or_init(build_state_from_env).clone()
 }
 
 pub fn log_bot_config() {
@@ -208,39 +174,6 @@ pub async fn handle_post(
     response(StatusCode::OK, "Ok")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn handle_get_http(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<WebhookQuery>,
-) -> (StatusCode, String) {
-    let response = handle_get(&state, query).await;
-    (response.status, response.body)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn handle_post_http(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<WebhookQuery>,
-    headers: axum::http::HeaderMap,
-    body: Result<axum::Json<Update>, axum::extract::rejection::JsonRejection>,
-) -> (StatusCode, String) {
-    let secret_header = headers
-        .get("X-Telegram-Bot-Api-Secret-Token")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_string());
-    let update = body.ok().map(|axum::Json(value)| value);
-
-    let response = handle_post(&state, query, secret_header, update).await;
-    (response.status, response.body)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_axum_router(app_state: AppState) -> axum::Router {
-    use axum::routing::get;
-    axum::Router::new()
-        .route("/", get(handle_get_http).post(handle_post_http))
-        .with_state(app_state)
-}
 
 async fn handle_check_webhook(state: &AppState) -> WebhookResponse {
     let Some(token) = state.telegram_token.as_deref() else {
@@ -319,12 +252,6 @@ fn is_true(value: &Option<String>) -> bool {
     matches!(value.as_deref(), Some("true") | Some("TRUE") | Some("True"))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn sleep_duration(duration: Duration) {
-    tokio::time::sleep(duration).await;
-}
-
-#[cfg(target_arch = "wasm32")]
 async fn sleep_duration(duration: Duration) {
     worker::Delay::from(duration).await;
 }

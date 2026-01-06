@@ -3,23 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::message_utils::{truncate_text, ChatHistoryEntry};
 
-#[cfg(not(target_arch = "wasm32"))]
-type RedisClient = redis::Client;
-
 #[derive(Clone)]
 pub struct Storage {
-    backend: StorageBackend,
+    kv: worker::kv::KvStore,
 }
 
-#[derive(Clone)]
-enum StorageBackend {
-    #[cfg(not(target_arch = "wasm32"))]
-    Redis(RedisClient),
-    #[cfg(target_arch = "wasm32")]
-    Kv(worker::kv::KvStore),
-}
-
-#[cfg(target_arch = "wasm32")]
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredCounter {
     value: i64,
@@ -61,83 +49,25 @@ const BOT_MESSAGE_META_LIMIT: usize = 64;
 const BOT_MESSAGE_META_PREFIX: &str = "bot_message_meta:";
 
 impl Storage {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn create_redis_client(
-        host: &str,
-        port: u16,
-        password: Option<&str>,
-    ) -> redis::RedisResult<RedisClient> {
-        let url = if let Some(pw) = password {
-            format!("redis://:{}@{}:{}/", pw, host, port)
-        } else {
-            format!("redis://{}:{}/", host, port)
-        };
-        redis::Client::open(url)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_redis_client(client: RedisClient) -> Self {
-        Self {
-            backend: StorageBackend::Redis(client),
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub fn from_kv(kv: worker::kv::KvStore) -> Self {
-        Self {
-            backend: StorageBackend::Kv(kv),
-        }
+        Self { kv }
     }
 
     pub async fn get_string(&self, key: &str) -> Option<String> {
-        match &self.backend {
-            #[cfg(not(target_arch = "wasm32"))]
-            StorageBackend::Redis(client) => {
-                let mut conn = client.get_multiplexed_async_connection().await.ok()?;
-                redis::AsyncCommands::get(&mut conn, key).await.ok()
-            }
-            #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => kv.get(key).text().await.ok().flatten(),
-        }
+        self.kv.get(key).text().await.ok().flatten()
     }
 
     pub async fn set_string(&self, key: &str, value: &str) -> bool {
-        match &self.backend {
-            #[cfg(not(target_arch = "wasm32"))]
-            StorageBackend::Redis(client) => {
-                let mut conn = match client.get_multiplexed_async_connection().await {
-                    Ok(conn) => conn,
-                    Err(_) => return false,
-                };
-                redis::AsyncCommands::set::<_, _, bool>(&mut conn, key, value)
-                    .await
-                    .unwrap_or(false)
-            }
-            #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => match kv.put(key, value) {
-                Ok(builder) => builder.execute().await.is_ok(),
-                Err(_) => false,
-            },
+        match self.kv.put(key, value) {
+            Ok(builder) => builder.execute().await.is_ok(),
+            Err(_) => false,
         }
     }
 
     pub async fn set_string_with_ttl(&self, key: &str, ttl_seconds: u64, value: &str) -> bool {
-        match &self.backend {
-            #[cfg(not(target_arch = "wasm32"))]
-            StorageBackend::Redis(client) => {
-                let mut conn = match client.get_multiplexed_async_connection().await {
-                    Ok(conn) => conn,
-                    Err(_) => return false,
-                };
-                redis::AsyncCommands::set_ex::<_, _, bool>(&mut conn, key, value, ttl_seconds)
-                    .await
-                    .unwrap_or(false)
-            }
-            #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => match kv.put(key, value) {
-                Ok(builder) => builder.expiration_ttl(ttl_seconds).execute().await.is_ok(),
-                Err(_) => false,
-            },
+        match self.kv.put(key, value) {
+            Ok(builder) => builder.expiration_ttl(ttl_seconds).execute().await.is_ok(),
+            Err(_) => false,
         }
     }
 
@@ -160,59 +90,37 @@ impl Storage {
     }
 
     pub async fn increment_counter(&self, key: &str, ttl_seconds: u64) -> i64 {
-        match &self.backend {
-            #[cfg(not(target_arch = "wasm32"))]
-            StorageBackend::Redis(client) => {
-                let mut conn = match client.get_multiplexed_async_connection().await {
-                    Ok(conn) => conn,
-                    Err(_) => return 0,
-                };
-                let count: i64 = match redis::AsyncCommands::incr(&mut conn, key, 1).await {
-                    Ok(value) => value,
-                    Err(_) => return 0,
-                };
-                if count == 1 {
-                    let _: () = redis::AsyncCommands::expire(&mut conn, key, ttl_seconds as i64)
-                        .await
-                        .unwrap_or(());
+        let now = current_timestamp();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let current = self
+                .get_json(key)
+                .await
+                .and_then(|raw| serde_json::from_value::<StoredCounter>(raw).ok());
+
+            let mut value = 1;
+            let mut expires_at = now + ttl_seconds as i64;
+            if let Some(counter) = current {
+                if counter.expires_at >= now {
+                    value = counter.value + 1;
+                    expires_at = counter.expires_at;
                 }
-                count
             }
-            #[cfg(target_arch = "wasm32")]
-            StorageBackend::Kv(kv) => {
-                let now = current_timestamp();
-                let mut attempts = 0;
-                loop {
-                    attempts += 1;
-                    let current = self
-                        .get_json(key)
-                        .await
-                        .and_then(|raw| serde_json::from_value::<StoredCounter>(raw).ok());
 
-                    let mut value = 1;
-                    let mut expires_at = now + ttl_seconds as i64;
-                    if let Some(counter) = current {
-                        if counter.expires_at >= now {
-                            value = counter.value + 1;
-                            expires_at = counter.expires_at;
-                        }
-                    }
+            let remaining_ttl = expires_at.saturating_sub(now).max(1) as u64;
+            let payload = StoredCounter { value, expires_at };
+            let stored = match self.kv.put(
+                key,
+                serde_json::to_string(&payload)
+                    .unwrap_or_else(|_| "{\"value\":0,\"expires_at\":0}".to_string()),
+            ) {
+                Ok(builder) => builder.expiration_ttl(remaining_ttl).execute().await,
+                Err(err) => Err(err),
+            };
 
-                    let remaining_ttl = expires_at.saturating_sub(now).max(1) as u64;
-                    let payload = StoredCounter { value, expires_at };
-                    let stored = match kv.put(
-                        key,
-                        serde_json::to_string(&payload)
-                            .unwrap_or_else(|_| "{\"value\":0,\"expires_at\":0}".to_string()),
-                    ) {
-                        Ok(builder) => builder.expiration_ttl(remaining_ttl).execute().await,
-                        Err(err) => Err(err),
-                    };
-
-                    if stored.is_ok() || attempts >= 3 {
-                        return value;
-                    }
-                }
+            if stored.is_ok() || attempts >= 3 {
+                return value;
             }
         }
     }

@@ -1,5 +1,3 @@
-#![cfg(target_arch = "wasm32")]
-
 use crate::models::Update;
 use crate::webhook::{
     app_state, handle_get, handle_post, log_bot_config, AppState, WebhookQuery, WebhookResponse,

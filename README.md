@@ -1,16 +1,16 @@
-# Telegram Bot (Rust / Axum)
+# Telegram Bot (Rust / Cloudflare Workers)
 
-A configurable Telegram bot built with Rust and Axum. The service listens on `0.0.0.0:8080`, handles Telegram webhooks, and responds with AI-powered messages plus utility commands.
+A configurable Telegram bot built for Cloudflare Workers (Rust + Wasm). It handles Telegram webhooks and responds with AI-powered messages plus utility commands.
 
 ## Quick Start
 
 1. Copy `.env.example` to `.env` and fill in your secrets and API keys.
 2. Install Rust (stable) and ensure `cargo` is available.
-3. Run the bot locally:
+3. Run the Worker locally:
    ```bash
-   cargo run
+   wrangler dev
    ```
-4. Configure the Telegram webhook once the server or Worker is reachable:
+4. Configure the Telegram webhook once the Worker is reachable:
    - Set webhook: `{FUNCTION_URL}/?update_webhook=true&key={WEBHOOK_AUTH_KEY}`
    - Check webhook: `{FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}`
 
@@ -72,9 +72,9 @@ The included `wrangler.toml` defines the Worker name (`respondedorbot`), entry f
 
 ## Development
 
-- Run the server: `cargo run`
-- Tests: `cargo test`
-- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
+- Run locally: `wrangler dev`
+- Build: `cargo build --target wasm32-unknown-unknown --features worker --no-default-features`
+- Lint: `cargo clippy --target wasm32-unknown-unknown --features worker -- -D warnings`
 
 ## Cache TTLs
 

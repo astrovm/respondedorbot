@@ -7,14 +7,8 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["server"]
-server = ["redis"]
+default = ["worker"]
 worker = []
-
-[[bin]]
-name = "respondedorbot"
-path = "src/main.rs"
-required-features = ["server"]
 
 [dependencies]
 http = "1.1"
@@ -36,14 +30,6 @@ md5 = "0.8"
 urlencoding = "2.1"
 unicode-normalization = "0.1"
 html-escape = "0.2"
-redis = { version = "1.0", features = ["tokio-comp"], optional = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = "0.8"
-axum-server = "0.8"
-reqwest = { version = "0.13.1", features = ["json"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 worker = { version = "0.7.2", features = ["http"] }

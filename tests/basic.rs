@@ -1,4 +1,5 @@
 use respondedorbot::{commands, links, market, tools};
+use futures::executor::block_on;
 
 #[test]
 fn test_parse_command_basic() {
@@ -79,18 +80,20 @@ fn test_format_search_results_empty() {
     assert!(formatted.contains("No encontré"));
 }
 
-#[tokio::test]
-async fn test_replace_links_twitter() {
+#[test]
+fn test_replace_links_twitter() {
     let text = "mirá esto https://twitter.com/user/status/123";
-    let (out, changed, _) = links::replace_links_with_checker(text, |_| async { true }).await;
+    let (out, changed, _) =
+        block_on(links::replace_links_with_checker(text, |_| async { true }));
     assert!(changed);
     assert!(out.contains("fxtwitter.com"));
 }
 
-#[tokio::test]
-async fn test_replace_links_profile_ignored() {
+#[test]
+fn test_replace_links_profile_ignored() {
     let text = "perfil https://twitter.com/usuario";
-    let (out, changed, _) = links::replace_links_with_checker(text, |_| async { true }).await;
+    let (out, changed, _) =
+        block_on(links::replace_links_with_checker(text, |_| async { true }));
     assert!(!changed);
     assert!(out.contains("twitter.com/usuario"));
 }

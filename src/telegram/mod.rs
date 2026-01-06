@@ -176,7 +176,8 @@ pub async fn get_chat_member_status(
     let url = format!("{}/getChatMember", api_base(token));
     let response = http
         .get(url)
-        .query(&[("chat_id", chat_id), ("user_id", user_id)])
+        .query("chat_id", chat_id.to_string())
+        .query("user_id", user_id.to_string())
         .send()
         .await?;
     let body = response.json::<serde_json::Value>().await?;
@@ -213,7 +214,11 @@ pub async fn get_file_path(
     file_id: &str,
 ) -> HttpResult<Option<String>> {
     let url = format!("{}/getFile", api_base(token));
-    let response = http.get(url).query(&[("file_id", file_id)]).send().await?;
+    let response = http
+        .get(url)
+        .query("file_id", file_id)
+        .send()
+        .await?;
     let body = response.json::<serde_json::Value>().await?;
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Ok(None);

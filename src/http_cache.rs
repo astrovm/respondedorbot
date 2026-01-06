@@ -174,10 +174,12 @@ async fn make_request(
     params: Option<&[(&str, String)]>,
     headers: Option<&[(&str, String)]>,
 ) -> Result<HttpResponse, http_client::HttpError> {
-    let request = http
-        .get(url)
-        .headers(build_headers(headers))
-        .query(params.unwrap_or_default());
+    let mut request = http.get(url).headers(build_headers(headers));
+    if let Some(params) = params {
+        for (key, value) in params {
+            request = request.query(*key, value.clone());
+        }
+    }
     match request.send().await {
         Ok(resp) => Ok(resp),
         Err(_) => http_client::get_with_ssl_fallback(http, url).await,
