@@ -75,6 +75,8 @@ The included `wrangler.toml` defines the Worker name (`respondedorbot`), entry f
 - Run locally: `wrangler dev`
 - Build: `cargo build --target wasm32-unknown-unknown --features worker --no-default-features`
 - Lint: `cargo clippy --target wasm32-unknown-unknown --features worker -- -D warnings`
+- Tests (requires `wasm-bindgen-test-runner`): `cargo test`
+  - Install once: `cargo install wasm-bindgen-cli`
 
 ## Cache TTLs
 
