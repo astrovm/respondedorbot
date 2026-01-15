@@ -2160,7 +2160,6 @@ def _report_unauthorized_config_attempt(
         context["callback_data"] = callback_data
 
     _log_config_event("Unauthorized config attempt", context)
-    admin_report("Unauthorized config attempt", None, context)
 
 
 bcra_service.configure(
