@@ -2382,7 +2382,7 @@ def ask_ai(
                         else last_tool_output
                     )
                     if not isinstance(data, Mapping):
-                        return format_search_results("", None)
+                        return summarize_search_results("", None)
                     query = data.get("query", "")
                     raw_results = data.get("results", [])
                     normalized_results: List[Mapping[str, Any]] = []
@@ -2390,7 +2390,7 @@ def ask_ai(
                         for item in raw_results:
                             if isinstance(item, Mapping):
                                 normalized_results.append(cast(Mapping[str, Any], item))
-                    return format_search_results(query, normalized_results, limit=5)
+                    return summarize_search_results(query, normalized_results)
                 if last_tool_name == "fetch_url":
                     data: Any = last_tool_output
                     if isinstance(data, str):
@@ -3105,6 +3105,48 @@ def format_search_results(
             lines.append(f"{index}. {title}\n{url}")
 
     return "\n\n".join(lines)
+
+
+def summarize_search_results(
+    query: str,
+    results: Optional[Sequence[Mapping[str, Any]]],
+) -> str:
+    """Summarize the top DuckDuckGo search result into 1-3 short sentences."""
+    normalized_query = (query or "").strip()
+    if not results:
+        return "no encontré resultados ahora con duckduckgo"
+
+    top_result = next((item for item in results if isinstance(item, Mapping)), None)
+    if not top_result:
+        return "no encontré resultados ahora con duckduckgo"
+
+    title = str(top_result.get("title") or top_result.get("url") or "").strip()
+    snippet = str(top_result.get("snippet") or "").strip()
+    url = str(top_result.get("url") or "").strip()
+
+    if not title and not snippet:
+        return "no encontré resultados ahora con duckduckgo"
+
+    sentences: List[str] = []
+    if normalized_query:
+        if title:
+            sentences.append(f"Encontré esto sobre {normalized_query}: {title}.")
+        else:
+            sentences.append(f"Encontré esto sobre {normalized_query}.")
+    elif title:
+        sentences.append(f"{title}.")
+
+    if snippet:
+        trimmed_snippet = snippet[:240].rstrip()
+        if trimmed_snippet and not trimmed_snippet.endswith((".", "!", "?")):
+            trimmed_snippet += "."
+        if trimmed_snippet:
+            sentences.append(trimmed_snippet)
+
+    summary = " ".join(sentences[:3]).strip()
+    if url:
+        return f"{summary}\nFuente: {url}" if summary else f"Fuente: {url}"
+    return summary or "no encontré resultados ahora con duckduckgo"
 
 
 def sanitize_tool_artifacts(text: Optional[str]) -> str:
