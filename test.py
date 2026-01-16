@@ -2547,6 +2547,46 @@ def test_ask_ai_with_image():
         assert len(result) > 0
 
 
+def test_ask_ai_forced_search_uses_message_section():
+    from api.index import ask_ai
+
+    message_block = "\n".join(
+        [
+            "CONTEXTO:",
+            "- Chat: private",
+            "- Usuario: Juan",
+            "- Hora: 10:00",
+            "",
+            "MENSAJE:",
+            "Últimas noticias de economía",
+            "",
+            "INSTRUCCIONES:",
+            "- Mantené el personaje del gordo",
+        ]
+    )
+
+    with patch("api.index.get_market_context", return_value={}), patch(
+        "api.index.get_weather_context", return_value={}
+    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
+        "api.index.get_time_context", return_value={}
+    ), patch("api.index.get_agent_memory_context", return_value=None), patch(
+        "api.index.build_system_message",
+        return_value={"role": "system", "content": "sys"},
+    ), patch(
+        "api.index._run_forced_web_search", return_value="ok"
+    ) as mock_run, patch(
+        "api.index.environ.get"
+    ) as mock_env:
+        mock_env.side_effect = lambda key, default=None: {
+            "OPENROUTER_API_KEY": "test_key"
+        }.get(key, default)
+
+        result = ask_ai([{"role": "user", "content": message_block}])
+
+    assert result == "ok"
+    assert mock_run.call_args.kwargs["query"] == "Últimas noticias de economía"
+
+
 def test_ask_ai_sanitizes_tool_call_before_retry():
     """ask_ai should sanitize tool responses before retrying provider"""
     from api.index import ask_ai

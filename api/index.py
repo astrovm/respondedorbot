@@ -190,6 +190,25 @@ def should_search_previous_query(text: str) -> bool:
     )
 
 
+def extract_user_message_from_context(text: str) -> str:
+    """Extract the user-provided message from a context block."""
+
+    if not text:
+        return ""
+
+    marker = "MENSAJE:"
+    start_index = text.find(marker)
+    if start_index == -1:
+        return text.strip()
+
+    message_block = text[start_index + len(marker) :]
+    end_marker = "INSTRUCCIONES:"
+    end_index = message_block.find(end_marker)
+    if end_index != -1:
+        message_block = message_block[:end_index]
+    return message_block.strip()
+
+
 def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
     """Return the latest price and timestamp for a Polymarket CLOB token."""
 
@@ -2547,6 +2566,7 @@ def ask_ai(
 
         # Continue with normal AI flow (for both image and text).
         latest_user_text = ""
+        latest_user_message = ""
         latest_user_index: Optional[int] = None
         for idx in range(len(messages) - 1, -1, -1):
             msg = messages[idx]
@@ -2554,26 +2574,28 @@ def ask_ai(
                 content = msg.get("content")
                 if isinstance(content, str):
                     latest_user_text = content
+                    latest_user_message = extract_user_message_from_context(content)
                     latest_user_index = idx
                 break
 
-        if should_search_previous_query(latest_user_text):
+        if should_search_previous_query(latest_user_message):
             previous_query = ""
             if latest_user_index is not None:
                 previous_query = _find_previous_user_text(messages, latest_user_index)
-            if not previous_query:
+            previous_message = extract_user_message_from_context(previous_query)
+            if not previous_message:
                 return "Decime qué querés buscar o usá /buscar <tema>."
             print("ask_ai: previous query web_search triggered")
             return _run_forced_web_search(
-                query=previous_query,
+                query=previous_message,
                 messages=messages,
                 system_message=system_message,
             )
 
-        if should_force_web_search(latest_user_text):
+        if should_force_web_search(latest_user_message):
             print("ask_ai: forced web_search heuristic triggered")
             return _run_forced_web_search(
-                query=latest_user_text,
+                query=latest_user_message,
                 messages=messages,
                 system_message=system_message,
             )
