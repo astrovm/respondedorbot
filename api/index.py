@@ -2254,6 +2254,155 @@ def get_weather() -> dict:
         return {}
 
 
+def resolve_tool_calls(
+    system_message: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    initial_response: Optional[str],
+) -> Optional[str]:
+    """Resolve tool calls from an initial model response, returning a final reply."""
+    if not initial_response:
+        return None
+
+    tool_call = parse_tool_call(initial_response)
+    if not tool_call:
+        return None
+
+    tool_name, tool_args = tool_call
+    try:
+        print(
+            f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+        )
+        tool_output = execute_tool(tool_name, tool_args)
+    except Exception as tool_err:
+        tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+        print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
+
+    # Feed tool result back into the conversation and get final answer
+    tool_context = {
+        "tool": tool_name,
+        "args": tool_args,
+        "result": tool_output,
+    }
+    messages = messages + [
+        {
+            "role": "assistant",
+            "content": sanitize_tool_artifacts(initial_response),
+        },
+        {
+            "role": "user",
+            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+        },
+    ]
+
+    last_tool_name = tool_name
+    last_tool_output = tool_output
+
+    attempts = 0
+    final = None
+    while attempts < 3:
+        final = complete_with_providers(system_message, messages)
+        if not final:
+            print(
+                "ask_ai: second pass returned None; falling back to tool-output formatting"
+            )
+            break
+        print(
+            f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'"
+        )
+        next_tool_call = parse_tool_call(final)
+        if not next_tool_call:
+            return final
+
+        tool_name, tool_args = next_tool_call
+        try:
+            print(
+                f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+            )
+            tool_output = execute_tool(tool_name, tool_args)
+        except Exception as tool_err:
+            tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+            print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
+
+        tool_context = {
+            "tool": tool_name,
+            "args": tool_args,
+            "result": tool_output,
+        }
+        messages = messages + [
+            {
+                "role": "assistant",
+                "content": sanitize_tool_artifacts(final),
+            },
+            {
+                "role": "user",
+                "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+            },
+        ]
+        last_tool_name = tool_name
+        last_tool_output = tool_output
+        attempts += 1
+
+    # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
+    try:
+        if last_tool_name == "web_search":
+            # tool_output is JSON string with {query, results}
+            data = (
+                json.loads(last_tool_output)
+                if isinstance(last_tool_output, str)
+                else last_tool_output
+            )
+            if not isinstance(data, Mapping):
+                return summarize_search_results("", None)
+            query = data.get("query", "")
+            raw_results = data.get("results", [])
+            normalized_results: List[Mapping[str, Any]] = []
+            if isinstance(raw_results, Sequence):
+                for item in raw_results:
+                    if isinstance(item, Mapping):
+                        normalized_results.append(cast(Mapping[str, Any], item))
+            return summarize_search_results(query, normalized_results)
+        if last_tool_name == "fetch_url":
+            data: Any = last_tool_output
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception:
+                    return str(last_tool_output)[:1500]
+            if not isinstance(data, dict):
+                return str(last_tool_output)[:1500]
+            url = str(data.get("url") or "").strip()
+            error_msg = str(data.get("error") or "").strip()
+            if error_msg:
+                if url:
+                    return f"no pude leer {url}: {error_msg}"
+                return f"no pude leer la URL: {error_msg}"
+            title = str(data.get("title") or "").strip()
+            content = str(data.get("content") or "").strip()
+            truncated_flag = bool(data.get("truncated"))
+            lines: List[str] = []
+            if title:
+                lines.append(f"📄 {title}")
+            if url:
+                lines.append(url)
+            if content:
+                lines.append("")
+                lines.append(content)
+            if truncated_flag and content:
+                lines.append("")
+                lines.append("(texto recortado)")
+            formatted = "\n".join(line for line in lines if line).strip()
+            if formatted:
+                return formatted
+            if url:
+                return f"leí {url} pero no encontré texto para mostrar"
+            return "no había texto legible en la página"
+        # Generic fallback for other tools
+        return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
+    except Exception:
+        # If even formatting fails, return a safe generic message
+        return "tuve un problema usando la herramienta, probá de nuevo más tarde"
+
+
 def ask_ai(
     messages: List[Dict[str, Any]],
     image_data: Optional[bytes] = None,
@@ -2348,6 +2497,11 @@ def ask_ai(
                 },
             ]
             forced_final = complete_with_providers(system_message, messages)
+            forced_tool_final = resolve_tool_calls(
+                system_message, messages, forced_final
+            )
+            if forced_tool_final:
+                return forced_tool_final
             if forced_final:
                 return forced_final
 
@@ -2358,147 +2512,9 @@ def ask_ai(
                 f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'"
             )
 
-        # If the model asked to call a tool, execute and do a second pass
-        tool_call = parse_tool_call(initial) if initial else None
-        if tool_call:
-            tool_name, tool_args = tool_call
-            try:
-                print(
-                    f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-                )
-                tool_output = execute_tool(tool_name, tool_args)
-            except Exception as tool_err:
-                tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-                print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
-
-            # Feed tool result back into the conversation and get final answer
-            tool_context = {
-                "tool": tool_name,
-                "args": tool_args,
-                "result": tool_output,
-            }
-            messages = messages + [
-                {
-                    "role": "assistant",
-                    "content": sanitize_tool_artifacts(initial),
-                },
-                {
-                    "role": "user",
-                    "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
-                },
-            ]
-
-            last_tool_name = tool_name
-            last_tool_output = tool_output
-
-            attempts = 0
-            final = None
-            while attempts < 3:
-                final = complete_with_providers(system_message, messages)
-                if not final:
-                    print(
-                        "ask_ai: second pass returned None; falling back to tool-output formatting"
-                    )
-                    break
-                print(
-                    f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'"
-                )
-                next_tool_call = parse_tool_call(final)
-                if not next_tool_call:
-                    return final
-
-                tool_name, tool_args = next_tool_call
-                try:
-                    print(
-                        f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-                    )
-                    tool_output = execute_tool(tool_name, tool_args)
-                except Exception as tool_err:
-                    tool_output = (
-                        f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-                    )
-                    print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
-
-                tool_context = {
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result": tool_output,
-                }
-                messages = messages + [
-                    {
-                        "role": "assistant",
-                        "content": sanitize_tool_artifacts(final),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
-                    },
-                ]
-                last_tool_name = tool_name
-                last_tool_output = tool_output
-                attempts += 1
-
-            # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
-            try:
-                if last_tool_name == "web_search":
-                    # tool_output is JSON string with {query, results}
-                    data = (
-                        json.loads(last_tool_output)
-                        if isinstance(last_tool_output, str)
-                        else last_tool_output
-                    )
-                    if not isinstance(data, Mapping):
-                        return summarize_search_results("", None)
-                    query = data.get("query", "")
-                    raw_results = data.get("results", [])
-                    normalized_results: List[Mapping[str, Any]] = []
-                    if isinstance(raw_results, Sequence):
-                        for item in raw_results:
-                            if isinstance(item, Mapping):
-                                normalized_results.append(cast(Mapping[str, Any], item))
-                    return summarize_search_results(query, normalized_results)
-                if last_tool_name == "fetch_url":
-                    data: Any = last_tool_output
-                    if isinstance(data, str):
-                        try:
-                            data = json.loads(data)
-                        except Exception:
-                            return str(last_tool_output)[:1500]
-                    if not isinstance(data, dict):
-                        return str(last_tool_output)[:1500]
-                    url = str(data.get("url") or "").strip()
-                    error_msg = str(data.get("error") or "").strip()
-                    if error_msg:
-                        if url:
-                            return f"no pude leer {url}: {error_msg}"
-                        return f"no pude leer la URL: {error_msg}"
-                    title = str(data.get("title") or "").strip()
-                    content = str(data.get("content") or "").strip()
-                    truncated_flag = bool(data.get("truncated"))
-                    lines: List[str] = []
-                    if title:
-                        lines.append(f"📄 {title}")
-                    if url:
-                        lines.append(url)
-                    if content:
-                        lines.append("")
-                        lines.append(content)
-                    if truncated_flag and content:
-                        lines.append("")
-                        lines.append("(texto recortado)")
-                    formatted = "\n".join(line for line in lines if line).strip()
-                    if formatted:
-                        return formatted
-                    if url:
-                        return f"leí {url} pero no encontré texto para mostrar"
-                    return "no había texto legible en la página"
-                # Generic fallback for other tools
-                return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
-            except Exception:
-                # If even formatting fails, return a safe generic message
-                return (
-                    "tuve un problema usando la herramienta, probá de nuevo más tarde"
-                )
+        tool_final = resolve_tool_calls(system_message, messages, initial)
+        if tool_final:
+            return tool_final
 
         # If no tool call or second pass failed, return the best we had
         if initial:
