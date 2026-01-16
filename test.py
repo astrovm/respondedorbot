@@ -50,6 +50,7 @@ from api.index import (
     get_agent_retry_hint,
     _decode_redis_value,
     is_chat_admin,
+    should_force_web_search,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -201,6 +202,33 @@ def test_convert_to_command():
     msg_text6 = "hola\nlinea\n"
     expected6 = "/HOLA_LINEA"
     assert convert_to_command(msg_text6) == expected6
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Cuándo sale la nueva temporada?",
+        "fecha de estreno de la peli",
+        "Últimas noticias de economía",
+        "ultima novedad hoy",
+        "sale en 2024 o 2025?",
+    ],
+)
+def test_should_force_web_search_matches_date_and_news_queries(text):
+    assert should_force_web_search(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "hola, cómo estás?",
+        "explicame que es la inflación",
+        "necesito ayuda con python",
+    ],
+)
+def test_should_force_web_search_skips_regular_queries(text):
+    assert should_force_web_search(text) is False
 
 
 def test_decode_redis_value_variants():
