@@ -51,6 +51,7 @@ from api.index import (
     _decode_redis_value,
     is_chat_admin,
     should_force_web_search,
+    should_search_previous_query,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -229,6 +230,33 @@ def test_should_force_web_search_matches_date_and_news_queries(text):
 )
 def test_should_force_web_search_skips_regular_queries(text):
     assert should_force_web_search(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "buscalo",
+        "BÚSCALO",
+        "busca eso",
+        "busca esto",
+        "che, buscalo porfa",
+    ],
+)
+def test_should_search_previous_query_detects_shortcuts(text):
+    assert should_search_previous_query(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "busca mañana",
+        "buscar esto",
+        "necesito ayuda",
+    ],
+)
+def test_should_search_previous_query_ignores_other_text(text):
+    assert should_search_previous_query(text) is False
 
 
 def test_decode_redis_value_variants():
