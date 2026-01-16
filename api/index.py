@@ -3707,7 +3707,8 @@ CONTEXTO POLITICO:
             'Ejemplos:\n  [TOOL] web_search {"query": "inflación argentina hoy"}\n'
             '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
-            "Usá herramientas solo si realmente ayudan (actualidad, datos frescos)."
+            "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
+            "Tras usar web_search, respondé con síntesis breve y 1 fuente; no devuelvas lista cruda."
         )
 
     print(f"build_system_message: include_tools={include_tools}")
