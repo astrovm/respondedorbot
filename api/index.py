@@ -149,6 +149,22 @@ FORCE_WEB_SEARCH_PATTERNS = [
     r"\b20(24|25|26)\b",
 ]
 
+FORCE_WEB_SEARCH_PREVIOUS_PATTERNS = [
+    r"\bbuscalo\b",
+    r"\bbusca\s+eso\b",
+    r"\bbusca\s+esto\b",
+]
+
+
+def normalize_text_for_matching(text: str) -> str:
+    """Normalize text by removing accents and lowercasing for matching."""
+
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    ).lower()
+    return normalized
+
 
 def should_force_web_search(text: str) -> bool:
     """Return True when queries look like date/release/latest-news requests."""
@@ -156,12 +172,22 @@ def should_force_web_search(text: str) -> bool:
     if not text:
         return False
 
-    normalized = unicodedata.normalize("NFKD", text)
-    normalized = "".join(
-        char for char in normalized if not unicodedata.combining(char)
-    ).lower()
+    normalized = normalize_text_for_matching(text)
 
     return any(re.search(pattern, normalized) for pattern in FORCE_WEB_SEARCH_PATTERNS)
+
+
+def should_search_previous_query(text: str) -> bool:
+    """Return True when the user asks to search the previous topic."""
+
+    if not text:
+        return False
+
+    normalized = normalize_text_for_matching(text)
+    return any(
+        re.search(pattern, normalized)
+        for pattern in FORCE_WEB_SEARCH_PREVIOUS_PATTERNS
+    )
 
 
 def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
@@ -228,6 +254,56 @@ def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[s
         TTL_DOLLAR,
         hourly_cache,
     )
+
+
+def _find_previous_user_text(
+    messages: List[Dict[str, Any]], latest_user_index: int
+) -> str:
+    for msg in reversed(messages[:latest_user_index]):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return ""
+
+
+def _run_forced_web_search(
+    *,
+    query: str,
+    messages: List[Dict[str, Any]],
+    system_message: Dict[str, Any],
+) -> str:
+    tool_name = "web_search"
+    tool_args = {"query": query}
+    try:
+        print(
+            f"ask_ai: executing forced tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+        )
+        tool_output = execute_tool(tool_name, tool_args)
+    except Exception as tool_err:
+        tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+        print(f"ask_ai: forced tool '{tool_name}' raised error: {tool_err}")
+
+    tool_context = {
+        "tool": tool_name,
+        "args": tool_args,
+        "result": tool_output,
+    }
+    next_messages = messages + [
+        {
+            "role": "user",
+            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+        },
+    ]
+    forced_final = complete_with_providers(system_message, next_messages)
+    forced_tool_final = resolve_tool_calls(
+        system_message, next_messages, forced_final
+    )
+    if forced_tool_final:
+        return forced_tool_final
+    forced_query, forced_results = normalize_web_search_output(tool_output)
+    return summarize_search_results(forced_query, forced_results)
 
 
 CHAT_CONFIG_KEY_PREFIX = "chat_config:"
@@ -2471,47 +2547,36 @@ def ask_ai(
 
         # Continue with normal AI flow (for both image and text).
         latest_user_text = ""
-        for msg in reversed(messages):
+        latest_user_index: Optional[int] = None
+        for idx in range(len(messages) - 1, -1, -1):
+            msg = messages[idx]
             if msg.get("role") == "user":
                 content = msg.get("content")
                 if isinstance(content, str):
                     latest_user_text = content
+                    latest_user_index = idx
                 break
+
+        if should_search_previous_query(latest_user_text):
+            previous_query = ""
+            if latest_user_index is not None:
+                previous_query = _find_previous_user_text(messages, latest_user_index)
+            if not previous_query:
+                return "Decime qué querés buscar o usá /buscar <tema>."
+            print("ask_ai: previous query web_search triggered")
+            return _run_forced_web_search(
+                query=previous_query,
+                messages=messages,
+                system_message=system_message,
+            )
 
         if should_force_web_search(latest_user_text):
             print("ask_ai: forced web_search heuristic triggered")
-            tool_name = "web_search"
-            tool_args = {"query": latest_user_text}
-            try:
-                print(
-                    f"ask_ai: executing forced tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-                )
-                tool_output = execute_tool(tool_name, tool_args)
-            except Exception as tool_err:
-                tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-                print(
-                    f"ask_ai: forced tool '{tool_name}' raised error: {tool_err}"
-                )
-
-            tool_context = {
-                "tool": tool_name,
-                "args": tool_args,
-                "result": tool_output,
-            }
-            messages = messages + [
-                {
-                    "role": "user",
-                    "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
-                },
-            ]
-            forced_final = complete_with_providers(system_message, messages)
-            forced_tool_final = resolve_tool_calls(
-                system_message, messages, forced_final
+            return _run_forced_web_search(
+                query=latest_user_text,
+                messages=messages,
+                system_message=system_message,
             )
-            if forced_tool_final:
-                return forced_tool_final
-            forced_query, forced_results = normalize_web_search_output(tool_output)
-            return summarize_search_results(forced_query, forced_results)
 
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
