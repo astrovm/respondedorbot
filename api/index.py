@@ -136,6 +136,34 @@ POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
 
+FORCE_WEB_SEARCH_PATTERNS = [
+    r"\bcuando\s+sale\b",
+    r"\bfecha\b",
+    r"\bestreno\b",
+    r"\blanzamiento\b",
+    r"\bultima(s)?\b",
+    r"\bultimo(s)?\b",
+    r"\bnoticia(s)?\b",
+    r"\bnovedad(es)?\b",
+    r"\bhoy\b",
+    r"\b20(24|25|26)\b",
+]
+
+
+def should_force_web_search(text: str) -> bool:
+    """Return True when queries look like date/release/latest-news requests."""
+
+    if not text:
+        return False
+
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    ).lower()
+
+    return any(re.search(pattern, normalized) for pattern in FORCE_WEB_SEARCH_PATTERNS)
+
+
 def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
     """Return the latest price and timestamp for a Polymarket CLOB token."""
 
@@ -2285,6 +2313,44 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text).
+        latest_user_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    latest_user_text = content
+                break
+
+        if should_force_web_search(latest_user_text):
+            print("ask_ai: forced web_search heuristic triggered")
+            tool_name = "web_search"
+            tool_args = {"query": latest_user_text}
+            try:
+                print(
+                    f"ask_ai: executing forced tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
+                )
+                tool_output = execute_tool(tool_name, tool_args)
+            except Exception as tool_err:
+                tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
+                print(
+                    f"ask_ai: forced tool '{tool_name}' raised error: {tool_err}"
+                )
+
+            tool_context = {
+                "tool": tool_name,
+                "args": tool_args,
+                "result": tool_output,
+            }
+            messages = messages + [
+                {
+                    "role": "user",
+                    "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+                },
+            ]
+            forced_final = complete_with_providers(system_message, messages)
+            if forced_final:
+                return forced_final
+
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
         if initial:
