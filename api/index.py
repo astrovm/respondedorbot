@@ -2254,6 +2254,28 @@ def get_weather() -> dict:
         return {}
 
 
+def normalize_web_search_output(
+    tool_output: Any,
+) -> Tuple[str, List[Mapping[str, Any]]]:
+    """Extract query/results from web_search output into a normalized shape."""
+    try:
+        data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+    except Exception:
+        return "", []
+
+    if not isinstance(data, Mapping):
+        return "", []
+
+    query = data.get("query", "")
+    raw_results = data.get("results", [])
+    normalized_results: List[Mapping[str, Any]] = []
+    if isinstance(raw_results, Sequence):
+        for item in raw_results:
+            if isinstance(item, Mapping):
+                normalized_results.append(cast(Mapping[str, Any], item))
+    return query, normalized_results
+
+
 def resolve_tool_calls(
     system_message: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -2345,21 +2367,7 @@ def resolve_tool_calls(
     # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
     try:
         if last_tool_name == "web_search":
-            # tool_output is JSON string with {query, results}
-            data = (
-                json.loads(last_tool_output)
-                if isinstance(last_tool_output, str)
-                else last_tool_output
-            )
-            if not isinstance(data, Mapping):
-                return summarize_search_results("", None)
-            query = data.get("query", "")
-            raw_results = data.get("results", [])
-            normalized_results: List[Mapping[str, Any]] = []
-            if isinstance(raw_results, Sequence):
-                for item in raw_results:
-                    if isinstance(item, Mapping):
-                        normalized_results.append(cast(Mapping[str, Any], item))
+            query, normalized_results = normalize_web_search_output(last_tool_output)
             return summarize_search_results(query, normalized_results)
         if last_tool_name == "fetch_url":
             data: Any = last_tool_output
@@ -2502,8 +2510,8 @@ def ask_ai(
             )
             if forced_tool_final:
                 return forced_tool_final
-            if forced_final:
-                return forced_final
+            forced_query, forced_results = normalize_web_search_output(tool_output)
+            return summarize_search_results(forced_query, forced_results)
 
         # First pass: get an initial response that might include a tool call.
         initial = complete_with_providers(system_message, messages)
