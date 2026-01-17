@@ -206,6 +206,11 @@ def test_convert_to_command():
     expected6 = "/HOLA_LINEA"
     assert convert_to_command(msg_text6) == expected6
 
+    # Test string with Japanese characters
+    msg_text7 = "もうすぐです"
+    expected7 = "/MOUSUGUDESU"
+    assert convert_to_command(msg_text7) == expected7
+
 
 @pytest.mark.parametrize(
     "text",
