@@ -370,11 +370,11 @@ def _run_forced_web_search(
         },
     ]
     forced_final = complete_with_providers(system_message, next_messages)
-    forced_tool_final = resolve_tool_calls(
-        system_message, next_messages, forced_final
-    )
+    forced_tool_final = resolve_tool_calls(system_message, next_messages, forced_final)
     if forced_tool_final:
         return forced_tool_final
+    if forced_final:
+        return forced_final
     return summarize_search_results(forced_query, forced_results)
 
 
