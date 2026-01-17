@@ -129,6 +129,8 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "browser_automation",
     "wolfram_alpha",
 )
+GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
 
 
 # Polymarket constants
@@ -422,40 +424,6 @@ configure_agent_memory(redis_factory=config_redis, tz=BA_TZ)
 _T = TypeVar("_T")
 
 
-class CloudflareCredentialsError(RuntimeError):
-    """Raised when Cloudflare credentials are missing from the environment."""
-
-
-def _get_cloudflare_credentials(
-    missing_message: str = "Cloudflare Workers AI credentials not configured",
-) -> Tuple[str, str]:
-    """Return configured Cloudflare credentials or raise if unavailable."""
-
-    account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
-    api_key = environ.get("CLOUDFLARE_API_KEY")
-
-    if not account_id or not api_key:
-        print(missing_message)
-        raise CloudflareCredentialsError(missing_message)
-
-    return account_id, api_key
-
-
-def _build_cloudflare_ai_base_url(account_id: str) -> str:
-    return f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai"
-
-
-def _build_cloudflare_run_url(account_id: str, model_path: str) -> str:
-    return f"{_build_cloudflare_ai_base_url(account_id)}/run/{model_path}"
-
-
-def _build_cloudflare_headers(
-    api_key: str, content_type: Optional[str] = None
-) -> Dict[str, str]:
-    headers: Dict[str, str] = {"Authorization": f"Bearer {api_key}"}
-    if content_type:
-        headers["Content-Type"] = content_type
-    return headers
 
 
 bcra_api_get = bcra_service.bcra_api_get
@@ -568,7 +536,6 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
 # Provider backoff windows (seconds)
 GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit response
 OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS = 600
-CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS = 600
 
 
 _provider_backoff_until: Dict[str, float] = {}
@@ -2592,17 +2559,15 @@ def ask_ai(
             build_compound_system_message() if should_use_groq_compound_tools() else None
         )
 
-        # If we have an image, first describe it with LLaVA then continue normal flow
+        # If we have an image, first describe it with the vision model then continue normal flow
         if image_data:
-            print("Processing image with LLaVA model...")
+            print("Processing image with Groq vision model...")
 
-            # Always use a description prompt for LLaVA, not the user's question
+            # Always use a description prompt for the vision model, not the user's question
             user_text = "Describe what you see in this image in detail."
 
-            # Describe the image using LLaVA
-            image_description = describe_image_cloudflare(
-                image_data, user_text, image_file_id
-            )
+            # Describe the image using Groq
+            image_description = describe_image_groq(image_data, user_text, image_file_id)
 
             if image_description:
                 # Add image description to the conversation context
@@ -2688,7 +2653,7 @@ def ask_ai(
 def complete_with_providers(
     system_message: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Try Groq, then OpenRouter, then Cloudflare and return the first response."""
+    """Try Groq, then OpenRouter and return the first response."""
 
     def _run_provider(
         *,
@@ -2736,12 +2701,6 @@ def complete_with_providers(
             if openrouter_api_key
             else None,
             None if openrouter_api_key else "OpenRouter API key not configured",
-        ),
-        (
-            "Cloudflare",
-            "cloudflare",
-            lambda: get_cloudflare_ai_response(system_message, messages),
-            None,
         ),
     ]
 
@@ -3647,42 +3606,6 @@ def get_ai_response(
     )
 
 
-def get_cloudflare_ai_response(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
-) -> Optional[str]:
-    """Fallback using Cloudflare Workers AI for text-only"""
-    provider_name = "cloudflare"
-    try:
-        cloudflare_account_id, cloudflare_api_key = _get_cloudflare_credentials()
-    except CloudflareCredentialsError:
-        return None
-
-    def _attempt() -> Optional[str]:
-        print("Trying Cloudflare Workers AI as fallback...")
-        cloudflare = OpenAI(
-            api_key=cloudflare_api_key,
-            base_url=f"{_build_cloudflare_ai_base_url(cloudflare_account_id)}/v1",
-        )
-
-        response = cloudflare.chat.completions.create(
-            model="@cf/mistralai/mistral-small-3.1-24b-instruct",
-            messages=cast(Any, [system_msg] + messages),
-            max_tokens=1024,
-        )
-
-        if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                print("Cloudflare Workers AI response successful")
-                return response.choices[0].message.content
-        return None
-
-    return _invoke_provider(
-        provider_name,
-        attempt=_attempt,
-        rate_limit_backoff=CLOUDFLARE_RATE_LIMIT_BACKOFF_SECONDS,
-        label="Cloudflare Workers AI",
-    )
-
 
 def _is_rate_limit_error(error: Exception) -> bool:
     """Detect whether the provided exception represents a rate limit."""
@@ -4455,205 +4378,168 @@ def download_telegram_file(file_id: str) -> Optional[bytes]:
         return None
 
 
-def _cloudflare_cached_invoke(
-    *,
-    model_path: str,
-    file_id: Optional[str],
-    cache_get: Optional[Callable[[str], Optional[str]]] = None,
-    cache_set: Optional[Callable[[str, str], None]] = None,
-    payload: Optional[Dict[str, Any]] = None,
-    data: Optional[bytes] = None,
-    content_type: str,
-    timeout: int,
-    missing_credentials_message: Optional[str] = None,
-    retries: int = 1,
-    retry_delay: float = 0.0,
-    should_retry: Optional[Callable[[Exception], bool]] = None,
-    on_request_start: Optional[Callable[[int, int], None]] = None,
-    on_retry: Optional[Callable[[int, int, Exception], None]] = None,
-    on_failure: Optional[Callable[[Exception, bool], None]] = None,
-    action_label: str = "Cloudflare AI call",
-    parse_response: Callable[[requests.Response], Optional[str]],
-) -> Optional[str]:
-    """Shared Cloudflare Workers AI caller with cache and retry support."""
+def _get_groq_client() -> Optional[OpenAI]:
+    groq_api_key = environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        print("Groq API key not configured")
+        return None
+    return OpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
 
-    if file_id and cache_get:
-        cached = cache_get(file_id)
-        if cached:
-            return str(cached)
 
-    try:
-        account_id, api_key = _get_cloudflare_credentials(
-            missing_credentials_message
-            or "Cloudflare Workers AI credentials not configured",
-        )
-    except CloudflareCredentialsError:
+def _extract_response_text(response: Any) -> Optional[str]:
+    if response is None:
         return None
 
-    url = _build_cloudflare_run_url(account_id, model_path)
-    headers = _build_cloudflare_headers(api_key, content_type=content_type)
-    attempts = max(1, int(retries or 1))
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
 
-    for attempt_index in range(1, attempts + 1):
-        if on_request_start:
-            on_request_start(attempt_index, attempts)
+    if isinstance(response, dict):
+        output_text = response.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+        output = response.get("output")
+    else:
+        output = getattr(response, "output", None)
 
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload if data is None else None,
-                data=data if data is not None else None,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-        except requests.RequestException as error:
-            retryable = bool(should_retry and should_retry(error))
-            if retryable:
-                if on_retry:
-                    on_retry(attempt_index, attempts, error)
-                if attempt_index < attempts:
-                    if retry_delay:
-                        time.sleep(retry_delay)
-                    continue
-                if on_failure:
-                    on_failure(error, True)
+    if isinstance(output, list):
+        parts: List[str] = []
+        for item in output:
+            content = None
+            if isinstance(item, dict):
+                content = item.get("content")
+            else:
+                content = getattr(item, "content", None)
+
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        block_type = block.get("type")
+                        if block_type in {"output_text", "text"}:
+                            chunk = block.get("text") or block.get("output_text")
+                            if chunk:
+                                parts.append(str(chunk))
+                    else:
+                        chunk = getattr(block, "text", None) or getattr(
+                            block, "output_text", None
+                        )
+                        if chunk:
+                            parts.append(str(chunk))
+            else:
+                if isinstance(item, dict):
+                    chunk = item.get("text") or item.get("output_text")
                 else:
-                    print(f"{action_label} failed after all retries: {error}")
-                return None
+                    chunk = getattr(item, "text", None) or getattr(
+                        item, "output_text", None
+                    )
+                if chunk:
+                    parts.append(str(chunk))
 
-            if on_failure:
-                on_failure(error, False)
-            else:
-                print(f"{action_label} error: {error}")
-            return None
-        except Exception as error:
-            if on_failure:
-                on_failure(error, False)
-            else:
-                print(f"{action_label} error: {error}")
-            return None
-
-        try:
-            result_text = parse_response(response)
-        except Exception as error:
-            if on_failure:
-                on_failure(error, False)
-            else:
-                print(f"{action_label} parse error: {error}")
-            return None
-
-        if result_text:
-            if file_id and cache_set:
-                cache_set(file_id, result_text)
-            return result_text
-
-        return None
+        if parts:
+            return " ".join(part.strip() for part in parts if part.strip()).strip()
 
     return None
 
 
-def describe_image_cloudflare(
+def describe_image_groq(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
+    *,
+    use_cache: bool = True,
 ) -> Optional[str]:
-    """Describe image using Cloudflare Workers AI LLaVA model"""
-    image_array = list(image_data)
+    """Describe image using Groq vision models."""
 
-    def _on_request_start(attempt: int, _: int) -> None:
-        if attempt == 1:
-            print("Describing image with LLaVA model...")
+    if file_id and use_cache:
+        cached = get_cached_description(file_id)
+        if cached:
+            return str(cached)
 
-    def _parse_response(response: requests.Response) -> Optional[str]:
-        result = response.json()
-        if "result" not in result:
-            print(f"Unexpected LLaVA response format: {result}")
-            return None
-
-        payload = result["result"]
-        description = payload.get("response") or payload.get("description")
-        if not description:
-            print(f"Unexpected LLaVA response format: {result}")
-            return None
-
-        print(f"Image description successful: {description[:100]}...")
-        return str(description)
-
-    def _on_failure(error: Exception, _: bool) -> None:
-        if isinstance(error, requests.HTTPError) and error.response is not None:
-            status_code = error.response.status_code
-            error_text = error.response.text
-            print(f"LLaVA API error {status_code}: {error_text}")
-        else:
-            print(f"Error describing image: {error}")
-
-    return _cloudflare_cached_invoke(
-        model_path="@cf/llava-hf/llava-1.5-7b-hf",
-        file_id=file_id,
-        cache_get=get_cached_description,
-        cache_set=cache_description,
-        payload={"prompt": user_text, "image": image_array, "max_tokens": 1024},
-        content_type="application/json",
-        timeout=15,
-        on_request_start=_on_request_start,
-        on_failure=_on_failure,
-        action_label="Image description",
-        parse_response=_parse_response,
-    )
-
-
-def transcribe_audio_cloudflare(
-    audio_data: bytes, file_id: Optional[str] = None
-) -> Optional[str]:
-    """Transcribe audio using Cloudflare Workers AI Whisper with retry"""
-    def _on_request_start(attempt: int, total: int) -> None:
-        if attempt == 1:
-            print("Transcribing audio with Cloudflare Whisper...")
-        else:
-            print(f"Retrying audio transcription (attempt {attempt}/{total})...")
-
-    def _should_retry(error: Exception) -> bool:
-        message = str(error).lower()
-        return isinstance(error, requests.exceptions.Timeout) or "timeout" in message or "408" in message
-
-    def _on_retry(attempt: int, total: int, error: Exception) -> None:
-        print(f"Audio transcription timeout on attempt {attempt}/{total}: {error}")
-
-    def _on_failure(error: Exception, exhausted: bool) -> None:
-        if exhausted:
-            print("Audio transcription failed after all retries")
-        else:
-            print(f"Error transcribing audio: {error}")
-
-    def _parse_response(response: requests.Response) -> Optional[str]:
-        result = response.json()
-        if result.get("success") and "result" in result:
-            transcription = result["result"].get("text", "")
-            if transcription:
-                print(f"Audio transcribed successfully: {transcription[:100]}...")
-                return transcription
-        print(f"Whisper transcription failed: {result}")
+    groq_client = _get_groq_client()
+    if groq_client is None:
         return None
 
-    return _cloudflare_cached_invoke(
-        model_path="@cf/openai/whisper-large-v3-turbo",
-        file_id=file_id,
-        cache_get=get_cached_transcription,
-        cache_set=cache_transcription,
-        data=audio_data,
-        content_type="application/octet-stream",
-        timeout=30,
-        missing_credentials_message="Cloudflare credentials not configured for audio transcription",
-        retries=2,
-        retry_delay=2,
-        should_retry=_should_retry,
-        on_request_start=_on_request_start,
-        on_retry=_on_retry,
-        on_failure=_on_failure,
-        action_label="Audio transcription",
-        parse_response=_parse_response,
+    image_base64 = encode_image_to_base64(image_data)
+    image_url = f"data:image/jpeg;base64,{image_base64}"
+
+    def _attempt() -> Optional[str]:
+        print("Describing image with Groq vision model...")
+        response = groq_client.responses.create(
+            model=GROQ_VISION_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_text},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                }
+            ],
+            max_output_tokens=512,
+        )
+        description = _extract_response_text(response)
+        if description:
+            print(f"Image description successful: {description[:100]}...")
+        return description
+
+    description = _invoke_provider(
+        "groq",
+        attempt=_attempt,
+        rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
+        label="Groq Vision",
     )
+
+    if description and file_id:
+        cache_description(file_id, description)
+
+    return description
+
+
+def transcribe_audio_groq(
+    audio_data: bytes,
+    file_id: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+) -> Optional[str]:
+    """Transcribe audio using Groq Whisper."""
+
+    if file_id and use_cache:
+        cached = get_cached_transcription(file_id)
+        if cached:
+            return str(cached)
+
+    groq_client = _get_groq_client()
+    if groq_client is None:
+        return None
+
+    def _attempt() -> Optional[str]:
+        print("Transcribing audio with Groq Whisper...")
+        audio_file = io.BytesIO(audio_data)
+        audio_file.name = "audio.webm"
+        response = groq_client.audio.transcriptions.create(
+            model=GROQ_TRANSCRIBE_MODEL,
+            file=audio_file,
+        )
+        transcription = None
+        if isinstance(response, dict):
+            transcription = response.get("text")
+        else:
+            transcription = getattr(response, "text", None)
+        if transcription:
+            print(f"Audio transcribed successfully: {transcription[:100]}...")
+        return transcription
+
+    transcription = _invoke_provider(
+        "groq",
+        attempt=_attempt,
+        rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
+        label="Groq Whisper",
+    )
+
+    if transcription and file_id:
+        cache_transcription(file_id, transcription)
+
+    return transcription
 
 
 def _process_media_with_cache(
@@ -4701,7 +4587,9 @@ def transcribe_file_by_id(
         file_id=file_id,
         use_cache=use_cache,
         cache_lookup=get_cached_transcription,
-        processor=lambda media: transcribe_audio_cloudflare(media, file_id),
+        processor=lambda media: transcribe_audio_groq(
+            media, file_id, use_cache=use_cache
+        ),
         failure_code="transcribe",
     )
 
@@ -4709,7 +4597,7 @@ def transcribe_file_by_id(
 def describe_media_by_id(
     file_id: str, prompt: str
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Fetch description for an image/sticker by Telegram file_id using LLaVA.
+    """Fetch description for an image/sticker by Telegram file_id using Groq vision.
 
     Returns (description, error):
     - On success: (description, None)
@@ -4718,7 +4606,7 @@ def describe_media_by_id(
     """
     def _processor(media: bytes) -> Optional[str]:
         resized = resize_image_if_needed(media)
-        return describe_image_cloudflare(resized, prompt, file_id)
+        return describe_image_groq(resized, prompt, file_id)
 
     return _process_media_with_cache(
         file_id=file_id,
@@ -4730,7 +4618,7 @@ def describe_media_by_id(
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
-    """Resize image if it's too large for LLaVA processing"""
+    """Resize image if it's too large for vision processing"""
     try:
         # Open the image
         image = Image.open(io.BytesIO(image_data))
@@ -5332,7 +5220,7 @@ def handle_msg(message: Dict) -> str:
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
             if image_data:
-                # Resize image if needed for LLaVA compatibility
+                # Resize image if needed for vision compatibility
                 resized_image_data = resize_image_if_needed(image_data)
                 image_base64 = encode_image_to_base64(resized_image_data)
                 print(f"Image encoded to base64: {len(image_base64)} chars")
