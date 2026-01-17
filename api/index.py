@@ -3925,7 +3925,7 @@ CONTEXTO POLITICO:
             '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
-            "Tras usar web_search, respondé con síntesis breve y 1 fuente; no devuelvas lista cruda."
+            "Tras usar web_search, respondé directo al usuario con síntesis breve y 1 fuente; no devuelvas lista cruda ni arranques con 'Encontré esto sobre...'."
         )
 
     print(f"build_system_message: include_tools={include_tools}")
@@ -3953,7 +3953,7 @@ def build_compound_system_message() -> Dict[str, Any]:
     tool_hint = (
         "\n\nHERRAMIENTAS GROQ:\n"
         "Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
-        " Respondé con síntesis breve y 1 fuente."
+        " Respondé directo al usuario con síntesis breve y 1 fuente."
     )
 
     return {
