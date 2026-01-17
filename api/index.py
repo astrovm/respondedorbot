@@ -39,6 +39,7 @@ import redis
 import requests
 import time
 import traceback
+from pykakasi import kakasi
 from openpyxl import load_workbook
 from decimal import Decimal
 import unicodedata
@@ -1967,15 +1968,30 @@ def get_timestamp() -> str:
     return f"{int(time.time())}"
 
 
+def romanize_japanese(text: str) -> str:
+    """Convert Japanese kana/kanji text to romaji when possible."""
+    converter = kakasi()
+    converter.setMode("H", "a")
+    converter.setMode("K", "a")
+    converter.setMode("J", "a")
+    converter.setMode("r", "Hepburn")
+    converter.setMode("s", True)
+    converter.setMode("C", True)
+    return converter.getConverter().do(text)
+
+
 def convert_to_command(msg_text: str) -> str:
     if not msg_text:
         return "y que queres que convierta boludo? mandate texto"
 
     # Convert emojis to their textual representation in Spanish with underscore delimiters
     emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
+    romanized_text = romanize_japanese(emoji_text)
 
     # Convert to uppercase and replace Ñ
-    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", emoji_text.upper()).replace("Ñ", "NI")
+    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", romanized_text.upper()).replace(
+        "Ñ", "NI"
+    )
 
     # Normalize the text and remove consecutive spaces
     single_spaced_text = re.sub(
