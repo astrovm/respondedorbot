@@ -74,8 +74,7 @@ FUNCTION_URL=https://your-app.vercel.app
 
 # APIs (Required)
 OPENROUTER_API_KEY=your_openrouter_key
-CLOUDFLARE_API_KEY=your_cloudflare_key
-CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id
+GROQ_API_KEY=your_groq_api_key
 COINMARKETCAP_KEY=your_coinmarketcap_key
 
 # Monitoring (Required)

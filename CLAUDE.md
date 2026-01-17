@@ -63,7 +63,7 @@ python -m pytest test.py::test_handle_msg -v
 - **CoinMarketCap**: Cryptocurrency prices (requires `COINMARKETCAP_KEY`)
 - **CriptoYa**: Argentine peso exchange rates
 - **OpenRouter**: AI model access (requires `OPENROUTER_API_KEY`)
-- **Cloudflare Workers AI**: Fallback AI and image/audio processing
+- **Groq**: AI model access + built-in tools (requires `GROQ_API_KEY`)
 - **BCRA**: Economic variables retrieved through the official API (https://api.bcra.gob.ar/estadisticas/v4.0)
 - **Open-Meteo**: Weather data for Buenos Aires
 
@@ -71,8 +71,7 @@ python -m pytest test.py::test_handle_msg -v
 Required environment variables are documented in README.md. Critical ones:
 - `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`: Bot authentication
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Cache configuration
-- `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`: API access
-- `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Workers AI
+- `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`: API access
 - `ADMIN_CHAT_ID`: Error reporting destination
 - `WEBHOOK_AUTH_KEY`: Webhook authentication key
 - `FUNCTION_URL`: Deployment URL
@@ -103,8 +102,8 @@ Required environment variables are documented in README.md. Critical ones:
 
 **Audio/Image Transcription (/transcribe):**
 - Must be used as reply to messages containing audio, images, or stickers
-- Audio transcription via Cloudflare Workers AI
-- Image description via LLaVA model
+- Audio transcription via Groq Whisper
+- Image description via Groq vision model
 - 7-day Redis caching for both audio and image processing
 - Automatic file download from Telegram servers
 
