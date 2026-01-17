@@ -1986,7 +1986,10 @@ def convert_to_command(msg_text: str) -> str:
 
     # Convert emojis to their textual representation in Spanish with underscore delimiters
     emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
-    romanized_text = romanize_japanese(emoji_text)
+    if re.search(r"[ぁ-んァ-ン一-龯]", emoji_text):
+        romanized_text = romanize_japanese(emoji_text)
+    else:
+        romanized_text = emoji_text
 
     # Convert to uppercase and replace Ñ
     replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", romanized_text.upper()).replace(
