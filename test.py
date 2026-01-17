@@ -21,6 +21,7 @@ from api.index import (
     execute_tool,
     complete_with_providers,
     get_groq_ai_response,
+    get_groq_compound_response,
     get_ai_response,
     get_provider_backoff_remaining,
     get_cloudflare_ai_response,
@@ -52,6 +53,8 @@ from api.index import (
     is_chat_admin,
     should_force_web_search,
     should_search_previous_query,
+    should_use_groq_compound_tools,
+    get_groq_compound_enabled_tools,
 )
 from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api import config as config_module
@@ -230,6 +233,34 @@ def test_should_force_web_search_matches_date_and_news_queries(text):
 )
 def test_should_force_web_search_skips_regular_queries(text):
     assert should_force_web_search(text) is False
+
+
+def test_should_use_groq_compound_tools_truthy(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.delenv("GROQ_COMPOUND_TOOLS", raising=False)
+    assert should_use_groq_compound_tools() is True
+
+    monkeypatch.setenv("GROQ_COMPOUND_TOOLS", "true")
+    assert should_use_groq_compound_tools() is True
+
+    monkeypatch.setenv("GROQ_COMPOUND_TOOLS", "0")
+    assert should_use_groq_compound_tools() is False
+
+
+def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
+    monkeypatch.setenv(
+        "GROQ_COMPOUND_ENABLED_TOOLS", "web_search, visit_website, invalid"
+    )
+    assert get_groq_compound_enabled_tools() == ["web_search", "visit_website"]
+
+    monkeypatch.setenv("GROQ_COMPOUND_ENABLED_TOOLS", "invalid")
+    assert get_groq_compound_enabled_tools() == [
+        "web_search",
+        "code_interpreter",
+        "visit_website",
+        "browser_automation",
+        "wolfram_alpha",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -5755,6 +5786,53 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
         assert mock_openai.call_count == 1
 
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+
+def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setenv("GROQ_COMPOUND_ENABLED_TOOLS", "web_search")
+
+    fake_choice = MagicMock()
+    fake_choice.message.content = "ok"
+    fake_choice.finish_reason = "stop"
+
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_response
+
+    with patch("api.index.OpenAI", return_value=fake_client):
+        result = get_groq_compound_response(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result == "ok"
+    call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["model"] == "groq/compound"
+    assert (
+        call_kwargs["extra_body"]["compound_custom"]["tools"]["enabled_tools"]
+        == ["web_search"]
+    )
+
+
+def test_run_forced_web_search_prefers_compound_tools():
+    from api.index import _run_forced_web_search
+
+    with patch(
+        "api.index.get_groq_compound_response", return_value="compuesto"
+    ) as mock_compound, patch("api.index.execute_tool") as mock_tool:
+        result = _run_forced_web_search(
+            query="algo",
+            messages=[{"role": "user", "content": "algo"}],
+            system_message={"role": "system", "content": "sys"},
+            compound_system_message={"role": "system", "content": "sys"},
+        )
+
+    assert result == "compuesto"
+    mock_compound.assert_called_once()
+    mock_tool.assert_not_called()
 
 
 def test_get_ai_response_sets_backoff_on_rate_limit():
