@@ -23,6 +23,9 @@ from typing import (
     Sequence,
     TypeVar,
     NamedTuple,
+    TYPE_CHECKING,
+    TypedDict,
+    Literal,
 )
 import ast
 import base64
@@ -42,6 +45,11 @@ import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
 from functools import lru_cache
+
+if TYPE_CHECKING:
+    from openai.types.responses import ResponseInputParam
+else:
+    ResponseInputParam = Any  # type: ignore[assignment]
 
 from api.utils import (
     fmt_num,
@@ -4464,9 +4472,9 @@ def describe_image_groq(
 
     def _attempt() -> Optional[str]:
         print("Describing image with Groq vision model...")
-        response = groq_client.responses.create(
-            model=GROQ_VISION_MODEL,
-            input=[
+        input_payload = cast(
+            ResponseInputParam,
+            [
                 {
                     "role": "user",
                     "content": [
@@ -4475,6 +4483,11 @@ def describe_image_groq(
                     ],
                 }
             ],
+        )
+
+        response = groq_client.responses.create(
+            model=GROQ_VISION_MODEL,
+            input=input_payload,
             max_output_tokens=512,
         )
         description = _extract_response_text(response)
