@@ -24,7 +24,6 @@ from api.index import (
     get_groq_compound_response,
     get_ai_response,
     get_provider_backoff_remaining,
-    get_cloudflare_ai_response,
     remove_gordo_prefix,
     handle_ai_response,
     handle_msg,
@@ -1534,7 +1533,7 @@ def test_handle_msg_with_image():
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
         "api.index.check_rate_limit"
     ) as mock_rate_limit, patch(
-        "api.index.describe_image_cloudflare"
+        "api.index.describe_image_groq"
     ) as mock_describe, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
@@ -1585,15 +1584,14 @@ def test_handle_msg_with_audio():
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
         "api.index.check_rate_limit"
     ) as mock_rate_limit, patch(
-        "api.index.transcribe_audio_cloudflare"
+        "api.index.transcribe_audio_groq"
     ) as mock_transcribe, patch(
         "api.index.download_telegram_file"
     ) as mock_download:
 
         mock_env.side_effect = lambda key: {
             "TELEGRAM_USERNAME": "testbot",
-            "CLOUDFLARE_API_KEY": "test_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account",
+            "GROQ_API_KEY": "test_key",
         }.get(key)
         mock_rate_limit.return_value = True
         mock_download.return_value = b"audio data"
@@ -2471,38 +2469,6 @@ def test_ask_ai_with_openrouter_success():
         assert len(result) > 0
 
 
-def test_ask_ai_with_cloudflare_fallback():
-    from api.index import ask_ai
-
-    # Simplified test - just verify the function runs without crashing
-    with patch("api.index.get_market_context") as mock_get_market_context, patch(
-        "api.index.get_weather_context"
-    ) as mock_get_weather_context, patch(
-        "api.index.get_hacker_news_context"
-    ) as mock_get_hn_context, patch(
-        "api.index.get_time_context"
-    ) as mock_get_time_context, patch(
-        "api.index.get_agent_memory_context"
-    ) as mock_get_memory, patch(
-        "os.environ.get"
-    ) as mock_env:
-
-        # Setup basic mocks
-        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
-        mock_get_weather_context.return_value = {"temperature": 25}
-        mock_get_hn_context.return_value = []
-        mock_get_time_context.return_value = {"formatted": "Monday"}
-        mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
-
-        messages = [{"role": "user", "content": "hello"}]
-        result = ask_ai(messages)
-
-        # Just verify it returns a string (could be fallback response)
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-
 def test_ask_ai_with_all_failures():
     from api.index import ask_ai
 
@@ -2546,7 +2512,7 @@ def test_ask_ai_with_image():
     ) as mock_get_time_context, patch(
         "api.index.get_agent_memory_context"
     ) as mock_get_memory, patch(
-        "api.index.describe_image_cloudflare"
+        "api.index.describe_image_groq"
     ) as mock_describe_image, patch(
         "os.environ.get"
     ) as mock_env:
@@ -3492,7 +3458,7 @@ def test_handle_transcribe_with_message_voice_download_success():
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
-        "api.index.transcribe_audio_cloudflare"
+        "api.index.transcribe_audio_groq"
     ) as mock_transcribe:
 
         mock_cached.return_value = None
@@ -3509,7 +3475,9 @@ def test_handle_transcribe_with_message_voice_download_success():
         result = handle_transcribe_with_message(message)
         assert result == "🎵 Transcripción: new transcription"
         mock_download.assert_called_once_with("voice123")
-        mock_transcribe.assert_called_once_with(b"audio data", "voice123")
+        mock_transcribe.assert_called_once_with(
+            b"audio data", "voice123", use_cache=True
+        )
 
 
 def test_handle_transcribe_with_message_voice_download_fail():
@@ -3539,7 +3507,7 @@ def test_handle_transcribe_with_message_audio_success():
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
-        "api.index.transcribe_audio_cloudflare"
+        "api.index.transcribe_audio_groq"
     ) as mock_transcribe:
 
         mock_cached.return_value = None
@@ -3581,7 +3549,7 @@ def test_handle_transcribe_with_message_photo_success():
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
-        "api.index.describe_image_cloudflare"
+        "api.index.describe_image_groq"
     ) as mock_describe:
 
         mock_cached.return_value = None
@@ -3613,7 +3581,7 @@ def test_handle_transcribe_with_message_sticker_success():
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
-        "api.index.describe_image_cloudflare"
+        "api.index.describe_image_groq"
     ) as mock_describe:
 
         mock_cached.return_value = None
@@ -5154,94 +5122,90 @@ def test_resize_image_if_needed_processing_error():
         assert result == test_data  # Should return original data on error
 
 
-def test_describe_image_cloudflare_success():
-    """Test describe_image_cloudflare with successful API response"""
-    from api.index import describe_image_cloudflare
+def test_describe_image_groq_success():
+    """Test describe_image_groq with successful API response"""
+    from api.index import describe_image_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index.requests.post"
-    ) as mock_post:
+        "api.index.OpenAI"
+    ) as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
-            "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
+            "GROQ_API_KEY": "test_api_key",
         }.get(key, default)
 
-        # Mock successful response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "result": {"response": "A beautiful landscape with mountains"}
-        }
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
+        fake_response = MagicMock()
+        fake_response.output_text = "A beautiful landscape with mountains"
 
-        result = describe_image_cloudflare(b"base64_image_data")
+        fake_client = MagicMock()
+        fake_client.responses.create.return_value = fake_response
+        mock_openai.return_value = fake_client
+
+        result = describe_image_groq(b"image_data")
 
         assert result == "A beautiful landscape with mountains"
-        mock_post.assert_called_once()
+        fake_client.responses.create.assert_called_once()
 
 
-def test_describe_image_cloudflare_api_error():
-    """Test describe_image_cloudflare with API error"""
-    from api.index import describe_image_cloudflare
+def test_describe_image_groq_api_error():
+    """Test describe_image_groq with API error"""
+    from api.index import describe_image_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index.requests.post"
-    ) as mock_post:
+        "api.index.OpenAI"
+    ) as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
-            "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
+            "GROQ_API_KEY": "test_api_key",
         }.get(key, default)
 
-        mock_post.side_effect = requests.exceptions.RequestException("API error")
+        fake_client = MagicMock()
+        fake_client.responses.create.side_effect = Exception("API error")
+        mock_openai.return_value = fake_client
 
-        result = describe_image_cloudflare(b"base64_image_data")
+        result = describe_image_groq(b"image_data")
 
         assert result is None
 
 
-def test_transcribe_audio_cloudflare_success():
-    """Test transcribe_audio_cloudflare with successful transcription"""
-    from api.index import transcribe_audio_cloudflare
+def test_transcribe_audio_groq_success():
+    """Test transcribe_audio_groq with successful transcription"""
+    from api.index import transcribe_audio_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index.requests.post"
-    ) as mock_post:
+        "api.index.OpenAI"
+    ) as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
-            "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
+            "GROQ_API_KEY": "test_api_key",
         }.get(key, default)
 
-        # Mock successful response
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "success": True,
-            "result": {"text": "Hello, this is a test audio transcription"},
-        }
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
+        fake_response = MagicMock()
+        fake_response.text = "Hello, this is a test audio transcription"
 
-        result = transcribe_audio_cloudflare(b"audio_data")
+        fake_client = MagicMock()
+        fake_client.audio.transcriptions.create.return_value = fake_response
+        mock_openai.return_value = fake_client
+
+        result = transcribe_audio_groq(b"audio_data")
 
         assert result == "Hello, this is a test audio transcription"
-        mock_post.assert_called_once()
+        fake_client.audio.transcriptions.create.assert_called_once()
 
 
-def test_transcribe_audio_cloudflare_network_error():
-    """Test transcribe_audio_cloudflare with network error"""
-    from api.index import transcribe_audio_cloudflare
+def test_transcribe_audio_groq_network_error():
+    """Test transcribe_audio_groq with network error"""
+    from api.index import transcribe_audio_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index.requests.post"
-    ) as mock_post:
+        "api.index.OpenAI"
+    ) as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
-            "CLOUDFLARE_API_KEY": "test_api_key",
-            "CLOUDFLARE_ACCOUNT_ID": "test_account_id",
+            "GROQ_API_KEY": "test_api_key",
         }.get(key, default)
 
-        mock_post.side_effect = requests.exceptions.RequestException("Network error")
+        fake_client = MagicMock()
+        fake_client.audio.transcriptions.create.side_effect = Exception("Network error")
+        mock_openai.return_value = fake_client
 
-        result = transcribe_audio_cloudflare(b"audio_data")
+        result = transcribe_audio_groq(b"audio_data")
 
         assert result is None
 
@@ -5593,20 +5557,16 @@ def test_complete_with_providers_groq_success():
 
     with patch("api.index.get_groq_ai_response") as mock_groq, patch(
         "api.index.get_ai_response"
-    ) as mock_openrouter, patch(
-        "api.index.get_cloudflare_ai_response"
-    ) as mock_cloudflare:
+    ) as mock_openrouter:
 
         mock_groq.return_value = "Groq response"
         mock_openrouter.return_value = "OpenRouter response"
-        mock_cloudflare.return_value = "Cloudflare response"
 
         result = complete_with_providers(system_message, messages)
 
         assert result == "Groq response"
         mock_groq.assert_called_once()
         mock_openrouter.assert_not_called()
-        mock_cloudflare.assert_not_called()
 
 
 def test_complete_with_providers_fallback_sequence():
@@ -5617,8 +5577,6 @@ def test_complete_with_providers_fallback_sequence():
     with patch("api.index.get_groq_ai_response") as mock_groq, patch(
         "api.index.get_ai_response"
     ) as mock_openrouter, patch(
-        "api.index.get_cloudflare_ai_response"
-    ) as mock_cloudflare, patch(
         "os.environ.get"
     ) as mock_env, patch(
         "api.index.OpenAI"
@@ -5627,8 +5585,6 @@ def test_complete_with_providers_fallback_sequence():
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None  # Groq fails
         mock_openrouter.return_value = "OpenRouter response"
-        mock_cloudflare.return_value = "Cloudflare response"
-
         # Mock OpenAI client creation
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
@@ -5638,7 +5594,6 @@ def test_complete_with_providers_fallback_sequence():
         assert result == "OpenRouter response"
         assert mock_groq.call_count == 1
         mock_openrouter.assert_called_once()
-        mock_cloudflare.assert_not_called()
 
 
 def test_complete_with_providers_all_fail():
@@ -5649,8 +5604,6 @@ def test_complete_with_providers_all_fail():
     with patch("api.index.get_groq_ai_response") as mock_groq, patch(
         "api.index.get_ai_response"
     ) as mock_openrouter, patch(
-        "api.index.get_cloudflare_ai_response"
-    ) as mock_cloudflare, patch(
         "os.environ.get"
     ) as mock_env, patch(
         "api.index.OpenAI"
@@ -5659,8 +5612,6 @@ def test_complete_with_providers_all_fail():
         mock_env.return_value = "test_api_key"
         mock_groq.return_value = None
         mock_openrouter.return_value = None
-        mock_cloudflare.return_value = None
-
         # Mock OpenAI client creation
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
@@ -5670,7 +5621,6 @@ def test_complete_with_providers_all_fail():
         assert result is None
         assert mock_groq.call_count == 1
         mock_openrouter.assert_called_once()
-        assert mock_cloudflare.call_count == 1
 
 
 def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
@@ -5686,8 +5636,6 @@ def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
     with patch("api.index.get_groq_ai_response") as mock_groq, patch(
         "api.index.get_ai_response"
     ) as mock_openrouter, patch(
-        "api.index.get_cloudflare_ai_response"
-    ) as mock_cloudflare, patch(
         "os.environ.get"
     ) as mock_env, patch(
         "api.index.OpenAI"
@@ -5695,8 +5643,6 @@ def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
 
         mock_env.return_value = "test_api_key"
         mock_openrouter.return_value = "OpenRouter response"
-        mock_cloudflare.return_value = None
-
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
 
@@ -5705,11 +5651,10 @@ def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
         assert result == "OpenRouter response"
         mock_groq.assert_not_called()
         mock_openrouter.assert_called_once()
-        mock_cloudflare.assert_not_called()
 
 
 def test_complete_with_providers_skips_openrouter_during_backoff(monkeypatch):
-    """OpenRouter backoff should skip OpenRouter and fall through to Cloudflare."""
+    """OpenRouter backoff should skip OpenRouter and return None when Groq fails."""
 
     from api import index as index_module
 
@@ -5721,13 +5666,10 @@ def test_complete_with_providers_skips_openrouter_during_backoff(monkeypatch):
     with patch("api.index.get_groq_ai_response") as mock_groq, patch(
         "api.index.get_ai_response"
     ) as mock_openrouter, patch(
-        "api.index.get_cloudflare_ai_response"
-    ) as mock_cloudflare, patch(
         "os.environ.get"
     ) as mock_env, patch("api.index.OpenAI") as mock_openai:
 
         mock_groq.return_value = None
-        mock_cloudflare.return_value = "Cloudflare response"
         mock_env.return_value = "test_api_key"
 
         mock_client = MagicMock()
@@ -5735,10 +5677,9 @@ def test_complete_with_providers_skips_openrouter_during_backoff(monkeypatch):
 
         result = complete_with_providers(system_message, messages)
 
-        assert result == "Cloudflare response"
+        assert result is None
         mock_groq.assert_called_once()
         mock_openrouter.assert_not_called()
-        mock_cloudflare.assert_called_once()
 
 
 def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
@@ -5848,30 +5789,6 @@ def test_get_ai_response_sets_backoff_on_rate_limit():
 
     assert result is None
     assert index_module.get_provider_backoff_remaining("openrouter") > 0
-
-
-def test_get_cloudflare_ai_response_sets_backoff_on_rate_limit(monkeypatch):
-    from api import index as index_module
-
-    index_module._provider_backoff_until.clear()
-
-    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct")
-    monkeypatch.setenv("CLOUDFLARE_API_KEY", "key")
-
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = Exception("429 rate limit")
-
-    with patch("api.index.OpenAI", return_value=fake_client):
-        result = get_cloudflare_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-    assert result is None
-    assert index_module.get_provider_backoff_remaining("cloudflare") > 0
-
-    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
-    monkeypatch.delenv("CLOUDFLARE_API_KEY", raising=False)
 
 
 def test_is_social_frontend():
