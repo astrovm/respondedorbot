@@ -5765,7 +5765,7 @@ def test_run_forced_web_search_prefers_compound_tools():
 
     assert result == "compuesto"
     mock_compound.assert_called_once_with(
-        {"role": "system", "content": "sys"}, [{"role": "user", "content": "algo"}]
+        None, [{"role": "user", "content": "algo"}]
     )
     mock_tool.assert_not_called()
 
