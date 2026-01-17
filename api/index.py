@@ -121,6 +121,21 @@ WEB_FETCH_DEFAULT_CHARS = 4000
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
+GROQ_COMPOUND_DEFAULT_MODEL = "groq/compound"
+GROQ_COMPOUND_DEFAULT_TOOLS = (
+    "web_search",
+    "code_interpreter",
+    "visit_website",
+    "browser_automation",
+    "wolfram_alpha",
+)
+GROQ_COMPOUND_ALLOWED_TOOLS = {
+    "web_search",
+    "code_interpreter",
+    "visit_website",
+    "browser_automation",
+    "wolfram_alpha",
+}
 
 
 # Polymarket constants
@@ -154,6 +169,45 @@ FORCE_WEB_SEARCH_PREVIOUS_PATTERNS = [
     r"\bbusca\s+eso\b",
     r"\bbusca\s+esto\b",
 ]
+
+
+def _is_truthy(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_falsey(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"0", "false", "no", "n", "off"}
+
+
+def should_use_groq_compound_tools() -> bool:
+    """Return True when Groq Compound built-in tools are enabled."""
+
+    if _is_falsey(environ.get("GROQ_COMPOUND_TOOLS")):
+        return False
+    return bool(environ.get("GROQ_API_KEY"))
+
+
+def get_groq_compound_enabled_tools() -> List[str]:
+    """Return the enabled Groq Compound tool list, sanitized by allowlist."""
+
+    raw = environ.get("GROQ_COMPOUND_ENABLED_TOOLS")
+    if not raw:
+        return list(GROQ_COMPOUND_DEFAULT_TOOLS)
+
+    tokens = re.split(r"[,\s]+", raw.strip())
+    cleaned: List[str] = []
+    for token in tokens:
+        normalized = token.strip()
+        if not normalized:
+            continue
+        if normalized in GROQ_COMPOUND_ALLOWED_TOOLS:
+            cleaned.append(normalized)
+
+    return cleaned or list(GROQ_COMPOUND_DEFAULT_TOOLS)
 
 
 def normalize_text_for_matching(text: str) -> str:
@@ -292,7 +346,15 @@ def _run_forced_web_search(
     query: str,
     messages: List[Dict[str, Any]],
     system_message: Dict[str, Any],
+    compound_system_message: Optional[Dict[str, Any]] = None,
 ) -> str:
+    if compound_system_message:
+        compound_response = get_groq_compound_response(
+            compound_system_message, messages
+        )
+        if compound_response:
+            return compound_response
+
     tool_name = "web_search"
     tool_args = {"query": query}
     try:
@@ -2535,6 +2597,11 @@ def ask_ai(
 
         # Build system message with personality, context and tool instructions
         system_message = build_system_message(context_data, include_tools=True)
+        compound_system_message = (
+            build_compound_system_message(context_data)
+            if should_use_groq_compound_tools()
+            else None
+        )
 
         # If we have an image, first describe it with LLaVA then continue normal flow
         if image_data:
@@ -2590,6 +2657,7 @@ def ask_ai(
                 query=previous_message,
                 messages=messages,
                 system_message=system_message,
+                compound_system_message=compound_system_message,
             )
 
         if should_force_web_search(latest_user_message):
@@ -2598,6 +2666,7 @@ def ask_ai(
                 query=latest_user_message,
                 messages=messages,
                 system_message=system_message,
+                compound_system_message=compound_system_message,
             )
 
         # First pass: get an initial response that might include a tool call.
@@ -3692,6 +3761,54 @@ def get_groq_ai_response(
     )
 
 
+def get_groq_compound_response(
+    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Use Groq Compound built-in tools for a single response."""
+
+    provider_name = "groq"
+    groq_api_key = environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        print("Groq API key not configured")
+        return None
+
+    model = environ.get("GROQ_COMPOUND_MODEL") or GROQ_COMPOUND_DEFAULT_MODEL
+    enabled_tools = get_groq_compound_enabled_tools()
+
+    def _attempt() -> Optional[str]:
+        print("Trying Groq Compound tools...")
+        groq_client = OpenAI(
+            api_key=groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+            default_headers={"Groq-Model-Version": "latest"},
+        )
+
+        response = groq_client.chat.completions.create(
+            model=model,
+            messages=cast(Any, [system_msg] + messages),
+            max_tokens=1024,
+            extra_body={
+                "compound_custom": {
+                    "tools": {"enabled_tools": enabled_tools},
+                }
+            },
+        )
+
+        if response and hasattr(response, "choices") and response.choices:
+            choice = response.choices[0]
+            content = getattr(choice.message, "content", None)
+            if content:
+                return content
+        return None
+
+    return _invoke_provider(
+        provider_name,
+        attempt=_attempt,
+        rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
+        label="Groq Compound",
+    )
+
+
 def get_fallback_response(messages: List[Dict]) -> str:
     """Generate fallback random response"""
     first_name = ""
@@ -3829,6 +3946,32 @@ CONTEXTO POLITICO:
             {
                 "type": "text",
                 "text": base_prompt + contextual_info + tools_section,
+            }
+        ],
+    }
+
+
+def build_compound_system_message(context: Dict) -> Dict[str, Any]:
+    """Build a system message tailored for Groq Compound built-in tools."""
+
+    base = build_system_message(context, include_tools=False)
+    base_text = ""
+    content = base.get("content")
+    if isinstance(content, list) and content:
+        base_text = str(content[0].get("text") or "")
+
+    tool_hint = (
+        "\n\nHERRAMIENTAS GROQ:\n"
+        "Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
+        " Respondé con síntesis breve y 1 fuente."
+    )
+
+    return {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": base_text + tool_hint,
             }
         ],
     }
