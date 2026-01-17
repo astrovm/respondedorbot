@@ -3945,6 +3945,10 @@ def build_compound_system_message() -> Dict[str, Any]:
 
     config = load_bot_config()
     base_text = config.get("system_prompt", "You are a helpful AI assistant.")
+    base_text = str(base_text or "").strip()
+    max_chars = 1200
+    if len(base_text) > max_chars:
+        base_text = base_text[:max_chars].rsplit(" ", 1)[0].strip()
 
     tool_hint = (
         "\n\nHERRAMIENTAS GROQ:\n"
