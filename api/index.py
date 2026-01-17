@@ -326,9 +326,7 @@ def _run_forced_web_search(
 ) -> str:
     if compound_system_message:
         compound_messages = [{"role": "user", "content": query}]
-        compound_response = get_groq_compound_response(
-            compound_system_message, compound_messages
-        )
+        compound_response = get_groq_compound_response(None, compound_messages)
         if compound_response:
             return compound_response
 
@@ -3670,7 +3668,7 @@ def get_groq_ai_response(
 
 
 def get_groq_compound_response(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
     """Use Groq Compound built-in tools for a single response."""
 
@@ -3691,9 +3689,13 @@ def get_groq_compound_response(
             default_headers={"Groq-Model-Version": "latest"},
         )
 
+        payload_messages = messages
+        if system_msg:
+            payload_messages = [system_msg] + messages
+
         response = groq_client.chat.completions.create(
             model=model,
-            messages=cast(Any, [system_msg] + messages),
+            messages=cast(Any, payload_messages),
             max_tokens=1024,
             extra_body={
                 "compound_custom": {
@@ -3862,17 +3864,9 @@ CONTEXTO POLITICO:
 def build_compound_system_message() -> Dict[str, Any]:
     """Build a minimal system message tailored for Groq Compound tools."""
 
-    config = load_bot_config()
-    base_text = config.get("system_prompt", "You are a helpful AI assistant.")
-    base_text = str(base_text or "").strip()
-    max_chars = 1200
-    if len(base_text) > max_chars:
-        base_text = base_text[:max_chars].rsplit(" ", 1)[0].strip()
-
     tool_hint = (
-        "\n\nHERRAMIENTAS GROQ:\n"
-        "Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
-        " Respondé directo al usuario con síntesis breve."
+        "Respondé directo al usuario con síntesis breve."
+        " Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
     )
 
     return {
@@ -3880,7 +3874,7 @@ def build_compound_system_message() -> Dict[str, Any]:
         "content": [
             {
                 "type": "text",
-                "text": base_text + tool_hint,
+                "text": tool_hint,
             }
         ],
     }
