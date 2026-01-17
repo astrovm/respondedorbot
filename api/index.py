@@ -315,8 +315,9 @@ def _run_forced_web_search(
     compound_system_message: Optional[Dict[str, Any]] = None,
 ) -> str:
     if compound_system_message:
+        compound_messages = [{"role": "user", "content": query}]
         compound_response = get_groq_compound_response(
-            compound_system_message, messages
+            compound_system_message, compound_messages
         )
         if compound_response:
             return compound_response
@@ -332,15 +333,40 @@ def _run_forced_web_search(
         tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
         print(f"ask_ai: forced tool '{tool_name}' raised error: {tool_err}")
 
-    tool_context = {
-        "tool": tool_name,
-        "args": tool_args,
-        "result": tool_output,
-    }
+    forced_query, forced_results = normalize_web_search_output(tool_output)
+    tool_contexts = [
+        {
+            "tool": tool_name,
+            "args": tool_args,
+            "result": tool_output,
+        }
+    ]
+
+    top_url = ""
+    for result in forced_results or []:
+        if isinstance(result, Mapping):
+            top_url = str(result.get("url") or "").strip()
+            if top_url:
+                break
+
+    if top_url:
+        fetch_args = {"url": top_url, "max_chars": 1500}
+        try:
+            fetch_output = execute_tool("fetch_url", fetch_args)
+            tool_contexts.append(
+                {
+                    "tool": "fetch_url",
+                    "args": fetch_args,
+                    "result": fetch_output,
+                }
+            )
+        except Exception as fetch_err:
+            print(f"ask_ai: forced fetch_url failed: {fetch_err}")
+
     next_messages = messages + [
         {
             "role": "user",
-            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
+            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_contexts)[:4000]}",
         },
     ]
     forced_final = complete_with_providers(system_message, next_messages)
@@ -349,7 +375,6 @@ def _run_forced_web_search(
     )
     if forced_tool_final:
         return forced_tool_final
-    forced_query, forced_results = normalize_web_search_output(tool_output)
     return summarize_search_results(forced_query, forced_results)
 
 
@@ -2564,9 +2589,7 @@ def ask_ai(
         # Build system message with personality, context and tool instructions
         system_message = build_system_message(context_data, include_tools=True)
         compound_system_message = (
-            build_compound_system_message(context_data)
-            if should_use_groq_compound_tools()
-            else None
+            build_compound_system_message() if should_use_groq_compound_tools() else None
         )
 
         # If we have an image, first describe it with LLaVA then continue normal flow
@@ -3917,14 +3940,11 @@ CONTEXTO POLITICO:
     }
 
 
-def build_compound_system_message(context: Dict) -> Dict[str, Any]:
-    """Build a system message tailored for Groq Compound built-in tools."""
+def build_compound_system_message() -> Dict[str, Any]:
+    """Build a minimal system message tailored for Groq Compound tools."""
 
-    base = build_system_message(context, include_tools=False)
-    base_text = ""
-    content = base.get("content")
-    if isinstance(content, list) and content:
-        base_text = str(content[0].get("text") or "")
+    config = load_bot_config()
+    base_text = config.get("system_prompt", "You are a helpful AI assistant.")
 
     tool_hint = (
         "\n\nHERRAMIENTAS GROQ:\n"
