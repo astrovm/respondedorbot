@@ -211,6 +211,11 @@ def test_convert_to_command():
     expected7 = "/MOUSUGUDESU"
     assert convert_to_command(msg_text7) == expected7
 
+    # Test string with halfwidth katakana
+    msg_text8 = "ｶﾀｶﾅ"
+    expected8 = "/KATAKANA"
+    assert convert_to_command(msg_text8) == expected8
+
 
 @pytest.mark.parametrize(
     "text",
