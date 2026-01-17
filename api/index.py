@@ -3347,7 +3347,6 @@ def summarize_search_results(
     results: Optional[Sequence[Mapping[str, Any]]],
 ) -> str:
     """Summarize the top DuckDuckGo search result into 1-3 short sentences."""
-    normalized_query = (query or "").strip()
     if not results:
         return "no encontré resultados ahora con duckduckgo"
 
@@ -3357,31 +3356,22 @@ def summarize_search_results(
 
     title = str(top_result.get("title") or top_result.get("url") or "").strip()
     snippet = str(top_result.get("snippet") or "").strip()
-    url = str(top_result.get("url") or "").strip()
 
     if not title and not snippet:
         return "no encontré resultados ahora con duckduckgo"
 
-    sentences: List[str] = []
-    if normalized_query:
-        if title:
-            sentences.append(f"Encontré esto sobre {normalized_query}: {title}.")
-        else:
-            sentences.append(f"Encontré esto sobre {normalized_query}.")
-    elif title:
-        sentences.append(f"{title}.")
-
+    parts: List[str] = []
     if snippet:
-        trimmed_snippet = snippet[:240].rstrip()
+        trimmed_snippet = snippet[:280].rstrip()
         if trimmed_snippet and not trimmed_snippet.endswith((".", "!", "?")):
             trimmed_snippet += "."
         if trimmed_snippet:
-            sentences.append(trimmed_snippet)
+            parts.append(trimmed_snippet)
 
-    summary = " ".join(sentences[:3]).strip()
-    if url:
-        return f"{summary}\nFuente: {url}" if summary else f"Fuente: {url}"
-    return summary or "no encontré resultados ahora con duckduckgo"
+    if not parts and title:
+        parts.append(f"{title}.")
+
+    return " ".join(parts).strip()
 
 
 def sanitize_tool_artifacts(text: Optional[str]) -> str:
@@ -3925,7 +3915,7 @@ CONTEXTO POLITICO:
             '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
-            "Tras usar web_search, respondé directo al usuario con síntesis breve y 1 fuente; no devuelvas lista cruda ni arranques con 'Encontré esto sobre...'."
+            "Tras usar web_search, respondé directo al usuario con síntesis breve; no devuelvas lista cruda ni arranques con 'Encontré esto sobre...'."
         )
 
     print(f"build_system_message: include_tools={include_tools}")
@@ -3953,7 +3943,7 @@ def build_compound_system_message() -> Dict[str, Any]:
     tool_hint = (
         "\n\nHERRAMIENTAS GROQ:\n"
         "Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
-        " Respondé directo al usuario con síntesis breve y 1 fuente."
+        " Respondé directo al usuario con síntesis breve."
     )
 
     return {
