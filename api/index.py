@@ -3579,8 +3579,6 @@ def get_ai_response(
 
     models = [
         "moonshotai/kimi-k2:free",
-        "x-ai/grok-4-fast:free",
-        "deepseek/deepseek-chat-v3.1:free",
     ]
 
     rate_limit_backoff = (
