@@ -1968,6 +1968,14 @@ def get_timestamp() -> str:
     return f"{int(time.time())}"
 
 
+JAPANESE_TEXT_RE = re.compile(
+    r"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF65-\uFF9F\u3400-\u4DBF"
+    r"\u4E00-\u9FFF\uF900-\uFAFF\U00020000-\U0002A6DF\U0002A700-\U0002B73F"
+    r"\U0002B740-\U0002B81F\U0002B820-\U0002CEAF\U0002CEB0-\U0002EBEF"
+    r"\U0002F800-\U0002FA1F\U00030000-\U0003134F]"
+)
+
+
 def romanize_japanese(text: str) -> str:
     """Convert Japanese kana/kanji text to romaji when possible."""
     converter = kakasi()
@@ -1980,13 +1988,18 @@ def romanize_japanese(text: str) -> str:
     return converter.getConverter().do(text)
 
 
+def is_japanese_text(text: str) -> bool:
+    """Return True when the text includes Japanese scripts or CJK extensions."""
+    return bool(JAPANESE_TEXT_RE.search(text))
+
+
 def convert_to_command(msg_text: str) -> str:
     if not msg_text:
         return "y que queres que convierta boludo? mandate texto"
 
     # Convert emojis to their textual representation in Spanish with underscore delimiters
     emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
-    if re.search(r"[ぁ-んァ-ン一-龯]", emoji_text):
+    if is_japanese_text(emoji_text):
         romanized_text = romanize_japanese(emoji_text)
     else:
         romanized_text = emoji_text
