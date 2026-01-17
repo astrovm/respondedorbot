@@ -237,23 +237,13 @@ def test_should_force_web_search_skips_regular_queries(text):
 
 def test_should_use_groq_compound_tools_truthy(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    monkeypatch.delenv("GROQ_COMPOUND_TOOLS", raising=False)
     assert should_use_groq_compound_tools() is True
 
-    monkeypatch.setenv("GROQ_COMPOUND_TOOLS", "true")
-    assert should_use_groq_compound_tools() is True
-
-    monkeypatch.setenv("GROQ_COMPOUND_TOOLS", "0")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     assert should_use_groq_compound_tools() is False
 
 
 def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
-    monkeypatch.setenv(
-        "GROQ_COMPOUND_ENABLED_TOOLS", "web_search, visit_website, invalid"
-    )
-    assert get_groq_compound_enabled_tools() == ["web_search", "visit_website"]
-
-    monkeypatch.setenv("GROQ_COMPOUND_ENABLED_TOOLS", "invalid")
     assert get_groq_compound_enabled_tools() == [
         "web_search",
         "code_interpreter",
@@ -5790,7 +5780,6 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
 
 def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    monkeypatch.setenv("GROQ_COMPOUND_ENABLED_TOOLS", "web_search")
 
     fake_choice = MagicMock()
     fake_choice.message.content = "ok"
@@ -5811,10 +5800,13 @@ def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
     assert result == "ok"
     call_kwargs = fake_client.chat.completions.create.call_args.kwargs
     assert call_kwargs["model"] == "groq/compound"
-    assert (
-        call_kwargs["extra_body"]["compound_custom"]["tools"]["enabled_tools"]
-        == ["web_search"]
-    )
+    assert call_kwargs["extra_body"]["compound_custom"]["tools"]["enabled_tools"] == [
+        "web_search",
+        "code_interpreter",
+        "visit_website",
+        "browser_automation",
+        "wolfram_alpha",
+    ]
 
 
 def test_run_forced_web_search_prefers_compound_tools():

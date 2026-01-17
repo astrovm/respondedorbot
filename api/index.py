@@ -129,13 +129,6 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "browser_automation",
     "wolfram_alpha",
 )
-GROQ_COMPOUND_ALLOWED_TOOLS = {
-    "web_search",
-    "code_interpreter",
-    "visit_website",
-    "browser_automation",
-    "wolfram_alpha",
-}
 
 
 # Polymarket constants
@@ -171,43 +164,16 @@ FORCE_WEB_SEARCH_PREVIOUS_PATTERNS = [
 ]
 
 
-def _is_truthy(value: Optional[str]) -> bool:
-    if value is None:
-        return False
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _is_falsey(value: Optional[str]) -> bool:
-    if value is None:
-        return False
-    return str(value).strip().lower() in {"0", "false", "no", "n", "off"}
-
-
 def should_use_groq_compound_tools() -> bool:
     """Return True when Groq Compound built-in tools are enabled."""
 
-    if _is_falsey(environ.get("GROQ_COMPOUND_TOOLS")):
-        return False
     return bool(environ.get("GROQ_API_KEY"))
 
 
 def get_groq_compound_enabled_tools() -> List[str]:
     """Return the enabled Groq Compound tool list, sanitized by allowlist."""
 
-    raw = environ.get("GROQ_COMPOUND_ENABLED_TOOLS")
-    if not raw:
-        return list(GROQ_COMPOUND_DEFAULT_TOOLS)
-
-    tokens = re.split(r"[,\s]+", raw.strip())
-    cleaned: List[str] = []
-    for token in tokens:
-        normalized = token.strip()
-        if not normalized:
-            continue
-        if normalized in GROQ_COMPOUND_ALLOWED_TOOLS:
-            cleaned.append(normalized)
-
-    return cleaned or list(GROQ_COMPOUND_DEFAULT_TOOLS)
+    return list(GROQ_COMPOUND_DEFAULT_TOOLS)
 
 
 def normalize_text_for_matching(text: str) -> str:
@@ -3772,7 +3738,7 @@ def get_groq_compound_response(
         print("Groq API key not configured")
         return None
 
-    model = environ.get("GROQ_COMPOUND_MODEL") or GROQ_COMPOUND_DEFAULT_MODEL
+    model = GROQ_COMPOUND_DEFAULT_MODEL
     enabled_tools = get_groq_compound_enabled_tools()
 
     def _attempt() -> Optional[str]:
