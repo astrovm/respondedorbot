@@ -5806,7 +5806,6 @@ def test_is_social_frontend():
 
     assert is_social_frontend("twitter.com")
     assert is_social_frontend("mobile.twitter.com")
-    assert is_social_frontend("vxtiktok.com")
     assert is_social_frontend("xcancel.com")
     assert not is_social_frontend("example.com")
 
@@ -5831,8 +5830,8 @@ def test_replace_links(mock_get):
     assert "https://kkinstagram.com/qux" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
-    assert "https://www.vxtiktok.com/@bar" in fixed
-    assert "https://vm.vxtiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+    assert "https://www.tiktok.com/@bar" in fixed
+    assert "https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
     assert "fxtwitter.com" not in fixed
     assert "fixupx.com" not in fixed
     assert "?" not in fixed
@@ -5841,8 +5840,6 @@ def test_replace_links(mock_get):
         "https://www.instagram.com/qux",
         "https://www.reddit.com/r/foo",
         "https://old.reddit.com/r/bar",
-        "https://www.tiktok.com/@bar",
-        "https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/",
     }
     assert set(originals) == expected
     assert all("?" not in url and "#" not in url for url in originals)
@@ -6432,7 +6429,7 @@ def test_handle_msg_link_already_fixed_subdomain():
         "message_id": 8,
         "chat": {"id": 999, "type": "group"},
         "from": {"id": 1},
-        "text": "https://vm.vxtiktok.com/foo",
+        "text": "https://old.rxddit.com/r/foo",
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
