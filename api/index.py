@@ -4249,7 +4249,6 @@ def should_gordo_respond(
             "fxbsky.app",
             "kkinstagram.com",
             "rxddit.com",
-            "vxtiktok.com",
         )
         if any(domain in reply_text for domain in replacement_domains):
             return False

@@ -18,7 +18,6 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxbsky.app",
     "kkinstagram.com",
     "rxddit.com",
-    "vxtiktok.com",
 }
 
 ORIGINAL_FRONTENDS: Set[str] = {
@@ -175,10 +174,6 @@ def replace_links(
         (
             r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
             r"\1\2rxddit.com\3",
-        ),
-        (
-            r"(https?://)((?:[a-zA-Z0-9-]+\.)?)tiktok\.com([^\s]*)",
-            r"\1\2vxtiktok.com\3",
         ),
     ]
 
