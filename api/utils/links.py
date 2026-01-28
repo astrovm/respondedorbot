@@ -128,7 +128,7 @@ def can_embed_url(url: str) -> bool:
     class MetaParser(HTMLParser):
         def __init__(self) -> None:
             super().__init__()
-            self.tags: List[Tuple[str, str]] = []
+            self.tags: Dict[str, str] = {}
 
         def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
             if tag != "meta":
@@ -137,22 +137,36 @@ def can_embed_url(url: str) -> bool:
             key_candidate = attrs_dict.get("property") or attrs_dict.get("name")
             if not key_candidate:
                 return
-            key = key_candidate
-            key_lower = key.lower()
+            key_lower = key_candidate.lower()
             if key_lower.startswith("og:") or key_lower.startswith("twitter:"):
-                content = attrs_dict.get("content") or ""
-                self.tags.append((key, content))
+                content = (attrs_dict.get("content") or "").strip()
+                if content:
+                    self.tags[key_lower] = content
 
     parser = MetaParser()
     parser.feed(html)
     meta_tags = parser.tags
-    has_meta = bool(meta_tags)
-    if not has_meta:
-        print(f"[EMBED] {url} missing og/twitter meta tags")
-    else:
-        detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags)
+    has_title = "og:title" in meta_tags
+    has_image = "og:image" in meta_tags or "twitter:image" in meta_tags
+    has_twitter_card = "twitter:card" in meta_tags
+
+    if (has_title and has_image) or has_twitter_card:
+        detail = ", ".join(
+            f"{key}={value[:80]}" for key, value in meta_tags.items()
+        )
         print(f"[EMBED] {url} has embed metadata: {detail}")
-    return has_meta
+        return True
+
+    missing_fields: List[str] = []
+    if not has_title:
+        missing_fields.append("og:title")
+    if not has_image:
+        missing_fields.append("og:image or twitter:image")
+    if not has_twitter_card:
+        missing_fields.append("twitter:card")
+    missing_detail = ", ".join(missing_fields)
+    print(f"[EMBED] {url} missing required metadata: {missing_detail}")
+    return False
 
 
 def url_is_embedable(url: str) -> bool:
