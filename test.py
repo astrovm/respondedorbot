@@ -5815,7 +5815,10 @@ def test_replace_links(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
-    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_response.text = (
+        "<meta property='og:title' content='foo'>"
+        "<meta property='og:image' content='https://example.com/image.png'>"
+    )
     mock_get.return_value = mock_response
     text = (
         "Check https://twitter.com/foo?utm_source=share and http://x.com/bar?s=20 and https://bsky.app/baz?share=1 and "
@@ -6126,7 +6129,10 @@ def test_handle_msg_link_reply():
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = {"Content-Type": "text/html"}
-        mock_response.text = "<meta property='og:title'>"
+        mock_response.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_response
 
         result = handle_msg(message)
@@ -6170,7 +6176,10 @@ def test_handle_msg_link_reply_instagram():
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = {"Content-Type": "text/html"}
-        mock_response.text = "<meta property='og:title'>"
+        mock_response.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_response
 
         result = handle_msg(message)
@@ -6214,7 +6223,10 @@ def test_handle_msg_link_delete():
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = {"Content-Type": "text/html"}
-        mock_response.text = "<meta property='og:title'>"
+        mock_response.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_response
 
         result = handle_msg(message)
@@ -6288,7 +6300,10 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
-    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_response.text = (
+        "<meta property='og:title' content='foo'>"
+        "<meta property='og:image' content='https://example.com/image.png'>"
+    )
     mock_get.return_value = mock_response
     fixed, changed, originals = replace_links("https://x.com/foo/status/123")
     assert changed is True
@@ -6307,7 +6322,10 @@ def test_xcancel_link_replacement(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
-    mock_response.text = "<meta property='og:title' content='foo'>"
+    mock_response.text = (
+        "<meta property='og:title' content='foo'>"
+        "<meta property='og:image' content='https://example.com/image.png'>"
+    )
     mock_get.return_value = mock_response
     fixed, changed, originals = replace_links("https://xcancel.com/foo/status/123")
     assert changed is True
@@ -6333,7 +6351,52 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     result = can_embed_url("http://example.com")
     assert result is False
     captured = capsys.readouterr().out
-    assert "missing og/twitter meta tags" in captured
+    assert "missing required metadata" in captured
+    assert "og:title" in captured
+    assert "og:image or twitter:image" in captured
+    assert "twitter:card" in captured
+
+
+def test_can_embed_url_requires_image_with_title(monkeypatch):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<meta property='og:site_name' content='site'>"
+    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+
+    assert can_embed_url("http://example.com") is False
+
+
+def test_can_embed_url_allows_title_and_image(monkeypatch):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = (
+        "<meta property='og:title' content='Title'>"
+        "<meta property='og:image' content='https://example.com/img.png'>"
+    )
+    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+
+    assert can_embed_url("http://example.com") is True
+
+
+def test_can_embed_url_allows_twitter_card(monkeypatch):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = (
+        "<meta name='twitter:card' content='summary'>"
+        "<meta name='twitter:image' content='https://example.com/img.png'>"
+    )
+    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+
+    assert can_embed_url("http://example.com") is True
 
 
 @patch("api.index.requests.get")
@@ -6486,7 +6549,10 @@ def test_handle_msg_replaced_link_adds_button():
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "text/html"}
-        mock_resp.text = "<meta property='og:title'>"
+        mock_resp.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_resp
 
         result = handle_msg(message)
@@ -6530,7 +6596,10 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "text/html"}
-        mock_resp.text = "<meta property='og:title'>"
+        mock_resp.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_resp
 
         result = handle_msg(message)
@@ -6576,7 +6645,10 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "text/html"}
-        mock_resp.text = "<meta property='og:title'>"
+        mock_resp.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
         mock_get.return_value = mock_resp
 
         result = handle_msg(message)
