@@ -6457,6 +6457,25 @@ def test_can_embed_url_allows_kkinstagram_redirect(monkeypatch):
     )
 
 
+def test_can_embed_url_allows_kkinstagram_post_redirect(monkeypatch):
+    from api.index import can_embed_url
+
+    head_response = MagicMock()
+    head_response.status_code = 307
+    head_response.headers = {
+        "Location": "https://scontent.cdninstagram.com/video.mp4"
+    }
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return head_response
+        raise AssertionError("GET should not be called for kkinstagram")
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    assert can_embed_url("https://kkinstagram.com/p/DQ5RaKnjE8J/") is True
+
+
 @patch("api.index.requests.get")
 def test_can_embed_url_allows_direct_media(mock_get):
     from api.index import can_embed_url

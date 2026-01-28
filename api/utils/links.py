@@ -185,7 +185,7 @@ def _kkinstagram_preview_check(
         return None
 
     path_segments = [segment for segment in parsed.path.lower().split("/") if segment]
-    if not path_segments or path_segments[0] not in {"reel", "reels"}:
+    if not path_segments or path_segments[0] not in {"p", "reel", "reels"}:
         return None
 
     headers = {"User-Agent": "TelegramBot 1.0"}
