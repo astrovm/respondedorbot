@@ -102,6 +102,12 @@ def is_social_frontend(host: str) -> bool:
 
 def can_embed_url(url: str) -> bool:
     """Return True when the target page exposes Telegram-compatible OpenGraph metadata."""
+    parsed = urlparse(url)
+    kkinstagram_preview = _kkinstagram_preview_check(parsed, url)
+    if kkinstagram_preview is False:
+        return False
+    if kkinstagram_preview is True:
+        return True
     headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
         response = request_with_ssl_fallback(
@@ -165,6 +171,53 @@ def can_embed_url(url: str) -> bool:
     missing_detail = ", ".join(missing_fields)
     print(f"[EMBED] {url} missing required metadata: {missing_detail}")
     return False
+
+
+def _kkinstagram_preview_check(
+    parsed: ParseResult, url: str
+) -> Optional[bool]:
+    """Return embed eligibility from the kkinstagram HEAD response when available."""
+
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if not (host == "kkinstagram.com" or host.endswith(".kkinstagram.com")):
+        return None
+
+    path_segments = [segment for segment in parsed.path.lower().split("/") if segment]
+    if not path_segments or path_segments[0] not in {"reel", "reels"}:
+        return None
+
+    headers = {"User-Agent": "TelegramBot 1.0"}
+    try:
+        response = request_with_ssl_fallback(
+            url,
+            method="head",
+            allow_redirects=False,
+            timeout=5,
+            headers=headers,
+        )
+    except RequestException as exc:
+        print(f"[EMBED] {url} HEAD request failed: {exc}")
+        return False
+
+    status_code = response.status_code
+    if status_code == 405:
+        print(f"[EMBED] {url} HEAD not allowed, rejecting embed")
+        return False
+    if status_code >= 400:
+        print(f"[EMBED] {url} HEAD returned status {status_code}")
+        return False
+
+    if 300 <= status_code < 400:
+        location = response.headers.get("Location", "")
+        if not location:
+            print(f"[EMBED] {url} HEAD redirect missing location")
+            return False
+        print(f"[EMBED] {url} HEAD redirect {status_code} to {location[:120]}")
+        return True
+
+    return None
 
 
 def url_is_embedable(url: str) -> bool:

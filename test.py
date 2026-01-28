@@ -6415,6 +6415,48 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
     assert can_embed_url("http://example.com") is False
 
 
+def test_can_embed_url_rejects_kkinstagram_without_preview(monkeypatch):
+    from api.index import can_embed_url
+
+    head_response = MagicMock()
+    head_response.status_code = 405
+    head_response.headers = {"Content-Type": "application/json"}
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return head_response
+        raise AssertionError("GET should not be called for kkinstagram")
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    assert (
+        can_embed_url("https://kkinstagram.com/reel/DUEZt-wEXNw/")
+        is False
+    )
+
+
+def test_can_embed_url_allows_kkinstagram_redirect(monkeypatch):
+    from api.index import can_embed_url
+
+    head_response = MagicMock()
+    head_response.status_code = 307
+    head_response.headers = {
+        "Location": "https://scontent.cdninstagram.com/video.mp4"
+    }
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return head_response
+        raise AssertionError("GET should not be called for kkinstagram")
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    assert (
+        can_embed_url("https://kkinstagram.com/reel/DOmco1zjuVi/")
+        is True
+    )
+
+
 @patch("api.index.requests.get")
 def test_can_embed_url_allows_direct_media(mock_get):
     from api.index import can_embed_url
