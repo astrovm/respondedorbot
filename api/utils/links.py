@@ -101,7 +101,7 @@ def is_social_frontend(host: str) -> bool:
 
 
 def can_embed_url(url: str) -> bool:
-    """Return True when the target page exposes OpenGraph/Twitter metadata."""
+    """Return True when the target page exposes Telegram-compatible OpenGraph metadata."""
     headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
         response = request_with_ssl_fallback(
@@ -147,10 +147,10 @@ def can_embed_url(url: str) -> bool:
     parser.feed(html)
     meta_tags = parser.tags
     has_title = "og:title" in meta_tags
-    has_image = "og:image" in meta_tags or "twitter:image" in meta_tags
-    has_twitter_card = "twitter:card" in meta_tags
+    has_image = "og:image" in meta_tags
+    has_video = "og:video" in meta_tags
 
-    if (has_title and has_image) or has_twitter_card:
+    if has_title and (has_image or has_video):
         detail = ", ".join(
             f"{key}={value[:80]}" for key, value in meta_tags.items()
         )
@@ -160,10 +160,8 @@ def can_embed_url(url: str) -> bool:
     missing_fields: List[str] = []
     if not has_title:
         missing_fields.append("og:title")
-    if not has_image:
-        missing_fields.append("og:image or twitter:image")
-    if not has_twitter_card:
-        missing_fields.append("twitter:card")
+    if not (has_image or has_video):
+        missing_fields.append("og:image or og:video")
     missing_detail = ", ".join(missing_fields)
     print(f"[EMBED] {url} missing required metadata: {missing_detail}")
     return False
