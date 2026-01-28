@@ -5875,6 +5875,23 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert originals == []
 
 
+@patch("api.index.requests.get")
+def test_replace_links_skips_when_only_twitter_metadata(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = (
+        "<meta name='twitter:card' content='summary'>"
+        "<meta name='twitter:image' content='https://example.com/img.png'>"
+    )
+    mock_get.return_value = mock_response
+    text = "Check https://www.instagram.com/qux?igsh=abc123"
+    fixed, changed, originals = replace_links(text)
+    assert not changed
+    assert fixed == "Check https://www.instagram.com/qux"
+    assert originals == []
+
+
 def test_set_chat_config_updates_link_mode_and_persists():
     redis_client = MagicMock()
     redis_client.get.return_value = None
@@ -6353,8 +6370,7 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert "missing required metadata" in captured
     assert "og:title" in captured
-    assert "og:image or twitter:image" in captured
-    assert "twitter:card" in captured
+    assert "og:image or og:video" in captured
 
 
 def test_can_embed_url_requires_image_with_title(monkeypatch):
@@ -6384,7 +6400,7 @@ def test_can_embed_url_allows_title_and_image(monkeypatch):
     assert can_embed_url("http://example.com") is True
 
 
-def test_can_embed_url_allows_twitter_card(monkeypatch):
+def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
     from api.index import can_embed_url
 
     mock_response = MagicMock()
@@ -6396,7 +6412,7 @@ def test_can_embed_url_allows_twitter_card(monkeypatch):
     )
     monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
 
-    assert can_embed_url("http://example.com") is True
+    assert can_embed_url("http://example.com") is False
 
 
 @patch("api.index.requests.get")
