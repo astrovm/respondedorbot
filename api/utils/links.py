@@ -12,6 +12,8 @@ from requests.exceptions import RequestException
 
 from api.utils.http import request_with_ssl_fallback
 
+EMBED_REQUEST_TIMEOUT = 10
+
 ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
     "fixupx.com",
@@ -111,7 +113,10 @@ def can_embed_url(url: str) -> bool:
     headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
         response = request_with_ssl_fallback(
-            url, allow_redirects=True, timeout=5, headers=headers
+            url,
+            allow_redirects=True,
+            timeout=EMBED_REQUEST_TIMEOUT,
+            headers=headers,
         )
     except RequestException as exc:
         print(f"[EMBED] {url} request failed: {exc}")
@@ -194,7 +199,7 @@ def _kkinstagram_preview_check(
             url,
             method="head",
             allow_redirects=False,
-            timeout=5,
+            timeout=EMBED_REQUEST_TIMEOUT,
             headers=headers,
         )
     except RequestException as exc:
