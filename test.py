@@ -6329,7 +6329,7 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     mock_get.assert_called_once_with(
         "https://fixupx.com/foo/status/123",
         allow_redirects=True,
-        timeout=5,
+        timeout=10,
         headers=ANY,
     )
 
@@ -6351,7 +6351,7 @@ def test_xcancel_link_replacement(mock_get):
     mock_get.assert_called_once_with(
         "https://fixupx.com/foo/status/123",
         allow_redirects=True,
-        timeout=5,
+        timeout=10,
         headers=ANY,
     )
 
