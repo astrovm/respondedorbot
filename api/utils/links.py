@@ -95,6 +95,21 @@ def _is_twitter_user_profile(parsed: ParseResult) -> bool:
     return len(lower_segments) == 2 and lower_segments[1] in profile_subpages
 
 
+def _normalize_twitter_status_path(parsed: ParseResult) -> ParseResult:
+    """Normalize Twitter/X status URLs that include the /i/ prefix."""
+
+    path = parsed.path or ""
+    normalized = re.sub(
+        r"^/i/(?:web/)?status/",
+        "/status/",
+        path,
+        flags=re.IGNORECASE,
+    )
+    if normalized == path:
+        return parsed
+    return parsed._replace(path=normalized)
+
+
 def is_social_frontend(host: str) -> bool:
     """Return True if *host* matches a known social media frontend."""
     host = host.lower()
@@ -259,6 +274,7 @@ def replace_links(
                 return original
             replaced = match.expand(repl)
             parsed = urlparse(replaced)
+            parsed = _normalize_twitter_status_path(parsed)
             cleaned = parsed._replace(query="", fragment="")
             replaced_full = urlunparse(cleaned)
             if checker(replaced_full):
