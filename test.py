@@ -6300,6 +6300,22 @@ def test_replace_links_checks_preview(monkeypatch):
     mock_can.assert_called_once_with("https://fixupx.com/foo/status/123")
 
 
+def test_replace_links_strips_xcom_i_status(monkeypatch):
+    from api.index import replace_links
+
+    mock_can = MagicMock(return_value=True)
+    monkeypatch.setattr("api.index.can_embed_url", mock_can)
+    text, changed, originals = replace_links(
+        "https://x.com/i/status/1848434048944783554"
+    )
+    assert text == "https://fixupx.com/status/1848434048944783554"
+    assert changed is True
+    assert originals == ["https://x.com/i/status/1848434048944783554"]
+    mock_can.assert_called_once_with(
+        "https://fixupx.com/status/1848434048944783554"
+    )
+
+
 def test_replace_links_skips_twitter_user_profiles(monkeypatch):
     from api.index import replace_links
 
