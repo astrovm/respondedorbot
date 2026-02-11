@@ -2084,6 +2084,10 @@ def test_initialize_commands():
     assert "/agent" in commands
     assert "/random" in commands
     assert "/prices" in commands
+    assert "/bresio" in commands
+    assert "/bresios" in commands
+    assert "/brecio" in commands
+    assert "/brecios" in commands
     assert "/dolar" in commands
     assert "/usd" in commands
 
@@ -2104,6 +2108,10 @@ def test_initialize_commands():
     assert commands["/ask"][0] == ask_ai
     assert commands["/random"][0] == select_random
     assert commands["/prices"][0] == get_prices
+    assert commands["/bresio"][0] == get_prices
+    assert commands["/bresios"][0] == get_prices
+    assert commands["/brecio"][0] == get_prices
+    assert commands["/brecios"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
     assert commands["/agent"][0] == show_agent_thoughts
