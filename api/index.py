@@ -2076,7 +2076,7 @@ comandos disponibles boludo:
 
 - /config: cambiá la config del gordo, link fixer y demases
 
-- /prices, /precio, /precios, /presio, /presios: top 10 cryptos en usd
+- /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
 - /prices 20: top 20 en usd
 - /prices 100 in eur: top 100 en eur
@@ -4071,6 +4071,10 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/precio": (get_prices, False, True),
         "/presios": (get_prices, False, True),
         "/presio": (get_prices, False, True),
+        "/bresio": (get_prices, False, True),
+        "/bresios": (get_prices, False, True),
+        "/brecio": (get_prices, False, True),
+        "/brecios": (get_prices, False, True),
         "/dolar": (get_dollar_rates, False, False),
         "/dollar": (get_dollar_rates, False, False),
         "/usd": (get_dollar_rates, False, False),
