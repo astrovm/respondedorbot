@@ -2445,6 +2445,28 @@ def test_get_prices_amount_conversion():
         assert "15600" in result
 
 
+def test_get_prices_amount_conversion_reverse():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.side_effect = [
+            {"data": []},
+            {
+                "data": [
+                    {
+                        "symbol": "USDT",
+                        "name": "Tether",
+                        "quote": {"HKD": {"price": 7.8, "percent_change_24h": 0.1}},
+                    }
+                ]
+            },
+        ]
+
+        result = get_prices("2000 hkd in usdt")
+
+        assert result == "2000 HKD = 256.41025641 USDT"
+
+
 def test_get_prices_amount_conversion_invalid_symbol():
     from api.index import get_prices
 
@@ -2460,6 +2482,19 @@ def test_get_prices_amount_conversion_invalid_symbol():
         }
 
         result = get_prices("2000 notacoin in usd")
+        assert result == "no laburo con esos ponzis boludo"
+
+
+def test_get_prices_amount_conversion_unsupported_pair_still_fails():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.side_effect = [
+            {"data": []},
+            {"data": []},
+        ]
+
+        result = get_prices("2000 hkd in usdt")
         assert result == "no laburo con esos ponzis boludo"
 
 
