@@ -4111,6 +4111,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/convertbase": (convert_base, False, True),
         "/random": (select_random, False, True),
         "/prices": (get_prices, False, True),
+        "/price": (get_prices, False, True),
         "/precios": (get_prices, False, True),
         "/precio": (get_prices, False, True),
         "/presios": (get_prices, False, True),
