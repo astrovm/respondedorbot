@@ -1186,48 +1186,92 @@ def get_prices(msg_text: str) -> Optional[str]:
     convert_to = "USD"
     # here we keep the currency that we'll request to the api
     convert_to_parameter = "USD"
+    supported_symbols = {
+        "ARS",
+        "AUD",
+        "BRL",
+        "BTC",
+        "BUSD",
+        "CAD",
+        "CHF",
+        "CLP",
+        "CNY",
+        "COP",
+        "CZK",
+        "DAI",
+        "DKK",
+        "ETH",
+        "EUR",
+        "GBP",
+        "HKD",
+        "ILS",
+        "INR",
+        "ISK",
+        "JPY",
+        "KRW",
+        "MXN",
+        "NZD",
+        "PEN",
+        "SATS",
+        "SEK",
+        "SGD",
+        "TWD",
+        "USD",
+        "USDC",
+        "USDT",
+        "UYU",
+        "XAU",
+        "XMR",
+    }
+
+    conversion_match = re.match(
+        r"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+([a-zA-Z0-9]+)\s+in\s+([a-zA-Z0-9]+)\s*$",
+        msg_text,
+        re.IGNORECASE,
+    )
+
+    # symmetric behavior: amount + source_asset + in + target_currency
+    if conversion_match:
+        amount_text, source_symbol, target_symbol = conversion_match.groups()
+        amount = float(amount_text.replace(",", "."))
+        source_symbol = source_symbol.upper()
+        convert_to = target_symbol.upper()
+
+        if convert_to not in supported_symbols:
+            return f"no laburo con {convert_to} gordo"
+
+        convert_to_parameter = "BTC" if convert_to == "SATS" else convert_to
+        prices = get_api_or_cache_prices(convert_to_parameter)
+
+        if not prices or "data" not in prices:
+            return "Error getting crypto prices"
+
+        requested_asset = None
+        normalized_source = source_symbol.replace(" ", "")
+        for coin in prices["data"]:
+            symbol = coin["symbol"].upper().replace(" ", "")
+            name = coin["name"].upper().replace(" ", "")
+            if symbol == normalized_source or name == normalized_source:
+                requested_asset = coin
+                break
+
+        if not requested_asset:
+            return "no laburo con esos ponzis boludo"
+
+        quote_price = requested_asset["quote"][convert_to_parameter]["price"]
+        if convert_to == "SATS":
+            quote_price = quote_price * 100000000
+
+        converted_value = amount * quote_price
+        return (
+            f"{fmt_num(amount, 8)} {requested_asset['symbol'].upper()} = "
+            f"{fmt_num(converted_value, 8)} {convert_to}"
+        )
 
     if "IN " in msg_text.upper():
         words = msg_text.upper().split()
-        coins = [
-            "ARS",
-            "AUD",
-            "BRL",
-            "BTC",
-            "BUSD",
-            "CAD",
-            "CHF",
-            "CLP",
-            "CNY",
-            "COP",
-            "CZK",
-            "DAI",
-            "DKK",
-            "ETH",
-            "EUR",
-            "GBP",
-            "HKD",
-            "ILS",
-            "INR",
-            "ISK",
-            "JPY",
-            "KRW",
-            "MXN",
-            "NZD",
-            "PEN",
-            "SATS",
-            "SEK",
-            "SGD",
-            "TWD",
-            "USD",
-            "USDC",
-            "USDT",
-            "UYU",
-            "XAU",
-            "XMR",
-        ]
         convert_to = words[-1]
-        if convert_to in coins:
+        if convert_to in supported_symbols:
             if convert_to == "SATS":
                 convert_to_parameter = "BTC"
             else:
