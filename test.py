@@ -2405,6 +2405,98 @@ def test_get_prices_basic():
         assert "-2.5%" in result
 
 
+def test_get_prices_amount_conversion():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "USDT",
+                    "name": "Tether",
+                    "quote": {"HKD": {"price": 7.8, "percent_change_24h": 0.1}},
+                }
+            ]
+        }
+
+        result = get_prices("2000 usdt in hkd")
+
+        assert result is not None
+        assert "USDT =" in result
+        assert "HKD" in result
+        assert "15600" in result
+
+
+def test_get_prices_amount_conversion_invalid_symbol():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "quote": {"USD": {"price": 50000.0, "percent_change_24h": 5.25}},
+                }
+            ]
+        }
+
+        result = get_prices("2000 notacoin in usd")
+        assert result == "no laburo con esos ponzis boludo"
+
+
+def test_get_prices_existing_paths_unchanged():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        def mock_get_prices_side_effect(currency):
+            return {
+                "data": [
+                    {
+                        "symbol": "BTC",
+                        "name": "Bitcoin",
+                        "quote": {
+                            "USD": {"price": 50000.0, "percent_change_24h": 5.25},
+                            "EUR": {"price": 46000.0, "percent_change_24h": 5.25},
+                        },
+                    },
+                    {
+                        "symbol": "ETH",
+                        "name": "Ethereum",
+                        "quote": {
+                            "USD": {"price": 2500.0, "percent_change_24h": -2.5},
+                            "EUR": {"price": 2200.0, "percent_change_24h": -2.5},
+                        },
+                    },
+                    {
+                        "symbol": "SOL",
+                        "name": "Solana",
+                        "quote": {
+                            "USD": {"price": 120.0, "percent_change_24h": 1.25},
+                            "EUR": {"price": 100.0, "percent_change_24h": 1.25},
+                        },
+                    },
+                ]
+            }
+
+        mock_get_prices.side_effect = mock_get_prices_side_effect
+
+        top_n_result = get_prices("10")
+        list_result = get_prices("btc,eth")
+        in_result = get_prices("in eur")
+
+        assert top_n_result is not None
+        assert "BTC:" in top_n_result
+
+        assert list_result is not None
+        assert "BTC:" in list_result
+        assert "ETH:" in list_result
+        assert "SOL:" not in list_result
+
+        assert in_result is not None
+        assert "EUR" in in_result
+
+
 def test_cached_requests_basic():
     from api.index import cached_requests
 
