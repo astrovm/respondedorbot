@@ -2445,6 +2445,49 @@ def test_get_prices_amount_conversion():
         assert "15600" in result
 
 
+def test_get_prices_amount_conversion_accepts_to_and_en():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "USDT",
+                    "name": "Tether",
+                    "quote": {"HKD": {"price": 7.8, "percent_change_24h": 0.1}},
+                }
+            ]
+        }
+
+        to_result = get_prices("2000 usdt to hkd")
+        en_result = get_prices("2000 usdt en hkd")
+
+        assert to_result == "2000 USDT = 15600 HKD"
+        assert en_result == "2000 USDT = 15600 HKD"
+
+
+def test_get_prices_amount_conversion_reverse_accepts_a():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.side_effect = [
+            {"data": []},
+            {
+                "data": [
+                    {
+                        "symbol": "USDT",
+                        "name": "Tether",
+                        "quote": {"HKD": {"price": 7.8, "percent_change_24h": 0.1}},
+                    }
+                ]
+            },
+        ]
+
+        result = get_prices("2000 hkd a usdt")
+
+        assert result == "2000 HKD = 256.41025641 USDT"
+
+
 def test_get_prices_amount_conversion_reverse():
     from api.index import get_prices
 

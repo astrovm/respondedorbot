@@ -1224,8 +1224,11 @@ def get_prices(msg_text: str) -> Optional[str]:
         "XMR",
     }
 
+    conversion_prepositions = ("in", "to", "a", "en")
+    conversion_token_pattern = "|".join(conversion_prepositions)
+
     conversion_match = re.match(
-        r"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+([a-zA-Z0-9]+)\s+in\s+([a-zA-Z0-9]+)\s*$",
+        rf"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+([a-zA-Z0-9]+)\s+(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
         msg_text,
         re.IGNORECASE,
     )
@@ -1294,17 +1297,37 @@ def get_prices(msg_text: str) -> Optional[str]:
             f"{fmt_num(converted_value, 8)} {convert_to}"
         )
 
-    if "IN " in msg_text.upper():
-        words = msg_text.upper().split()
-        convert_to = words[-1]
-        if convert_to in supported_symbols:
-            if convert_to == "SATS":
-                convert_to_parameter = "BTC"
-            else:
-                convert_to_parameter = convert_to
-            msg_text = msg_text.upper().replace(f"IN {convert_to}", "").strip()
+    conversion_only_match = re.match(
+        rf"^\s*(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
+        msg_text,
+        re.IGNORECASE,
+    )
+    if conversion_only_match:
+        convert_to = conversion_only_match.group(1).upper()
+        msg_text = ""
+        if convert_to == "SATS":
+            convert_to_parameter = "BTC"
+        elif convert_to in supported_symbols:
+            convert_to_parameter = convert_to
         else:
             return f"no laburo con {convert_to} gordo"
+    else:
+        split_parts = re.split(
+            rf"\s+(?:{conversion_token_pattern})\s+",
+            msg_text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )
+        if len(split_parts) == 2:
+            msg_text, convert_to = split_parts[0], split_parts[1].upper().strip()
+            msg_text = msg_text.strip()
+            if convert_to in supported_symbols:
+                if convert_to == "SATS":
+                    convert_to_parameter = "BTC"
+                else:
+                    convert_to_parameter = convert_to
+            else:
+                return f"no laburo con {convert_to} gordo"
 
     # get prices from api or cache
     prices = get_api_or_cache_prices(convert_to_parameter)
