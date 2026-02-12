@@ -2084,6 +2084,7 @@ def test_initialize_commands():
     assert "/agent" in commands
     assert "/random" in commands
     assert "/prices" in commands
+    assert "/price" in commands
     assert "/bresio" in commands
     assert "/bresios" in commands
     assert "/brecio" in commands
@@ -2101,6 +2102,7 @@ def test_initialize_commands():
     # Test that non-AI commands are properly marked
     assert commands["/random"][1] == False
     assert commands["/prices"][1] == False
+    assert commands["/price"][1] == False
     assert commands["/dolar"][1] == False
     assert commands["/usd"][1] == False
 
@@ -2108,6 +2110,7 @@ def test_initialize_commands():
     assert commands["/ask"][0] == ask_ai
     assert commands["/random"][0] == select_random
     assert commands["/prices"][0] == get_prices
+    assert commands["/price"][0] == get_prices
     assert commands["/bresio"][0] == get_prices
     assert commands["/bresios"][0] == get_prices
     assert commands["/brecio"][0] == get_prices
@@ -2122,6 +2125,21 @@ def test_initialize_commands():
 
     assert commands["/buscar"][0] == _search_command
     assert commands["/search"][0] == _search_command
+
+
+def test_price_alias_command_dispatches_to_get_prices():
+    from api.index import initialize_commands, parse_command, get_prices
+
+    command, args = parse_command("/price 1 btc in usd", "@bot")
+    commands = initialize_commands()
+
+    assert command == "/price"
+    assert args == "1 btc in usd"
+
+    handler_func, uses_ai, takes_params = commands[command]
+    assert handler_func == get_prices
+    assert uses_ai == False
+    assert takes_params == True
 
 
 def test_config_redis_with_env_vars():
