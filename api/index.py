@@ -1256,7 +1256,33 @@ def get_prices(msg_text: str) -> Optional[str]:
                 break
 
         if not requested_asset:
-            return "no laburo con esos ponzis boludo"
+            source_parameter = "BTC" if source_symbol == "SATS" else source_symbol
+            reverse_prices = get_api_or_cache_prices(source_parameter)
+            if not reverse_prices or "data" not in reverse_prices:
+                return "Error getting crypto prices"
+
+            requested_target_asset = None
+            normalized_target = convert_to.replace(" ", "")
+            for coin in reverse_prices["data"]:
+                symbol = coin["symbol"].upper().replace(" ", "")
+                name = coin["name"].upper().replace(" ", "")
+                if symbol == normalized_target or name == normalized_target:
+                    requested_target_asset = coin
+                    break
+
+            if not requested_target_asset:
+                return "no laburo con esos ponzis boludo"
+
+            source_amount = amount
+            if source_symbol == "SATS":
+                source_amount = source_amount / 100000000
+
+            asset_price_in_source = requested_target_asset["quote"][source_parameter]["price"]
+            converted_value = source_amount / asset_price_in_source
+            return (
+                f"{fmt_num(amount, 8)} {source_symbol} = "
+                f"{fmt_num(converted_value, 8)} {requested_target_asset['symbol'].upper()}"
+            )
 
         quote_price = requested_asset["quote"][convert_to_parameter]["price"]
         if convert_to == "SATS":
