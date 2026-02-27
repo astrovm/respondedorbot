@@ -418,10 +418,10 @@ def _optional_redis_client(**kwargs: Any) -> Optional[redis.Redis]:
 
 
 def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
-    """Return a stable cache key composed of *prefix* and an MD5 hash of *payload*."""
+    """Return a stable cache key composed of *prefix* and a SHA-256 hash."""
 
     serialized = json.dumps(payload, sort_keys=True, default=str)
-    digest = hashlib.md5(serialized.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
 
 
@@ -844,7 +844,7 @@ def cached_requests(
             "parameters": parameters,
             "headers": headers,
         }
-        request_hash = hashlib.md5(
+        request_hash = hashlib.sha256(
             json.dumps(arguments_dict, sort_keys=True).encode()
         ).hexdigest()
 
@@ -2275,6 +2275,33 @@ def send_typing(token: str, chat_id: str) -> None:
     )
 
 
+def _message_has_domain_link(message: str, domain: str) -> bool:
+    """Return True when *message* includes a URL matching *domain*."""
+
+    if not message:
+        return False
+
+    normalized_domain = domain.lower().strip(".")
+    if not normalized_domain:
+        return False
+
+    candidates = re.findall(
+        r"(https?://[^\s<>()]+|www\.[^\s<>()]+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    for candidate in candidates:
+        cleaned_candidate = candidate.rstrip(".,!?;:)]}'\"")
+        normalized_url = _normalize_http_url(cleaned_candidate)
+        if not normalized_url:
+            continue
+        hostname = (urlparse(normalized_url).hostname or "").lower()
+        if hostname == normalized_domain or hostname.endswith(f".{normalized_domain}"):
+            return True
+
+    return False
+
+
 def send_msg(
     chat_id: str,
     msg: str,
@@ -2283,7 +2310,7 @@ def send_msg(
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
-    if "polymarket.com" in msg.lower():
+    if _message_has_domain_link(msg, "polymarket.com"):
         payload["disable_web_page_preview"] = True
     if msg_id:
         payload["reply_to_message_id"] = msg_id

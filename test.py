@@ -3202,6 +3202,28 @@ def test_send_msg_disables_preview_for_polymarket_link():
         assert result == 101
 
 
+def test_send_msg_does_not_disable_preview_for_lookalike_domain():
+    from api.index import send_msg
+
+    with patch("requests.post") as mock_post, patch("os.environ.get") as mock_env:
+        mock_env.return_value = "test_token"
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "result": {"message_id": 102}}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        lookalike_text = "https://evilpolymarket.com/event/not-the-real-domain"
+
+        result = send_msg("12345", lookalike_text)
+
+        mock_post.assert_called_once_with(
+            "https://api.telegram.org/bottest_token/sendMessage",
+            json={"chat_id": "12345", "text": lookalike_text},
+            timeout=5,
+        )
+        assert result == 102
+
+
 def test_admin_report_basic():
     from api.index import admin_report
 
