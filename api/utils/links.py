@@ -172,11 +172,16 @@ def can_embed_url(url: str) -> bool:
     parser = MetaParser()
     parser.feed(html)
     meta_tags = parser.tags
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    is_eeinstagram_host = host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
+
     has_title = "og:title" in meta_tags
     has_image = "og:image" in meta_tags
     has_video = "og:video" in meta_tags
 
-    if has_title and (has_image or has_video):
+    if (has_title or (is_eeinstagram_host and (has_image or has_video))) and (has_image or has_video):
         detail = ", ".join(
             f"{key}={value[:80]}" for key, value in meta_tags.items()
         )
@@ -184,7 +189,7 @@ def can_embed_url(url: str) -> bool:
         return True
 
     missing_fields: List[str] = []
-    if not has_title:
+    if not has_title and not (is_eeinstagram_host and (has_image or has_video)):
         missing_fields.append("og:title")
     if not (has_image or has_video):
         missing_fields.append("og:image or og:video")
@@ -223,8 +228,8 @@ def _eeinstagram_preview_check(
 
     status_code = response.status_code
     if status_code == 405:
-        print(f"[EMBED] {url} HEAD not allowed, rejecting embed")
-        return False
+        print(f"[EMBED] {url} HEAD not allowed, falling back to GET metadata check")
+        return None
     if status_code >= 400:
         print(f"[EMBED] {url} HEAD returned status {status_code}")
         return False

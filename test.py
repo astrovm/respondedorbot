@@ -6649,24 +6649,54 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
     assert can_embed_url("http://example.com") is False
 
 
-def test_can_embed_url_rejects_eeinstagram_without_preview(monkeypatch):
+def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monkeypatch):
     from api.index import can_embed_url
 
     head_response = MagicMock()
     head_response.status_code = 405
     head_response.headers = {"Content-Type": "application/json"}
 
+    get_response = MagicMock()
+    get_response.status_code = 200
+    get_response.headers = {"Content-Type": "text/html"}
+    get_response.text = (
+        "<meta property='og:title' content='Instagram post'>"
+        "<meta property='og:image' content='https://example.com/preview.jpg'>"
+    )
+
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for eeinstagram")
+        return get_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
     assert (
         can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/")
-        is False
+        is True
     )
+
+
+def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
+    from api.index import can_embed_url
+
+    head_response = MagicMock()
+    head_response.status_code = 405
+    head_response.headers = {"Content-Type": "application/json"}
+
+    get_response = MagicMock()
+    get_response.status_code = 200
+    get_response.headers = {"Content-Type": "text/html"}
+    get_response.text = "<meta property='og:image' content='https://example.com/preview.jpg'>"
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return head_response
+        return get_response
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    assert can_embed_url("https://eeinstagram.com/p/DVUqOBgDEor/") is True
 
 
 def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
