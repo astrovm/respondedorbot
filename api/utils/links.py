@@ -18,7 +18,7 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
     "fixupx.com",
     "fxbsky.app",
-    "kkinstagram.com",
+    "eeinstagram.com",
     "rxddit.com",
 }
 
@@ -120,10 +120,10 @@ def is_social_frontend(host: str) -> bool:
 def can_embed_url(url: str) -> bool:
     """Return True when the target page exposes Telegram-compatible OpenGraph metadata."""
     parsed = urlparse(url)
-    kkinstagram_preview = _kkinstagram_preview_check(parsed, url)
-    if kkinstagram_preview is False:
+    eeinstagram_preview = _eeinstagram_preview_check(parsed, url)
+    if eeinstagram_preview is False:
         return False
-    if kkinstagram_preview is True:
+    if eeinstagram_preview is True:
         return True
     headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
     try:
@@ -193,15 +193,15 @@ def can_embed_url(url: str) -> bool:
     return False
 
 
-def _kkinstagram_preview_check(
+def _eeinstagram_preview_check(
     parsed: ParseResult, url: str
 ) -> Optional[bool]:
-    """Return embed eligibility from the kkinstagram HEAD response when available."""
+    """Return embed eligibility from the eeinstagram HEAD response when available."""
 
     host = parsed.netloc.lower().split(":", 1)[0]
     if host.startswith("www."):
         host = host[4:]
-    if not (host == "kkinstagram.com" or host.endswith(".kkinstagram.com")):
+    if not (host == "eeinstagram.com" or host.endswith(".eeinstagram.com")):
         return None
 
     path_segments = [segment for segment in parsed.path.lower().split("/") if segment]
@@ -255,7 +255,7 @@ def replace_links(
         (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
+        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1eeinstagram.com\2"),
         (
             r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
             r"\1\2rxddit.com\3",
