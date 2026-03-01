@@ -4372,6 +4372,7 @@ def should_gordo_respond(
             "fxtwitter.com",
             "fixupx.com",
             "fxbsky.app",
+            "kkinstagram.com",
             "eeinstagram.com",
             "rxddit.com",
         )
