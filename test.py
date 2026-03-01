@@ -6048,7 +6048,7 @@ def test_replace_links(mock_get):
     assert "https://twitter.com/foo" in fixed
     assert "http://x.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
-    assert "https://kkinstagram.com/qux" in fixed
+    assert "https://eeinstagram.com/qux" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.tiktok.com/@bar" in fixed
@@ -6420,7 +6420,7 @@ def test_handle_msg_link_reply_instagram():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "mirá https://kkinstagram.com/qux\n\nShared by @lu"
+        expected = "mirá https://eeinstagram.com/qux\n\nShared by @lu"
         mock_send.assert_called_once_with(
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
@@ -6649,7 +6649,7 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
     assert can_embed_url("http://example.com") is False
 
 
-def test_can_embed_url_rejects_kkinstagram_without_preview(monkeypatch):
+def test_can_embed_url_rejects_eeinstagram_without_preview(monkeypatch):
     from api.index import can_embed_url
 
     head_response = MagicMock()
@@ -6659,17 +6659,17 @@ def test_can_embed_url_rejects_kkinstagram_without_preview(monkeypatch):
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for kkinstagram")
+        raise AssertionError("GET should not be called for eeinstagram")
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
     assert (
-        can_embed_url("https://kkinstagram.com/reel/DUEZt-wEXNw/")
+        can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/")
         is False
     )
 
 
-def test_can_embed_url_allows_kkinstagram_redirect(monkeypatch):
+def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
     from api.index import can_embed_url
 
     head_response = MagicMock()
@@ -6681,17 +6681,17 @@ def test_can_embed_url_allows_kkinstagram_redirect(monkeypatch):
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for kkinstagram")
+        raise AssertionError("GET should not be called for eeinstagram")
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
     assert (
-        can_embed_url("https://kkinstagram.com/reel/DOmco1zjuVi/")
+        can_embed_url("https://eeinstagram.com/reel/DOmco1zjuVi/")
         is True
     )
 
 
-def test_can_embed_url_allows_kkinstagram_post_redirect(monkeypatch):
+def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
     from api.index import can_embed_url
 
     head_response = MagicMock()
@@ -6703,11 +6703,11 @@ def test_can_embed_url_allows_kkinstagram_post_redirect(monkeypatch):
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for kkinstagram")
+        raise AssertionError("GET should not be called for eeinstagram")
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert can_embed_url("https://kkinstagram.com/p/DQ5RaKnjE8J/") is True
+    assert can_embed_url("https://eeinstagram.com/p/DQ5RaKnjE8J/") is True
 
 
 @patch("api.index.requests.get")
