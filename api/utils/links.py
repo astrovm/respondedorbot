@@ -18,6 +18,7 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
     "fixupx.com",
     "fxbsky.app",
+    "kkinstagram.com",
     "eeinstagram.com",
     "rxddit.com",
 }
@@ -260,7 +261,7 @@ def replace_links(
         (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1eeinstagram.com\2"),
+        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
         (
             r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
             r"\1\2rxddit.com\3",
@@ -282,6 +283,14 @@ def replace_links(
             parsed = _normalize_twitter_status_path(parsed)
             cleaned = parsed._replace(query="", fragment="")
             replaced_full = urlunparse(cleaned)
+            fallback_replaced_full: Optional[str] = None
+            replaced_host = cleaned.netloc.lower().split(":", 1)[0]
+            if replaced_host.startswith("www."):
+                replaced_host = replaced_host[4:]
+            if replaced_host == "kkinstagram.com":
+                fallback_cleaned = cleaned._replace(netloc="eeinstagram.com")
+                fallback_replaced_full = urlunparse(fallback_cleaned)
+
             if checker(replaced_full):
                 nonlocal changed
                 changed = True
@@ -289,6 +298,16 @@ def replace_links(
                 original_links.append(urlunparse(cleaned_original))
                 print(f"[LINK] replacing {original} with {replaced_full}")
                 return replaced_full
+
+            if fallback_replaced_full and checker(fallback_replaced_full):
+                changed = True
+                cleaned_original = parsed_original._replace(query="", fragment="")
+                original_links.append(urlunparse(cleaned_original))
+                print(
+                    f"[LINK] replacing {original} with fallback {fallback_replaced_full}"
+                )
+                return fallback_replaced_full
+
             print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
             return original
 
