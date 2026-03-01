@@ -223,8 +223,8 @@ def _eeinstagram_preview_check(
 
     status_code = response.status_code
     if status_code == 405:
-        print(f"[EMBED] {url} HEAD not allowed, rejecting embed")
-        return False
+        print(f"[EMBED] {url} HEAD not allowed, falling back to GET metadata check")
+        return None
     if status_code >= 400:
         print(f"[EMBED] {url} HEAD returned status {status_code}")
         return False
