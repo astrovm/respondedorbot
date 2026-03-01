@@ -6048,7 +6048,7 @@ def test_replace_links(mock_get):
     assert "https://twitter.com/foo" in fixed
     assert "http://x.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
-    assert "https://eeinstagram.com/qux" in fixed
+    assert "https://kkinstagram.com/qux" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.tiktok.com/@bar" in fixed
@@ -6108,6 +6108,33 @@ def test_replace_links_skips_when_only_twitter_metadata(mock_get):
     assert not changed
     assert fixed == "Check https://www.instagram.com/qux"
     assert originals == []
+
+
+def test_replace_links_instagram_falls_back_to_eeinstagram_when_kk_fails():
+    checks = []
+
+    def checker(url):
+        checks.append(url)
+        if "kkinstagram.com" in url:
+            return False
+        if "eeinstagram.com" in url:
+            return True
+        return False
+
+    from api.utils.links import replace_links as links_replace_links
+
+    fixed, changed, originals = links_replace_links(
+        "Check https://www.instagram.com/qux?igsh=abc123",
+        embed_checker=checker,
+    )
+
+    assert fixed == "Check https://eeinstagram.com/qux"
+    assert changed is True
+    assert originals == ["https://www.instagram.com/qux"]
+    assert checks == [
+        "https://kkinstagram.com/qux",
+        "https://eeinstagram.com/qux",
+    ]
 
 
 def test_set_chat_config_updates_link_mode_and_persists():
@@ -6420,7 +6447,7 @@ def test_handle_msg_link_reply_instagram():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "mirá https://eeinstagram.com/qux\n\nShared by @lu"
+        expected = "mirá https://kkinstagram.com/qux\n\nShared by @lu"
         mock_send.assert_called_once_with(
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
