@@ -4372,7 +4372,7 @@ def should_gordo_respond(
             "fxtwitter.com",
             "fixupx.com",
             "fxbsky.app",
-            "kkinstagram.com",
+            "eeinstagram.com",
             "rxddit.com",
         )
         if any(domain in reply_text for domain in replacement_domains):
