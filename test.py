@@ -6677,6 +6677,28 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monke
     )
 
 
+def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
+    from api.index import can_embed_url
+
+    head_response = MagicMock()
+    head_response.status_code = 405
+    head_response.headers = {"Content-Type": "application/json"}
+
+    get_response = MagicMock()
+    get_response.status_code = 200
+    get_response.headers = {"Content-Type": "text/html"}
+    get_response.text = "<meta property='og:image' content='https://example.com/preview.jpg'>"
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return head_response
+        return get_response
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    assert can_embed_url("https://eeinstagram.com/p/DVUqOBgDEor/") is True
+
+
 def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
     from api.index import can_embed_url
 
