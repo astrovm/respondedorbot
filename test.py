@@ -3114,7 +3114,7 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
         def fake_complete(system_message, msgs):
             calls.append(msgs)
             if len(calls) == 1:
-                return '[TOOL] web_search {"query": "test"}'
+                return '[TOOL] fetch_url {"url": "https://example.com"}'
             return "respuesta final"
 
         with patch("api.index.complete_with_providers", side_effect=fake_complete):
@@ -5973,19 +5973,11 @@ def test_parse_tool_call_invalid():
 
 
 def test_execute_tool_web_search():
-    """Test execute_tool with web_search tool"""
+    """web_search is not a direct execute_tool command in chat flow."""
     with patch("api.index.web_search") as mock_search:
-        mock_search.return_value = [
-            {"title": "Test", "url": "https://test.com", "snippet": ""}
-        ]
-
         result = execute_tool("web_search", {"query": "test", "limit": 3})
-
-        import json
-
-        parsed_result = json.loads(result)
-        assert parsed_result["query"] == "test"
-        assert len(parsed_result["results"]) == 1
+        assert result == "herramienta desconocida: web_search"
+        mock_search.assert_not_called()
 
 
 def test_execute_tool_fetch_url():
@@ -6017,7 +6009,26 @@ def test_execute_tool_empty_query():
     """Test execute_tool with empty query"""
     result = execute_tool("web_search", {"query": "", "limit": 3})
 
-    assert result == "query vacío"
+    assert result == "herramienta desconocida: web_search"
+
+
+def test_resolve_tool_calls_web_search_uses_compound_only():
+    from api.index import resolve_tool_calls
+
+    with patch(
+        "api.index.get_groq_compound_response", return_value="respuesta compound"
+    ) as mock_compound, patch("api.index.execute_tool") as mock_tool, patch(
+        "api.index.should_use_groq_compound_tools", return_value=True
+    ):
+        result = resolve_tool_calls(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            '[TOOL] web_search {"query": "test"}',
+        )
+
+    assert result == "respuesta compound"
+    mock_compound.assert_called_once()
+    mock_tool.assert_not_called()
 
 
 def test_execute_tool_unknown():
@@ -6303,7 +6314,8 @@ def test_run_forced_web_search_prefers_compound_tools():
 
     assert result == "compuesto"
     mock_compound.assert_called_once_with(
-        None, [{"role": "user", "content": "algo"}]
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "algo"}],
     )
     mock_tool.assert_not_called()
 
