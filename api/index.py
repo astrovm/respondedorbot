@@ -5855,7 +5855,9 @@ def handle_msg(message: Dict) -> str:
         # Download image if present
         image_base64 = None
         resized_image_data = None
-        if auto_process_media and photo_file_id:
+        if auto_process_media and photo_file_id and not (
+            message_text and message_text.strip().lower().startswith("/transcribe")
+        ):
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
             if image_data:
@@ -6037,6 +6039,12 @@ def handle_msg(message: Dict) -> str:
                     )
                     return f"{random_response}\n\n{credits_message}"
 
+                media_charge_meta: Optional[Dict[str, Any]] = None
+                if resized_image_data and photo_file_id:
+                    media_charge_meta, media_charge_error = _charge_media_usage()
+                    if media_charge_error:
+                        return media_charge_error
+
                 chat_history = get_chat_history(chat_id, redis_client)
                 ai_messages = build_ai_messages(
                     message,
@@ -6079,6 +6087,9 @@ def handle_msg(message: Dict) -> str:
                                 "source": charge_source,
                             },
                         )
+                    _refund_media_charge(
+                        media_charge_meta, "ai_response_failed_after_image_media_charge"
+                    )
                 return response_msg_inner
 
             if not check_rate_limit(chat_id, redis_client):

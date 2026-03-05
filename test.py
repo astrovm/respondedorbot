@@ -2162,6 +2162,101 @@ def test_handle_msg_auto_audio_charges_media_credits():
         mock_send_msg.assert_not_called()
 
 
+def test_handle_msg_image_conversation_charges_media_and_response_credits():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.download_telegram_file", return_value=b"img-bytes"
+    ) as mock_download, patch(
+        "api.index.resize_image_if_needed", return_value=b"img-resized"
+    ), patch(
+        "api.index.encode_image_to_base64", return_value="abc"
+    ), patch(
+        "api.index.should_gordo_respond", return_value=True
+    ), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge, patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.handle_ai_response", return_value="todo piola"
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        message = {
+            "message_id": 22,
+            "chat": {"id": 555, "type": "private"},
+            "from": {"id": 99, "first_name": "Ana", "username": "ana"},
+            "photo": [{"file_id": "img1"}],
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert mock_download.called
+    # 1 crédito por respuesta IA + 1 crédito por media (imagen/sticker)
+    assert mock_charge.call_count == 2
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.download_telegram_file"
+    ) as mock_download, patch(
+        "api.index.handle_transcribe_with_message",
+        return_value="🖼️ Descripción: todo piola",
+    ), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge:
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        message = {
+            "message_id": 23,
+            "chat": {"id": 556, "type": "private"},
+            "from": {"id": 100, "first_name": "Ana", "username": "ana"},
+            "text": "/transcribe",
+            "reply_to_message": {"message_id": 24, "photo": [{"file_id": "img_reply"}]},
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    # /transcribe maneja la imagen dentro de su flujo; no debería predescargar acá
+    mock_download.assert_not_called()
+    # Debe cobrar solo una vez por el comando /transcribe
+    mock_charge.assert_called_once_with(user_id=100, chat_id=None, amount=1)
+    mock_send_msg.assert_called_once()
+
+
 def test_handle_msg_with_unknown_command():
     from api.index import handle_msg
 
