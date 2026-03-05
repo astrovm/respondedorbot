@@ -92,8 +92,7 @@ DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
 GROQ_API_KEY=your_groq_api_key
 COINMARKETCAP_KEY=your_coinmarketcap_key
 
-# AI Credits Billing (Optional, defaults shown)
-AI_BILLING_ENABLED=true
+# AI Credits Billing (always enabled; defaults shown)
 AI_CREDITS_PER_RESPONSE=1
 AI_ONBOARDING_CREDITS=10
 AI_STARS_PACKS_JSON='[{"id":"p100","credits":100,"xtr":50},{"id":"p250","credits":250,"xtr":125},{"id":"p500","credits":500,"xtr":250},{"id":"p1000","credits":1000,"xtr":500},{"id":"p2500","credits":2500,"xtr":1250}]'
