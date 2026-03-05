@@ -99,7 +99,7 @@ def reset_caches(monkeypatch):
 def test_responder_no_args():
     with app.test_request_context("/?"):
         response = responder()
-        assert response == ("No key", 200)
+        assert response == ("falta key", 200)
 
 
 def test_responder_wrong_key():
@@ -108,8 +108,8 @@ def test_responder_wrong_key():
     ) as mock_env, patch("api.index.admin_report") as mock_admin:
         mock_env.return_value = "correct_key"
         response = responder()
-        assert response == ("Wrong key", 400)
-        mock_admin.assert_called_once_with("Wrong key attempt")
+        assert response == ("key incorrecta", 400)
+        mock_admin.assert_called_once_with("intento con key inválida")
 
 
 def test_responder_valid_key_with_webhook_check():
@@ -119,7 +119,7 @@ def test_responder_valid_key_with_webhook_check():
         mock_env.return_value = "valid_key"
         mock_verify.return_value = True
         response = responder()
-        assert response == ("Webhook checked", 200)
+        assert response == ("webhook verificado", 200)
 
 
 def test_responder_valid_key_with_webhook_update():
@@ -132,7 +132,7 @@ def test_responder_valid_key_with_webhook_update():
         }.get(key, default)
         mock_set.return_value = True
         response = responder()
-        assert response == ("Webhook updated", 200)
+        assert response == ("webhook actualizado", 200)
 
 
 def test_responder_valid_key_with_valid_message():
@@ -161,7 +161,7 @@ def test_responder_valid_key_with_valid_message():
         mock_redis.return_value = MagicMock()
         mock_token.return_value = True
         response = responder()
-        assert response == ("Ok", 200)
+        assert response == ("ok", 200)
 
 
 def test_responder_exception_handling():
@@ -176,7 +176,7 @@ def test_responder_exception_handling():
         mock_process.side_effect = Exception("Test error")
 
         response = responder()
-        assert response == ("Critical error", 500)
+        assert response == ("error crítico", 500)
         mock_admin.assert_called_once()
 
 
@@ -1038,7 +1038,7 @@ def test_process_request_parameters():
             mock_verify.return_value = True
             response, status = process_request_parameters(request)
             assert status == 200
-            assert "Webhook checked" in response
+            assert "webhook verificado" in response
 
     with app.test_request_context("/?update_webhook=true"):
         with patch("api.index.set_telegram_webhook") as mock_set, patch(
@@ -1048,7 +1048,7 @@ def test_process_request_parameters():
             mock_env.return_value = "https://example.com/webhook"  # Mock FUNCTION_URL
             response, status = process_request_parameters(request)
             assert status == 200
-            assert "Webhook updated" in response
+            assert "webhook actualizado" in response
 
     with app.test_request_context("/?run_agent=true"):
         with patch("api.index.run_agent_cycle") as mock_run_agent:
@@ -1072,7 +1072,7 @@ def test_process_request_parameters_handles_pre_checkout_query():
             response, status = process_request_parameters(request)
 
     assert status == 200
-    assert response == "Ok"
+    assert response == "ok"
     mock_handle.assert_called_once_with({"id": "pcq_1"})
 
 
@@ -2100,7 +2100,7 @@ def test_handle_msg_with_exception():
         }
 
         result = handle_msg(message)
-        assert result == "Error processing message"
+        assert result == "error procesando mensaje"
         mock_admin_report.assert_called_once()
 
 
@@ -2276,7 +2276,7 @@ def test_handle_msg_edge_cases():
         message = {"message_id": "123"}  # Missing chat and from fields
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "Error processing message"
+        assert result == "error procesando mensaje"
         mock_admin_report.assert_called_once()  # Should report error to admin
 
         # Test message with None values
@@ -2289,7 +2289,7 @@ def test_handle_msg_edge_cases():
         }
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "Error processing message"
+        assert result == "error procesando mensaje"
         mock_admin_report.assert_called_once()
 
         # Test message with missing message_id
@@ -2297,7 +2297,7 @@ def test_handle_msg_edge_cases():
         message = {"chat": {"id": "456"}, "from": {"first_name": "John"}}
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "Error processing message"
+        assert result == "error procesando mensaje"
         mock_admin_report.assert_called_once()
 
 
@@ -3356,7 +3356,7 @@ def test_get_devo_invalid_input():
     from api.index import get_devo
 
     result = get_devo("invalid")
-    assert "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]" in result
+    assert "uso: /devo <fee_porcentaje>[, <monto_compra>]" in result
 
 
 def test_satoshi_basic():
@@ -3561,7 +3561,7 @@ def test_send_msg_with_buttons():
                 "text": "hello",
                 "reply_markup": {
                     "inline_keyboard": [
-                        [{"text": "Open in app", "url": "https://twitter.com/foo"}]
+                        [{"text": "abrir en la app", "url": "https://twitter.com/foo"}]
                     ]
                 },
             },
@@ -4250,7 +4250,7 @@ def test_handle_transcribe_with_message_exception():
     message = cast(Dict[str, Any], None)
 
     result = handle_transcribe_with_message(message)
-    assert result == "Error procesando el comando, intentá más tarde"
+    assert result == "error procesando el comando, intentá más tarde"
 
 
 def test_handle_transcribe():
@@ -4523,7 +4523,7 @@ def test_handle_bcra_variables_exception():
         mock_get.side_effect = Exception("Cache error")
 
         result = handle_bcra_variables()
-        assert result == "Error al obtener las variables del BCRA"
+        assert result == "error al obtener las variables del BCRA"
 
 
 def test_calculate_tcrm_100_success():
@@ -6531,14 +6531,14 @@ def test_build_config_text_and_keyboard_reflect_values():
 
     text = build_config_text(config)
     assert "Gordo config:" in text
-    assert "Link fixer: Delete original message" in text
-    assert "Random IA replies: ▫️ disabled" in text
-    assert "Follow-ups for non-IA commands: ▫️ disabled" in text
-    assert "Use the buttons below" in text
+    assert "Arregla-links: borrar mensaje original" in text
+    assert "Respuestas random de IA: ▫️ desactivadas" in text
+    assert "Seguimientos para comandos no-IA: ▫️ desactivados" in text
+    assert "tocá los botones de abajo para cambiar la config" in text
 
     keyboard = build_config_keyboard(config)
     assert keyboard["inline_keyboard"][0][1]["text"].startswith(
-        "✅ Delete original message"
+        "✅ borrar mensaje original"
     )
     assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
 
@@ -6745,7 +6745,7 @@ def test_handle_msg_link_reply():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "check https://fxtwitter.com/foo/status/1\n\nShared by @john"
+        expected = "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john"
         mock_send.assert_called_once_with(
             "123", expected, "1", ["https://twitter.com/foo/status/1"]
         )
@@ -6792,7 +6792,7 @@ def test_handle_msg_link_reply_instagram():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "mirá https://kkinstagram.com/qux\n\nShared by @lu"
+        expected = "mirá https://kkinstagram.com/qux\n\ncompartido por @lu"
         mock_send.assert_called_once_with(
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
@@ -6839,7 +6839,7 @@ def test_handle_msg_link_delete():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "look https://fixupx.com/bar/status/1\n\nShared by @ana"
+        expected = "look https://fixupx.com/bar/status/1\n\ncompartido por @ana"
         mock_delete.assert_called_once_with("456", "2")
         mock_send.assert_called_once_with(
             "456", expected, buttons=["https://x.com/bar/status/1"]
@@ -7320,7 +7320,7 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         assert result == "ok"
         mock_send.assert_called_once_with(
             "222",
-            "https://fixupx.com/foo/status/1\n\nShared by @user",
+            "https://fixupx.com/foo/status/1\n\ncompartido por @user",
             "1",
             ["https://x.com/foo/status/1"],
         )
@@ -7370,7 +7370,7 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         mock_delete.assert_called_once_with("333", "11")
         mock_send.assert_called_once_with(
             "333",
-            "https://fixupx.com/foo/status/1\n\nShared by @user",
+            "https://fixupx.com/foo/status/1\n\ncompartido por @user",
             "2",
             ["https://x.com/foo/status/1"],
         )

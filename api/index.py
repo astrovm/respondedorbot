@@ -1208,7 +1208,7 @@ def get_prices(msg_text: str) -> Optional[str]:
         prices = get_api_or_cache_prices(convert_to_parameter)
 
         if not prices or "data" not in prices:
-            return "Error getting crypto prices"
+            return "no pude traer precios de crypto boludo"
 
         requested_asset = None
         normalized_source = source_symbol.replace(" ", "")
@@ -1223,7 +1223,7 @@ def get_prices(msg_text: str) -> Optional[str]:
             source_parameter = "BTC" if source_symbol == "SATS" else source_symbol
             reverse_prices = get_api_or_cache_prices(source_parameter)
             if not reverse_prices or "data" not in reverse_prices:
-                return "Error getting crypto prices"
+                return "no pude traer precios de crypto boludo"
 
             requested_target_asset = None
             normalized_target = convert_to.replace(" ", "")
@@ -1342,7 +1342,7 @@ def get_prices(msg_text: str) -> Optional[str]:
             )
 
         if not prices or "data" not in prices:
-            return "Error getting crypto prices"
+            return "no pude traer precios de crypto boludo"
 
         for coin in prices["data"]:
             symbol = coin["symbol"].upper().replace(" ", "")
@@ -1370,7 +1370,7 @@ def get_prices(msg_text: str) -> Optional[str]:
     # generate the message to answer the user
     msg = ""
     if not prices or "data" not in prices:
-        return "Error getting crypto prices"
+        return "no pude traer precios de crypto boludo"
 
     for coin in prices["data"][:prices_number]:
         if convert_to == "SATS":
@@ -1534,12 +1534,12 @@ def get_devo(msg_text: str) -> str:
             fee = float(msg_text) / 100
 
         if fee != fee or fee > 1 or compra != compra or compra < 0:
-            return "Invalid input. Fee should be between 0 and 100, and purchase amount should be a positive number."
+            return "mandá bien los datos capo: fee entre 0 y 100, y monto de compra positivo"
 
         dollars = _fetch_criptoya_dollar_data()
 
         if not dollars or "data" not in dollars:
-            return "Error getting dollar rates"
+            return "no pude traer cotizaciones del dólar boludo"
 
         usdt_ask = float(dollars["data"]["cripto"]["usdt"]["ask"])
         usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
@@ -1549,12 +1549,12 @@ def get_devo(msg_text: str) -> str:
 
         profit = -(fee * usdt + oficial - usdt) / tarjeta
 
-        msg = f"""Profit: {fmt_num(profit * 100, 2)}%
+        msg = f"""ganancia: {fmt_num(profit * 100, 2)}%
 
-Fee: {fmt_num(fee * 100, 2)}%
-Oficial: {fmt_num(oficial, 2)}
-USDT: {fmt_num(usdt, 2)}
-Tarjeta: {fmt_num(tarjeta, 2)}"""
+comisión: {fmt_num(fee * 100, 2)}%
+oficial: {fmt_num(oficial, 2)}
+usdt: {fmt_num(usdt, 2)}
+tarjeta: {fmt_num(tarjeta, 2)}"""
 
         if compra > 0:
             compra_ars = compra * tarjeta
@@ -1569,7 +1569,7 @@ Total: {fmt_num(compra_ars + ganancia_ars, 2)} ARS / {fmt_num(compra_usdt + gana
 
         return msg
     except ValueError:
-        return "Invalid input. Usage: /devo <fee_percentage>[, <purchase_amount>]"
+        return "uso: /devo <fee_porcentaje>[, <monto_compra>]"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -1604,7 +1604,7 @@ def _format_spread_line(
     lines = [
         f"- {label}",
         f"  • Precio venta: {_format_local_currency(sell_price)} ARS/USD",
-        f"  • Spread vs oficial: {_format_local_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
+        f"  • Diferencia vs oficial: {_format_local_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
     ]
     lines.extend(f"  • {detail}" for detail in details)
     return "\n".join(lines)
@@ -1620,7 +1620,7 @@ def get_rulo() -> str:
     dollars = _fetch_criptoya_dollar_data()
 
     if not dollars or "data" not in dollars:
-        return "Error consiguiendo cotizaciones del dólar"
+        return "error consiguiendo cotizaciones del dólar"
 
     data = dollars["data"]
     oficial_price = _safe_float(data.get("oficial", {}).get("price"))
@@ -1749,9 +1749,9 @@ def satoshi() -> str:
         btc_price_ars = get_btc_price("ARS")
 
         if btc_price_usd is None:
-            return "Error getting BTC USD price"
+            return "no pude traer el precio de btc en usd"
         if btc_price_ars is None:
-            return "Error getting BTC ARS price"
+            return "no pude traer el precio de btc en ars"
 
         # Calculate satoshi value (1 BTC = 100,000,000 sats)
         sat_value_usd = btc_price_usd / 100_000_000
@@ -1784,7 +1784,7 @@ def handle_bcra_variables() -> str:
 
     except Exception as e:
         print(f"Error handling BCRA variables: {e}")
-        return "Error al obtener las variables del BCRA"
+        return "error al obtener las variables del BCRA"
 
 
 _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
@@ -1928,7 +1928,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
 
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
-        return "Error procesando el comando, intentá más tarde"
+        return "error procesando el comando, intentá más tarde"
 
 
 def handle_transcribe() -> str:
@@ -1947,7 +1947,7 @@ def powerlaw() -> str:
 
     price = get_btc_price("USD")
     if price is None:
-        return "Error getting BTC price for power law calculation"
+        return "no pude traer el precio de btc para calcular power law"
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
@@ -1967,7 +1967,7 @@ def rainbow() -> str:
 
     price = get_btc_price("USD")
     if price is None:
-        return "Error getting BTC price for rainbow calculation"
+        return "no pude traer el precio de btc para calcular rainbow"
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
@@ -2284,7 +2284,7 @@ def send_msg(
 
     markup = reply_markup
     if markup is None and buttons:
-        keyboard = [[{"text": "Open in app", "url": url}] for url in buttons]
+        keyboard = [[{"text": "abrir en la app", "url": url}] for url in buttons]
         markup = {"inline_keyboard": keyboard}
 
     if markup is not None:
@@ -2326,21 +2326,21 @@ def admin_report(
     instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
 
     # Basic error message
-    formatted_message = f"Admin report from {instance_name}: {message}"
+    formatted_message = f"reporte admin desde {instance_name}: {message}"
 
     # Add extra context if provided
     if extra_context:
-        context_details = "\n\nAdditional Context:"
+        context_details = "\n\ncontexto adicional:"
         for key, value in extra_context.items():
             context_details += f"\n{key}: {value}"
         formatted_message += context_details
 
     # Add error details if provided
     if error:
-        error_details = f"\n\nError Type: {type(error).__name__}"
-        error_details += f"\nError Message: {str(error)}"
+        error_details = f"\n\ntipo de error: {type(error).__name__}"
+        error_details += f"\nmensaje de error: {str(error)}"
 
-        error_details += f"\n\nTraceback:\n{traceback.format_exc()}"
+        error_details += f"\n\ntraceback:\n{traceback.format_exc()}"
 
         formatted_message += error_details
 
@@ -4525,7 +4525,7 @@ def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
     try:
         credits_db_service.grant_onboarding_if_needed(user_id, onboarding_credits)
     except Exception as error:
-        admin_report("Failed to grant onboarding credits", error, {"user_id": user_id})
+        admin_report("falló la acreditación de onboarding", error, {"user_id": user_id})
 
 
 def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
@@ -5181,20 +5181,20 @@ def build_config_text(config: Mapping[str, Any]) -> str:
     )
 
     link_labels = {
-        "delete": "Delete original message",
-        "reply": "Reply to original message",
-        "off": "Off",
+        "delete": "borrar mensaje original",
+        "reply": "responder al mensaje original",
+        "off": "apagado",
     }
 
     lines = [
         "Gordo config:",
         "",
-        f"Link fixer: {link_labels.get(link_mode, link_mode)}",
-        f"Random IA replies: {'✅ enabled' if random_enabled else '▫️ disabled'}",
-        "Follow-ups for non-IA commands: "
-        f"{'✅ enabled' if followups_enabled else '▫️ disabled'}",
+        f"Arregla-links: {link_labels.get(link_mode, link_mode)}",
+        f"Respuestas random de IA: {'✅ activadas' if random_enabled else '▫️ desactivadas'}",
+        "Seguimientos para comandos no-IA: "
+        f"{'✅ activados' if followups_enabled else '▫️ desactivados'}",
         "",
-        "Use the buttons below to change the settings.",
+        "tocá los botones de abajo para cambiar la config",
     ]
     return "\n".join(lines)
 
@@ -5209,21 +5209,21 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     keyboard = [
         [
             _build_config_choice_button(
-                "Reply to original message", "reply", link_mode, action="link"
+                "responder al mensaje original", "reply", link_mode, action="link"
             ),
             _build_config_choice_button(
-                "Delete original message", "delete", link_mode, action="link"
+                "borrar mensaje original", "delete", link_mode, action="link"
             ),
-            _build_config_choice_button("Off", "off", link_mode, action="link"),
+            _build_config_choice_button("apagado", "off", link_mode, action="link"),
         ],
         [
             _build_config_toggle_button(
-                "Random IA replies", random_enabled, action="random"
+                "respuestas random de IA", random_enabled, action="random"
             ),
         ],
         [
             _build_config_toggle_button(
-                "Follow-ups for non-IA commands",
+                "seguimientos para comandos no-IA",
                 followups_enabled,
                 action="followups",
             ),
@@ -5253,7 +5253,7 @@ def ensure_callback_updates_enabled() -> None:
     webhook_info = get_telegram_webhook_info(token)
     if webhook_info.get("error"):
         _WEBHOOK_CALLBACKS_CHECKED = True
-        admin_report("Failed to fetch webhook info for callbacks")
+        admin_report("falló la lectura del webhook para callbacks")
         return
 
     allowed_updates = webhook_info.get("allowed_updates")
@@ -5272,7 +5272,7 @@ def ensure_callback_updates_enabled() -> None:
     if current_url and current_url != expected_url:
         _WEBHOOK_CALLBACKS_CHECKED = True
         _log_config_event(
-            "Webhook points to different URL; skipping callback update",
+            "el webhook apunta a otra url; salteo update de callbacks",
             {"current_url": current_url},
         )
         return
@@ -5286,7 +5286,7 @@ def ensure_callback_updates_enabled() -> None:
         _WEBHOOK_CALLBACKS_CHECKED = True
     else:
         _WEBHOOK_CALLBACKS_CHECKED = True
-        admin_report("Failed to update webhook for callbacks and pre-checkout")
+        admin_report("falló update del webhook para callbacks y pre-checkout")
 
 
 def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
@@ -5486,7 +5486,7 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         )
     except Exception as error:
         admin_report(
-            "Failed to persist successful payment",
+            "falló persistencia de pago exitoso",
             error,
             {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
         )
@@ -5802,7 +5802,7 @@ def handle_msg(message: Dict) -> str:
                     shared_by = " ".join(name_parts)
 
                 if shared_by:
-                    fixed_text += f"\n\nShared by {shared_by}"
+                    fixed_text += f"\n\ncompartido por {shared_by}"
                 reply_id = message.get("reply_to_message", {}).get("message_id")
                 if reply_id is not None:
                     reply_id = str(reply_id)
@@ -5986,7 +5986,7 @@ def handle_msg(message: Dict) -> str:
                         )
                     except Exception as refund_error:
                         admin_report(
-                            "Failed to refund AI credits",
+                            "falló el reintegro de créditos IA",
                             refund_error,
                             {
                                 "chat_id": chat_id,
@@ -6170,7 +6170,7 @@ def handle_msg(message: Dict) -> str:
         error_msg = f"Message handling error: {str(e)}"
         print(error_msg)
         admin_report(error_msg, e, error_context)
-        return "Error processing message"
+        return "error procesando mensaje"
 
 
 def handle_rate_limit(chat_id: str, message: Dict) -> str:
@@ -6421,14 +6421,14 @@ def _arg_is_true(args: Mapping[str, Any], key: str) -> bool:
 def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
     if _arg_is_true(args, "check_webhook"):
         webhook_verified = verify_webhook()
-        return ("Webhook checked", 200) if webhook_verified else ("Webhook check error", 400)
+        return ("webhook verificado", 200) if webhook_verified else ("error verificando webhook", 400)
 
     if _arg_is_true(args, "update_webhook"):
         function_url = environ.get("FUNCTION_URL")
         if not function_url:
-            return "Webhook update error", 400
+            return "error actualizando webhook", 400
         updated = set_telegram_webhook(function_url)
-        return ("Webhook updated", 200) if updated else ("Webhook update error", 400)
+        return ("webhook actualizado", 200) if updated else ("error actualizando webhook", 400)
 
     return None
 
@@ -6436,7 +6436,7 @@ def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
 def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
     if _arg_is_true(args, "update_dollars"):
         get_dollar_rates()
-        return "Dollars updated", 200
+        return "dólares actualizados", 200
 
     if _arg_is_true(args, "run_agent"):
         try:
@@ -6444,8 +6444,8 @@ def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
             payload = json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False)
             return payload, 200
         except Exception as agent_error:
-            admin_report("Agent run failed", agent_error)
-            return "Agent run failed", 500
+            admin_report("falló ejecución del agente", agent_error)
+            return "falló la ejecución del agente", 500
 
     return None
 
@@ -6464,28 +6464,28 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
 
         # Validate secret token
         if not is_secret_token_valid(request):
-            admin_report("Wrong secret token")
-            return "Wrong secret token", 400
+            admin_report("token secreto inválido")
+            return "token secreto inválido", 400
 
         # Process message
         request_json = request.get_json(silent=True)
         if not request_json:
-            return "Invalid JSON", 400
+            return "json inválido", 400
         callback_query = request_json.get("callback_query")
         if callback_query:
             handle_callback_query(callback_query)
-            return "Ok", 200
+            return "ok", 200
         pre_checkout_query = request_json.get("pre_checkout_query")
         if pre_checkout_query:
             handle_pre_checkout_query(cast(Dict[str, Any], pre_checkout_query))
-            return "Ok", 200
+            return "ok", 200
 
         message = request_json.get("message")
         if not message:
-            return "No message", 200
+            return "sin mensaje", 200
 
         handle_msg(message)
-        return "Ok", 200
+        return "ok", 200
 
     except Exception as e:
         error_context = {
@@ -6497,7 +6497,7 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         error_msg = f"Request processing error: {str(e)}"
         print(error_msg)
         admin_report(error_msg, e, error_context)
-        return "Error processing request", 500
+        return "error procesando request", 500
 
 
 app = Flask(__name__)
@@ -6508,11 +6508,11 @@ def responder() -> Tuple[str, int]:
     try:
         webhook_key = request.args.get("key")
         if not webhook_key:
-            return "No key", 200
+            return "falta key", 200
 
         if webhook_key != environ.get("WEBHOOK_AUTH_KEY"):
-            admin_report("Wrong key attempt")
-            return "Wrong key", 400
+            admin_report("intento con key inválida")
+            return "key incorrecta", 400
 
         response_message, status_code = process_request_parameters(request)
         return response_message, status_code
@@ -6523,7 +6523,7 @@ def responder() -> Tuple[str, int]:
             "request_path": request.path,
         }
 
-        error_msg = "Critical error in responder"
+        error_msg = "error crítico en responder"
         print(error_msg)
         admin_report(error_msg, e, error_context)
-        return "Critical error", 500
+        return "error crítico", 500
