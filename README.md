@@ -48,9 +48,7 @@ This bot is configured entirely through environment variables, making it easy to
 ### Web Search and Tools
 
 - `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
-- In AI conversations, the bot may decide to use the `web_search` tool when it needs current data. The model will request the tool by writing a line such as:
-  `[TOOL] web_search {"query": "argentina inflation today"}`
-  and will then respond using the results.
+- In AI conversations, the bot may do a web lookup on its own when it needs up-to-date information.
 - It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses or when operating as an autonomous agent.
 
 ## Testing
