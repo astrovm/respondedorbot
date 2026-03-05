@@ -74,6 +74,7 @@ from api.config import (
     load_bot_config as _config_load_bot_config,
 )
 from api.services import bcra as bcra_service
+from api.services import chat_config_db as chat_config_db_service
 from api.services import credits_db as credits_db_service
 from api.agent import (
     AGENT_EMPTY_RESPONSE_FALLBACK,
@@ -5113,53 +5114,103 @@ def _is_group_chat_type(chat_type: Optional[str]) -> bool:
     return str(chat_type) in {"group", "supergroup"}
 
 
+def _load_chat_config_from_redis(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
+    config = dict(CHAT_CONFIG_DEFAULTS)
+    raw_value = redis_client.get(_chat_config_key(chat_id))
+    raw_value_text = _decode_redis_value(raw_value)
+    deserializable_value = raw_value_text
+    _log_config_event(
+        "Chat config raw value fetched",
+        {
+            "chat_id": chat_id,
+            "raw_value": raw_value_text,
+        },
+    )
+    if deserializable_value:
+        try:
+            loaded = json.loads(deserializable_value)
+            if isinstance(loaded, dict):
+                for key, value in loaded.items():
+                    if key in config:
+                        config[key] = value
+        except json.JSONDecodeError:
+            pass
+    else:
+        legacy_key = _legacy_link_mode_key(chat_id)
+        legacy_value = redis_client.get(legacy_key)
+        legacy_value_text = _decode_redis_value(legacy_value)
+        if legacy_value_text:
+            _log_config_event(
+                "Using legacy link mode config",
+                {
+                    "chat_id": chat_id,
+                    "legacy_value": legacy_value_text,
+                },
+            )
+            config["link_mode"] = legacy_value_text
+        else:
+            _log_config_event(
+                "No stored chat config found; using defaults",
+                {"chat_id": chat_id},
+            )
+
+    return config
+
+
+def _persist_chat_config_to_redis(
+    redis_client: redis.Redis,
+    chat_id: str,
+    config: Mapping[str, Any],
+) -> None:
+    redis_client.set(_chat_config_key(chat_id), json.dumps(dict(config)))
+    link_mode = str(config.get("link_mode", "off"))
+    legacy_key = _legacy_link_mode_key(chat_id)
+    if link_mode in {"reply", "delete"}:
+        redis_client.set(legacy_key, link_mode)
+        _log_config_event(
+            "Persisted legacy link mode",
+            {"chat_id": chat_id, "link_mode": link_mode},
+        )
+    else:
+        redis_client.delete(legacy_key)
+        _log_config_event("Cleared legacy link mode", {"chat_id": chat_id})
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     config = dict(CHAT_CONFIG_DEFAULTS)
     try:
         _log_config_event("Loading chat config", {"chat_id": chat_id})
-        raw_value = redis_client.get(_chat_config_key(chat_id))
-        raw_value_text = _decode_redis_value(raw_value)
-        deserializable_value = raw_value_text
-        _log_config_event(
-            "Chat config raw value fetched",
-            {
-                "chat_id": chat_id,
-                "raw_value": raw_value_text,
-            },
-        )
-        if deserializable_value:
+        if chat_config_db_service.is_configured():
+            pg_config = chat_config_db_service.get_chat_config(
+                chat_id, CHAT_CONFIG_DEFAULTS
+            )
+            if isinstance(pg_config, dict):
+                return pg_config
+
+            redis_config = _load_chat_config_from_redis(redis_client, chat_id)
             try:
-                loaded = json.loads(deserializable_value)
-                if isinstance(loaded, dict):
-                    for key, value in loaded.items():
-                        if key in config:
-                            config[key] = value
-            except json.JSONDecodeError:
-                pass
-        else:
-            legacy_key = _legacy_link_mode_key(chat_id)
-            legacy_value = redis_client.get(legacy_key)
-            legacy_value_text = _decode_redis_value(legacy_value)
-            if legacy_value_text:
+                chat_config_db_service.set_chat_config(chat_id, redis_config)
+            except Exception as persist_error:
                 _log_config_event(
-                    "Using legacy link mode config",
-                    {
-                        "chat_id": chat_id,
-                        "legacy_value": legacy_value_text,
-                    },
+                    "Error migrating chat config from Redis to Postgres",
+                    {"chat_id": chat_id, "error": str(persist_error)},
                 )
-                config["link_mode"] = legacy_value_text
-            else:
-                _log_config_event(
-                    "No stored chat config found; using defaults",
-                    {"chat_id": chat_id},
-                )
+            return redis_config
+
+        return _load_chat_config_from_redis(redis_client, chat_id)
     except Exception as error:
-        admin_report(
+        _log_config_event(
             "Error loading chat config",
-            error,
-            {"chat_id": chat_id},
+            {"chat_id": chat_id, "error": str(error)},
         )
+        try:
+            return _load_chat_config_from_redis(redis_client, chat_id)
+        except Exception as redis_error:
+            admin_report(
+                "Error loading chat config",
+                redis_error,
+                {"chat_id": chat_id},
+            )
     return config
 
 
@@ -5176,18 +5227,9 @@ def set_chat_config(
             "Saving chat config",
             {"chat_id": chat_id, "updates": updates, "config": config},
         )
-        redis_client.set(_chat_config_key(chat_id), json.dumps(config))
-        link_mode = config.get("link_mode", "off")
-        legacy_key = _legacy_link_mode_key(chat_id)
-        if link_mode in {"reply", "delete"}:
-            redis_client.set(legacy_key, link_mode)
-            _log_config_event(
-                "Persisted legacy link mode",
-                {"chat_id": chat_id, "link_mode": link_mode},
-            )
-        else:
-            redis_client.delete(legacy_key)
-            _log_config_event("Cleared legacy link mode", {"chat_id": chat_id})
+        if chat_config_db_service.is_configured():
+            chat_config_db_service.set_chat_config(chat_id, config)
+        _persist_chat_config_to_redis(redis_client, chat_id, config)
     except Exception as error:
         admin_report(
             "Error saving chat config",
