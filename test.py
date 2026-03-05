@@ -1181,6 +1181,29 @@ def test_handle_msg_balance_private_uses_personal_balance():
 
     assert result == "ok"
     assert "42" in mock_send_msg.call_args[0][1]
+    assert "/topup" in mock_send_msg.call_args[0][1]
+
+
+def test_format_balance_command_private_includes_topup_hint():
+    from api.index import _format_balance_command
+
+    with patch("api.index._fetch_balance", return_value=42):
+        text = _format_balance_command("private", 1, 2)
+
+    assert "tu saldo personal de IA es: 42" in text
+    assert "para cargar créditos: /topup" in text
+
+
+def test_format_balance_command_group_includes_topup_and_transfer_hints():
+    from api.index import _format_balance_command
+
+    with patch("api.index._fetch_balance", side_effect=[30, 120]):
+        text = _format_balance_command("group", 1, 2)
+
+    assert "tu saldo personal: 30" in text
+    assert "saldo del grupo: 120" in text
+    assert "/topup" in text
+    assert "/transfer <monto>" in text
 
 
 def test_handle_msg_transfer_group_moves_credits():
