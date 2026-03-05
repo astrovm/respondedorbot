@@ -142,6 +142,7 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
 )
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
+AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 
 
 # Polymarket constants
@@ -2771,7 +2772,7 @@ def ask_ai(
             return initial or get_fallback_response(messages)
 
         # Final fallback to random response if all AI providers fail
-        return get_fallback_response(messages)
+        return _mark_ai_fallback_response(get_fallback_response(messages))
 
     except Exception as e:
         error_context = {
@@ -2779,7 +2780,7 @@ def ask_ai(
             "messages_preview": [msg.get("content", "")[:100] for msg in messages],
         }
         admin_report("Error in ask_ai", e, error_context)
-        return get_fallback_response(messages)
+        return _mark_ai_fallback_response(get_fallback_response(messages))
 
 
 def complete_with_providers(
@@ -3741,6 +3742,18 @@ def get_fallback_response(messages: List[Dict]) -> str:
         if "Usuario: " in last_message:
             first_name = last_message.split("Usuario: ")[1].split(" ")[0]
     return gen_random(first_name)
+
+
+def _mark_ai_fallback_response(text: str) -> str:
+    """Attach a private marker so billing logic can detect fallback responses."""
+    return f"{AI_FALLBACK_MARKER}{text}"
+
+
+def _strip_ai_fallback_marker(text: str) -> Tuple[str, bool]:
+    """Remove internal fallback marker and return (clean_text, was_marked)."""
+    if text.startswith(AI_FALLBACK_MARKER):
+        return text[len(AI_FALLBACK_MARKER) :].lstrip(), True
+    return text, False
 
 
 def clean_crypto_data(cryptos: List[Dict]) -> List[Dict]:
@@ -5943,6 +5956,7 @@ def handle_msg(message: Dict) -> str:
                     prompt_text,
                     reply_context_text,
                 )
+                ai_response_meta: Dict[str, Any] = {}
                 response_msg_inner = handle_ai_response(
                     chat_id,
                     handler_func,
@@ -5951,13 +5965,14 @@ def handle_msg(message: Dict) -> str:
                     image_file_id=photo_file_id or None,
                     context_texts=[reply_context_text],
                     user_identity=user_identity,
+                    response_meta=ai_response_meta,
                 )
                 response_uses_ai = True
 
                 if response_msg_inner in {
                     "error de IA, intentá de nuevo en un rato",
                     "no pude generar respuesta, intentá de nuevo",
-                }:
+                } or bool(ai_response_meta.get("ai_fallback")):
                     charge_source = str(charge_result.get("source") or "user")
                     try:
                         credits_db_service.refund_ai_charge(
@@ -6271,6 +6286,7 @@ def handle_ai_response(
     image_file_id: Optional[str] = None,
     context_texts: Optional[Sequence[Optional[str]]] = None,
     user_identity: Optional[str] = None,
+    response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Handle AI API responses"""
     token = environ.get("TELEGRAM_TOKEN")
@@ -6294,8 +6310,13 @@ def handle_ai_response(
         )
         response = handler_func(messages)
 
+    response_text = str(response or "")
+    response_text, used_ai_fallback = _strip_ai_fallback_marker(response_text)
+    if response_meta is not None:
+        response_meta["ai_fallback"] = used_ai_fallback
+
     # Remove any internal tool call lines before further processing
-    sanitized_response = sanitize_tool_artifacts(response)
+    sanitized_response = sanitize_tool_artifacts(response_text)
 
     # Strip persona prefixes that sometimes leak into completions
     persona_stripped_response = remove_gordo_prefix(sanitized_response)
