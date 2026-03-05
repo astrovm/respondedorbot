@@ -2235,14 +2235,44 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits():
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_charges_extra_compound_calls():
+def test_handle_msg_search_command_does_not_charge():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.credits_db_service.charge_ai_credits"
+    ) as mock_charge, patch(
+        "api.index.search_command", return_value="resultado web"
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        message = {
+            "message_id": 99,
+            "chat": {"id": 555, "type": "private"},
+            "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+            "text": "/buscar btc news",
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_charge.assert_not_called()
+    mock_send_msg.assert_called_once()
+    assert mock_send_msg.call_args[0][1] == "resultado web"
+
+
+def test_handle_msg_ai_flow_charges_each_provider_request():
     from api.index import handle_msg
 
     def fake_handle_ai_response(*args, **kwargs):
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
-            response_meta["extra_compound_calls"] = 2
-        return "respuesta con compound"
+            response_meta["provider_request_count"] = 2
+        return "respuesta ok"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
@@ -2268,18 +2298,18 @@ def test_handle_msg_charges_extra_compound_calls():
         mock_config_redis.return_value = redis_client
 
         message = {
-            "message_id": 99,
+            "message_id": 199,
             "chat": {"id": 555, "type": "private"},
-            "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+            "from": {"id": 2001, "first_name": "Ana", "username": "ana"},
             "text": "/ask hola",
         }
 
         result = handle_msg(message)
 
     assert result == "ok"
-    # 1 cobro base del reply + 2 cobros extra por compound adicional
-    assert mock_charge.call_count == 3
-    assert mock_send_msg.call_args[0][1] == "respuesta con compound"
+    # 1 cobro base + 1 cobro extra por segundo request real al proveedor IA
+    assert mock_charge.call_count == 2
+    assert mock_send_msg.call_args[0][1] == "respuesta ok"
 
 
 def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge():
