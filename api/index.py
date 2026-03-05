@@ -2130,9 +2130,9 @@ comandos disponibles boludo:
 
 - /config: cambiá la config del gordo, link fixer y demases
 
-- /topup: recargá créditos AI con Telegram Stars ⭐ (en privado)
+- /topup: recargá créditos IA con Telegram Stars ⭐ (en privado)
 
-- /balance: te muestro saldo AI (en grupo: personal + grupo)
+- /balance: te muestro saldo IA (en grupo: personal + grupo)
 
 - /transfer 100: pasás 100 créditos de tu saldo personal al grupo
 
@@ -4484,17 +4484,17 @@ def build_insufficient_credits_message(
 
     if _is_group_chat_type(chat_type):
         return (
-            "sin créditos para AI en este grupo, che.\n"
+            "sin créditos para IA en este grupo, che.\n"
             f"- Tu saldo: {user_balance}\n"
             f"- Saldo del grupo: {chat_balance}\n"
-            "recargá con /topup (por privado) y pasá al grupo con /transfer <monto>.\n"
+            "agregá créditos con /topup (por privado) y si querés pasá al grupo con /transfer <monto>.\n"
             "podés ver todo con /balance"
         )
 
     return (
-        "te quedaste sin créditos AI.\n"
+        "te quedaste sin créditos IA.\n"
         f"saldo actual: {user_balance}\n"
-        "mandá /topup para recargar con Stars ⭐"
+        "agregá créditos con /topup para recargar con Stars ⭐"
     )
 
 
@@ -4537,13 +4537,13 @@ def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
     if _is_group_chat_type(chat_type):
         chat_balance = _fetch_balance("chat", chat_id)
         return (
-            "saldos AI:\n"
+            "saldos IA:\n"
             f"- tu saldo personal: {user_balance}\n"
             f"- saldo del grupo: {chat_balance}\n"
             "en grupos siempre se usa primero tu saldo personal y después el del grupo."
         )
 
-    return f"tu saldo personal de AI es: {user_balance}"
+    return f"tu saldo personal de IA es: {user_balance}"
 
 
 def _send_stars_invoice(
@@ -4555,12 +4555,12 @@ def _send_stars_invoice(
     payload = f"topup:{pack['id']}:{user_id}"
     request_payload: Dict[str, Any] = {
         "chat_id": chat_id,
-        "title": f"Pack AI {pack['credits']} créditos",
-        "description": f"Recarga de {pack['credits']} créditos para mensajes AI",
+        "title": f"Pack IA {pack['credits']} créditos",
+        "description": f"Recarga de {pack['credits']} créditos para mensajes IA",
         "payload": payload,
         "provider_token": "",
         "currency": "XTR",
-        "prices": [{"label": f"{pack['credits']} créditos AI", "amount": pack["xtr"]}],
+        "prices": [{"label": f"{pack['credits']} créditos IA", "amount": pack["xtr"]}],
     }
     payload_response, error = _telegram_request(
         "sendInvoice",
@@ -5190,8 +5190,8 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         "Gordo config:",
         "",
         f"Link fixer: {link_labels.get(link_mode, link_mode)}",
-        f"Random AI replies: {'✅ enabled' if random_enabled else '▫️ disabled'}",
-        "Follow-ups for non-AI commands: "
+        f"Random IA replies: {'✅ enabled' if random_enabled else '▫️ disabled'}",
+        "Follow-ups for non-IA commands: "
         f"{'✅ enabled' if followups_enabled else '▫️ disabled'}",
         "",
         "Use the buttons below to change the settings.",
@@ -5218,12 +5218,12 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
         ],
         [
             _build_config_toggle_button(
-                "Random AI replies", random_enabled, action="random"
+                "Random IA replies", random_enabled, action="random"
             ),
         ],
         [
             _build_config_toggle_button(
-                "Follow-ups for non-AI commands",
+                "Follow-ups for non-IA commands",
                 followups_enabled,
                 action="followups",
             ),
@@ -5940,14 +5940,17 @@ def handle_msg(message: Dict) -> str:
                         error,
                         {"chat_id": chat_id, "user_id": user_id},
                     )
-                    return "error cobrando créditos AI, intentá de nuevo."
+                    return "error cobrando créditos IA, intentá de nuevo."
 
                 if not charge_result.get("ok"):
-                    return build_insufficient_credits_message(
+                    random_name = str(message.get("from", {}).get("first_name") or "boludo")
+                    random_response = gen_random(random_name)
+                    credits_message = build_insufficient_credits_message(
                         chat_type=chat_type,
                         user_balance=int(charge_result.get("user_balance", 0)),
                         chat_balance=int(charge_result.get("chat_balance", 0)),
                     )
+                    return f"{random_response}\n\n{credits_message}"
 
                 chat_history = get_chat_history(chat_id, redis_client)
                 ai_messages = build_ai_messages(
@@ -6021,7 +6024,7 @@ def handle_msg(message: Dict) -> str:
         elif command == "/topup":
             response_command = command
             if not is_ai_billing_enabled():
-                response_msg = "el cobro AI está desactivado en esta instancia."
+                response_msg = "el cobro IA está desactivado en esta instancia."
             elif chat_type != "private":
                 bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
                 if bot_username:
@@ -6033,14 +6036,14 @@ def handle_msg(message: Dict) -> str:
                     response_msg = "la recarga va por privado, abrime en DM."
             else:
                 ensure_callback_updates_enabled()
-                response_msg = "elegí un pack para recargar créditos AI:"
+                response_msg = "elegí un pack para recargar créditos IA:"
                 response_markup = build_topup_keyboard()
         elif command == "/balance":
             response_command = command
             if not is_ai_billing_enabled():
-                response_msg = "el cobro AI está desactivado en esta instancia."
+                response_msg = "el cobro IA está desactivado en esta instancia."
             elif not credits_db_service.is_configured():
-                response_msg = "el cobro AI no está configurado, avisale al admin."
+                response_msg = "el cobro IA no está configurado, avisale al admin."
             elif user_id is None or numeric_chat_id is None:
                 response_msg = "no pude leer tu usuario para ver saldos."
             else:
@@ -6059,9 +6062,9 @@ def handle_msg(message: Dict) -> str:
         elif command == "/transfer":
             response_command = command
             if not is_ai_billing_enabled():
-                response_msg = "el cobro AI está desactivado en esta instancia."
+                response_msg = "el cobro IA está desactivado en esta instancia."
             elif not credits_db_service.is_configured():
-                response_msg = "el cobro AI no está configurado, avisale al admin."
+                response_msg = "el cobro IA no está configurado, avisale al admin."
             elif not _is_group_chat_type(chat_type):
                 response_msg = "este comando es para grupos: /transfer <monto>"
             elif user_id is None or numeric_chat_id is None:
