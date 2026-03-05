@@ -89,7 +89,6 @@ DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
 # PGPASSWORD=your_password
 
 # APIs (Required)
-OPENROUTER_API_KEY=your_openrouter_key
 GROQ_API_KEY=your_groq_api_key
 COINMARKETCAP_KEY=your_coinmarketcap_key
 

@@ -23,7 +23,6 @@ from api.index import (
     complete_with_providers,
     get_groq_ai_response,
     get_groq_compound_response,
-    get_ai_response,
     get_provider_backoff_remaining,
     remove_gordo_prefix,
     handle_ai_response,
@@ -2953,7 +2952,7 @@ def test_get_weather_description():
     assert get_weather_description(9999) == "clima raro"
 
 
-def test_ask_ai_with_openrouter_success():
+def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
     # Simplified test - just verify the function runs without crashing
@@ -2975,7 +2974,7 @@ def test_ask_ai_with_openrouter_success():
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
         result = ask_ai(messages)
@@ -3007,7 +3006,7 @@ def test_ask_ai_with_all_failures():
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
         result = ask_ai(messages)
@@ -3039,7 +3038,7 @@ def test_ask_ai_with_image():
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_get_memory.return_value = None
         mock_describe_image.return_value = "A beautiful landscape"
-        mock_env.side_effect = lambda key: {"OPENROUTER_API_KEY": "test_key"}.get(key)
+        mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "what do you see in this image?"}]
         image_data = b"fake_image_data"
@@ -3081,7 +3080,7 @@ def test_ask_ai_forced_search_uses_message_section():
         "api.index.environ.get"
     ) as mock_env:
         mock_env.side_effect = lambda key, default=None: {
-            "OPENROUTER_API_KEY": "test_key"
+            "GROQ_API_KEY": "test_key"
         }.get(key, default)
 
         result = ask_ai([{"role": "user", "content": message_block}])
@@ -6104,45 +6103,27 @@ def test_complete_with_providers_groq_success():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
-        "api.index.get_ai_response"
-    ) as mock_openrouter:
-
+    with patch("api.index.get_groq_ai_response") as mock_groq:
         mock_groq.return_value = "Groq response"
-        mock_openrouter.return_value = "OpenRouter response"
 
         result = complete_with_providers(system_message, messages)
 
         assert result == "Groq response"
         mock_groq.assert_called_once()
-        mock_openrouter.assert_not_called()
 
 
-def test_complete_with_providers_fallback_sequence():
-    """Test complete_with_providers fallback sequence"""
+def test_complete_with_providers_returns_none_when_groq_fails():
+    """Test complete_with_providers returns None when Groq fails"""
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
-        "api.index.get_ai_response"
-    ) as mock_openrouter, patch(
-        "os.environ.get"
-    ) as mock_env, patch(
-        "api.index.OpenAI"
-    ) as mock_openai:
-
-        mock_env.return_value = "test_api_key"
-        mock_groq.return_value = None  # Groq fails
-        mock_openrouter.return_value = "OpenRouter response"
-        # Mock OpenAI client creation
-        mock_client = MagicMock()
-        mock_openai.return_value = mock_client
+    with patch("api.index.get_groq_ai_response") as mock_groq:
+        mock_groq.return_value = None
 
         result = complete_with_providers(system_message, messages)
 
-        assert result == "OpenRouter response"
+        assert result is None
         assert mock_groq.call_count == 1
-        mock_openrouter.assert_called_once()
 
 
 def test_complete_with_providers_all_fail():
@@ -6150,85 +6131,31 @@ def test_complete_with_providers_all_fail():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
-        "api.index.get_ai_response"
-    ) as mock_openrouter, patch(
-        "os.environ.get"
-    ) as mock_env, patch(
-        "api.index.OpenAI"
-    ) as mock_openai:
-
-        mock_env.return_value = "test_api_key"
+    with patch("api.index.get_groq_ai_response") as mock_groq:
         mock_groq.return_value = None
-        mock_openrouter.return_value = None
-        # Mock OpenAI client creation
-        mock_client = MagicMock()
-        mock_openai.return_value = mock_client
 
         result = complete_with_providers(system_message, messages)
 
         assert result is None
         assert mock_groq.call_count == 1
-        mock_openrouter.assert_called_once()
 
 
-def test_complete_with_providers_skips_groq_during_backoff(monkeypatch):
-    """When Groq backoff is active we should skip Groq attempts entirely."""
+def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
+    """When Groq backoff is active we should skip provider API calls entirely."""
 
     from api import index as index_module
 
-    system_message = {"role": "system", "content": "test"}
-    messages = [{"role": "user", "content": "hello"}]
-
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
     index_module._provider_backoff_until["groq"] = time.time() + 30
 
-    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
-        "api.index.get_ai_response"
-    ) as mock_openrouter, patch(
-        "os.environ.get"
-    ) as mock_env, patch(
-        "api.index.OpenAI"
-    ) as mock_openai:
+    with patch("api.index.OpenAI") as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
 
-        mock_env.return_value = "test_api_key"
-        mock_openrouter.return_value = "OpenRouter response"
-        mock_client = MagicMock()
-        mock_openai.return_value = mock_client
-
-        result = complete_with_providers(system_message, messages)
-
-        assert result == "OpenRouter response"
-        mock_groq.assert_not_called()
-        mock_openrouter.assert_called_once()
-
-
-def test_complete_with_providers_skips_openrouter_during_backoff(monkeypatch):
-    """OpenRouter backoff should skip OpenRouter and return None when Groq fails."""
-
-    from api import index as index_module
-
-    system_message = {"role": "system", "content": "test"}
-    messages = [{"role": "user", "content": "hello"}]
-
-    index_module._provider_backoff_until["openrouter"] = time.time() + 30
-
-    with patch("api.index.get_groq_ai_response") as mock_groq, patch(
-        "api.index.get_ai_response"
-    ) as mock_openrouter, patch(
-        "os.environ.get"
-    ) as mock_env, patch("api.index.OpenAI") as mock_openai:
-
-        mock_groq.return_value = None
-        mock_env.return_value = "test_api_key"
-
-        mock_client = MagicMock()
-        mock_openai.return_value = mock_client
-
-        result = complete_with_providers(system_message, messages)
-
-        assert result is None
-        mock_groq.assert_called_once()
-        mock_openrouter.assert_not_called()
+    assert result is None
+    mock_openai.assert_not_called()
 
 
 def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
@@ -6318,27 +6245,6 @@ def test_run_forced_web_search_prefers_compound_tools():
         [{"role": "user", "content": "algo"}],
     )
     mock_tool.assert_not_called()
-
-
-def test_get_ai_response_sets_backoff_on_rate_limit():
-    from api import index as index_module
-
-    index_module._provider_backoff_until.clear()
-
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = Exception(
-        "HTTP 429 rate limit"
-    )
-
-    result = get_ai_response(
-        fake_client,
-        {"role": "system", "content": "system"},
-        [{"role": "user", "content": "hola"}],
-        provider_name="openrouter",
-    )
-
-    assert result is None
-    assert index_module.get_provider_backoff_remaining("openrouter") > 0
 
 
 def test_is_social_frontend():

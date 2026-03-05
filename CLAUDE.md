@@ -35,7 +35,7 @@ python -m pytest test.py::test_handle_msg -v
 **Main Application (`api/index.py`):**
 - Flask web server handling Telegram webhooks
 - Redis-based caching system for API responses and chat history
-- OpenAI/OpenRouter integration for AI conversations
+- Groq integration for AI conversations
 - Multiple command handlers for crypto prices, currency rates, utilities
 
 **Key Functions:**
@@ -48,13 +48,13 @@ python -m pytest test.py::test_handle_msg -v
 ### Data Flow
 1. Telegram webhook → `responder()` → `process_request_parameters()` → `handle_msg()`
 2. Message processing: text extraction → command parsing → rate limiting → handler execution
-3. AI responses: chat history retrieval → message building → OpenRouter API → response caching
+3. AI responses: chat history retrieval → message building → Groq API → response caching
 4. All API calls go through `cached_requests()` with configurable TTL
 
 ### Dependencies
 - **Flask**: Web framework for webhook handling
 - **Redis**: Caching layer for API responses and chat history
-- **OpenAI**: AI conversation capabilities via OpenRouter
+- **OpenAI SDK**: client library used to call Groq's OpenAI-compatible API
 - **Requests**: HTTP client for external APIs
 - **Cryptography**: For webhook security tokens
 
@@ -62,7 +62,6 @@ python -m pytest test.py::test_handle_msg -v
 - **Telegram Bot API**: Message sending/receiving and file downloads
 - **CoinMarketCap**: Cryptocurrency prices (requires `COINMARKETCAP_KEY`)
 - **CriptoYa**: Argentine peso exchange rates
-- **OpenRouter**: AI model access (requires `OPENROUTER_API_KEY`)
 - **Groq**: AI model access + built-in tools (requires `GROQ_API_KEY`)
 - **BCRA**: Economic variables retrieved through the official API (https://api.bcra.gob.ar/estadisticas/v4.0)
 - **Open-Meteo**: Weather data for Buenos Aires
@@ -71,7 +70,7 @@ python -m pytest test.py::test_handle_msg -v
 Required environment variables are documented in README.md. Critical ones:
 - `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`: Bot authentication
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Cache configuration
-- `COINMARKETCAP_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`: API access
+- `COINMARKETCAP_KEY`, `GROQ_API_KEY`: API access
 - `ADMIN_CHAT_ID`: Error reporting destination
 - `WEBHOOK_AUTH_KEY`: Webhook authentication key
 - `FUNCTION_URL`: Deployment URL
