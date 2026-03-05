@@ -348,6 +348,36 @@ def test_get_chat_config_uses_postgres_when_available():
     redis_client.get.assert_not_called()
 
 
+def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
+    redis_client = MagicMock(spec=redis.Redis)
+
+    with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
+        "api.index.chat_config_db_service.get_chat_config",
+        side_effect=RuntimeError("pg down"),
+    ), patch("api.index.admin_report") as mock_admin:
+        config = get_chat_config(redis_client, "chat-5")
+
+    assert config == CHAT_CONFIG_DEFAULTS
+    redis_client.get.assert_not_called()
+    mock_admin.assert_called_once()
+
+
+def test_get_chat_config_migration_error_returns_defaults():
+    redis_client = MagicMock(spec=redis.Redis)
+    redis_client.get.return_value = json.dumps({"link_mode": "reply"})
+
+    with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
+        "api.index.chat_config_db_service.get_chat_config", return_value=None
+    ), patch(
+        "api.index.chat_config_db_service.set_chat_config",
+        side_effect=RuntimeError("pg write failed"),
+    ), patch("api.index.admin_report") as mock_admin:
+        config = get_chat_config(redis_client, "chat-6")
+
+    assert config == CHAT_CONFIG_DEFAULTS
+    mock_admin.assert_called_once()
+
+
 def test_is_chat_admin_uses_cache():
     redis_client = MagicMock(spec=redis.Redis)
 
@@ -6373,7 +6403,7 @@ def test_set_chat_config_persists_to_postgres_when_available():
 
     assert config["link_mode"] == "reply"
     mock_pg_set.assert_called_once_with("123", config)
-    redis_client.set.assert_any_call("chat_config:123", ANY)
+    redis_client.set.assert_not_called()
 
 
 def test_get_chat_config_uses_defaults_and_legacy():
