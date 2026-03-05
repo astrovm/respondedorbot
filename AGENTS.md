@@ -42,4 +42,4 @@
 
 - Never commit secrets; use `.env.example` to document required vars (see `README.md`).
 - Validate `WEBHOOK_AUTH_KEY` usage when touching webhook paths; avoid logging secrets.
-- Networked features rely on `REDIS_*`, OpenRouter, and other API keys—handle failures gracefully and cache via Redis when available.
+- Networked features rely on `REDIS_*`, Groq, and other API keys—handle failures gracefully and cache via Redis when available.
