@@ -327,66 +327,17 @@ def _run_forced_web_search(
     system_message: Dict[str, Any],
     compound_system_message: Optional[Dict[str, Any]] = None,
 ) -> str:
-    if compound_system_message:
-        compound_messages = [{"role": "user", "content": query}]
-        compound_response = get_groq_compound_response(None, compound_messages)
-        if compound_response:
-            return compound_response
+    if not compound_system_message:
+        return "la búsqueda web no está disponible en este momento"
 
-    tool_name = "web_search"
-    tool_args = {"query": query}
-    try:
-        print(
-            f"ask_ai: executing forced tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-        )
-        tool_output = execute_tool(tool_name, tool_args)
-    except Exception as tool_err:
-        tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-        print(f"ask_ai: forced tool '{tool_name}' raised error: {tool_err}")
+    compound_messages = [{"role": "user", "content": query}]
+    compound_response = get_groq_compound_response(
+        compound_system_message, compound_messages
+    )
+    if compound_response:
+        return compound_response
 
-    forced_query, forced_results = normalize_web_search_output(tool_output)
-    tool_contexts = [
-        {
-            "tool": tool_name,
-            "args": tool_args,
-            "result": tool_output,
-        }
-    ]
-
-    top_url = ""
-    for result in forced_results or []:
-        if isinstance(result, Mapping):
-            top_url = str(result.get("url") or "").strip()
-            if top_url:
-                break
-
-    if top_url:
-        fetch_args = {"url": top_url, "max_chars": 1500}
-        try:
-            fetch_output = execute_tool("fetch_url", fetch_args)
-            tool_contexts.append(
-                {
-                    "tool": "fetch_url",
-                    "args": fetch_args,
-                    "result": fetch_output,
-                }
-            )
-        except Exception as fetch_err:
-            print(f"ask_ai: forced fetch_url failed: {fetch_err}")
-
-    next_messages = messages + [
-        {
-            "role": "user",
-            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_contexts)[:4000]}",
-        },
-    ]
-    forced_final = complete_with_providers(system_message, next_messages)
-    forced_tool_final = resolve_tool_calls(system_message, next_messages, forced_final)
-    if forced_tool_final:
-        return forced_tool_final
-    if forced_final:
-        return forced_final
-    return summarize_search_results(forced_query, forced_results)
+    return "no pude completar la búsqueda web ahora"
 
 
 CHAT_CONFIG_KEY_PREFIX = "chat_config:"
@@ -2579,6 +2530,20 @@ def resolve_tool_calls(
         return None
 
     tool_name, tool_args = tool_call
+    if tool_name.lower() == "web_search":
+        query = str(tool_args.get("query", "")).strip()
+        if not query:
+            return "query vacío"
+        if not should_use_groq_compound_tools():
+            return "la búsqueda web no está disponible en este momento"
+        compound_response = get_groq_compound_response(
+            build_compound_system_message(),
+            [{"role": "user", "content": query}],
+        )
+        if compound_response:
+            return compound_response
+        return "no pude completar la búsqueda web ahora"
+
     try:
         print(
             f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
@@ -3350,17 +3315,6 @@ def fetch_url_content(
 def execute_tool(name: str, args: Dict[str, Any]) -> str:
     """Execute a named tool and return a plain-text result string."""
     name = name.lower()
-    if name == "web_search":
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return "query vacío"
-        # Always use a fixed limit so the model can't choose it
-        results = web_search(query, limit=10)
-        try:
-            print(f"execute_tool:web_search: q='{query}' results={len(results)}")
-        except Exception:
-            pass
-        return json.dumps({"query": query, "results": results})
     if name == "fetch_url":
         raw_url = args.get("url") or args.get("link") or args.get("href") or ""
         url = str(raw_url).strip()
