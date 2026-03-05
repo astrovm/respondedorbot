@@ -5803,15 +5803,36 @@ def handle_msg(message: Dict) -> str:
             )
             return f"{random_response}\n\n{credits_message}"
 
-        def _charge_ai_usage() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-            if not credits_db_service.is_configured():
-                return None, "el cobro IA no está configurado, avisale al admin."
-            if user_id is None or numeric_chat_id is None:
-                return None, "no pude identificar usuario/chat para cobrar IA."
+        billing_not_configured_message = "el cobro IA no está configurado, avisale al admin."
+        billing_missing_scope_message = "no pude identificar usuario/chat para cobrar IA."
+        billing_charge_error_message = "error cobrando créditos IA, intentá de nuevo."
+        onboarding_checked = False
 
-            _maybe_grant_onboarding_credits(user_id)
+        def _resolve_ai_charge_context() -> Tuple[Optional[int], Optional[str]]:
+            if not credits_db_service.is_configured():
+                return None, billing_not_configured_message
+            if user_id is None or numeric_chat_id is None:
+                return None, billing_missing_scope_message
+            return (
+                numeric_chat_id if _is_group_chat_type(chat_type) else None,
+                None,
+            )
+
+        def charge_one_ai_request(
+            usage_tag: str,
+        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            nonlocal onboarding_checked
+            chat_scope_id, context_error = _resolve_ai_charge_context()
+            if context_error:
+                return None, context_error
+            if user_id is None:
+                return None, billing_missing_scope_message
+
+            if not onboarding_checked:
+                _maybe_grant_onboarding_credits(user_id)
+                onboarding_checked = True
+
             credits_cost = get_ai_credits_per_response()
-            chat_scope_id = numeric_chat_id if _is_group_chat_type(chat_type) else None
             try:
                 charge_result = credits_db_service.charge_ai_credits(
                     user_id=user_id,
@@ -5820,11 +5841,16 @@ def handle_msg(message: Dict) -> str:
                 )
             except Exception as error:
                 admin_report(
-                    "Error charging IA credits for media",
+                    "Error charging IA credits",
                     error,
-                    {"chat_id": chat_id, "user_id": user_id, "command": command},
+                    {
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "command": command,
+                        "usage_tag": usage_tag,
+                    },
                 )
-                return None, "error cobrando créditos IA, intentá de nuevo."
+                return None, billing_charge_error_message
 
             if not charge_result.get("ok"):
                 return None, _build_insufficient_credits_reply(charge_result)
@@ -5835,7 +5861,9 @@ def handle_msg(message: Dict) -> str:
                 "source": str(charge_result.get("source") or "user"),
             }, None
 
-        def _refund_media_charge(charge_meta: Optional[Mapping[str, Any]], reason: str) -> None:
+        def refund_ai_charge_meta(
+            charge_meta: Optional[Mapping[str, Any]], reason: str
+        ) -> None:
             if not charge_meta or user_id is None:
                 return
 
@@ -5848,7 +5876,7 @@ def handle_msg(message: Dict) -> str:
                 )
             except Exception as refund_error:
                 admin_report(
-                    "falló el reintegro de créditos IA (media)",
+                    "falló el reintegro de créditos IA",
                     refund_error,
                     {
                         "chat_id": chat_id,
@@ -5872,7 +5900,9 @@ def handle_msg(message: Dict) -> str:
         if auto_process_media and audio_file_id and not (
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
-            media_charge_meta, media_charge_error = _charge_ai_usage()
+            media_charge_meta, media_charge_error = charge_one_ai_request(
+                "auto_audio_media"
+            )
             if media_charge_error:
                 return media_charge_error
 
@@ -5882,7 +5912,7 @@ def handle_msg(message: Dict) -> str:
                 message_text = transcription
                 print(f"Audio transcribed: {message_text[:100]}...")
             else:
-                _refund_media_charge(media_charge_meta, "auto_audio_transcribe_failed")
+                refund_ai_charge_meta(media_charge_meta, "auto_audio_transcribe_failed")
                 message_text = _transcription_error_message(
                     err,
                     download_message="no pude bajar tu audio, mandalo de vuelta",
@@ -6038,42 +6068,24 @@ def handle_msg(message: Dict) -> str:
         def run_ai_flow(handler_func: Callable[..., str], prompt_text: str) -> str:
             nonlocal response_uses_ai
 
-            if not credits_db_service.is_configured():
-                return "el cobro IA no está configurado, avisale al admin."
-            if user_id is None or numeric_chat_id is None:
-                return "no pude identificar usuario/chat para cobrar IA."
-
             if not check_global_rate_limit(redis_client):
                 return handle_rate_limit(chat_id, message)
 
-            _maybe_grant_onboarding_credits(user_id)
-            credits_cost = get_ai_credits_per_response()
-            chat_scope_id = (
-                numeric_chat_id if _is_group_chat_type(chat_type) else None
-            )
+            charges_applied: List[Dict[str, Any]] = []
+            base_charge_meta, base_charge_error = charge_one_ai_request("ai_response_base")
+            if base_charge_error:
+                return base_charge_error
+            if base_charge_meta:
+                charges_applied.append(base_charge_meta)
 
-            try:
-                charge_result = credits_db_service.charge_ai_credits(
-                    user_id=user_id,
-                    chat_id=chat_scope_id,
-                    amount=credits_cost,
-                )
-            except Exception as error:
-                admin_report(
-                    "Error charging IA credits",
-                    error,
-                    {"chat_id": chat_id, "user_id": user_id},
-                )
-                return "error cobrando créditos IA, intentá de nuevo."
-
-            if not charge_result.get("ok"):
-                return _build_insufficient_credits_reply(charge_result)
-
-            media_charge_meta: Optional[Dict[str, Any]] = None
             if resized_image_data and photo_file_id:
-                media_charge_meta, media_charge_error = _charge_ai_usage()
+                media_charge_meta, media_charge_error = charge_one_ai_request(
+                    "image_context_media"
+                )
                 if media_charge_error:
                     return media_charge_error
+                if media_charge_meta:
+                    charges_applied.append(media_charge_meta)
 
             chat_history = get_chat_history(chat_id, redis_client)
             ai_messages = build_ai_messages(
@@ -6098,76 +6110,21 @@ def handle_msg(message: Dict) -> str:
             provider_request_count = max(
                 1, int(ai_response_meta.get("provider_request_count", 1))
             )
-            extra_charge_sources: List[str] = []
             for _ in range(max(0, provider_request_count - 1)):
-                try:
-                    extra_charge_result = credits_db_service.charge_ai_credits(
-                        user_id=user_id,
-                        chat_id=chat_scope_id,
-                        amount=credits_cost,
-                    )
-                except Exception as error:
-                    admin_report(
-                        "Error charging IA credits (extra provider request)",
-                        error,
-                        {
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "provider_request_count": provider_request_count,
-                        },
-                    )
-                    return "error cobrando créditos IA, intentá de nuevo."
-
-                if not extra_charge_result.get("ok"):
-                    return _build_insufficient_credits_reply(extra_charge_result)
-
-                extra_charge_sources.append(
-                    str(extra_charge_result.get("source") or "user")
+                extra_charge_meta, extra_charge_error = charge_one_ai_request(
+                    "ai_response_extra_provider_request"
                 )
+                if extra_charge_error:
+                    return extra_charge_error
+                if extra_charge_meta:
+                    charges_applied.append(extra_charge_meta)
 
             if response_msg_inner in {
                 "error de IA, intentá de nuevo en un rato",
                 "no pude generar respuesta, intentá de nuevo",
             } or bool(ai_response_meta.get("ai_fallback")):
-                charge_source = str(charge_result.get("source") or "user")
-                try:
-                    credits_db_service.refund_ai_charge(
-                        user_id=user_id,
-                        chat_id=chat_scope_id,
-                        amount=credits_cost,
-                        source="chat" if charge_source == "chat" else "user",
-                    )
-                except Exception as refund_error:
-                    admin_report(
-                        "falló el reintegro de créditos IA",
-                        refund_error,
-                        {
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "source": charge_source,
-                        },
-                    )
-                _refund_media_charge(
-                    media_charge_meta, "ai_response_failed_after_image_media_charge"
-                )
-                for extra_source in extra_charge_sources:
-                    try:
-                        credits_db_service.refund_ai_charge(
-                            user_id=user_id,
-                            chat_id=chat_scope_id,
-                            amount=credits_cost,
-                            source="chat" if extra_source == "chat" else "user",
-                        )
-                    except Exception as refund_error:
-                        admin_report(
-                            "falló el reintegro de créditos IA (extra request)",
-                            refund_error,
-                            {
-                                "chat_id": chat_id,
-                                "user_id": user_id,
-                                "source": extra_source,
-                            },
-                        )
+                for charge_meta in charges_applied:
+                    refund_ai_charge_meta(charge_meta, "ai_response_fallback")
             return response_msg_inner
 
         if command == "/config":
@@ -6267,7 +6224,9 @@ def handle_msg(message: Dict) -> str:
                 response_msg = run_ai_flow(handler_func, sanitized_message_text)
             else:
                 if command == "/transcribe":
-                    media_charge_meta, media_charge_error = _charge_ai_usage()
+                    media_charge_meta, media_charge_error = charge_one_ai_request(
+                        "transcribe_command_media"
+                    )
                     if media_charge_error:
                         response_msg = media_charge_error
                     else:
@@ -6275,7 +6234,7 @@ def handle_msg(message: Dict) -> str:
                         if media_charge_meta and not _is_transcribe_success_response(
                             response_msg
                         ):
-                            _refund_media_charge(
+                            refund_ai_charge_meta(
                                 media_charge_meta, "transcribe_command_unsuccessful"
                             )
                 else:
@@ -6615,6 +6574,7 @@ def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
 
     if _arg_is_true(args, "run_agent"):
         try:
+            # Operational exception: autonomous run does not bill user/group AI credits.
             thought_result = run_agent_cycle()
             payload = json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False)
             return payload, 200
