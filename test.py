@@ -3330,7 +3330,7 @@ def test_get_devo_with_fee_only():
 
         result = get_devo("0.5")
         assert result is not None
-        assert "Profit: 62.68%" in result
+        assert "ganancia: 62.68%" in result
 
 
 def test_get_devo_with_fee_and_amount():
@@ -3634,7 +3634,7 @@ def test_admin_report_basic():
 
         admin_report("test message")
         mock_send_msg.assert_called_once_with(
-            "12345", "Admin report from test_instance: test message"
+            "12345", "reporte admin desde test_instance: test message"
         )
 
 
