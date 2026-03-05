@@ -1,5 +1,5 @@
-from cryptography.fernet import Fernet
 from contextvars import ContextVar, Token
+from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone, date
 from flask import Flask, Request, request
 from html.parser import HTMLParser
@@ -500,52 +500,25 @@ GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit resp
 
 
 _provider_backoff_until: Dict[str, float] = {}
-_ai_provider_usage: ContextVar[Dict[str, Any]] = ContextVar(
-    "ai_provider_usage", default={}
+_ai_provider_request_count: ContextVar[int] = ContextVar(
+    "ai_provider_request_count", default=0
 )
 
 
-def _reset_ai_provider_usage() -> Token:
-    return _ai_provider_usage.set(
-        {
-            "total_calls": 0,
-            "compound_calls": 0,
-            "first_provider": None,
-        }
-    )
+def _reset_ai_provider_request_count() -> Token:
+    return _ai_provider_request_count.set(0)
 
 
-def _restore_ai_provider_usage(token: Token) -> None:
-    _ai_provider_usage.reset(token)
+def _restore_ai_provider_request_count(token: Token) -> None:
+    _ai_provider_request_count.reset(token)
 
 
-def _record_ai_provider_call(provider_name: str) -> None:
-    usage = dict(_ai_provider_usage.get() or {})
-    total_calls = int(usage.get("total_calls", 0)) + 1
-    compound_calls = int(usage.get("compound_calls", 0))
-    if provider_name == "groq_compound":
-        compound_calls += 1
-
-    first_provider = usage.get("first_provider")
-    if not first_provider:
-        first_provider = provider_name
-
-    _ai_provider_usage.set(
-        {
-            "total_calls": total_calls,
-            "compound_calls": compound_calls,
-            "first_provider": first_provider,
-        }
-    )
+def _increment_ai_provider_request_count() -> None:
+    _ai_provider_request_count.set(int(_ai_provider_request_count.get() or 0) + 1)
 
 
-def _get_ai_provider_usage() -> Dict[str, Any]:
-    usage = dict(_ai_provider_usage.get() or {})
-    return {
-        "total_calls": int(usage.get("total_calls", 0)),
-        "compound_calls": int(usage.get("compound_calls", 0)),
-        "first_provider": usage.get("first_provider"),
-    }
+def _get_ai_provider_request_count() -> int:
+    return int(_ai_provider_request_count.get() or 0)
 
 
 def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
@@ -3705,7 +3678,7 @@ def get_groq_ai_response(
 
     def _attempt() -> Optional[str]:
         print("Trying Groq AI as first option...")
-        _record_ai_provider_call("groq_ai")
+        _increment_ai_provider_request_count()
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
@@ -3747,7 +3720,7 @@ def get_groq_compound_response(
 
     def _attempt() -> Optional[str]:
         print("Trying Groq Compound tools...")
-        _record_ai_provider_call("groq_compound")
+        _increment_ai_provider_request_count()
         groq_client = OpenAI(
             api_key=groq_api_key,
             base_url="https://api.groq.com/openai/v1",
@@ -5830,7 +5803,7 @@ def handle_msg(message: Dict) -> str:
             )
             return f"{random_response}\n\n{credits_message}"
 
-        def _charge_media_usage() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        def _charge_ai_usage() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
             if not credits_db_service.is_configured():
                 return None, "el cobro IA no está configurado, avisale al admin."
             if user_id is None or numeric_chat_id is None:
@@ -5899,7 +5872,7 @@ def handle_msg(message: Dict) -> str:
         if auto_process_media and audio_file_id and not (
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
-            media_charge_meta, media_charge_error = _charge_media_usage()
+            media_charge_meta, media_charge_error = _charge_ai_usage()
             if media_charge_error:
                 return media_charge_error
 
@@ -6098,7 +6071,7 @@ def handle_msg(message: Dict) -> str:
 
             media_charge_meta: Optional[Dict[str, Any]] = None
             if resized_image_data and photo_file_id:
-                media_charge_meta, media_charge_error = _charge_media_usage()
+                media_charge_meta, media_charge_error = _charge_ai_usage()
                 if media_charge_error:
                     return media_charge_error
 
@@ -6122,40 +6095,40 @@ def handle_msg(message: Dict) -> str:
             )
             response_uses_ai = True
 
-            used_ai_fallback = response_msg_inner in {
+            provider_request_count = max(
+                1, int(ai_response_meta.get("provider_request_count", 1))
+            )
+            extra_charge_sources: List[str] = []
+            for _ in range(max(0, provider_request_count - 1)):
+                try:
+                    extra_charge_result = credits_db_service.charge_ai_credits(
+                        user_id=user_id,
+                        chat_id=chat_scope_id,
+                        amount=credits_cost,
+                    )
+                except Exception as error:
+                    admin_report(
+                        "Error charging IA credits (extra provider request)",
+                        error,
+                        {
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "provider_request_count": provider_request_count,
+                        },
+                    )
+                    return "error cobrando créditos IA, intentá de nuevo."
+
+                if not extra_charge_result.get("ok"):
+                    return _build_insufficient_credits_reply(extra_charge_result)
+
+                extra_charge_sources.append(
+                    str(extra_charge_result.get("source") or "user")
+                )
+
+            if response_msg_inner in {
                 "error de IA, intentá de nuevo en un rato",
                 "no pude generar respuesta, intentá de nuevo",
-            } or bool(ai_response_meta.get("ai_fallback"))
-
-            extra_compound_charges: List[str] = []
-            extra_compound_calls = int(ai_response_meta.get("extra_compound_calls", 0))
-            if not used_ai_fallback and extra_compound_calls > 0:
-                for _ in range(extra_compound_calls):
-                    try:
-                        extra_charge_result = credits_db_service.charge_ai_credits(
-                            user_id=user_id,
-                            chat_id=chat_scope_id,
-                            amount=credits_cost,
-                        )
-                    except Exception as error:
-                        admin_report(
-                            "Error charging extra IA credits (Groq Compound)",
-                            error,
-                            {
-                                "chat_id": chat_id,
-                                "user_id": user_id,
-                                "extra_compound_calls": extra_compound_calls,
-                            },
-                        )
-                        return "error cobrando créditos IA, intentá de nuevo."
-
-                    if not extra_charge_result.get("ok"):
-                        return _build_insufficient_credits_reply(extra_charge_result)
-                    extra_compound_charges.append(
-                        str(extra_charge_result.get("source") or "user")
-                    )
-
-            if used_ai_fallback:
+            } or bool(ai_response_meta.get("ai_fallback")):
                 charge_source = str(charge_result.get("source") or "user")
                 try:
                     credits_db_service.refund_ai_charge(
@@ -6177,7 +6150,7 @@ def handle_msg(message: Dict) -> str:
                 _refund_media_charge(
                     media_charge_meta, "ai_response_failed_after_image_media_charge"
                 )
-                for extra_source in extra_compound_charges:
+                for extra_source in extra_charge_sources:
                     try:
                         credits_db_service.refund_ai_charge(
                             user_id=user_id,
@@ -6187,7 +6160,7 @@ def handle_msg(message: Dict) -> str:
                         )
                     except Exception as refund_error:
                         admin_report(
-                            "falló el reintegro de créditos IA (extra compound)",
+                            "falló el reintegro de créditos IA (extra request)",
                             refund_error,
                             {
                                 "chat_id": chat_id,
@@ -6283,6 +6256,9 @@ def handle_msg(message: Dict) -> str:
                                     "no te alcanza el saldo personal para esa transferencia.\n"
                                     f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
                                 )
+        elif command in {"/buscar", "/search"}:
+            response_command = command
+            response_msg = search_command(sanitized_message_text)
         elif command in commands:
             handler_func, uses_ai, takes_params = commands[command]
             response_command = command
@@ -6291,7 +6267,7 @@ def handle_msg(message: Dict) -> str:
                 response_msg = run_ai_flow(handler_func, sanitized_message_text)
             else:
                 if command == "/transcribe":
-                    media_charge_meta, media_charge_error = _charge_media_usage()
+                    media_charge_meta, media_charge_error = _charge_ai_usage()
                     if media_charge_error:
                         response_msg = media_charge_error
                     else:
@@ -6484,9 +6460,9 @@ def handle_ai_response(
 
     handler_name = getattr(handler_func, "__name__", "")
     is_ask_ai_handler = handler_name == "ask_ai"
-    usage_token: Optional[Token] = None
+    request_count_token: Optional[Token] = None
     if is_ask_ai_handler:
-        usage_token = _reset_ai_provider_usage()
+        request_count_token = _reset_ai_provider_request_count()
 
     try:
         # Call handler with image if supported
@@ -6507,21 +6483,10 @@ def handle_ai_response(
             else:
                 response = handler_func(messages)
     finally:
-        if usage_token is not None:
-            usage = _get_ai_provider_usage()
+        if request_count_token is not None:
             if response_meta is not None:
-                total_calls = int(usage.get("total_calls", 0))
-                compound_calls = int(usage.get("compound_calls", 0))
-                first_provider = usage.get("first_provider")
-                extra_compound_calls = compound_calls
-                if first_provider == "groq_compound" and extra_compound_calls > 0:
-                    extra_compound_calls -= 1
-
-                response_meta["provider_calls"] = total_calls
-                response_meta["compound_calls"] = compound_calls
-                response_meta["extra_compound_calls"] = max(0, extra_compound_calls)
-                response_meta["first_provider"] = first_provider
-            _restore_ai_provider_usage(usage_token)
+                response_meta["provider_request_count"] = _get_ai_provider_request_count()
+            _restore_ai_provider_request_count(request_count_token)
 
     response_text = str(response or "")
     response_text, used_ai_fallback = _strip_ai_fallback_marker(response_text)
