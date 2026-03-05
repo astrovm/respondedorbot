@@ -39,7 +39,7 @@ This bot is configured entirely through environment variables, making it easy to
 ### AI Credits Billing (Telegram Stars)
 
 - AI responses are billed with credits (default: `1` credit per AI response).
-- New users receive onboarding credits once (default: `10`).
+- New users receive onboarding credits once (default: `3`).
 - In groups, spending priority is: personal balance first, then group balance.
 - `/topup`: recharge credits with Telegram Stars (private chat).
 - `/balance`: in private shows personal balance; in groups shows personal + group balance.
@@ -94,7 +94,7 @@ COINMARKETCAP_KEY=your_coinmarketcap_key
 
 # AI Credits Billing (always enabled; defaults shown)
 AI_CREDITS_PER_RESPONSE=1
-AI_ONBOARDING_CREDITS=10
+AI_ONBOARDING_CREDITS=3
 AI_STARS_PACKS_JSON='[{"id":"p100","credits":100,"xtr":50},{"id":"p250","credits":250,"xtr":125},{"id":"p500","credits":500,"xtr":250},{"id":"p1000","credits":1000,"xtr":500},{"id":"p2500","credits":2500,"xtr":1250}]'
 
 # Monitoring (Required)
