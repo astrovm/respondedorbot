@@ -5735,8 +5735,13 @@ def handle_msg(message: Dict) -> str:
         chat_id = str(chat.get("id"))
         chat_type = str(chat.get("type", ""))
         user_identity = _format_user_identity(message.get("from", {})).strip()
+        user_id = _extract_user_id(message)
+        numeric_chat_id = _extract_numeric_chat_id(chat_id)
         if isinstance(message.get("successful_payment"), Mapping):
             return handle_successful_payment_message(message)
+
+        redis_client = config_redis()
+        chat_config = get_chat_config(redis_client, chat_id)
 
         commands = initialize_commands()
         bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
@@ -5745,16 +5750,97 @@ def handle_msg(message: Dict) -> str:
             commands, command, message_text, message
         )
 
+        def _build_insufficient_credits_reply(charge_result: Mapping[str, Any]) -> str:
+            random_name = str(message.get("from", {}).get("first_name") or "boludo")
+            random_response = gen_random(random_name)
+            credits_message = build_insufficient_credits_message(
+                chat_type=chat_type,
+                user_balance=int(charge_result.get("user_balance", 0)),
+                chat_balance=int(charge_result.get("chat_balance", 0)),
+            )
+            return f"{random_response}\n\n{credits_message}"
+
+        def _charge_media_usage() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            billing_active = is_ai_billing_enabled() and credits_db_service.is_configured()
+            if billing_active and (user_id is None or numeric_chat_id is None):
+                billing_active = False
+            if not billing_active:
+                return None, None
+
+            _maybe_grant_onboarding_credits(user_id)
+            credits_cost = get_ai_credits_per_response()
+            chat_scope_id = numeric_chat_id if _is_group_chat_type(chat_type) else None
+            try:
+                charge_result = credits_db_service.charge_ai_credits(
+                    user_id=user_id,
+                    chat_id=chat_scope_id,
+                    amount=credits_cost,
+                )
+            except Exception as error:
+                admin_report(
+                    "Error charging IA credits for media",
+                    error,
+                    {"chat_id": chat_id, "user_id": user_id, "command": command},
+                )
+                return None, "error cobrando créditos IA, intentá de nuevo."
+
+            if not charge_result.get("ok"):
+                return None, _build_insufficient_credits_reply(charge_result)
+
+            return {
+                "credits_cost": credits_cost,
+                "chat_scope_id": chat_scope_id,
+                "source": str(charge_result.get("source") or "user"),
+            }, None
+
+        def _refund_media_charge(charge_meta: Optional[Mapping[str, Any]], reason: str) -> None:
+            if not charge_meta or user_id is None:
+                return
+
+            try:
+                credits_db_service.refund_ai_charge(
+                    user_id=user_id,
+                    chat_id=cast(Optional[int], charge_meta.get("chat_scope_id")),
+                    amount=int(charge_meta.get("credits_cost", 1)),
+                    source="chat" if str(charge_meta.get("source") or "user") == "chat" else "user",
+                )
+            except Exception as refund_error:
+                admin_report(
+                    "falló el reintegro de créditos IA (media)",
+                    refund_error,
+                    {
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "reason": reason,
+                        "command": command,
+                    },
+                )
+
+        def _is_transcribe_success_response(text: Optional[str]) -> bool:
+            if not text:
+                return False
+            success_prefixes = (
+                "🎵 Transcripción: ",
+                "🖼️ Descripción: ",
+                "🎨 Descripción del sticker: ",
+            )
+            return text.startswith(success_prefixes)
+
         # Process audio first if present (but not for /transcribe commands)
         if auto_process_media and audio_file_id and not (
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
+            media_charge_meta, media_charge_error = _charge_media_usage()
+            if media_charge_error:
+                return media_charge_error
+
             print(f"Processing audio message: {audio_file_id}")
             transcription, err = _transcribe_audio_file(audio_file_id, use_cache=False)
             if transcription:
                 message_text = transcription
                 print(f"Audio transcribed: {message_text[:100]}...")
             else:
+                _refund_media_charge(media_charge_meta, "auto_audio_transcribe_failed")
                 message_text = _transcription_error_message(
                     err,
                     download_message="no pude bajar tu audio, mandalo de vuelta",
@@ -5777,10 +5863,6 @@ def handle_msg(message: Dict) -> str:
             else:
                 if not message_text:
                     message_text = "no pude ver tu foto, boludo"
-
-        # Initialize Redis and commands
-        redis_client = config_redis()
-        chat_config = get_chat_config(redis_client, chat_id)
 
         link_mode = str(chat_config.get("link_mode", "off"))
         if link_mode != "off" and message_text and not message_text.startswith("/"):
@@ -5891,8 +5973,6 @@ def handle_msg(message: Dict) -> str:
         response_markup: Optional[Dict[str, Any]] = None
         response_uses_ai = False
         response_command: Optional[str] = None
-        user_id = _extract_user_id(message)
-        numeric_chat_id = _extract_numeric_chat_id(chat_id)
 
         if (
             command == "/config"
@@ -6116,7 +6196,17 @@ def handle_msg(message: Dict) -> str:
                 response_msg = run_ai_flow(handler_func, sanitized_message_text)
             else:
                 if command == "/transcribe":
-                    response_msg = handle_transcribe_with_message(message)
+                    media_charge_meta, media_charge_error = _charge_media_usage()
+                    if media_charge_error:
+                        response_msg = media_charge_error
+                    else:
+                        response_msg = handle_transcribe_with_message(message)
+                        if media_charge_meta and not _is_transcribe_success_response(
+                            response_msg
+                        ):
+                            _refund_media_charge(
+                                media_charge_meta, "transcribe_command_unsuccessful"
+                            )
                 else:
                     if takes_params:
                         response_msg = handler_func(sanitized_message_text)
