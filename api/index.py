@@ -6115,7 +6115,7 @@ def handle_msg(message: Dict) -> str:
                 if bot_username:
                     response_msg = (
                         "la recarga va por privado.\n"
-                        f"abrime acá: https://t.me/{bot_username}"
+                        f"abrime en @{bot_username}"
                     )
                 else:
                     response_msg = "la recarga va por privado, abrime en DM."
