@@ -4540,10 +4540,15 @@ def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
             "saldos IA:\n"
             f"- tu saldo personal: {user_balance}\n"
             f"- saldo del grupo: {chat_balance}\n"
-            "en grupos siempre se usa primero tu saldo personal y después el del grupo."
+            "si no te alcanza el saldo personal, se usa el del grupo.\n"
+            "para cargar créditos: /topup (por privado)\n"
+            "si querés pasar créditos al grupo: /transfer <monto>"
         )
 
-    return f"tu saldo personal de IA es: {user_balance}"
+    return (
+        f"tu saldo personal de IA es: {user_balance}\n"
+        "para cargar créditos: /topup"
+    )
 
 
 def _send_stars_invoice(
