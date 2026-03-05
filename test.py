@@ -1087,7 +1087,11 @@ def test_handle_callback_query_topup_sends_invoice():
     with patch(
         "api.index.get_ai_billing_pack",
         return_value={"id": "p100", "credits": 100, "xtr": 50},
-    ), patch("api.index._send_stars_invoice", return_value=True) as mock_send_invoice, patch(
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._send_stars_invoice", return_value=True
+    ) as mock_send_invoice, patch(
         "api.index._answer_callback_query"
     ) as mock_answer, patch("api.index.config_redis") as mock_cfg:
         handle_callback_query(callback)
@@ -1114,7 +1118,7 @@ def test_handle_msg_topup_private_returns_keyboard():
     with patch("api.index.config_redis", return_value=redis_client), patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("api.index.ensure_callback_updates_enabled"), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
+        "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.build_topup_keyboard",
         return_value={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
@@ -1143,7 +1147,7 @@ def test_handle_msg_topup_group_redirects_private():
     with patch("api.index.config_redis", return_value=redis_client), patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch(
-        "api.index.is_ai_billing_enabled", return_value=True
+        "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "os.environ.get",
         side_effect=lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(
@@ -1247,6 +1251,8 @@ def test_handle_msg_successful_payment_credits_user():
     }
 
     with patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
         "api.index.credits_db_service.record_star_payment",
         return_value={"inserted": True, "user_balance": 777},
     ) as mock_record, patch("api.index.send_msg") as mock_send_msg:
@@ -1737,17 +1743,23 @@ def test_handle_msg():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
-    ) as mock_rate_limit, patch(
         "api.index.ask_ai"
     ) as mock_ask_ai, patch(
         "api.index.send_typing"
     ) as mock_send_typing, patch(
+        "api.index.check_global_rate_limit", side_effect=[True, False]
+    ) as mock_global_rate_limit, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
         "time.sleep"
     ) as _mock_sleep:  # Add sleep mock to avoid delays  # noqa: F841
 
         mock_env.return_value = "testbot"
-        mock_rate_limit.return_value = True  # Don't rate limit
         mock_ask_ai.return_value = "test response"  # Mock ai response
 
         # Mock Redis instance
@@ -1768,7 +1780,7 @@ def test_handle_msg():
         message = {
             "message_id": "123",
             "chat": {"id": "456", "type": "private"},
-            "from": {"first_name": "John", "username": "john123"},
+            "from": {"id": 9, "first_name": "John", "username": "john123"},
             "text": "/help",
         }
 
@@ -1785,13 +1797,13 @@ def test_handle_msg():
         mock_ask_ai.assert_called_once()
 
         # Test rate limited message
-        mock_rate_limit.return_value = False
         mock_send_msg.reset_mock()
         mock_send_typing.reset_mock()
         mock_ask_ai.reset_mock()
         assert handle_msg(message) == "ok"
         mock_send_typing.assert_called_once()
         mock_ask_ai.assert_not_called()
+        assert mock_global_rate_limit.call_count == 2
 
 
 def test_handle_msg_blocks_config_for_non_admin_group():
@@ -1913,8 +1925,6 @@ def test_handle_msg_with_image():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
-    ) as mock_rate_limit, patch(
         "api.index.describe_image_groq"
     ) as mock_describe, patch(
         "api.index.download_telegram_file"
@@ -1926,13 +1936,21 @@ def test_handle_msg_with_image():
         "api.index.cached_requests"
     ) as mock_requests, patch(
         "api.index.send_typing"
-    ) as mock_send_typing:
+    ) as mock_send_typing, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ):
 
         mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
             "TELEGRAM_TOKEN": "test_token",
         }.get(key, default)
-        mock_rate_limit.return_value = True
         mock_download.return_value = b"image data"
         mock_describe.return_value = "A beautiful landscape"
         mock_resize.return_value = b"resized image data"
@@ -1946,7 +1964,7 @@ def test_handle_msg_with_image():
         message = {
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
-            "from": {"first_name": "John", "username": "john"},
+            "from": {"id": 11, "first_name": "John", "username": "john"},
             "photo": [{"file_id": "photo_123"}],
         }
 
@@ -1964,18 +1982,24 @@ def test_handle_msg_with_audio():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
-    ) as mock_rate_limit, patch(
         "api.index.transcribe_audio_groq"
     ) as mock_transcribe, patch(
         "api.index.download_telegram_file"
-    ) as mock_download:
+    ) as mock_download, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ):
 
         mock_env.side_effect = lambda key: {
             "TELEGRAM_USERNAME": "testbot",
             "GROQ_API_KEY": "test_key",
         }.get(key)
-        mock_rate_limit.return_value = True
         mock_download.return_value = b"audio data"
         mock_transcribe.return_value = "transcribed text"
 
@@ -1986,7 +2010,7 @@ def test_handle_msg_with_audio():
         message = {
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
-            "from": {"first_name": "John", "username": "john"},
+            "from": {"id": 12, "first_name": "John", "username": "john"},
             "voice": {"file_id": "voice_123"},
         }
 
@@ -2047,13 +2071,17 @@ def test_handle_msg_with_transcribe_command():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
-    ) as mock_rate_limit, patch(
         "api.index.handle_transcribe_with_message"
-    ) as mock_handle_transcribe:
+    ) as mock_handle_transcribe, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ):
 
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
-        mock_rate_limit.return_value = True
         mock_handle_transcribe.return_value = "Transcription result"
 
         # Mock Redis instance
@@ -2063,7 +2091,7 @@ def test_handle_msg_with_transcribe_command():
         message = {
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
-            "from": {"first_name": "John", "username": "john"},
+            "from": {"id": 13, "first_name": "John", "username": "john"},
             "text": "/transcribe",
             "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123"}},
         }
@@ -2405,8 +2433,6 @@ def test_handle_msg_edge_cases():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
-    ) as mock_rate_limit, patch(
         "api.index.send_typing"
     ) as mock_send_typing, patch(
         "api.index.gen_random"
@@ -2419,12 +2445,20 @@ def test_handle_msg_edge_cases():
     ) as mock_ask_ai, patch(
         "api.index.should_gordo_respond"
     ) as mock_should_respond, patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
         "time.sleep"
     ) as _mock_sleep:  # noqa: F841
 
         # Set up mocks
         mock_env.return_value = "testbot"
-        mock_rate_limit.return_value = True
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
         mock_gen_random.return_value = "no boludo"
@@ -2451,7 +2485,7 @@ def test_handle_msg_edge_cases():
         message = {
             "message_id": "123",
             "chat": {"id": "456", "type": "private"},
-            "from": {"first_name": "John", "username": "john123"},
+            "from": {"id": 14, "first_name": "John", "username": "john123"},
         }
         assert handle_msg(message) == "ok"
         mock_send_msg.assert_not_called()
@@ -2482,8 +2516,8 @@ def test_handle_msg_edge_cases():
         message = {"message_id": "123"}  # Missing chat and from fields
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "error procesando mensaje"
-        mock_admin_report.assert_called_once()  # Should report error to admin
+        assert result == "ok"
+        mock_admin_report.assert_not_called()
 
         # Test message with None values
         mock_admin_report.reset_mock()
@@ -2495,16 +2529,16 @@ def test_handle_msg_edge_cases():
         }
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "error procesando mensaje"
-        mock_admin_report.assert_called_once()
+        assert result == "ok"
+        mock_admin_report.assert_not_called()
 
         # Test message with missing message_id
         mock_admin_report.reset_mock()
         message = {"chat": {"id": "456"}, "from": {"first_name": "John"}}
         mock_send_msg.reset_mock()
         result = handle_msg(message)
-        assert result == "error procesando mensaje"
-        mock_admin_report.assert_called_once()
+        assert result == "ok"
+        mock_admin_report.assert_not_called()
 
 
 def test_parse_command_edge_cases():
