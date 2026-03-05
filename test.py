@@ -1124,7 +1124,7 @@ def test_handle_msg_topup_private_returns_keyboard():
     assert result == "ok"
     mock_send_msg.assert_called_once_with(
         "100",
-        "elegí un pack para recargar créditos AI:",
+        "elegí un pack para recargar créditos IA:",
         "10",
         reply_markup={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
     )
@@ -1278,6 +1278,48 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     assert result == "ok"
     mock_refund.assert_called_once()
     assert mock_send.call_args[0][1] == "no boludo"
+
+
+def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypatch):
+    message = {
+        "message_id": "15",
+        "chat": {"id": "405", "type": "private"},
+        "from": {"id": 78, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": False, "user_balance": 0, "chat_balance": 0},
+    ), patch(
+        "api.index.gen_random", return_value="no boludo"
+    ), patch(
+        "api.index.send_msg", return_value=1001
+    ) as mock_send, patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.save_bot_message_metadata"
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert (
+        mock_send.call_args[0][1]
+        == "no boludo\n\nte quedaste sin créditos IA.\nsaldo actual: 0\nagregá créditos con /topup para recargar con Stars ⭐"
+    )
 
 
 def test_handle_rate_limit():
@@ -6490,8 +6532,8 @@ def test_build_config_text_and_keyboard_reflect_values():
     text = build_config_text(config)
     assert "Gordo config:" in text
     assert "Link fixer: Delete original message" in text
-    assert "Random AI replies: ▫️ disabled" in text
-    assert "Follow-ups for non-AI commands: ▫️ disabled" in text
+    assert "Random IA replies: ▫️ disabled" in text
+    assert "Follow-ups for non-IA commands: ▫️ disabled" in text
     assert "Use the buttons below" in text
 
     keyboard = build_config_keyboard(config)
