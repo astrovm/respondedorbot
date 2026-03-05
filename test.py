@@ -1153,7 +1153,7 @@ def test_handle_msg_topup_group_redirects_private():
         result = handle_msg(message)
 
     assert result == "ok"
-    assert "https://t.me/testbot" in mock_send_msg.call_args[0][1]
+    assert "@testbot" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_balance_private_uses_personal_balance():
