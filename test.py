@@ -82,11 +82,16 @@ def cleanup_test_artifacts():
 
 
 @pytest.fixture(autouse=True)
-def reset_caches():
+def reset_caches(monkeypatch):
     from api import index as index_module
     bcra_service.reset_local_caches()
     index_module._provider_backoff_until.clear()
     index_module._WEBHOOK_CALLBACKS_CHECKED = False
+    monkeypatch.setattr(
+        index_module.chat_config_db_service,
+        "is_configured",
+        lambda: False,
+    )
     config_module.reset_cache()
     yield
 
@@ -323,6 +328,24 @@ def test_get_chat_config_legacy_bytes():
 
     assert config["link_mode"] == "delete"
     assert config["ai_random_replies"] is True
+
+
+def test_get_chat_config_uses_postgres_when_available():
+    redis_client = MagicMock(spec=redis.Redis)
+    pg_config = {
+        "link_mode": "reply",
+        "ai_random_replies": False,
+        "ai_command_followups": True,
+    }
+
+    with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
+        "api.index.chat_config_db_service.get_chat_config", return_value=pg_config
+    ) as mock_get:
+        config = get_chat_config(redis_client, "chat-4")
+
+    assert config == pg_config
+    mock_get.assert_called_once_with("chat-4", CHAT_CONFIG_DEFAULTS)
+    redis_client.get.assert_not_called()
 
 
 def test_is_chat_admin_uses_cache():
@@ -6337,6 +6360,20 @@ def test_set_chat_config_turns_off_link_mode():
 
     redis_client.set.assert_called_once()
     redis_client.delete.assert_called_with("link_mode:123")
+
+
+def test_set_chat_config_persists_to_postgres_when_available():
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+
+    with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
+        "api.index.chat_config_db_service.set_chat_config"
+    ) as mock_pg_set:
+        config = set_chat_config(redis_client, "123", link_mode="reply")
+
+    assert config["link_mode"] == "reply"
+    mock_pg_set.assert_called_once_with("123", config)
+    redis_client.set.assert_any_call("chat_config:123", ANY)
 
 
 def test_get_chat_config_uses_defaults_and_legacy():
