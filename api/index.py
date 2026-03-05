@@ -5181,9 +5181,7 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     try:
         _log_config_event("Loading chat config", {"chat_id": chat_id})
         if chat_config_db_service.is_configured():
-            pg_config = chat_config_db_service.get_chat_config(
-                chat_id, CHAT_CONFIG_DEFAULTS
-            )
+            pg_config = chat_config_db_service.get_chat_config(chat_id, CHAT_CONFIG_DEFAULTS)
             if isinstance(pg_config, dict):
                 return pg_config
 
@@ -5191,26 +5189,30 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
             try:
                 chat_config_db_service.set_chat_config(chat_id, redis_config)
             except Exception as persist_error:
-                _log_config_event(
+                admin_report(
                     "Error migrating chat config from Redis to Postgres",
-                    {"chat_id": chat_id, "error": str(persist_error)},
+                    persist_error,
+                    {"chat_id": chat_id},
                 )
+                return config
             return redis_config
 
         return _load_chat_config_from_redis(redis_client, chat_id)
     except Exception as error:
-        _log_config_event(
+        admin_report(
             "Error loading chat config",
-            {"chat_id": chat_id, "error": str(error)},
+            error,
+            {"chat_id": chat_id, "postgres_configured": chat_config_db_service.is_configured()},
         )
-        try:
-            return _load_chat_config_from_redis(redis_client, chat_id)
-        except Exception as redis_error:
-            admin_report(
-                "Error loading chat config",
-                redis_error,
-                {"chat_id": chat_id},
-            )
+        if not chat_config_db_service.is_configured():
+            try:
+                return _load_chat_config_from_redis(redis_client, chat_id)
+            except Exception as redis_error:
+                admin_report(
+                    "Error loading chat config from Redis",
+                    redis_error,
+                    {"chat_id": chat_id},
+                )
     return config
 
 
@@ -5229,7 +5231,8 @@ def set_chat_config(
         )
         if chat_config_db_service.is_configured():
             chat_config_db_service.set_chat_config(chat_id, config)
-        _persist_chat_config_to_redis(redis_client, chat_id, config)
+        else:
+            _persist_chat_config_to_redis(redis_client, chat_id, config)
     except Exception as error:
         admin_report(
             "Error saving chat config",
