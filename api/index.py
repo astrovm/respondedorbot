@@ -495,7 +495,6 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
 
 # Provider backoff windows (seconds)
 GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit response
-OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS = 600
 
 
 _provider_backoff_until: Dict[str, float] = {}
@@ -2686,12 +2685,6 @@ def ask_ai(
             "hacker_news": get_hacker_news_context(),
         }
 
-        # Create OpenAI client
-        openrouter = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=environ.get("OPENROUTER_API_KEY"),
-        )
-
         # Build system message with personality, context and tool instructions
         system_message = build_system_message(context_data, include_tools=True)
         compound_system_message = (
@@ -2792,67 +2785,12 @@ def ask_ai(
 def complete_with_providers(
     system_message: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    """Try Groq, then OpenRouter and return the first response."""
+    """Try Groq and return the first response."""
 
-    def _run_provider(
-        *,
-        name: str,
-        backoff_key: str,
-        attempt: Callable[[], Optional[str]],
-        skip_reason: Optional[str] = None,
-    ) -> Optional[str]:
-        if skip_reason:
-            print(skip_reason)
-            return None
-
-        if is_provider_backoff_active(backoff_key):
-            remaining = int(get_provider_backoff_remaining(backoff_key))
-            print(
-                f"{name} backoff active ({remaining}s remaining), skipping {name} attempts"
-            )
-            return None
-
-        response = attempt()
-        if response:
-            print(f"complete_with_providers: got response from {name}")
-            return response
-
-        return None
-
-    openrouter_api_key = environ.get("OPENROUTER_API_KEY")
-
-    providers: Sequence[Tuple[str, str, Callable[[], Optional[str]], Optional[str]]] = [
-        (
-            "Groq",
-            "groq",
-            lambda: get_groq_ai_response(system_message, messages),
-            None,
-        ),
-        (
-            "OpenRouter",
-            "openrouter",
-            lambda: get_ai_response(
-                OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key),
-                system_message,
-                messages,
-                provider_name="openrouter",
-            )
-            if openrouter_api_key
-            else None,
-            None if openrouter_api_key else "OpenRouter API key not configured",
-        ),
-    ]
-
-    for name, backoff_key, attempt, skip_reason in providers:
-        result = _run_provider(
-            name=name,
-            backoff_key=backoff_key,
-            attempt=attempt,
-            skip_reason=skip_reason,
-        )
-        if result:
-            return result
-
+    response = get_groq_ai_response(system_message, messages)
+    if response:
+        print("complete_with_providers: got response from Groq")
+        return response
     return None
 
 
@@ -3685,52 +3623,6 @@ def _invoke_provider(
                 f"{display_name} rate limit detected; backing off for {remaining}s"
             )
         return None
-
-
-def get_ai_response(
-    client: OpenAI,
-    system_msg: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    *,
-    provider_name: str = "openrouter",
-    backoff_seconds: Optional[int] = None,
-) -> Optional[str]:
-    """Get AI response (text-only) from a generic OpenAI-compatible provider."""
-
-    models = [
-        "moonshotai/kimi-k2:free",
-    ]
-
-    rate_limit_backoff = (
-        backoff_seconds
-        if backoff_seconds is not None
-        else OPENROUTER_RATE_LIMIT_BACKOFF_SECONDS
-    )
-
-    def _attempt() -> Optional[str]:
-        print(f"Attempt 1/1 using model: {models[0]}")
-
-        response = client.chat.completions.create(
-            model=models[0],
-            extra_body={
-                "models": models[1:],
-            },
-            messages=cast(Any, [system_msg] + messages),
-            max_tokens=1024,
-        )
-
-        if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                return response.choices[0].message.content
-        return None
-
-    return _invoke_provider(
-        provider_name,
-        attempt=_attempt,
-        rate_limit_backoff=rate_limit_backoff,
-        label=provider_name.capitalize(),
-    )
-
 
 
 def _is_rate_limit_error(error: Exception) -> bool:

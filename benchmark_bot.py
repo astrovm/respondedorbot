@@ -23,19 +23,18 @@ load_dotenv()
 
 
 class GordoBenchmark:
-    def __init__(self, openrouter_api_key: str):
-        self.api_key = openrouter_api_key
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+    def __init__(self, groq_api_key: str):
+        self.api_key = groq_api_key
+        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
         self.bot_config = self.load_bot_config()
 
-        # Modelos disponibles en OpenRouter
+        # Modelos disponibles en Groq
         self.models = [
-            "mistralai/mistral-small-3.1-24b-instruct:free",
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-            "mistralai/mistral-small-3.2-24b-instruct:free",
-            "z-ai/glm-4.5-air:free",
-            "moonshotai/kimi-k2:free",
-            "deepseek/deepseek-chat-v3-0324:free",
+            "openai/gpt-oss-120b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "qwen/qwen3-32b",
+            "moonshotai/kimi-k2-instruct-0905",
         ]
 
     def load_bot_config(self) -> Dict[str, Any]:
@@ -84,7 +83,7 @@ class GordoBenchmark:
         ]
 
     def call_model(self, model: str, prompt: str, max_retries: int = 3) -> str:
-        """Llama a un modelo específico via OpenRouter con reintentos automáticos"""
+        """Llama a un modelo específico via Groq con reintentos automáticos"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -149,7 +148,7 @@ class GordoBenchmark:
                 print(f"  Consultando {model}...")
                 response = self.call_model(model, scenario["prompt"])
                 responses[model] = response
-                time.sleep(30)  # Rate limiting para OpenRouter
+                time.sleep(5)  # Rate limiting para Groq
 
             print(f"\n{'='*60}")
             print("📊 RESPUESTAS:")
@@ -247,9 +246,9 @@ class GordoBenchmark:
 
 
 def main():
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        print("❌ Error: OPENROUTER_API_KEY no configurada")
+        print("❌ Error: GROQ_API_KEY no configurada")
         return
 
     benchmark = GordoBenchmark(api_key)
