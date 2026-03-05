@@ -1173,8 +1173,6 @@ def test_handle_msg_balance_private_uses_personal_balance():
     with patch("api.index.config_redis", return_value=redis_client), patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index._maybe_grant_onboarding_credits"
@@ -1210,6 +1208,13 @@ def test_format_balance_command_group_includes_topup_and_transfer_hints():
     assert "/transfer <monto>" in text
 
 
+def test_get_ai_onboarding_credits_default_is_3(monkeypatch):
+    from api.index import get_ai_onboarding_credits
+
+    monkeypatch.delenv("AI_ONBOARDING_CREDITS", raising=False)
+    assert get_ai_onboarding_credits() == 3
+
+
 def test_handle_msg_transfer_group_moves_credits():
     message = {
         "message_id": "12",
@@ -1223,8 +1228,6 @@ def test_handle_msg_transfer_group_moves_credits():
     with patch("api.index.config_redis", return_value=redis_client), patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.credits_db_service.transfer_user_to_chat",
@@ -1277,8 +1280,6 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.check_global_rate_limit", return_value=True
@@ -1323,8 +1324,6 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.check_global_rate_limit", return_value=True
@@ -2112,8 +2111,6 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
     ) as mock_rate_limit, patch(
         "api.index.handle_transcribe_with_message"
     ) as mock_handle_transcribe, patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index._maybe_grant_onboarding_credits"
@@ -2160,8 +2157,6 @@ def test_handle_msg_auto_audio_charges_media_credits():
     ), patch(
         "api.index.save_message_to_redis"
     ), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index._maybe_grant_onboarding_credits"
@@ -2204,8 +2199,6 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits():
     ), patch(
         "api.index.should_gordo_respond", return_value=True
     ), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
-    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.check_global_rate_limit", return_value=True
@@ -2242,6 +2235,53 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits():
     mock_send_msg.assert_called_once()
 
 
+def test_handle_msg_charges_extra_compound_calls():
+    from api.index import handle_msg
+
+    def fake_handle_ai_response(*args, **kwargs):
+        response_meta = kwargs.get("response_meta")
+        if isinstance(response_meta, dict):
+            response_meta["extra_compound_calls"] = 2
+        return "respuesta con compound"
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge, patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        message = {
+            "message_id": 99,
+            "chat": {"id": 555, "type": "private"},
+            "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+            "text": "/ask hola",
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    # 1 cobro base del reply + 2 cobros extra por compound adicional
+    assert mock_charge.call_count == 3
+    assert mock_send_msg.call_args[0][1] == "respuesta con compound"
+
+
 def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge():
     from api.index import handle_msg
 
@@ -2252,8 +2292,6 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
     ) as mock_download, patch(
         "api.index.handle_transcribe_with_message",
         return_value="🖼️ Descripción: todo piola",
-    ), patch(
-        "api.index.is_ai_billing_enabled", return_value=True
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
