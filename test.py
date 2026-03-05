@@ -1234,6 +1234,52 @@ def test_handle_msg_successful_payment_credits_user():
     assert "777" in mock_send_msg.call_args[0][1]
 
 
+def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
+    message = {
+        "message_id": "14",
+        "chat": {"id": "404", "type": "private"},
+        "from": {"id": 77, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index.credits_db_service.refund_ai_charge"
+    ) as mock_refund, patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.ask_ai", return_value="[[AI_FALLBACK]]no boludo"
+    ), patch(
+        "api.index.send_msg", return_value=999
+    ) as mock_send, patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.save_bot_message_metadata"
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_refund.assert_called_once()
+    assert mock_send.call_args[0][1] == "no boludo"
+
+
 def test_handle_rate_limit():
     from api.index import handle_rate_limit
 
@@ -6049,6 +6095,21 @@ def test_handle_ai_response_sanitizes_tool_lines(monkeypatch):
 
     assert "[TOOL]" not in result
     assert result == "Hola\nChau"
+
+
+def test_handle_ai_response_strips_internal_ai_fallback_marker(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    meta = {}
+
+    def fake_handler(_messages):
+        return "[[AI_FALLBACK]]no boludo"
+
+    result = handle_ai_response("123", fake_handler, [], response_meta=meta)
+
+    assert result == "no boludo"
+    assert meta["ai_fallback"] is True
 
 
 def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
