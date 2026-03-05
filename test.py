@@ -973,6 +973,178 @@ def test_process_request_parameters():
             mock_run_agent.assert_called_once()
 
 
+def test_process_request_parameters_handles_pre_checkout_query():
+    from api.index import process_request_parameters
+
+    with app.test_request_context("/", json={"pre_checkout_query": {"id": "pcq_1"}}):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index.handle_pre_checkout_query"
+        ) as mock_handle:
+            response, status = process_request_parameters(request)
+
+    assert status == 200
+    assert response == "Ok"
+    mock_handle.assert_called_once_with({"id": "pcq_1"})
+
+
+def test_handle_callback_query_topup_sends_invoice():
+    callback = {
+        "id": "cbq_topup",
+        "data": "topup:p100",
+        "from": {"id": 42},
+        "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
+    }
+
+    with patch(
+        "api.index.get_ai_billing_pack",
+        return_value={"id": "p100", "credits": 100, "xtr": 50},
+    ), patch("api.index._send_stars_invoice", return_value=True) as mock_send_invoice, patch(
+        "api.index._answer_callback_query"
+    ) as mock_answer, patch("api.index.config_redis") as mock_cfg:
+        handle_callback_query(callback)
+
+    mock_cfg.assert_not_called()
+    mock_send_invoice.assert_called_once_with(
+        chat_id="1",
+        user_id=42,
+        pack={"id": "p100", "credits": 100, "xtr": 50},
+    )
+    mock_answer.assert_called_once()
+
+
+def test_handle_msg_topup_private_returns_keyboard():
+    message = {
+        "message_id": "10",
+        "chat": {"id": "100", "type": "private"},
+        "from": {"id": 7, "first_name": "Ana", "username": "ana"},
+        "text": "/topup",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("api.index.ensure_callback_updates_enabled"), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.build_topup_keyboard",
+        return_value={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_send_msg.assert_called_once_with(
+        "100",
+        "elegí un pack para recargar créditos AI:",
+        "10",
+        reply_markup={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
+    )
+
+
+def test_handle_msg_topup_group_redirects_private():
+    message = {
+        "message_id": "10",
+        "chat": {"id": "100", "type": "group"},
+        "from": {"id": 7, "first_name": "Ana", "username": "ana"},
+        "text": "/topup",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "os.environ.get",
+        side_effect=lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(
+            key, default
+        ),
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert "https://t.me/testbot" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_balance_private_uses_personal_balance():
+    message = {
+        "message_id": "11",
+        "chat": {"id": "101", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/balance",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index._fetch_balance", return_value=42
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert "42" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_transfer_group_moves_credits():
+    message = {
+        "message_id": "12",
+        "chat": {"id": "202", "type": "group"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/transfer 20",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.transfer_user_to_chat",
+        return_value={"ok": True, "user_balance": 30, "chat_balance": 120},
+    ) as mock_transfer:
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_transfer.assert_called_once_with(user_id=55, chat_id=202, amount=20)
+    assert "transferidos 20" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_successful_payment_credits_user():
+    message = {
+        "message_id": "13",
+        "chat": {"id": "303", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "successful_payment": {
+            "currency": "XTR",
+            "total_amount": 50,
+            "invoice_payload": "topup:p100:55",
+            "telegram_payment_charge_id": "charge_1",
+        },
+    }
+
+    with patch(
+        "api.index.credits_db_service.record_star_payment",
+        return_value={"inserted": True, "user_balance": 777},
+    ) as mock_record, patch("api.index.send_msg") as mock_send_msg:
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_record.assert_called_once()
+    assert "777" in mock_send_msg.call_args[0][1]
+
+
 def test_handle_rate_limit():
     from api.index import handle_rate_limit
 
@@ -2091,6 +2263,9 @@ def test_initialize_commands():
     assert "/brecios" in commands
     assert "/dolar" in commands
     assert "/usd" in commands
+    assert "/topup" in commands
+    assert "/balance" in commands
+    assert "/transfer" in commands
 
     # Test that AI commands are properly marked
     assert commands["/ask"][1] == True
@@ -6256,7 +6431,7 @@ def test_ensure_callback_updates_enabled_skips_when_allowed():
         "api.index.get_telegram_webhook_info",
         return_value={
             "url": "https://example.com?key=secret",
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message", "callback_query", "pre_checkout_query"],
         },
     ), patch("api.index.set_telegram_webhook") as mock_set:
         ensure_callback_updates_enabled()
