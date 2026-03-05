@@ -4374,9 +4374,9 @@ def check_global_rate_limit(redis_client: redis.Redis) -> bool:
 
 
 def is_ai_billing_enabled() -> bool:
-    """Return whether AI credits billing is enabled."""
+    """Legacy helper kept for compatibility; IA billing is always enabled."""
 
-    return _coerce_bool(environ.get("AI_BILLING_ENABLED"), default=True)
+    return True
 
 
 def get_ai_credits_per_response() -> int:
@@ -5336,6 +5336,15 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
             _answer_callback_query(callback_id)
         return
 
+    if not credits_db_service.is_configured():
+        if callback_id:
+            _answer_callback_query(
+                callback_id,
+                text="el cobro IA no está configurado, avisale al admin.",
+                show_alert=True,
+            )
+        return
+
     if chat_type != "private":
         if callback_id:
             _answer_callback_query(
@@ -5398,6 +5407,14 @@ def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
     if not query_id:
         return
 
+    if not credits_db_service.is_configured():
+        _answer_pre_checkout_query(
+            str(query_id),
+            ok=False,
+            error_message="el cobro IA no está configurado, avisale al admin.",
+        )
+        return
+
     payload = str(pre_checkout_query.get("invoice_payload") or "")
     currency = str(pre_checkout_query.get("currency") or "")
     from_user = cast(Dict[str, Any], pre_checkout_query.get("from") or {})
@@ -5441,6 +5458,10 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
     if chat_id_raw is None:
         return "ok"
     chat_id = str(chat_id_raw)
+
+    if not credits_db_service.is_configured():
+        send_msg(chat_id, "el cobro IA no está configurado, avisale al admin.")
+        return "ok"
 
     user_id = _extract_user_id(message)
     if user_id is None:
@@ -5766,11 +5787,10 @@ def handle_msg(message: Dict) -> str:
             return f"{random_response}\n\n{credits_message}"
 
         def _charge_media_usage() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-            billing_active = is_ai_billing_enabled() and credits_db_service.is_configured()
-            if billing_active and (user_id is None or numeric_chat_id is None):
-                billing_active = False
-            if not billing_active:
-                return None, None
+            if not credits_db_service.is_configured():
+                return None, "el cobro IA no está configurado, avisale al admin."
+            if user_id is None or numeric_chat_id is None:
+                return None, "no pude identificar usuario/chat para cobrar IA."
 
             _maybe_grant_onboarding_credits(user_id)
             credits_cost = get_ai_credits_per_response()
@@ -6001,99 +6021,42 @@ def handle_msg(message: Dict) -> str:
         def run_ai_flow(handler_func: Callable[..., str], prompt_text: str) -> str:
             nonlocal response_uses_ai
 
-            billing_active = is_ai_billing_enabled() and credits_db_service.is_configured()
-            if billing_active and (user_id is None or numeric_chat_id is None):
-                billing_active = False
-            if billing_active:
+            if not credits_db_service.is_configured():
+                return "el cobro IA no está configurado, avisale al admin."
+            if user_id is None or numeric_chat_id is None:
+                return "no pude identificar usuario/chat para cobrar IA."
 
-                if not check_global_rate_limit(redis_client):
-                    return handle_rate_limit(chat_id, message)
-
-                _maybe_grant_onboarding_credits(user_id)
-                credits_cost = get_ai_credits_per_response()
-                chat_scope_id = (
-                    numeric_chat_id if _is_group_chat_type(chat_type) else None
-                )
-
-                try:
-                    charge_result = credits_db_service.charge_ai_credits(
-                        user_id=user_id,
-                        chat_id=chat_scope_id,
-                        amount=credits_cost,
-                    )
-                except Exception as error:
-                    admin_report(
-                        "Error charging AI credits",
-                        error,
-                        {"chat_id": chat_id, "user_id": user_id},
-                    )
-                    return "error cobrando créditos IA, intentá de nuevo."
-
-                if not charge_result.get("ok"):
-                    random_name = str(message.get("from", {}).get("first_name") or "boludo")
-                    random_response = gen_random(random_name)
-                    credits_message = build_insufficient_credits_message(
-                        chat_type=chat_type,
-                        user_balance=int(charge_result.get("user_balance", 0)),
-                        chat_balance=int(charge_result.get("chat_balance", 0)),
-                    )
-                    return f"{random_response}\n\n{credits_message}"
-
-                media_charge_meta: Optional[Dict[str, Any]] = None
-                if resized_image_data and photo_file_id:
-                    media_charge_meta, media_charge_error = _charge_media_usage()
-                    if media_charge_error:
-                        return media_charge_error
-
-                chat_history = get_chat_history(chat_id, redis_client)
-                ai_messages = build_ai_messages(
-                    message,
-                    chat_history,
-                    prompt_text,
-                    reply_context_text,
-                )
-                ai_response_meta: Dict[str, Any] = {}
-                response_msg_inner = handle_ai_response(
-                    chat_id,
-                    handler_func,
-                    ai_messages,
-                    image_data=resized_image_data if photo_file_id else None,
-                    image_file_id=photo_file_id or None,
-                    context_texts=[reply_context_text],
-                    user_identity=user_identity,
-                    response_meta=ai_response_meta,
-                )
-                response_uses_ai = True
-
-                if response_msg_inner in {
-                    "error de IA, intentá de nuevo en un rato",
-                    "no pude generar respuesta, intentá de nuevo",
-                } or bool(ai_response_meta.get("ai_fallback")):
-                    charge_source = str(charge_result.get("source") or "user")
-                    try:
-                        credits_db_service.refund_ai_charge(
-                            user_id=user_id,
-                            chat_id=chat_scope_id,
-                            amount=credits_cost,
-                            source="chat" if charge_source == "chat" else "user",
-                        )
-                    except Exception as refund_error:
-                        admin_report(
-                            "falló el reintegro de créditos IA",
-                            refund_error,
-                            {
-                                "chat_id": chat_id,
-                                "user_id": user_id,
-                                "source": charge_source,
-                            },
-                        )
-                    _refund_media_charge(
-                        media_charge_meta, "ai_response_failed_after_image_media_charge"
-                    )
-                return response_msg_inner
-
-            if not check_rate_limit(chat_id, redis_client):
+            if not check_global_rate_limit(redis_client):
                 return handle_rate_limit(chat_id, message)
+
+            _maybe_grant_onboarding_credits(user_id)
+            credits_cost = get_ai_credits_per_response()
+            chat_scope_id = (
+                numeric_chat_id if _is_group_chat_type(chat_type) else None
+            )
+
+            try:
+                charge_result = credits_db_service.charge_ai_credits(
+                    user_id=user_id,
+                    chat_id=chat_scope_id,
+                    amount=credits_cost,
+                )
+            except Exception as error:
+                admin_report(
+                    "Error charging IA credits",
+                    error,
+                    {"chat_id": chat_id, "user_id": user_id},
+                )
+                return "error cobrando créditos IA, intentá de nuevo."
+
+            if not charge_result.get("ok"):
+                return _build_insufficient_credits_reply(charge_result)
+
+            media_charge_meta: Optional[Dict[str, Any]] = None
+            if resized_image_data and photo_file_id:
+                media_charge_meta, media_charge_error = _charge_media_usage()
+                if media_charge_error:
+                    return media_charge_error
 
             chat_history = get_chat_history(chat_id, redis_client)
             ai_messages = build_ai_messages(
@@ -6102,6 +6065,7 @@ def handle_msg(message: Dict) -> str:
                 prompt_text,
                 reply_context_text,
             )
+            ai_response_meta: Dict[str, Any] = {}
             response_msg_inner = handle_ai_response(
                 chat_id,
                 handler_func,
@@ -6110,8 +6074,35 @@ def handle_msg(message: Dict) -> str:
                 image_file_id=photo_file_id or None,
                 context_texts=[reply_context_text],
                 user_identity=user_identity,
+                response_meta=ai_response_meta,
             )
             response_uses_ai = True
+
+            if response_msg_inner in {
+                "error de IA, intentá de nuevo en un rato",
+                "no pude generar respuesta, intentá de nuevo",
+            } or bool(ai_response_meta.get("ai_fallback")):
+                charge_source = str(charge_result.get("source") or "user")
+                try:
+                    credits_db_service.refund_ai_charge(
+                        user_id=user_id,
+                        chat_id=chat_scope_id,
+                        amount=credits_cost,
+                        source="chat" if charge_source == "chat" else "user",
+                    )
+                except Exception as refund_error:
+                    admin_report(
+                        "falló el reintegro de créditos IA",
+                        refund_error,
+                        {
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "source": charge_source,
+                        },
+                    )
+                _refund_media_charge(
+                    media_charge_meta, "ai_response_failed_after_image_media_charge"
+                )
             return response_msg_inner
 
         if command == "/config":
@@ -6119,8 +6110,8 @@ def handle_msg(message: Dict) -> str:
             response_msg, response_markup = handle_config_command(chat_id)
         elif command == "/topup":
             response_command = command
-            if not is_ai_billing_enabled():
-                response_msg = "el cobro IA está desactivado en esta instancia."
+            if not credits_db_service.is_configured():
+                response_msg = "el cobro IA no está configurado, avisale al admin."
             elif chat_type != "private":
                 bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
                 if bot_username:
@@ -6136,9 +6127,7 @@ def handle_msg(message: Dict) -> str:
                 response_markup = build_topup_keyboard()
         elif command == "/balance":
             response_command = command
-            if not is_ai_billing_enabled():
-                response_msg = "el cobro IA está desactivado en esta instancia."
-            elif not credits_db_service.is_configured():
+            if not credits_db_service.is_configured():
                 response_msg = "el cobro IA no está configurado, avisale al admin."
             elif user_id is None or numeric_chat_id is None:
                 response_msg = "no pude leer tu usuario para ver saldos."
@@ -6157,9 +6146,7 @@ def handle_msg(message: Dict) -> str:
                     response_msg = "error leyendo tu saldo, intentá de nuevo."
         elif command == "/transfer":
             response_command = command
-            if not is_ai_billing_enabled():
-                response_msg = "el cobro IA está desactivado en esta instancia."
-            elif not credits_db_service.is_configured():
+            if not credits_db_service.is_configured():
                 response_msg = "el cobro IA no está configurado, avisale al admin."
             elif not _is_group_chat_type(chat_type):
                 response_msg = "este comando es para grupos: /transfer <monto>"
