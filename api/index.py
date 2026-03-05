@@ -4434,6 +4434,37 @@ def should_gordo_respond(
     )
 
 
+def should_auto_process_media(
+    commands: Mapping[str, Tuple[Callable, bool, bool]],
+    command: str,
+    message_text: str,
+    message: Mapping[str, Any],
+) -> bool:
+    """Return whether incoming media should be auto transcribed/described."""
+
+    chat = cast(Mapping[str, Any], message.get("chat", {}))
+    chat_type = str(chat.get("type", ""))
+    if chat_type == "private":
+        return True
+
+    if command in commands:
+        return True
+
+    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
+    if not bot_username:
+        return False
+
+    bot_name = f"@{bot_username}"
+    lowered_text = (message_text or "").lower()
+    is_mention = bot_name.lower() in lowered_text
+
+    reply = cast(Mapping[str, Any], message.get("reply_to_message", {}))
+    reply_from = cast(Mapping[str, Any], reply.get("from", {}))
+    is_reply_to_bot = str(reply_from.get("username", "")) == bot_username
+
+    return is_mention or is_reply_to_bot
+
+
 def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
     """
     Checkea si un chat_id o el bot global superó el rate limit
@@ -5848,8 +5879,15 @@ def handle_msg(message: Dict) -> str:
         if isinstance(message.get("successful_payment"), Mapping):
             return handle_successful_payment_message(message)
 
+        commands = initialize_commands()
+        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+        command, _ = parse_command(message_text, bot_name)
+        auto_process_media = should_auto_process_media(
+            commands, command, message_text, message
+        )
+
         # Process audio first if present (but not for /transcribe commands)
-        if audio_file_id and not (
+        if auto_process_media and audio_file_id and not (
             message_text and message_text.strip().lower().startswith("/transcribe")
         ):
             print(f"Processing audio message: {audio_file_id}")
@@ -5867,7 +5905,7 @@ def handle_msg(message: Dict) -> str:
         # Download image if present
         image_base64 = None
         resized_image_data = None
-        if photo_file_id:
+        if auto_process_media and photo_file_id:
             print(f"Processing image message: {photo_file_id}")
             image_data = download_telegram_file(photo_file_id)
             if image_data:
@@ -5926,9 +5964,6 @@ def handle_msg(message: Dict) -> str:
             urls = re.findall(r"https?://\S+", message_text)
             if urls:
                 return "ok"
-
-        commands = initialize_commands()
-        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
 
         # Get command and message text
         command, sanitized_message_text = parse_command(message_text, bot_name)

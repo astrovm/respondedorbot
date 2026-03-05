@@ -13,6 +13,7 @@ from api.index import (
     format_user_message,
     build_reply_context_text,
     should_gordo_respond,
+    should_auto_process_media,
     truncate_text,
     fetch_url_content,
     web_search,
@@ -813,6 +814,42 @@ def test_should_gordo_respond_blocks_followups_when_disabled():
                 commands, "", "hola", msg, chat_config, reply_metadata
             )
             is False
+        )
+
+
+def test_should_auto_process_media_requires_direct_invocation_in_groups():
+    commands = {"/ask": (lambda x: x, True, True)}
+
+    with patch("os.environ.get") as mock_env:
+        mock_env.return_value = "testbot"
+
+        plain_group_msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+        }
+        assert (
+            should_auto_process_media(commands, "", "", plain_group_msg) is False
+        )
+
+        mention_group_msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+            "text": "@testbot mirá esto",
+        }
+        assert (
+            should_auto_process_media(
+                commands, "", mention_group_msg["text"], mention_group_msg
+            )
+            is True
+        )
+
+        reply_group_msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+            "reply_to_message": {"from": {"username": "testbot"}},
+        }
+        assert (
+            should_auto_process_media(commands, "", "", reply_group_msg) is True
         )
 
 
@@ -1847,6 +1884,51 @@ def test_handle_msg_with_audio():
         assert result == "ok"
         mock_transcribe.assert_called_once()
         mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_group_audio_without_invocation_skips_auto_transcription():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index._transcribe_audio_file"
+    ) as mock_transcribe:
+
+        def env_side_effect(key, default=None):
+            env_vars = {
+                "TELEGRAM_USERNAME": "testbot",
+                "BOT_SYSTEM_PROMPT": "You are a test bot",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
+            }
+            return env_vars.get(key, default)
+
+        mock_env.side_effect = env_side_effect
+        mock_transcribe.return_value = ("transcribed text", None)
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+
+        def redis_get(key):
+            if key == "chat_config:123":
+                return json.dumps(CHAT_CONFIG_DEFAULTS)
+            return None
+
+        mock_redis.get.side_effect = redis_get
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "group"},
+            "from": {"first_name": "John", "username": "john"},
+            "voice": {"file_id": "voice_123"},
+        }
+
+        result = handle_msg(message)
+
+        assert result == "ok"
+        mock_transcribe.assert_not_called()
+        mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_with_transcribe_command():
