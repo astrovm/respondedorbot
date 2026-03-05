@@ -2051,6 +2051,94 @@ def test_handle_msg_with_transcribe_command():
         mock_send_msg.assert_called_once()
 
 
+def test_handle_msg_with_transcribe_command_charges_media_credits():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.check_rate_limit"
+    ) as mock_rate_limit, patch(
+        "api.index.handle_transcribe_with_message"
+    ) as mock_handle_transcribe, patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge, patch(
+        "api.index.credits_db_service.refund_ai_charge"
+    ) as mock_refund:
+
+        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_rate_limit.return_value = True
+        mock_handle_transcribe.return_value = "🎵 Transcripción: todo piola"
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 77, "first_name": "John", "username": "john"},
+            "text": "/transcribe",
+            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123"}},
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_charge.assert_called_once_with(user_id=77, chat_id=None, amount=1)
+        mock_refund.assert_not_called()
+        mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_auto_audio_charges_media_credits():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index._transcribe_audio_file", return_value=("audio transcripto", None)
+    ) as mock_transcribe, patch(
+        "api.index.should_gordo_respond", return_value=False
+    ), patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.is_ai_billing_enabled", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge:
+        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 88, "first_name": "John", "username": "john"},
+            "voice": {"file_id": "voice_123"},
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
+        mock_charge.assert_called_once_with(user_id=88, chat_id=None, amount=1)
+        mock_send_msg.assert_not_called()
+
+
 def test_handle_msg_with_unknown_command():
     from api.index import handle_msg
 
