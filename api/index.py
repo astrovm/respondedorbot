@@ -74,6 +74,7 @@ from api.config import (
     load_bot_config as _config_load_bot_config,
 )
 from api.services import bcra as bcra_service
+from api.services import credits_db as credits_db_service
 from api.agent import (
     AGENT_EMPTY_RESPONSE_FALLBACK,
     AGENT_LOOP_FALLBACK_PREFIX,
@@ -588,6 +589,14 @@ RATE_LIMIT_GLOBAL_MAX = 1024
 RATE_LIMIT_CHAT_MAX = 128
 TTL_RATE_GLOBAL = 3600  # 1 hour
 TTL_RATE_CHAT = 600  # 10 minutes
+
+AI_BILLING_DEFAULT_PACKS: List[Dict[str, int]] = [
+    {"id": "p100", "credits": 100, "xtr": 50},
+    {"id": "p250", "credits": 250, "xtr": 125},
+    {"id": "p500", "credits": 500, "xtr": 250},
+    {"id": "p1000", "credits": 1000, "xtr": 500},
+    {"id": "p2500", "credits": 2500, "xtr": 1250},
+]
 
 def run_agent_cycle() -> Dict[str, Any]:
     """Trigger the autonomous agent, persist its thought and return metadata."""
@@ -2168,6 +2177,12 @@ comandos disponibles boludo:
 - /instance: te digo donde estoy corriendo
 
 - /config: cambiá la config del gordo, link fixer y demases
+
+- /topup: recargá créditos AI con Telegram Stars ⭐ (en privado)
+
+- /balance: te muestro saldo AI (en grupo: personal + grupo)
+
+- /transfer 100: pasás 100 créditos de tu saldo personal al grupo
 
 - /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
@@ -4217,6 +4232,9 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
         "/transcribe": (handle_transcribe, False, False),
         "/bcra": (handle_bcra_variables, False, False),
         "/variables": (handle_bcra_variables, False, False),
+        "/topup": (lambda: "", False, False),
+        "/balance": (lambda: "", False, False),
+        "/transfer": (lambda _arg: "", False, True),
     }
 
 
@@ -4443,6 +4461,222 @@ def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
         return hour_count <= RATE_LIMIT_GLOBAL_MAX and chat_count <= RATE_LIMIT_CHAT_MAX
     except redis.RedisError:
         return False
+
+
+def check_global_rate_limit(redis_client: redis.Redis) -> bool:
+    """Check only the global hourly limit."""
+
+    try:
+        pipe = redis_client.pipeline()
+        hour_key = "rate_limit:global:hour"
+        pipe.incr(hour_key)
+        pipe.expire(hour_key, TTL_RATE_GLOBAL, nx=True)
+        results = pipe.execute()
+        hour_count_raw = results[0] if results else 0
+        try:
+            hour_count = int(hour_count_raw or 0)
+        except (TypeError, ValueError):
+            return True
+        return hour_count <= RATE_LIMIT_GLOBAL_MAX
+    except redis.RedisError:
+        return False
+
+
+def is_ai_billing_enabled() -> bool:
+    """Return whether AI credits billing is enabled."""
+
+    return _coerce_bool(environ.get("AI_BILLING_ENABLED"), default=True)
+
+
+def get_ai_credits_per_response() -> int:
+    """Return credits charged per AI response."""
+
+    raw_value = str(environ.get("AI_CREDITS_PER_RESPONSE") or "1").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, parsed)
+
+
+def get_ai_onboarding_credits() -> int:
+    """Return onboarding credits granted once per user."""
+
+    raw_value = str(environ.get("AI_ONBOARDING_CREDITS") or "10").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 10
+    return max(0, parsed)
+
+
+def get_ai_billing_packs() -> List[Dict[str, int]]:
+    """Load Stars billing packs from env or defaults."""
+
+    raw_value = str(environ.get("AI_STARS_PACKS_JSON") or "").strip()
+    if not raw_value:
+        return list(AI_BILLING_DEFAULT_PACKS)
+
+    try:
+        loaded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return list(AI_BILLING_DEFAULT_PACKS)
+
+    if not isinstance(loaded, list):
+        return list(AI_BILLING_DEFAULT_PACKS)
+
+    normalized: List[Dict[str, int]] = []
+    for item in loaded:
+        if not isinstance(item, Mapping):
+            continue
+        pack_id = str(item.get("id", "")).strip()
+        try:
+            credits = int(item.get("credits"))  # type: ignore[arg-type]
+            xtr = int(item.get("xtr"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if not pack_id or credits <= 0 or xtr <= 0:
+            continue
+        normalized.append({"id": pack_id, "credits": credits, "xtr": xtr})
+
+    return normalized or list(AI_BILLING_DEFAULT_PACKS)
+
+
+def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
+    """Return the pack dict matching *pack_id*."""
+
+    for pack in get_ai_billing_packs():
+        if str(pack.get("id")) == str(pack_id):
+            return pack
+    return None
+
+
+def build_topup_keyboard() -> Dict[str, Any]:
+    """Build inline keyboard with top-up packs."""
+
+    rows: List[List[Dict[str, str]]] = []
+    for pack in get_ai_billing_packs():
+        pack_id = str(pack["id"])
+        rows.append(
+            [
+                {
+                    "text": f"{pack['credits']} créditos - {pack['xtr']} ⭐",
+                    "callback_data": f"topup:{pack_id}",
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def _parse_topup_payload(payload: str) -> Tuple[Optional[str], Optional[int]]:
+    """Parse invoice payload for top-up purchases."""
+
+    if not payload:
+        return None, None
+    parts = str(payload).split(":")
+    if len(parts) < 2 or parts[0] != "topup":
+        return None, None
+
+    user_id: Optional[int] = None
+    if len(parts) >= 3:
+        try:
+            user_id = int(parts[2])
+        except (TypeError, ValueError):
+            user_id = None
+    return parts[1], user_id
+
+
+def build_insufficient_credits_message(
+    *, chat_type: str, user_balance: int, chat_balance: int
+) -> str:
+    """Build a user-facing paywall message when no credits are available."""
+
+    if _is_group_chat_type(chat_type):
+        return (
+            "sin créditos para AI en este grupo, che.\n"
+            f"- Tu saldo: {user_balance}\n"
+            f"- Saldo del grupo: {chat_balance}\n"
+            "recargá con /topup (por privado) y pasá al grupo con /transfer <monto>.\n"
+            "podés ver todo con /balance"
+        )
+
+    return (
+        "te quedaste sin créditos AI.\n"
+        f"saldo actual: {user_balance}\n"
+        "mandá /topup para recargar con Stars ⭐"
+    )
+
+
+def _extract_numeric_chat_id(chat_id: str) -> Optional[int]:
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
+    user = message.get("from") if message else None
+    if not isinstance(user, Mapping):
+        return None
+    try:
+        return int(cast(Mapping[str, Any], user).get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
+    if user_id is None:
+        return
+    onboarding_credits = get_ai_onboarding_credits()
+    if onboarding_credits <= 0:
+        return
+
+    try:
+        credits_db_service.grant_onboarding_if_needed(user_id, onboarding_credits)
+    except Exception as error:
+        admin_report("Failed to grant onboarding credits", error, {"user_id": user_id})
+
+
+def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
+    return credits_db_service.get_balance(scope_type, int(scope_id))
+
+
+def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
+    user_balance = _fetch_balance("user", user_id)
+    if _is_group_chat_type(chat_type):
+        chat_balance = _fetch_balance("chat", chat_id)
+        return (
+            "saldos AI:\n"
+            f"- tu saldo personal: {user_balance}\n"
+            f"- saldo del grupo: {chat_balance}\n"
+            "en grupos siempre se usa primero tu saldo personal y después el del grupo."
+        )
+
+    return f"tu saldo personal de AI es: {user_balance}"
+
+
+def _send_stars_invoice(
+    *,
+    chat_id: str,
+    user_id: int,
+    pack: Mapping[str, int],
+) -> bool:
+    payload = f"topup:{pack['id']}:{user_id}"
+    request_payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "title": f"Pack AI {pack['credits']} créditos",
+        "description": f"Recarga de {pack['credits']} créditos para mensajes AI",
+        "payload": payload,
+        "provider_token": "",
+        "currency": "XTR",
+        "prices": [{"label": f"{pack['credits']} créditos AI", "amount": pack["xtr"]}],
+    }
+    payload_response, error = _telegram_request(
+        "sendInvoice",
+        method="POST",
+        json_payload=request_payload,
+    )
+    return error is None and bool(payload_response)
 
 
 def extract_message_text(message: Dict) -> str:
@@ -5067,7 +5301,7 @@ _WEBHOOK_CALLBACKS_CHECKED = False
 
 
 def ensure_callback_updates_enabled() -> None:
-    """Ensure the Telegram webhook can deliver callback_query updates."""
+    """Ensure the webhook can deliver callback and payment updates."""
 
     global _WEBHOOK_CALLBACKS_CHECKED
     if _WEBHOOK_CALLBACKS_CHECKED:
@@ -5089,7 +5323,9 @@ def ensure_callback_updates_enabled() -> None:
 
     allowed_updates = webhook_info.get("allowed_updates")
     if isinstance(allowed_updates, list):
-        if not allowed_updates or "callback_query" in allowed_updates:
+        updates = {str(value) for value in allowed_updates}
+        required_updates = {"callback_query", "pre_checkout_query"}
+        if not allowed_updates or required_updates.issubset(updates):
             _WEBHOOK_CALLBACKS_CHECKED = True
             return
     elif allowed_updates is None:
@@ -5109,13 +5345,13 @@ def ensure_callback_updates_enabled() -> None:
     updated = set_telegram_webhook(function_url)
     if updated:
         _log_config_event(
-            "Updated webhook to enable callback queries",
+            "Updated webhook to enable callbacks and pre-checkout updates",
             {"url": expected_url},
         )
         _WEBHOOK_CALLBACKS_CHECKED = True
     else:
         _WEBHOOK_CALLBACKS_CHECKED = True
-        admin_report("Failed to update webhook for callback queries")
+        admin_report("Failed to update webhook for callbacks and pre-checkout")
 
 
 def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
@@ -5125,14 +5361,216 @@ def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
     return build_config_text(config), build_config_keyboard(config)
 
 
-def _answer_callback_query(callback_query_id: str) -> None:
+def _answer_callback_query(
+    callback_query_id: str,
+    *,
+    text: Optional[str] = None,
+    show_alert: bool = False,
+) -> None:
+    payload: Dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+        if show_alert:
+            payload["show_alert"] = True
+
     _telegram_request(
         "answerCallbackQuery",
         method="POST",
-        json_payload={"callback_query_id": callback_query_id},
+        json_payload=payload,
         log_errors=False,
         expect_json=False,
     )
+
+
+def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
+    callback_data = str(callback_query.get("data") or "")
+    callback_id = callback_query.get("id")
+    message = cast(Dict[str, Any], callback_query.get("message") or {})
+    chat = cast(Dict[str, Any], message.get("chat") or {})
+    user = cast(Dict[str, Any], callback_query.get("from") or {})
+    chat_id = chat.get("id")
+    chat_type = str(chat.get("type", ""))
+
+    if chat_id is None:
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    if chat_type != "private":
+        if callback_id:
+            _answer_callback_query(
+                callback_id,
+                text="recargá por privado, pa",
+                show_alert=True,
+            )
+        return
+
+    parts = callback_data.split(":", 1)
+    pack = get_ai_billing_pack(parts[1] if len(parts) == 2 else "")
+    if not pack:
+        if callback_id:
+            _answer_callback_query(
+                callback_id,
+                text="ese pack no existe",
+                show_alert=True,
+            )
+        return
+
+    try:
+        user_id = int(user.get("id"))
+    except (TypeError, ValueError):
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    sent_ok = _send_stars_invoice(chat_id=str(chat_id), user_id=user_id, pack=pack)
+    if callback_id:
+        if sent_ok:
+            _answer_callback_query(callback_id, text="factura lista ✅")
+        else:
+            _answer_callback_query(
+                callback_id,
+                text="no pude generar la factura",
+                show_alert=True,
+            )
+
+
+def _answer_pre_checkout_query(
+    query_id: str,
+    *,
+    ok: bool,
+    error_message: Optional[str] = None,
+) -> None:
+    payload: Dict[str, Any] = {"pre_checkout_query_id": query_id, "ok": bool(ok)}
+    if not ok and error_message:
+        payload["error_message"] = error_message
+    _telegram_request(
+        "answerPreCheckoutQuery",
+        method="POST",
+        json_payload=payload,
+        log_errors=False,
+        expect_json=False,
+    )
+
+
+def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
+    query_id = pre_checkout_query.get("id")
+    if not query_id:
+        return
+
+    payload = str(pre_checkout_query.get("invoice_payload") or "")
+    currency = str(pre_checkout_query.get("currency") or "")
+    from_user = cast(Dict[str, Any], pre_checkout_query.get("from") or {})
+    pack_id, payload_user_id = _parse_topup_payload(payload)
+    pack = get_ai_billing_pack(pack_id or "")
+
+    try:
+        user_id = int(from_user.get("id"))
+    except (TypeError, ValueError):
+        _answer_pre_checkout_query(
+            str(query_id),
+            ok=False,
+            error_message="usuario inválido para cobrar",
+        )
+        return
+
+    try:
+        total_amount = int(pre_checkout_query.get("total_amount"))
+    except (TypeError, ValueError):
+        total_amount = -1
+
+    if (
+        not pack
+        or currency != "XTR"
+        or int(pack["xtr"]) != total_amount
+        or (payload_user_id is not None and payload_user_id != user_id)
+    ):
+        _answer_pre_checkout_query(
+            str(query_id),
+            ok=False,
+            error_message="no pude validar ese pago, intentá de nuevo",
+        )
+        return
+
+    _answer_pre_checkout_query(str(query_id), ok=True)
+
+
+def handle_successful_payment_message(message: Dict[str, Any]) -> str:
+    chat = cast(Dict[str, Any], message.get("chat") or {})
+    chat_id_raw = chat.get("id")
+    if chat_id_raw is None:
+        return "ok"
+    chat_id = str(chat_id_raw)
+
+    user_id = _extract_user_id(message)
+    if user_id is None:
+        return "ok"
+
+    successful_payment = cast(Dict[str, Any], message.get("successful_payment") or {})
+    currency = str(successful_payment.get("currency") or "")
+    payload = str(successful_payment.get("invoice_payload") or "")
+    charge_id = str(successful_payment.get("telegram_payment_charge_id") or "")
+    pack_id, payload_user_id = _parse_topup_payload(payload)
+    pack = get_ai_billing_pack(pack_id or "")
+
+    try:
+        total_amount = int(successful_payment.get("total_amount"))
+    except (TypeError, ValueError):
+        total_amount = -1
+
+    if (
+        not charge_id
+        or not pack
+        or currency != "XTR"
+        or total_amount != int(pack["xtr"])
+        or (payload_user_id is not None and payload_user_id != user_id)
+    ):
+        send_msg(chat_id, "recibí el pago pero no pude validarlo, avisame al admin.")
+        admin_report(
+            "Invalid successful payment payload",
+            None,
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "currency": currency,
+                "payload": payload,
+                "total_amount": total_amount,
+                "charge_id": charge_id,
+            },
+        )
+        return "ok"
+
+    try:
+        payment_result = credits_db_service.record_star_payment(
+            telegram_payment_charge_id=charge_id,
+            user_id=user_id,
+            pack_id=str(pack["id"]),
+            xtr_amount=int(pack["xtr"]),
+            credits_awarded=int(pack["credits"]),
+            payload=payload,
+        )
+    except Exception as error:
+        admin_report(
+            "Failed to persist successful payment",
+            error,
+            {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
+        )
+        send_msg(chat_id, "pago recibido, pero hubo un error al acreditar créditos.")
+        return "ok"
+
+    balance = int(payment_result.get("user_balance", 0))
+    if payment_result.get("inserted"):
+        send_msg(
+            chat_id,
+            (
+                f"listo, te acredité {pack['credits']} créditos ✅\n"
+                f"tu saldo personal ahora es {balance}\n"
+                "si querés cargar un grupo: /transfer <monto>"
+            ),
+        )
+    else:
+        send_msg(chat_id, f"ese pago ya estaba acreditado. saldo actual: {balance}")
+    return "ok"
 
 
 def edit_message(
@@ -5162,6 +5600,10 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     if not callback_data or chat_id is None or message_id is None:
         if callback_id:
             _answer_callback_query(callback_id)
+        return
+
+    if str(callback_data).startswith("topup:"):
+        handle_topup_callback(callback_query)
         return
 
     redis_client = config_redis()
@@ -5358,6 +5800,8 @@ def handle_msg(message: Dict) -> str:
         chat_id = str(chat.get("id"))
         chat_type = str(chat.get("type", ""))
         user_identity = _format_user_identity(message.get("from", {})).strip()
+        if isinstance(message.get("successful_payment"), Mapping):
+            return handle_successful_payment_message(message)
 
         # Process audio first if present (but not for /transcribe commands)
         if audio_file_id and not (
@@ -5508,6 +5952,8 @@ def handle_msg(message: Dict) -> str:
         response_markup: Optional[Dict[str, Any]] = None
         response_uses_ai = False
         response_command: Optional[str] = None
+        user_id = _extract_user_id(message)
+        numeric_chat_id = _extract_numeric_chat_id(chat_id)
 
         if (
             command == "/config"
@@ -5526,34 +5972,204 @@ def handle_msg(message: Dict) -> str:
             )
             return "ok"
 
+        def run_ai_flow(handler_func: Callable[..., str], prompt_text: str) -> str:
+            nonlocal response_uses_ai
+
+            billing_active = is_ai_billing_enabled() and credits_db_service.is_configured()
+            if billing_active and (user_id is None or numeric_chat_id is None):
+                billing_active = False
+            if billing_active:
+
+                if not check_global_rate_limit(redis_client):
+                    return handle_rate_limit(chat_id, message)
+
+                _maybe_grant_onboarding_credits(user_id)
+                credits_cost = get_ai_credits_per_response()
+                chat_scope_id = (
+                    numeric_chat_id if _is_group_chat_type(chat_type) else None
+                )
+
+                try:
+                    charge_result = credits_db_service.charge_ai_credits(
+                        user_id=user_id,
+                        chat_id=chat_scope_id,
+                        amount=credits_cost,
+                    )
+                except Exception as error:
+                    admin_report(
+                        "Error charging AI credits",
+                        error,
+                        {"chat_id": chat_id, "user_id": user_id},
+                    )
+                    return "error cobrando créditos AI, intentá de nuevo."
+
+                if not charge_result.get("ok"):
+                    return build_insufficient_credits_message(
+                        chat_type=chat_type,
+                        user_balance=int(charge_result.get("user_balance", 0)),
+                        chat_balance=int(charge_result.get("chat_balance", 0)),
+                    )
+
+                chat_history = get_chat_history(chat_id, redis_client)
+                ai_messages = build_ai_messages(
+                    message,
+                    chat_history,
+                    prompt_text,
+                    reply_context_text,
+                )
+                response_msg_inner = handle_ai_response(
+                    chat_id,
+                    handler_func,
+                    ai_messages,
+                    image_data=resized_image_data if photo_file_id else None,
+                    image_file_id=photo_file_id or None,
+                    context_texts=[reply_context_text],
+                    user_identity=user_identity,
+                )
+                response_uses_ai = True
+
+                if response_msg_inner in {
+                    "error de IA, intentá de nuevo en un rato",
+                    "no pude generar respuesta, intentá de nuevo",
+                }:
+                    charge_source = str(charge_result.get("source") or "user")
+                    try:
+                        credits_db_service.refund_ai_charge(
+                            user_id=user_id,
+                            chat_id=chat_scope_id,
+                            amount=credits_cost,
+                            source="chat" if charge_source == "chat" else "user",
+                        )
+                    except Exception as refund_error:
+                        admin_report(
+                            "Failed to refund AI credits",
+                            refund_error,
+                            {
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "source": charge_source,
+                            },
+                        )
+                return response_msg_inner
+
+            if not check_rate_limit(chat_id, redis_client):
+                return handle_rate_limit(chat_id, message)
+
+            chat_history = get_chat_history(chat_id, redis_client)
+            ai_messages = build_ai_messages(
+                message,
+                chat_history,
+                prompt_text,
+                reply_context_text,
+            )
+            response_msg_inner = handle_ai_response(
+                chat_id,
+                handler_func,
+                ai_messages,
+                image_data=resized_image_data if photo_file_id else None,
+                image_file_id=photo_file_id or None,
+                context_texts=[reply_context_text],
+                user_identity=user_identity,
+            )
+            response_uses_ai = True
+            return response_msg_inner
+
         if command == "/config":
             response_command = command
             response_msg, response_markup = handle_config_command(chat_id)
+        elif command == "/topup":
+            response_command = command
+            if not is_ai_billing_enabled():
+                response_msg = "el cobro AI está desactivado en esta instancia."
+            elif chat_type != "private":
+                bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
+                if bot_username:
+                    response_msg = (
+                        "la recarga va por privado.\n"
+                        f"abrime acá: https://t.me/{bot_username}"
+                    )
+                else:
+                    response_msg = "la recarga va por privado, abrime en DM."
+            else:
+                ensure_callback_updates_enabled()
+                response_msg = "elegí un pack para recargar créditos AI:"
+                response_markup = build_topup_keyboard()
+        elif command == "/balance":
+            response_command = command
+            if not is_ai_billing_enabled():
+                response_msg = "el cobro AI está desactivado en esta instancia."
+            elif not credits_db_service.is_configured():
+                response_msg = "el cobro AI no está configurado, avisale al admin."
+            elif user_id is None or numeric_chat_id is None:
+                response_msg = "no pude leer tu usuario para ver saldos."
+            else:
+                try:
+                    _maybe_grant_onboarding_credits(user_id)
+                    response_msg = _format_balance_command(
+                        chat_type, user_id, numeric_chat_id
+                    )
+                except Exception as error:
+                    admin_report(
+                        "Error loading balance",
+                        error,
+                        {"chat_id": chat_id, "user_id": user_id},
+                    )
+                    response_msg = "error leyendo tu saldo, intentá de nuevo."
+        elif command == "/transfer":
+            response_command = command
+            if not is_ai_billing_enabled():
+                response_msg = "el cobro AI está desactivado en esta instancia."
+            elif not credits_db_service.is_configured():
+                response_msg = "el cobro AI no está configurado, avisale al admin."
+            elif not _is_group_chat_type(chat_type):
+                response_msg = "este comando es para grupos: /transfer <monto>"
+            elif user_id is None or numeric_chat_id is None:
+                response_msg = "no pude identificar usuario/chat para transferir."
+            else:
+                amount_token = sanitized_message_text.split(" ", 1)[0].strip()
+                try:
+                    amount = int(amount_token)
+                except (TypeError, ValueError):
+                    response_msg = "uso: /transfer <monto>"
+                else:
+                    if amount <= 0:
+                        response_msg = "el monto tiene que ser mayor a 0"
+                    else:
+                        try:
+                            transfer_result = credits_db_service.transfer_user_to_chat(
+                                user_id=user_id,
+                                chat_id=numeric_chat_id,
+                                amount=amount,
+                            )
+                        except Exception as error:
+                            admin_report(
+                                "Error transferring credits",
+                                error,
+                                {
+                                    "chat_id": chat_id,
+                                    "user_id": user_id,
+                                    "amount": amount,
+                                },
+                            )
+                            response_msg = "error transfiriendo créditos, intentá de nuevo."
+                        else:
+                            if transfer_result.get("ok"):
+                                response_msg = (
+                                    f"transferidos {amount} créditos al grupo ✅\n"
+                                    f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
+                                    f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
+                                )
+                            else:
+                                response_msg = (
+                                    "no te alcanza el saldo personal para esa transferencia.\n"
+                                    f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
+                                )
         elif command in commands:
             handler_func, uses_ai, takes_params = commands[command]
             response_command = command
 
             if uses_ai:
-                if not check_rate_limit(chat_id, redis_client):
-                    response_msg = handle_rate_limit(chat_id, message)
-                else:
-                    chat_history = get_chat_history(chat_id, redis_client)
-                    messages = build_ai_messages(
-                        message,
-                        chat_history,
-                        sanitized_message_text,
-                        reply_context_text,
-                    )
-                    response_msg = handle_ai_response(
-                        chat_id,
-                        handler_func,
-                        messages,
-                        image_data=resized_image_data if photo_file_id else None,
-                        image_file_id=photo_file_id or None,
-                        context_texts=[reply_context_text],
-                        user_identity=user_identity,
-                    )
-                    response_uses_ai = True
+                response_msg = run_ai_flow(handler_func, sanitized_message_text)
             else:
                 if command == "/transcribe":
                     response_msg = handle_transcribe_with_message(message)
@@ -5563,26 +6179,7 @@ def handle_msg(message: Dict) -> str:
                     else:
                         response_msg = handler_func()
         else:
-            if not check_rate_limit(chat_id, redis_client):
-                response_msg = handle_rate_limit(chat_id, message)
-            else:
-                chat_history = get_chat_history(chat_id, redis_client)
-                messages = build_ai_messages(
-                    message,
-                    chat_history,
-                    message_text,
-                    reply_context_text,
-                )
-                response_msg = handle_ai_response(
-                    chat_id,
-                    ask_ai,
-                    messages,
-                    image_data=resized_image_data if photo_file_id else None,
-                    image_file_id=photo_file_id or None,
-                    context_texts=[reply_context_text],
-                    user_identity=user_identity,
-                )
-                response_uses_ai = True
+            response_msg = run_ai_flow(ask_ai, message_text)
 
         # Only save messages AFTER we've generated a response
         if message_text:
@@ -5822,7 +6419,7 @@ def set_telegram_webhook(webhook_url: str) -> bool:
     secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
     parameters = {
         "url": f"{webhook_url}?key={webhook_key}",
-        "allowed_updates": '["message","callback_query"]',
+        "allowed_updates": '["message","callback_query","pre_checkout_query"]',
         "secret_token": secret_token,
         "max_connections": 8,
     }
@@ -5927,6 +6524,10 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         callback_query = request_json.get("callback_query")
         if callback_query:
             handle_callback_query(callback_query)
+            return "Ok", 200
+        pre_checkout_query = request_json.get("pre_checkout_query")
+        if pre_checkout_query:
+            handle_pre_checkout_query(cast(Dict[str, Any], pre_checkout_query))
             return "Ok", 200
 
         message = request_json.get("message")

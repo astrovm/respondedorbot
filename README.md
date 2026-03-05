@@ -36,6 +36,15 @@ This bot is configured entirely through environment variables, making it easy to
 - Unix timestamp with `/time`
 - And many more commands - use `/help` for complete list
 
+### AI Credits Billing (Telegram Stars)
+
+- AI responses are billed with credits (default: `1` credit per AI response).
+- New users receive onboarding credits once (default: `10`).
+- In groups, spending priority is: personal balance first, then group balance.
+- `/topup`: recharge credits with Telegram Stars (private chat).
+- `/balance`: in private shows personal balance; in groups shows personal + group balance.
+- `/transfer <amount>`: transfer credits from personal balance to group balance.
+
 ### Web Search and Tools
 
 - `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
@@ -72,10 +81,25 @@ REDIS_PORT=6379
 REDIS_PASSWORD=your_redis_password
 FUNCTION_URL=https://your-app.vercel.app
 
+# Postgres / Neon (Required for AI credits billing)
+DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
+# Optional fallback vars if DATABASE_URL is unset:
+# PGHOST=your-neon-host
+# PGPORT=5432
+# PGDATABASE=neondb
+# PGUSER=your_user
+# PGPASSWORD=your_password
+
 # APIs (Required)
 OPENROUTER_API_KEY=your_openrouter_key
 GROQ_API_KEY=your_groq_api_key
 COINMARKETCAP_KEY=your_coinmarketcap_key
+
+# AI Credits Billing (Optional, defaults shown)
+AI_BILLING_ENABLED=true
+AI_CREDITS_PER_RESPONSE=1
+AI_ONBOARDING_CREDITS=10
+AI_STARS_PACKS_JSON='[{"id":"p100","credits":100,"xtr":50},{"id":"p250","credits":250,"xtr":125},{"id":"p500","credits":500,"xtr":250},{"id":"p1000","credits":1000,"xtr":500},{"id":"p2500","credits":2500,"xtr":1250}]'
 
 # Monitoring (Required)
 ADMIN_CHAT_ID=your_telegram_chat_id
