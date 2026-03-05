@@ -44,6 +44,7 @@ This bot is configured entirely through environment variables, making it easy to
 - `/topup`: recharge credits with Telegram Stars (private chat).
 - `/balance`: in private shows personal balance; in groups shows personal + group balance.
 - `/transfer <amount>`: transfer credits from personal balance to group balance.
+- Operational exception: `?run_agent=true` does not consume user/group credits.
 
 ### Web Search and Tools
 
