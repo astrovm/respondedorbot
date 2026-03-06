@@ -866,9 +866,11 @@ def test_format_market_info():
 
     result = format_market_info(market_data)
 
+    assert "PRECIOS DE CRIPTOS:" in result
+    assert "DOLARES:" in result
     assert "BTC" in result
-    assert "50000" in result or "50,000" in result
-    assert "1000" in result or "1,000" in result
+    assert "50.000" in result or "50000" in result
+    assert "1.000" in result or "1000" in result
 
 
 def test_format_market_info_empty_dict():
@@ -1194,8 +1196,8 @@ def test_format_market_info_with_crypto_and_dollar():
 
     assert "PRECIOS DE CRIPTOS:" in result
     assert "DOLARES:" in result
-    assert '"name": "Bitcoin"' in result
-    assert '"name": "Oficial"' in result
+    assert "BITCOIN" in result or "BTC" in result
+    assert "oficial" in result.lower()
 
 
 def test_format_market_info_crypto_only():
@@ -1208,7 +1210,7 @@ def test_format_market_info_crypto_only():
 
     assert "PRECIOS DE CRIPTOS:" in result
     assert "DOLARES:" not in result
-    assert '"name": "Bitcoin"' in result
+    assert "BITCOIN" in result or "BTC" in result
 
 
 def test_format_market_info_dollar_only():
@@ -1221,7 +1223,7 @@ def test_format_market_info_dollar_only():
 
     assert "PRECIOS DE CRIPTOS:" not in result
     assert "DOLARES:" in result
-    assert '"name": "Oficial"' in result
+    assert "oficial" in result.lower()
 
 
 def test_format_market_info_empty():
