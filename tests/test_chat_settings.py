@@ -422,16 +422,19 @@ def test_build_config_text_and_keyboard_reflect_values():
     }
 
     text = build_config_text(config)
-    assert "Gordo config:" in text
-    assert "Arregla-links: borrar mensaje original" in text
-    assert "Respuestas random de IA: ▫️ desactivadas" in text
-    assert "Seguimientos para comandos no-IA: ▫️ desactivados" in text
-    assert "tocá los botones de abajo para cambiar la config" in text
+    assert "config del gordo" in text
+    assert "links arreglados" in text
+    assert "borra el mensaje original y repostea el link arreglado" in text
+    assert "si está activado, a veces me meto solo en la charla aunque nadie me llame" in text
+    assert "si está activado, me contestás después de un comando y sigo el hilo como si nada" in text
+    assert "▫️ desactivado" in text
+    assert "tocá los botones de abajo y dejalo como se te cante" in text
 
     keyboard = build_config_keyboard(config)
-    assert keyboard["inline_keyboard"][0][1]["text"].startswith(
-        "✅ borrar mensaje original"
-    )
+    assert keyboard["inline_keyboard"][0][1]["text"] == "✅ borrar link"
+    assert keyboard["inline_keyboard"][0][2]["text"] == "▫️ apagado"
+    assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ me meto en la charla"
+    assert keyboard["inline_keyboard"][2][0]["text"] == "▫️ seguir charla en comandos"
     assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
 
 
@@ -442,7 +445,7 @@ def test_handle_config_command_loads_config():
         "api.index.config_redis", return_value=redis_client
     ):
         text, keyboard = handle_config_command("123")
-    assert "Gordo config:" in text
+    assert "config del gordo" in text
     assert "inline_keyboard" in keyboard
     redis_client.get.assert_called_with("chat_config:123")
 
