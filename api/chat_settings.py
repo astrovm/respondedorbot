@@ -296,6 +296,8 @@ def is_chat_admin(
     optional_redis_client: Callable[[], Optional[redis.Redis]],
     telegram_request: Callable[..., Any],
     log_event: ConfigLogger,
+    redis_get_json_fn: Callable[[redis.Redis, str], Optional[Any]] = redis_get_json,
+    redis_setex_json_fn: Callable[[redis.Redis, str, int, Any], bool] = redis_setex_json,
 ) -> bool:
     """Return True if user_id is an admin of the chat."""
 
@@ -306,7 +308,7 @@ def is_chat_admin(
     cache_key = chat_admin_cache_key(chat_id, user_id)
 
     if redis_client:
-        cached_value = redis_get_json(redis_client, cache_key)
+        cached_value = redis_get_json_fn(redis_client, cache_key)
         cached_flag = (
             cached_value.get("is_admin")
             if isinstance(cached_value, Mapping)
@@ -338,7 +340,7 @@ def is_chat_admin(
         )
 
     if redis_client:
-        redis_setex_json(
+        redis_setex_json_fn(
             redis_client,
             cache_key,
             CHAT_ADMIN_STATUS_TTL,
