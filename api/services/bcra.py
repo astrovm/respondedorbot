@@ -7,6 +7,7 @@ import re
 import time
 import unicodedata
 import warnings
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import (
@@ -63,6 +64,18 @@ _cache_history_fn: Optional[CacheHistoryFn] = None
 BA_TZ = timezone(timedelta(hours=-3))
 
 
+@dataclass(frozen=True)
+class CacheBundle:
+    """Configuration for a cached BCRA payload."""
+
+    cache_key: str
+    local_cache: Dict[str, Any]
+    ttl: int
+    stale_grace: int
+    require_label: str
+    redis_error_message: Optional[str] = None
+
+
 def _normalize_text(value: Any) -> str:
     """Return lowercase ASCII-normalized text for fuzzy comparisons."""
 
@@ -78,21 +91,36 @@ def _normalize_text(value: Any) -> str:
     return normalized.lower()
 
 
-_bcra_local_cache: Dict[str, Any] = {
-    "value": None,
-    "expires_at": 0.0,
-    "stale_until": 0.0,
-    "meta": {},
-}
+def _empty_local_cache() -> Dict[str, Any]:
+    return {
+        "value": None,
+        "expires_at": 0.0,
+        "stale_until": 0.0,
+        "meta": {},
+    }
+
+
+_bcra_local_cache: Dict[str, Any] = _empty_local_cache()
 _bcra_failure_until: float = 0.0
 
-_currency_band_local_cache: Dict[str, Any] = {
-    "value": None,
-    "expires_at": 0.0,
-    "stale_until": 0.0,
-    "meta": {},
-}
+_currency_band_local_cache: Dict[str, Any] = _empty_local_cache()
 _currency_band_failure_until: float = 0.0
+
+_BCRA_VARIABLES_CACHE = CacheBundle(
+    cache_key="bcra_variables",
+    local_cache=_bcra_local_cache,
+    ttl=TTL_BCRA,
+    stale_grace=CACHE_STALE_GRACE_BCRA,
+    require_label="_get_cached_bcra_cache_entry",
+)
+_CURRENCY_BANDS_CACHE = CacheBundle(
+    cache_key="bcra_currency_band_limits",
+    local_cache=_currency_band_local_cache,
+    ttl=TTL_BCRA,
+    stale_grace=CACHE_STALE_GRACE_BANDS,
+    require_label="_get_cached_currency_band_entry",
+    redis_error_message="Error getting cached currency bands",
+)
 
 
 def _get_bcra_failure_until() -> float:
@@ -135,14 +163,10 @@ def reset_local_caches() -> None:
 
     global _bcra_failure_until, _currency_band_failure_until
 
-    _bcra_local_cache.update(
-        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
-    )
+    _bcra_local_cache.update(_empty_local_cache())
     _bcra_failure_until = 0.0
 
-    _currency_band_local_cache.update(
-        {"value": None, "expires_at": 0.0, "stale_until": 0.0, "meta": {}}
-    )
+    _currency_band_local_cache.update(_empty_local_cache())
     _currency_band_failure_until = 0.0
 
 
@@ -243,6 +267,24 @@ def _load_cached_entry(
     return None, {"is_fresh": False, "fetched_at": None}
 
 
+def _load_cached_bundle(
+    bundle: CacheBundle,
+    *,
+    allow_stale: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Load a cached payload using a declarative cache bundle."""
+
+    return _load_cached_entry(
+        cache_key=bundle.cache_key,
+        local_cache=bundle.local_cache,
+        ttl=bundle.ttl,
+        stale_grace=bundle.stale_grace,
+        allow_stale=allow_stale,
+        redis_error_message=bundle.redis_error_message,
+        require_label=bundle.require_label,
+    )
+
+
 def _persist_cache_entry(
     *,
     cache_key: str,
@@ -288,6 +330,28 @@ def _persist_cache_entry(
                         on_error(exc)
 
     update_local_cache(local_cache, data, ttl, stale_grace, fetched_at_iso)
+
+
+def _persist_cached_bundle(
+    bundle: CacheBundle,
+    data: Dict[str, Any],
+    *,
+    ttl: Optional[int] = None,
+    on_redis_write: Optional[Callable[[redis.Redis, Dict[str, Any], str], None]] = None,
+    on_error: Optional[Callable[[Exception], None]] = None,
+) -> None:
+    """Persist a cached payload using a declarative cache bundle."""
+
+    _persist_cache_entry(
+        cache_key=bundle.cache_key,
+        data=data,
+        local_cache=bundle.local_cache,
+        ttl=ttl if ttl is not None else bundle.ttl,
+        stale_grace=bundle.stale_grace,
+        on_redis_write=on_redis_write,
+        on_error=on_error,
+        require_label=bundle.require_label,
+    )
 
 
 _TValue = TypeVar("_TValue")
@@ -535,28 +599,24 @@ def _get_cached_currency_band_entry(
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Return cached currency band limits with freshness metadata."""
 
-    return _load_cached_entry(
-        cache_key="bcra_currency_band_limits",
-        local_cache=_currency_band_local_cache,
-        ttl=TTL_BCRA,
-        stale_grace=CACHE_STALE_GRACE_BANDS,
-        allow_stale=allow_stale,
-        redis_error_message="Error getting cached currency bands",
-        require_label="_get_cached_currency_band_entry",
-    )
+    return _load_cached_bundle(_CURRENCY_BANDS_CACHE, allow_stale=allow_stale)
 
 
 def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> None:
     if not data:
         return
 
-    _persist_cache_entry(
-        cache_key="bcra_currency_band_limits",
-        data=data,
-        local_cache=_currency_band_local_cache,
+    _persist_cached_bundle(
+        CacheBundle(
+            cache_key=_CURRENCY_BANDS_CACHE.cache_key,
+            local_cache=_CURRENCY_BANDS_CACHE.local_cache,
+            ttl=_CURRENCY_BANDS_CACHE.ttl,
+            stale_grace=_CURRENCY_BANDS_CACHE.stale_grace,
+            require_label="cache_currency_band_limits",
+            redis_error_message=_CURRENCY_BANDS_CACHE.redis_error_message,
+        ),
+        data,
         ttl=ttl,
-        stale_grace=CACHE_STALE_GRACE_BANDS,
-        require_label="cache_currency_band_limits",
     )
 
 
@@ -746,14 +806,7 @@ def _get_cached_bcra_cache_entry(
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Return cached BCRA variables along with freshness metadata."""
 
-    return _load_cached_entry(
-        cache_key="bcra_variables",
-        local_cache=_bcra_local_cache,
-        ttl=TTL_BCRA,
-        stale_grace=CACHE_STALE_GRACE_BCRA,
-        allow_stale=allow_stale,
-        require_label="_get_cached_bcra_cache_entry",
-    )
+    return _load_cached_bundle(_BCRA_VARIABLES_CACHE, allow_stale=allow_stale)
 
 
 def get_cached_bcra_variables(allow_stale: bool = False) -> Optional[Dict[str, Any]]:
@@ -789,15 +842,18 @@ def cache_bcra_variables(variables: Dict[str, Any], ttl: int = TTL_BCRA) -> None
             )
             break
 
-    _persist_cache_entry(
-        cache_key="bcra_variables",
-        data=variables,
-        local_cache=_bcra_local_cache,
+    _persist_cached_bundle(
+        CacheBundle(
+            cache_key=_BCRA_VARIABLES_CACHE.cache_key,
+            local_cache=_BCRA_VARIABLES_CACHE.local_cache,
+            ttl=_BCRA_VARIABLES_CACHE.ttl,
+            stale_grace=_BCRA_VARIABLES_CACHE.stale_grace,
+            require_label="cache_bcra_variables",
+        ),
+        variables,
         ttl=ttl,
-        stale_grace=CACHE_STALE_GRACE_BCRA,
         on_redis_write=_store_mayorista,
         on_error=_log_cache_error,
-        require_label="cache_bcra_variables",
     )
 
 
