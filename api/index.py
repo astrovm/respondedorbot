@@ -1837,8 +1837,8 @@ def handle_bcra_variables() -> str:
 
 
 _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
-    "download": "No pude descargar el audio",
-    "transcribe": "No pude transcribir el audio, intentá más tarde",
+    "download": "no pude bajar el audio, mandalo de nuevo",
+    "transcribe": "no pude sacar nada de ese audio, probá más tarde",
 }
 
 
@@ -1900,7 +1900,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
     try:
         # Check if this is a reply to another message
         if "reply_to_message" not in message:
-            return "Respondé a un mensaje con audio o imagen para transcribir/describir"
+            return "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí"
 
         replied_msg = message["reply_to_message"]
 
@@ -1951,8 +1951,8 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     else None,
                     prompt="Describe what you see in this image in detail.",
                     success_prefix="🖼️ Descripción: ",
-                    download_error="No pude descargar la imagen",
-                    describe_error="No pude describir la imagen, intentá más tarde",
+                    download_error="no pude bajar la imagen, mandala de nuevo",
+                    describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
                 )
                 if photo_response:
                     return photo_response
@@ -1967,22 +1967,22 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     else None,
                     prompt="Describe what you see in this sticker in detail.",
                     success_prefix="🎨 Descripción del sticker: ",
-                    download_error="No pude descargar el sticker",
-                    describe_error="No pude describir el sticker, intentá más tarde",
+                    download_error="no pude bajar el sticker, mandalo de nuevo",
+                    describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
                 if sticker_response:
                     return sticker_response
 
-        return "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
+        return "ese mensaje no tiene audio, imagen ni sticker para laburar"
 
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
-        return "error procesando el comando, intentá más tarde"
+        return "se trabó el /transcribe, probá más tarde"
 
 
 def handle_transcribe() -> str:
     """Transcribe command wrapper - requires special handling in message processor"""
-    return "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
+    return "el /transcribe se usa respondiendo a un audio, imagen o sticker, papá"
 
 
 def powerlaw() -> str:
@@ -2147,37 +2147,37 @@ def convert_to_command(msg_text: str) -> str:
 
 def get_help() -> str:
     return """
-comandos disponibles boludo:
+esto es lo que sé hacer, boludo:
 
 - /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
-- /bcra, /variables: te tiro las variables economicas del bcra
+- /bcra, /variables: te tiro las variables económicas del bcra
 
-- /comando, /command algo: te lo convierto en comando de telegram
+- /comando, /command algo: te convierto eso en comando de telegram
 
-- /convertbase 101, 2, 10: te paso numeros entre bases (ej: binario 101 a decimal)
+- /convertbase 101, 2, 10: te paso números entre bases
 
 - /buscar algo: te busco en la web
 
-- /agent: te muestro lo ultimo que penso el agente autonomo
+- /agent: te muestro lo último que pensé con el agente autónomo
 
 - /eleccion: odds actuales de Polymarket para Diputados 2025
 
-- /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto (fee%, monto opcional)
+- /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto
 
 - /rulo: te armo los rulos desde el oficial
 
-- /dolar, /dollar, /usd: te tiro la posta del blue y todos los dolares
+- /dolar, /dollar, /usd: te tiro la posta del blue y todos los dólares
 
 - /instance: te digo donde estoy corriendo
 
-- /config: cambiá la config del gordo, link fixer y demases
+- /config: tocás la config del gordo y de los links
 
-- /topup: recargá créditos IA con Telegram Stars ⭐ (en privado)
+- /topup: cargás créditos ia con telegram stars por privado
 
-- /balance: te muestro saldo IA (en grupo: personal + grupo)
+- /balance: te muestro cuántos créditos ia te quedan
 
-- /transfer 100: pasás 100 créditos de tu saldo personal al grupo
+- /transfer 100: le pasás 100 créditos tuyos al grupo
 
 - /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
@@ -2190,7 +2190,7 @@ comandos disponibles boludo:
 - /random pizza, carne, sushi: elijo por vos
 - /random 1-10: numero random del 1 al 10
 
-- /powerlaw: te tiro el precio justo de btc segun power law y si esta caro o barato
+- /powerlaw: te tiro el precio justo de btc según power law y si está caro o barato
 - /rainbow: idem pero con el rainbow chart
 
 - /satoshi, /sat, /sats: te digo cuanto vale un satoshi
@@ -4972,7 +4972,7 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
     chat_id = str(chat_id_raw)
 
     if not credits_db_service.is_configured():
-        send_msg(chat_id, "el cobro IA no está configurado, avisale al admin.")
+        send_msg(chat_id, "el cobro de ia no está andando, avisale al admin")
         return "ok"
 
     user_id = _extract_user_id(message)
@@ -4998,7 +4998,7 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         or total_amount != int(pack["xtr"])
         or (payload_user_id is not None and payload_user_id != user_id)
     ):
-        send_msg(chat_id, "recibí el pago pero no pude validarlo, avisame al admin.")
+        send_msg(chat_id, "me cayó un pago raro y no lo pude validar, avisale al admin")
         admin_report(
             "Invalid successful payment payload",
             None,
@@ -5028,7 +5028,7 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
             error,
             {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
         )
-        send_msg(chat_id, "pago recibido, pero hubo un error al acreditar créditos.")
+        send_msg(chat_id, "me entró la guita pero se trabó la acreditación, avisale al admin")
         return "ok"
 
     balance = int(payment_result.get("user_balance", 0))
@@ -5036,13 +5036,13 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         send_msg(
             chat_id,
             (
-                f"listo, te acredité {pack['credits']} créditos ✅\n"
-                f"tu saldo personal ahora es {balance}\n"
-                "si querés cargar un grupo: /transfer <monto>"
+                f"listo, te cargué {pack['credits']} créditos, papá\n"
+                f"ahora te quedaron {balance}\n"
+                "si querés mandarle al grupo: /transfer <monto>"
             ),
         )
     else:
-        send_msg(chat_id, f"ese pago ya estaba acreditado. saldo actual: {balance}")
+        send_msg(chat_id, f"ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}")
     return "ok"
 
 

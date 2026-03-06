@@ -598,7 +598,7 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
 
     result = handle_ai_response("123", fake_handler, [])
 
-    assert result == "no pude generar respuesta, intentá de nuevo"
+    assert result == "me quedé reculando y no te pude responder, probá de nuevo"
 
 
 def test_handle_ai_response_strips_context_echo(monkeypatch):

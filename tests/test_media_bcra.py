@@ -416,9 +416,7 @@ def test_handle_transcribe_with_message_no_reply():
     message = {"message_id": 1, "chat": {"id": 123}, "text": "/transcribe"}
 
     result = handle_transcribe_with_message(message)
-    assert (
-        result == "Respondé a un mensaje con audio o imagen para transcribir/describir"
-    )
+    assert result == "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí"
 
 
 def test_handle_transcribe_with_message_voice_cached():
@@ -485,7 +483,7 @@ def test_handle_transcribe_with_message_voice_download_fail():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "No pude descargar el audio"
+        assert result == "no pude bajar el audio, mandalo de nuevo"
 
 
 def test_handle_transcribe_with_message_audio_success():
@@ -598,10 +596,7 @@ def test_handle_transcribe_with_message_no_media():
     }
 
     result = handle_transcribe_with_message(message)
-    assert (
-        result
-        == "El mensaje no contiene audio, imagen o sticker para transcribir/describir"
-    )
+    assert result == "ese mensaje no tiene audio, imagen ni sticker para laburar"
 
 
 def test_handle_transcribe_with_message_exception():
@@ -612,17 +607,14 @@ def test_handle_transcribe_with_message_exception():
     message = cast(Dict[str, Any], None)
 
     result = handle_transcribe_with_message(message)
-    assert result == "error procesando el comando, intentá más tarde"
+    assert result == "se trabó el /transcribe, probá más tarde"
 
 
 def test_handle_transcribe():
     from api.index import handle_transcribe
 
     result = handle_transcribe()
-    assert (
-        result
-        == "El comando /transcribe debe usarse respondiendo a un mensaje con audio o imagen"
-    )
+    assert result == "el /transcribe se usa respondiendo a un audio, imagen o sticker, papá"
 
 
 def test_format_bcra_variables_empty():

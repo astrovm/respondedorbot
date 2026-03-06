@@ -320,10 +320,9 @@ def _run_ai_flow(
             if extra_charge_meta:
                 charges_applied.append(extra_charge_meta)
 
-    if response_msg in {
-        "error de IA, intentá de nuevo en un rato",
-        "no pude generar respuesta, intentá de nuevo",
-    } or bool(ai_response_meta.get("ai_fallback")):
+    if response_msg == "me quedé reculando y no te pude responder, probá de nuevo" or bool(
+        ai_response_meta.get("ai_fallback")
+    ):
         for charge_meta in charges_applied:
             billing_helper.refund_ai_charge_meta(charge_meta, "ai_response_fallback")
 

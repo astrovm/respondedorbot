@@ -866,7 +866,7 @@ def test_get_help_basic():
     from api.index import get_help
 
     result = get_help()
-    assert "comandos disponibles boludo:" in result
+    assert "esto es lo que sé hacer, boludo:" in result
     assert "/ask" in result
     assert "/dolar" in result
     assert "/usd" in result
