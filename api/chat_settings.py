@@ -225,20 +225,26 @@ def build_config_text(config: Mapping[str, Any]) -> str:
     followups_enabled = coerce_bool(config.get("ai_command_followups"), default=True)
 
     link_labels = {
-        "delete": "borrar mensaje original",
-        "reply": "responder al mensaje original",
-        "off": "apagado",
+        "delete": "borra el mensaje original y repostea el link arreglado",
+        "reply": "responde al mensaje original con el link arreglado",
+        "off": "no toca los links",
     }
 
     lines = [
-        "Gordo config:",
+        "config del gordo",
         "",
-        f"Arregla-links: {link_labels.get(link_mode, link_mode)}",
-        f"Respuestas random de IA: {'✅ activadas' if random_enabled else '▫️ desactivadas'}",
-        "Seguimientos para comandos no-IA: "
-        f"{'✅ activados' if followups_enabled else '▫️ desactivados'}",
+        "1. links arreglados",
+        link_labels.get(link_mode, link_mode),
         "",
-        "tocá los botones de abajo para cambiar la config",
+        "2. ia random",
+        "si está activado, a veces me meto solo en la charla aunque nadie me llame",
+        f"{'✅ activado' if random_enabled else '▫️ desactivado'}",
+        "",
+        "3. seguir charla",
+        "si está activado, me contestás después de un comando y sigo el hilo como si nada",
+        f"{'✅ activado' if followups_enabled else '▫️ desactivado'}",
+        "",
+        "tocá los botones de abajo y dejalo como se te cante",
     ]
     return "\n".join(lines)
 
@@ -261,14 +267,14 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                choice_button("responder al mensaje original", "reply", link_mode, action="link"),
-                choice_button("borrar mensaje original", "delete", link_mode, action="link"),
+                choice_button("responder link", "reply", link_mode, action="link"),
+                choice_button("borrar link", "delete", link_mode, action="link"),
                 choice_button("apagado", "off", link_mode, action="link"),
             ],
-            [toggle_button("respuestas random de IA", random_enabled, action="random")],
+            [toggle_button("me meto en la charla", random_enabled, action="random")],
             [
                 toggle_button(
-                    "seguimientos para comandos no-IA",
+                    "seguir charla en comandos",
                     followups_enabled,
                     action="followups",
                 )
