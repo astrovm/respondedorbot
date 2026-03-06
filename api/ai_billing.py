@@ -391,6 +391,29 @@ class AIMessageBilling:
                         "billing_segments": list(billing_segments or []),
                     },
                 )
+                try:
+                    self.credits_db_service.apply_ai_debt(
+                        user_id=self.user_id,
+                        chat_id=reservation_meta.get("chat_scope_id"),
+                        amount=actual_credits - reserved_credits,
+                        source="chat"
+                        if str(reservation_meta.get("source") or "user") == "chat"
+                        else "user",
+                        event_type="ai_settlement_debt",
+                        metadata=settlement_metadata,
+                    )
+                except Exception as error:
+                    self.admin_reporter(
+                        "falló registrar deuda de liquidación IA",
+                        error,
+                        {
+                            "chat_id": self.chat_id,
+                            "user_id": self.user_id,
+                            "reserved_credits": reserved_credits,
+                            "actual_credits": actual_credits,
+                            "reason": reason,
+                        },
+                    )
 
     def refund_reserved_ai_credits(
         self,

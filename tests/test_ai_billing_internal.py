@@ -236,3 +236,35 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 2
     assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"] == "ai_settlement_charge"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
+
+
+def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
+    billing = _build_billing_helper()
+    billing.credits_db_service.charge_ai_credits.return_value = {"ok": False}
+
+    billing.settle_reserved_ai_credits(
+        {
+            "reserved_credits": 1,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "ai_response_base",
+        },
+        [
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-instruct-0905",
+                "usage": {
+                    "input_tokens": 4000,
+                    "output_tokens": 2000,
+                },
+            }
+        ],
+        reason="ok",
+    )
+
+    billing.credits_db_service.charge_ai_credits.assert_called_once()
+    billing.credits_db_service.apply_ai_debt.assert_called_once()
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 2
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
+    billing.credits_db_service.refund_ai_charge.assert_not_called()

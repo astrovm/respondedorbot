@@ -709,7 +709,7 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
     from api import index as index_module
 
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    index_module._provider_backoff_until["groq"] = time.time() + 30
+    index_module._provider_backoff_until["chat"] = time.time() + 30
 
     with patch("api.index.OpenAI") as mock_openai:
         result = get_groq_ai_response(
@@ -724,7 +724,7 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
 def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
 
-    with patch("api.index._consume_groq_rate_limit", return_value=False), patch(
+    with patch("api.index._reserve_groq_rate_limit", return_value=None), patch(
         "api.index.OpenAI"
     ) as mock_openai:
         result = get_groq_ai_response(
@@ -757,7 +757,7 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
         )
 
         assert result is None
-        remaining = index_module.get_provider_backoff_remaining("groq")
+        remaining = index_module.get_provider_backoff_remaining("chat")
         assert remaining > 0
         assert mock_openai.call_count == 1
 
@@ -773,10 +773,36 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
 
+def test_get_groq_ai_response_uses_retry_after_header_for_scope_backoff(monkeypatch):
+    from api import index as index_module
+
+    class RateLimitError(Exception):
+        def __init__(self):
+            super().__init__("Error code: 429 - rate limit reached")
+            self.status_code = 429
+            self.response = MagicMock(headers={"retry-after": "30"})
+
+    index_module._provider_backoff_until.clear()
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = RateLimitError()
+
+    with patch("api.index.OpenAI", return_value=fake_client):
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is None
+    remaining = index_module.get_provider_backoff_remaining("chat")
+    assert 0 < remaining <= 30
+
+
 def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
 
-    with patch("api.index._consume_groq_rate_limit", return_value=False), patch(
+    with patch("api.index._reserve_groq_rate_limit", return_value=None), patch(
         "api.index.OpenAI"
     ) as mock_openai:
         result = get_groq_compound_response(
