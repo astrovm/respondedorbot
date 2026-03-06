@@ -289,6 +289,46 @@ def test_handle_rate_limit():
         assert response == "no boludo"
 
 
+def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
+    from api.index import handle_msg
+
+    message = {
+        "message_id": "rl1",
+        "chat": {"id": "404", "type": "private"},
+        "from": {"id": 77, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=False
+    ), patch(
+        "api.index.handle_rate_limit", return_value="tranqui"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits"
+    ) as mock_charge, patch(
+        "api.index.send_msg", return_value=999
+    ) as mock_send, patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.save_bot_message_metadata"
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_charge.assert_not_called()
+    assert mock_send.call_args[0][1] == "tranqui"
+
+
 def test_handle_msg():
     from api.index import handle_msg
 

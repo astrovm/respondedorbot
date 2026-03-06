@@ -1378,7 +1378,7 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
     from api.index import describe_image_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index._consume_groq_rate_limit", return_value=False
+        "api.index._reserve_groq_rate_limit", return_value=None
     ), patch("api.index.OpenAI") as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
@@ -1438,7 +1438,7 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
     from api.index import transcribe_audio_groq
 
     with patch("api.index.environ.get") as mock_env, patch(
-        "api.index._consume_groq_rate_limit", return_value=False
+        "api.index._reserve_groq_rate_limit", return_value=None
     ), patch("api.index.OpenAI") as mock_openai:
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
