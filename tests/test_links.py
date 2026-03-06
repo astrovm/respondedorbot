@@ -130,6 +130,9 @@ def test_handle_msg_link_reply():
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.save_message_to_redis"
@@ -137,13 +140,6 @@ def test_handle_msg_link_reply():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:123":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -177,6 +173,9 @@ def test_handle_msg_link_reply_instagram():
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.save_message_to_redis"
@@ -184,13 +183,6 @@ def test_handle_msg_link_reply_instagram():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:789":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -224,6 +216,9 @@ def test_handle_msg_link_delete():
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.save_message_to_redis"
@@ -231,13 +226,6 @@ def test_handle_msg_link_delete():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value_delete(key):
-            if key == "chat_config:456":
-                return json.dumps({"link_mode": "delete"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value_delete
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -269,17 +257,13 @@ def test_handle_msg_link_without_preview(mock_redis):
     }
     with patch("api.index.send_msg") as mock_send, patch(
         "api.index.replace_links"
-    ) as mock_replace, patch("api.index.initialize_commands", return_value={}), patch(
+    ) as mock_replace, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch("api.index.initialize_commands", return_value={}), patch(
         "api.index.should_gordo_respond"
     ) as mock_should:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:321":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://example.com", False, [])
 
@@ -551,6 +535,9 @@ def test_handle_msg_link_already_fixed():
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -558,13 +545,6 @@ def test_handle_msg_link_already_fixed():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:654":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
 
         result = handle_msg(message)
@@ -585,6 +565,9 @@ def test_handle_msg_original_link_no_check():
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -594,13 +577,6 @@ def test_handle_msg_original_link_no_check():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:987":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://vm.tiktok.com/foo", False, [])
 
@@ -622,6 +598,9 @@ def test_handle_msg_link_already_fixed_subdomain():
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -629,13 +608,6 @@ def test_handle_msg_link_already_fixed_subdomain():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:999":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
 
         result = handle_msg(message)
@@ -656,6 +628,9 @@ def test_handle_msg_replaced_link_adds_button():
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -663,13 +638,6 @@ def test_handle_msg_replaced_link_adds_button():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:111":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -703,6 +671,9 @@ def test_handle_msg_replaced_link_replies_to_original_message():
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -710,13 +681,6 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:222":
-                return json.dumps({"link_mode": "reply"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -752,6 +716,9 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
     ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
+        "api.index.get_chat_config",
+        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
+    ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.should_gordo_respond"
@@ -759,13 +726,6 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         "api.index.requests.get"
     ) as mock_get:
         redis_client = MagicMock()
-
-        def mock_get_value(key):
-            if key == "chat_config:333":
-                return json.dumps({"link_mode": "delete"})
-            return None
-
-        redis_client.get.side_effect = mock_get_value
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
