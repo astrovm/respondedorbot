@@ -1,0 +1,703 @@
+"""Main Telegram message handling flow extracted from the Flask entrypoint."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from os import environ
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+
+from api.ai_billing import AIMessageBilling
+
+
+CommandTuple = Tuple[Callable[..., str], bool, bool]
+
+
+@dataclass(frozen=True)
+class MessageHandlerDeps:
+    config_redis: Callable[[], Any]
+    get_chat_config: Callable[[Any, str], Dict[str, Any]]
+    initialize_commands: Callable[[], Dict[str, CommandTuple]]
+    parse_command: Callable[[str, str], Tuple[str, str]]
+    should_auto_process_media: Callable[[Mapping[str, CommandTuple], str, str, Mapping[str, Any]], bool]
+    extract_message_content: Callable[[Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]]
+    replace_links: Callable[[str], Tuple[str, bool, List[str]]]
+    send_msg: Callable[..., Optional[int]]
+    delete_msg: Callable[[str, str], None]
+    admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
+    get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
+    save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
+    build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
+    should_gordo_respond: Callable[
+        [Mapping[str, CommandTuple], str, str, Mapping[str, Any], Mapping[str, Any], Optional[Mapping[str, Any]]],
+        bool,
+    ]
+    format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
+    save_message_to_redis: Callable[[str, str, str, Any], None]
+    get_chat_history: Callable[[str, Any], List[Dict[str, Any]]]
+    build_ai_messages: Callable[[Dict[str, Any], List[Dict[str, Any]], str, Optional[str]], List[Dict[str, Any]]]
+    handle_ai_response: Callable[..., str]
+    ask_ai: Callable[..., str]
+    gen_random: Callable[[str], str]
+    build_insufficient_credits_message: Callable[..., str]
+    build_topup_keyboard: Callable[[], Dict[str, Any]]
+    credits_db_service: Any
+    is_group_chat_type: Callable[[Optional[str]], bool]
+    extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
+    extract_numeric_chat_id: Callable[[str], Optional[int]]
+    maybe_grant_onboarding_credits: Callable[[Any, Callable[..., None], Optional[int]], None]
+    format_balance_command: Callable[..., str]
+    handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
+    check_global_rate_limit: Callable[[Any], bool]
+    handle_rate_limit: Callable[[str, Dict[str, Any]], str]
+    handle_successful_payment_message: Callable[[Dict[str, Any]], str]
+    handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
+    ensure_callback_updates_enabled: Callable[[], None]
+    is_chat_admin: Callable[..., bool]
+    report_unauthorized_config_attempt: Callable[..., None]
+    handle_transcribe: Callable[[], str]
+    _transcribe_audio_file: Callable[..., Tuple[Optional[str], Optional[str]]]
+    _transcription_error_message: Callable[..., Optional[str]]
+    download_telegram_file: Callable[[str], Optional[bytes]]
+    resize_image_if_needed: Callable[[bytes], bytes]
+    encode_image_to_base64: Callable[[bytes], str]
+
+
+@dataclass
+class PreparedMessage:
+    message_text: str
+    photo_file_id: Optional[str]
+    audio_file_id: Optional[str]
+    resized_image_data: Optional[bytes] = None
+    early_response: Optional[str] = None
+
+
+def _build_billing_helper(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    chat_type: str,
+    user_id: Optional[int],
+    numeric_chat_id: Optional[int],
+    command: str,
+    message: Mapping[str, Any],
+) -> AIMessageBilling:
+    return AIMessageBilling(
+        credits_db_service=deps.credits_db_service,
+        admin_reporter=deps.admin_report,
+        gen_random_fn=deps.gen_random,
+        build_insufficient_credits_message_fn=deps.build_insufficient_credits_message,
+        command=command,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        user_id=user_id,
+        numeric_chat_id=numeric_chat_id,
+        message=message,
+    )
+
+
+def _prepare_message_content(
+    message: Dict[str, Any],
+    *,
+    auto_process_media: bool,
+    deps: MessageHandlerDeps,
+    billing_helper: AIMessageBilling,
+) -> PreparedMessage:
+    message_text, photo_file_id, audio_file_id = deps.extract_message_content(message)
+
+    if auto_process_media and audio_file_id and not (
+        message_text and message_text.strip().lower().startswith("/transcribe")
+    ):
+        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
+            "auto_audio_media"
+        )
+        if media_charge_error:
+            return PreparedMessage(
+                message_text=message_text,
+                photo_file_id=photo_file_id,
+                audio_file_id=audio_file_id,
+                early_response=media_charge_error,
+            )
+
+        transcription, err = deps._transcribe_audio_file(audio_file_id, use_cache=False)
+        if transcription:
+            message_text = transcription
+        else:
+            billing_helper.refund_ai_charge_meta(
+                media_charge_meta, "auto_audio_transcribe_failed"
+            )
+            message_text = deps._transcription_error_message(
+                err,
+                download_message="no pude bajar tu audio, mandalo de vuelta",
+                transcribe_message="mandame texto que no soy alexa, boludo",
+            ) or "mandame texto que no soy alexa, boludo"
+
+    resized_image_data: Optional[bytes] = None
+    if auto_process_media and photo_file_id and not (
+        message_text and message_text.strip().lower().startswith("/transcribe")
+    ):
+        image_data = deps.download_telegram_file(photo_file_id)
+        if image_data:
+            resized_image_data = deps.resize_image_if_needed(image_data)
+            deps.encode_image_to_base64(resized_image_data)
+            if not message_text:
+                message_text = "que onda con esta foto"
+        elif not message_text:
+            message_text = "no pude ver tu foto, boludo"
+
+    return PreparedMessage(
+        message_text=message_text,
+        photo_file_id=photo_file_id,
+        audio_file_id=audio_file_id,
+        resized_image_data=resized_image_data,
+    )
+
+
+def _handle_link_replacement(
+    deps: MessageHandlerDeps,
+    *,
+    chat_config: Mapping[str, Any],
+    message: Dict[str, Any],
+    message_text: str,
+    chat_id: str,
+    message_id: str,
+) -> bool:
+    link_mode = str(chat_config.get("link_mode", "off"))
+    if link_mode == "off" or not message_text or message_text.startswith("/"):
+        return False
+
+    fixed_text, changed, original_links = deps.replace_links(message_text)
+    if not changed:
+        return "http://" in message_text or "https://" in message_text
+
+    user_info = message.get("from", {})
+    username = user_info.get("username")
+    if username:
+        shared_by = f"@{username}"
+    else:
+        name_parts = [
+            part
+            for part in (user_info.get("first_name"), user_info.get("last_name"))
+            if part
+        ]
+        shared_by = " ".join(name_parts)
+
+    if shared_by:
+        fixed_text += f"\n\ncompartido por {shared_by}"
+
+    reply_id = message.get("reply_to_message", {}).get("message_id")
+    reply_id = str(reply_id) if reply_id is not None else None
+
+    if link_mode == "delete":
+        deps.delete_msg(chat_id, message_id)
+        if reply_id:
+            deps.send_msg(chat_id, fixed_text, reply_id, original_links)
+        else:
+            deps.send_msg(chat_id, fixed_text, buttons=original_links)
+        return True
+
+    deps.send_msg(chat_id, fixed_text, reply_id or message_id, original_links)
+    return True
+
+
+def _load_reply_metadata(
+    deps: MessageHandlerDeps,
+    *,
+    redis_client: Any,
+    chat_id: str,
+    message: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    reply_msg = message.get("reply_to_message")
+    if not isinstance(reply_msg, Mapping):
+        return None
+
+    if reply_msg.get("from", {}).get("username") != environ.get("TELEGRAM_USERNAME"):
+        return None
+
+    reply_id = reply_msg.get("message_id")
+    if reply_id is None:
+        return None
+
+    return deps.get_bot_message_metadata(redis_client, chat_id, reply_id)
+
+
+def _save_replied_message_context(
+    deps: MessageHandlerDeps,
+    *,
+    message: Dict[str, Any],
+    chat_id: str,
+    redis_client: Any,
+) -> None:
+    reply_msg = message.get("reply_to_message")
+    if not isinstance(reply_msg, Mapping):
+        return
+
+    reply_text = deps.extract_message_content(cast(Dict[str, Any], reply_msg))[0]
+    reply_id = str(reply_msg["message_id"])
+    is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
+        "TELEGRAM_USERNAME"
+    )
+
+    if not reply_text:
+        return
+
+    if is_bot:
+        deps.save_message_to_redis(chat_id, f"bot_{reply_id}", reply_text, redis_client)
+        return
+
+    formatted_reply = deps.format_user_message(cast(Dict[str, Any], reply_msg), reply_text)
+    deps.save_message_to_redis(chat_id, reply_id, formatted_reply, redis_client)
+
+
+def _run_ai_flow(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message: Dict[str, Any],
+    prepared_message: PreparedMessage,
+    billing_helper: AIMessageBilling,
+    prompt_text: str,
+    reply_context_text: Optional[str],
+    user_identity: str,
+    handler_func: Callable[..., str],
+    redis_client: Any,
+) -> Tuple[str, bool]:
+    if not deps.check_global_rate_limit(redis_client):
+        return deps.handle_rate_limit(chat_id, message), False
+
+    charges_applied: List[Dict[str, Any]] = []
+    base_charge_meta, base_charge_error = billing_helper.charge_one_ai_request(
+        "ai_response_base"
+    )
+    if base_charge_error:
+        return base_charge_error, False
+    if base_charge_meta:
+        charges_applied.append(base_charge_meta)
+
+    if prepared_message.resized_image_data and prepared_message.photo_file_id:
+        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
+            "image_context_media"
+        )
+        if media_charge_error:
+            return media_charge_error, False
+        if media_charge_meta:
+            charges_applied.append(media_charge_meta)
+
+    chat_history = deps.get_chat_history(chat_id, redis_client)
+    ai_messages = deps.build_ai_messages(
+        message,
+        chat_history,
+        prompt_text,
+        reply_context_text,
+    )
+    ai_response_meta: Dict[str, Any] = {}
+    response_msg = deps.handle_ai_response(
+        chat_id,
+        handler_func,
+        ai_messages,
+        image_data=prepared_message.resized_image_data if prepared_message.photo_file_id else None,
+        image_file_id=prepared_message.photo_file_id,
+        context_texts=(reply_context_text, prompt_text),
+        user_identity=user_identity,
+            response_meta=ai_response_meta,
+        )
+
+    provider_request_count = int(ai_response_meta.get("provider_request_count", 1) or 1)
+    if provider_request_count > 1:
+        for _ in range(provider_request_count - 1):
+            extra_charge_meta, extra_charge_error = billing_helper.charge_one_ai_request(
+                "ai_response_extra_provider_request"
+            )
+            if extra_charge_error:
+                return extra_charge_error, False
+            if extra_charge_meta:
+                charges_applied.append(extra_charge_meta)
+
+    if response_msg in {
+        "error de IA, intentá de nuevo en un rato",
+        "no pude generar respuesta, intentá de nuevo",
+    } or bool(ai_response_meta.get("ai_fallback")):
+        for charge_meta in charges_applied:
+            billing_helper.refund_ai_charge_meta(charge_meta, "ai_response_fallback")
+
+    return response_msg, True
+
+
+def _handle_known_command(
+    deps: MessageHandlerDeps,
+    *,
+    commands: Mapping[str, CommandTuple],
+    command: str,
+    sanitized_message_text: str,
+    message: Dict[str, Any],
+    chat_id: str,
+    chat_type: str,
+    user_id: Optional[int],
+    numeric_chat_id: Optional[int],
+    prepared_message: PreparedMessage,
+    billing_helper: AIMessageBilling,
+    reply_context_text: Optional[str],
+    user_identity: str,
+    redis_client: Any,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    response_msg: Optional[str] = None
+    response_markup: Optional[Dict[str, Any]] = None
+    response_uses_ai = False
+    response_command: Optional[str] = None
+
+    if (
+        command == "/config"
+        and deps.is_group_chat_type(chat_type)
+        and not deps.is_chat_admin(
+            chat_id,
+            message.get("from", {}).get("id"),
+            redis_client=redis_client,
+        )
+    ):
+        denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+        deps.send_msg(chat_id, denial_message, str(message.get("message_id")))
+        deps.report_unauthorized_config_attempt(
+            chat_id,
+            message.get("from", {}),
+            chat_type=chat_type,
+            action="command:/config",
+        )
+        return "ok", None, False, None
+
+    if command == "/config":
+        response_command = command
+        response_msg, response_markup = deps.handle_config_command(chat_id)
+        return response_msg, response_markup, False, response_command
+
+    if command == "/topup":
+        response_command = command
+        if not deps.credits_db_service.is_configured():
+            response_msg = "el cobro IA no está configurado, avisale al admin."
+        elif chat_type != "private":
+            bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
+            response_msg = (
+                "la recarga va por privado.\n"
+                f"abrime en @{bot_username}"
+                if bot_username
+                else "la recarga va por privado, abrime en DM."
+            )
+        else:
+            deps.ensure_callback_updates_enabled()
+            response_msg = "elegí un pack para recargar créditos IA:"
+            response_markup = deps.build_topup_keyboard()
+        return response_msg, response_markup, False, response_command
+
+    if command == "/balance":
+        response_command = command
+        if not deps.credits_db_service.is_configured():
+            response_msg = "el cobro IA no está configurado, avisale al admin."
+        elif user_id is None or numeric_chat_id is None:
+            response_msg = "no pude leer tu usuario para ver saldos."
+        else:
+            try:
+                deps.maybe_grant_onboarding_credits(
+                    deps.credits_db_service, deps.admin_report, user_id
+                )
+                response_msg = deps.format_balance_command(
+                    deps.credits_db_service,
+                    chat_type=chat_type,
+                    user_id=user_id,
+                    chat_id=numeric_chat_id,
+                )
+            except Exception as error:
+                deps.admin_report(
+                    "Error loading balance",
+                    error,
+                    {"chat_id": chat_id, "user_id": user_id},
+                )
+                response_msg = "error leyendo tu saldo, intentá de nuevo."
+        return response_msg, response_markup, False, response_command
+
+    if command == "/transfer":
+        response_command = command
+        if not deps.credits_db_service.is_configured():
+            response_msg = "el cobro IA no está configurado, avisale al admin."
+        elif not deps.is_group_chat_type(chat_type):
+            response_msg = "este comando es para grupos: /transfer <monto>"
+        elif user_id is None or numeric_chat_id is None:
+            response_msg = "no pude identificar usuario/chat para transferir."
+        else:
+            amount_token = sanitized_message_text.split(" ", 1)[0].strip()
+            try:
+                amount = int(amount_token)
+            except (TypeError, ValueError):
+                response_msg = "uso: /transfer <monto>"
+            else:
+                if amount <= 0:
+                    response_msg = "el monto tiene que ser mayor a 0"
+                else:
+                    try:
+                        transfer_result = deps.credits_db_service.transfer_user_to_chat(
+                            user_id=user_id,
+                            chat_id=numeric_chat_id,
+                            amount=amount,
+                        )
+                    except Exception as error:
+                        deps.admin_report(
+                            "Error transferring credits",
+                            error,
+                            {
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "amount": amount,
+                            },
+                        )
+                        response_msg = "error transfiriendo créditos, intentá de nuevo."
+                    else:
+                        if transfer_result.get("ok"):
+                            response_msg = (
+                                f"transferidos {amount} créditos al grupo ✅\n"
+                                f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
+                                f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
+                            )
+                        else:
+                            response_msg = (
+                                "no te alcanza el saldo personal para esa transferencia.\n"
+                                f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
+                            )
+        return response_msg, response_markup, False, response_command
+
+    if command in {"/buscar", "/search"}:
+        response_command = command
+        handler_func, uses_ai, takes_params = commands[command]
+        response_msg = handler_func(sanitized_message_text) if takes_params else handler_func()
+        return response_msg, response_markup, uses_ai, response_command
+
+    if command in commands:
+        handler_func, uses_ai, takes_params = commands[command]
+        response_command = command
+
+        if uses_ai:
+            response_msg, response_uses_ai = _run_ai_flow(
+                deps,
+                chat_id=chat_id,
+                message=message,
+                prepared_message=prepared_message,
+                billing_helper=billing_helper,
+                prompt_text=sanitized_message_text,
+                reply_context_text=reply_context_text,
+                user_identity=user_identity,
+                handler_func=handler_func,
+                redis_client=redis_client,
+            )
+            return response_msg, response_markup, response_uses_ai, response_command
+
+        if command == "/transcribe":
+            media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
+                "transcribe_command_media"
+            )
+            if media_charge_error:
+                response_msg = media_charge_error
+            else:
+                response_msg = deps.handle_transcribe_with_message(message)
+                if media_charge_meta and not billing_helper.is_transcribe_success_response(
+                    response_msg
+                ):
+                    billing_helper.refund_ai_charge_meta(
+                        media_charge_meta, "transcribe_command_unsuccessful"
+                    )
+            return response_msg, response_markup, False, response_command
+
+        response_msg = handler_func(sanitized_message_text) if takes_params else handler_func()
+        return response_msg, response_markup, False, response_command
+
+    response_msg, response_uses_ai = _run_ai_flow(
+        deps,
+        chat_id=chat_id,
+        message=message,
+        prepared_message=prepared_message,
+        billing_helper=billing_helper,
+        prompt_text=prepared_message.message_text,
+        reply_context_text=reply_context_text,
+        user_identity=user_identity,
+        handler_func=deps.ask_ai,
+        redis_client=redis_client,
+    )
+    return response_msg, response_markup, response_uses_ai, response_command
+
+
+def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
+    """Handle an incoming Telegram message."""
+
+    try:
+        chat = cast(Dict[str, Any], message.get("chat", {}))
+        message_id = str(message.get("message_id"))
+        chat_id = str(chat.get("id"))
+        chat_type = str(chat.get("type", ""))
+        user_identity = str(message.get("from", {}).get("first_name") or "")
+        username = message.get("from", {}).get("username")
+        if username:
+            user_identity = f"{user_identity} ({username})".strip()
+
+        user_id = deps.extract_user_id(message)
+        numeric_chat_id = deps.extract_numeric_chat_id(chat_id)
+
+        if isinstance(message.get("successful_payment"), Mapping):
+            return deps.handle_successful_payment_message(message)
+
+        redis_client = deps.config_redis()
+        chat_config = deps.get_chat_config(redis_client, chat_id)
+
+        commands = deps.initialize_commands()
+        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+        raw_message_text, _, _ = deps.extract_message_content(message)
+        command, _ = deps.parse_command(raw_message_text, bot_name)
+        auto_process_media = deps.should_auto_process_media(
+            commands,
+            command,
+            raw_message_text,
+            message,
+        )
+
+        billing_helper = _build_billing_helper(
+            deps,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_id=user_id,
+            numeric_chat_id=numeric_chat_id,
+            command=command,
+            message=message,
+        )
+        prepared_message = _prepare_message_content(
+            message,
+            auto_process_media=auto_process_media,
+            deps=deps,
+            billing_helper=billing_helper,
+        )
+        if prepared_message.early_response:
+            return prepared_message.early_response
+
+        if _handle_link_replacement(
+            deps,
+            chat_config=chat_config,
+            message=message,
+            message_text=prepared_message.message_text,
+            chat_id=chat_id,
+            message_id=message_id,
+        ):
+            return "ok"
+
+        command, sanitized_message_text = deps.parse_command(
+            prepared_message.message_text, bot_name
+        )
+        reply_metadata = _load_reply_metadata(
+            deps,
+            redis_client=redis_client,
+            chat_id=chat_id,
+            message=message,
+        )
+        reply_context_text = deps.build_reply_context_text(message)
+
+        if not deps.should_gordo_respond(
+            commands,
+            command,
+            sanitized_message_text,
+            message,
+            chat_config,
+            reply_metadata,
+        ):
+            if prepared_message.message_text:
+                formatted_message = deps.format_user_message(
+                    message,
+                    prepared_message.message_text,
+                    reply_context_text,
+                )
+                deps.save_message_to_redis(
+                    chat_id, message_id, formatted_message, redis_client
+                )
+            return "ok"
+
+        if (
+            command in ["/comando", "/command"]
+            and not sanitized_message_text
+            and "reply_to_message" in message
+        ):
+            sanitized_message_text = deps.extract_message_content(
+                cast(Dict[str, Any], message["reply_to_message"])
+            )[0]
+
+        _save_replied_message_context(
+            deps,
+            message=message,
+            chat_id=chat_id,
+            redis_client=redis_client,
+        )
+
+        response_msg, response_markup, response_uses_ai, response_command = _handle_known_command(
+            deps,
+            commands=commands,
+            command=command,
+            sanitized_message_text=sanitized_message_text,
+            message=message,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_id=user_id,
+            numeric_chat_id=numeric_chat_id,
+            prepared_message=prepared_message,
+            billing_helper=billing_helper,
+            reply_context_text=reply_context_text,
+            user_identity=user_identity,
+            redis_client=redis_client,
+        )
+
+        if response_msg == "ok" and response_command is None and response_markup is None:
+            return "ok"
+
+        if prepared_message.message_text:
+            formatted_message = deps.format_user_message(
+                message,
+                prepared_message.message_text,
+                reply_context_text,
+            )
+            deps.save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+
+        if response_msg:
+            deps.save_message_to_redis(
+                chat_id,
+                f"bot_{message_id}",
+                response_msg,
+                redis_client,
+            )
+            sent_message_id = deps.send_msg(
+                chat_id,
+                response_msg,
+                message_id,
+                reply_markup=response_markup,
+            )
+            if sent_message_id is not None:
+                metadata = (
+                    {
+                        "type": "command",
+                        "command": response_command,
+                        "uses_ai": response_uses_ai,
+                    }
+                    if response_command
+                    else {"type": "ai"}
+                )
+                deps.save_bot_message_metadata(
+                    redis_client,
+                    chat_id,
+                    sent_message_id,
+                    metadata,
+                )
+
+        return "ok"
+
+    except Exception as error:
+        deps.admin_report(
+            f"Message handling error: {error}",
+            error,
+            {
+                "message_id": message.get("message_id"),
+                "chat_id": message.get("chat", {}).get("id"),
+                "user": message.get("from", {}).get("username", "Unknown"),
+            },
+        )
+        return "error procesando mensaje"
+
+
+__all__ = ["MessageHandlerDeps", "handle_msg"]
