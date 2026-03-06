@@ -74,6 +74,54 @@ from api.config import (
     configure as configure_app_config,
     load_bot_config as _config_load_bot_config,
 )
+from api.ai_billing import (
+    build_insufficient_credits_message as _billing_build_insufficient_credits_message,
+    build_topup_keyboard as _billing_build_topup_keyboard,
+    extract_numeric_chat_id as _billing_extract_numeric_chat_id,
+    extract_user_id as _billing_extract_user_id,
+    format_balance_command as _billing_format_balance_command,
+    get_ai_billing_pack as _billing_get_ai_billing_pack,
+    get_ai_billing_packs as _billing_get_ai_billing_packs,
+    get_ai_credits_per_response as _billing_get_ai_credits_per_response,
+    get_ai_onboarding_credits as _billing_get_ai_onboarding_credits,
+    maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
+    parse_topup_payload as _billing_parse_topup_payload,
+)
+from api.ai_pipeline import (
+    clean_duplicate_response as _ai_clean_duplicate_response,
+    handle_ai_response as _ai_handle_response,
+    remove_gordo_prefix as _ai_remove_gordo_prefix,
+)
+from api.chat_settings import (
+    CHAT_ADMIN_STATUS_TTL,
+    CHAT_CONFIG_DEFAULTS,
+    build_config_keyboard as _chat_build_config_keyboard,
+    build_config_text as _chat_build_config_text,
+    coerce_bool as _chat_coerce_bool,
+    decode_redis_value as _chat_decode_redis_value,
+    get_chat_config as _chat_get_chat_config,
+    is_chat_admin as _chat_is_chat_admin,
+    is_group_chat_type as _chat_is_group_chat_type,
+    report_unauthorized_config_attempt as _chat_report_unauthorized_config_attempt,
+    set_chat_config as _chat_set_chat_config,
+)
+from api.command_registry import (
+    build_command_registry as _build_command_registry,
+    parse_command as _command_parse_command,
+    should_auto_process_media as _command_should_auto_process_media,
+    should_gordo_respond as _command_should_gordo_respond,
+)
+from api.message_handler import MessageHandlerDeps, handle_msg as _handle_msg_impl
+from api.message_state import (
+    BOT_MESSAGE_META_TTL,
+    build_reply_context_text as _state_build_reply_context_text,
+    format_user_message as _state_format_user_message,
+    get_bot_message_metadata as _state_get_bot_message_metadata,
+    get_chat_history as _state_get_chat_history,
+    save_bot_message_metadata as _state_save_bot_message_metadata,
+    save_message_to_redis as _state_save_message_to_redis,
+    truncate_text as _state_truncate_text,
+)
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
 from api.services import credits_db as credits_db_service
@@ -342,17 +390,6 @@ def _run_forced_web_search(
     return "no pude completar la búsqueda web ahora"
 
 
-CHAT_CONFIG_KEY_PREFIX = "chat_config:"
-CHAT_CONFIG_DEFAULTS = {
-    "link_mode": "off",
-    "ai_random_replies": True,
-    "ai_command_followups": True,
-}
-CHAT_ADMIN_STATUS_TTL = 300
-BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
-BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60  # 3 days
-
-
 def config_redis(host=None, port=None, password=None):
     configure_app_config(admin_reporter=globals().get("admin_report"))
     return _config_config_redis(host=host, port=port, password=password)
@@ -561,14 +598,6 @@ RATE_LIMIT_GLOBAL_MAX = 1024
 RATE_LIMIT_CHAT_MAX = 128
 TTL_RATE_GLOBAL = 3600  # 1 hour
 TTL_RATE_CHAT = 600  # 10 minutes
-
-AI_BILLING_DEFAULT_PACKS: List[Dict[str, int]] = [
-    {"id": "p100", "credits": 100, "xtr": 50},
-    {"id": "p250", "credits": 250, "xtr": 125},
-    {"id": "p500", "credits": 500, "xtr": 250},
-    {"id": "p1000", "credits": 1000, "xtr": 500},
-    {"id": "p2500", "credits": 2500, "xtr": 1250},
-]
 
 def run_agent_cycle() -> Dict[str, Any]:
     """Trigger the autonomous agent, persist its thought and return metadata."""
@@ -2378,55 +2407,14 @@ def is_chat_admin(
     *,
     redis_client: Optional[redis.Redis] = None,
 ) -> bool:
-    """Return ``True`` if *user_id* is an admin of the chat."""
-
-    if not chat_id or user_id is None:
-        return False
-
-    redis_client = redis_client or _optional_redis_client()
-    cache_key = _chat_admin_cache_key(chat_id, user_id)
-
-    if redis_client:
-        cached_value = redis_get_json(redis_client, cache_key)
-        cached_flag = (
-            cached_value.get("is_admin")
-            if isinstance(cached_value, Mapping)
-            else cached_value
-        )
-        if isinstance(cached_flag, bool):
-            return cached_flag
-
-    payload, error = _telegram_request(
-        "getChatMember",
-        method="GET",
-        params={"chat_id": chat_id, "user_id": user_id},
-        log_errors=False,
+    return _chat_is_chat_admin(
+        chat_id,
+        user_id,
+        redis_client=redis_client,
+        optional_redis_client=_optional_redis_client,
+        telegram_request=_telegram_request,
+        log_event=_log_config_event,
     )
-
-    is_admin = False
-    if payload and payload.get("ok"):
-        result = payload.get("result") or {}
-        status = str(result.get("status") or "").lower()
-        is_admin = status in {"administrator", "creator"}
-    else:
-        _log_config_event(
-            "Failed to verify chat admin status",
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "error": error or (payload or {}).get("description"),
-            },
-        )
-
-    if redis_client:
-        redis_setex_json(
-            redis_client,
-            cache_key,
-            CHAT_ADMIN_STATUS_TTL,
-            {"is_admin": is_admin},
-        )
-
-    return is_admin
 
 
 def _report_unauthorized_config_attempt(
@@ -2437,17 +2425,14 @@ def _report_unauthorized_config_attempt(
     action: str,
     callback_data: Optional[str] = None,
 ) -> None:
-    context: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "chat_type": chat_type,
-        "user_id": user.get("id"),
-        "username": user.get("username"),
-        "action": action,
-    }
-    if callback_data:
-        context["callback_data"] = callback_data
-
-    _log_config_event("Unauthorized config attempt", context)
+    _chat_report_unauthorized_config_attempt(
+        chat_id,
+        user,
+        chat_type=chat_type,
+        action=action,
+        log_event=_log_config_event,
+        callback_data=callback_data,
+    )
 
 
 bcra_service.configure(
@@ -4068,75 +4053,48 @@ def build_ai_messages(
     return messages[-8:]
 
 
+def _noop_command() -> str:
+    return ""
+
+
+def _noop_param_command(_arg: str) -> str:
+    return ""
+
+
 def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
-    """
-    Initialize command handlers with metadata.
-    Returns dict of command name -> (handler_function, uses_ai, takes_params)
-    """
-    return {
-        # AI-based commands
-        "/ask": (ask_ai, True, True),
-        "/pregunta": (ask_ai, True, True),
-        "/che": (ask_ai, True, True),
-        "/gordo": (ask_ai, True, True),
-        "/agent": (show_agent_thoughts, False, False),
-        # Regular commands
-        "/config": (lambda: "", False, False),
-        "/convertbase": (convert_base, False, True),
-        "/random": (select_random, False, True),
-        "/prices": (get_prices, False, True),
-        "/price": (get_prices, False, True),
-        "/precios": (get_prices, False, True),
-        "/precio": (get_prices, False, True),
-        "/presios": (get_prices, False, True),
-        "/presio": (get_prices, False, True),
-        "/bresio": (get_prices, False, True),
-        "/bresios": (get_prices, False, True),
-        "/brecio": (get_prices, False, True),
-        "/brecios": (get_prices, False, True),
-        "/dolar": (get_dollar_rates, False, False),
-        "/dollar": (get_dollar_rates, False, False),
-        "/usd": (get_dollar_rates, False, False),
-        "/eleccion": (get_polymarket_argentina_election, False, False),
-        "/rulo": (get_rulo, False, False),
-        "/devo": (get_devo, False, True),
-        "/powerlaw": (powerlaw, False, False),
-        "/rainbow": (rainbow, False, False),
-        "/satoshi": (satoshi, False, False),
-        "/sat": (satoshi, False, False),
-        "/sats": (satoshi, False, False),
-        "/time": (get_timestamp, False, False),
-        "/comando": (convert_to_command, False, True),
-        "/command": (convert_to_command, False, True),
-        "/buscar": (search_command, False, True),
-        "/search": (search_command, False, True),
-        "/instance": (get_instance_name, False, False),
-        "/help": (get_help, False, False),
-        "/transcribe": (handle_transcribe, False, False),
-        "/bcra": (handle_bcra_variables, False, False),
-        "/variables": (handle_bcra_variables, False, False),
-        "/topup": (lambda: "", False, False),
-        "/balance": (lambda: "", False, False),
-        "/transfer": (lambda _arg: "", False, True),
-    }
+    """Initialize command handlers with a deduplicated command registry."""
+
+    return _build_command_registry(
+        {
+            "ask_ai": ask_ai,
+            "show_agent_thoughts": show_agent_thoughts,
+            "config_command": _noop_command,
+            "convert_base": convert_base,
+            "select_random": select_random,
+            "get_prices": get_prices,
+            "get_dollar_rates": get_dollar_rates,
+            "get_polymarket_argentina_election": get_polymarket_argentina_election,
+            "get_rulo": get_rulo,
+            "get_devo": get_devo,
+            "powerlaw": powerlaw,
+            "rainbow": rainbow,
+            "satoshi": satoshi,
+            "get_timestamp": get_timestamp,
+            "convert_to_command": convert_to_command,
+            "search_command": search_command,
+            "get_instance_name": get_instance_name,
+            "get_help": get_help,
+            "handle_transcribe": handle_transcribe,
+            "handle_bcra_variables": handle_bcra_variables,
+            "topup_command": _noop_command,
+            "balance_command": _noop_command,
+            "transfer_command": _noop_param_command,
+        }
+    )
 
 
 def truncate_text(text: Optional[str], max_length: int = 512) -> str:
-    """Truncate text to max_length and add ellipsis if needed"""
-
-    if text is None:
-        return ""
-
-    if max_length <= 0:
-        return ""
-
-    if max_length <= 3:
-        return "." * max_length
-
-    if len(text) <= max_length:
-        return text
-
-    return text[: max_length - 3] + "..."
+    return _state_truncate_text(text, max_length)
 
 
 configure_agent_memory(
@@ -4150,104 +4108,24 @@ configure_agent_memory(
 def save_message_to_redis(
     chat_id: str, message_id: str, text: str, redis_client: redis.Redis
 ) -> None:
-    try:
-        chat_history_key = f"chat_history:{chat_id}"
-        message_ids_key = f"chat_message_ids:{chat_id}"
-
-        # Check if the message ID already exists using a SET structure
-        if redis_client.sismember(message_ids_key, message_id):
-            # Message already exists, don't save again
-            return
-
-        # Message doesn't exist, save it
-        history_entry = json.dumps(
-            {
-                "id": message_id,
-                "text": truncate_text(text),
-                "timestamp": int(time.time()),
-            }
-        )
-
-        pipe = redis_client.pipeline()
-        pipe.lpush(chat_history_key, history_entry)  # Add new message to history list
-        pipe.sadd(
-            message_ids_key, message_id
-        )  # Add message ID to set for duplicate tracking
-        pipe.ltrim(chat_history_key, 0, 31)  # Keep only last 32 messages
-
-        # Keep the message_ids set in sync with the history
-        # Get all message IDs from history (this is expensive but needed to maintain consistency)
-        pipe.lrange(chat_history_key, 0, -1)
-        results = pipe.execute()
-
-        # Last result is the list of messages after trimming
-        message_entries = results[-1]
-        valid_ids = set()
-        for entry in message_entries:
-            try:
-                msg = json.loads(entry)
-                valid_ids.add(msg["id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-        # Remove any IDs from the set that are no longer in the history
-        try:
-            current_ids_set = redis_client.smembers(message_ids_key)
-            current_ids = (
-                list(cast(Set[str], current_ids_set)) if current_ids_set else []
-            )
-            to_remove = [id for id in current_ids if id not in valid_ids]
-        except Exception:
-            current_ids = []
-            to_remove = []
-        if to_remove:
-            redis_client.srem(message_ids_key, *to_remove)
-
-    except Exception as e:
-        error_context = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text_length": len(text),
-        }
-        error_msg = f"Redis save message error: {str(e)}"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
+    _state_save_message_to_redis(
+        chat_id,
+        message_id,
+        text,
+        redis_client,
+        admin_reporter=admin_report,
+    )
 
 
 def get_chat_history(
     chat_id: str, redis_client: redis.Redis, max_messages: int = 8
 ) -> List[Dict]:
-    try:
-        chat_history_key = f"chat_history:{chat_id}"
-        history: List[str] = cast(
-            List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1)
-        )
-
-        if not history:
-            return []
-
-        messages = []
-        for entry in history:
-            try:
-                msg = json.loads(entry)
-                # Add role based on if it's from the bot or user
-                is_bot = msg["id"].startswith("bot_")
-                msg["role"] = "assistant" if is_bot else "user"
-                messages.append(msg)
-            except json.JSONDecodeError as decode_error:
-                error_context = {"chat_id": chat_id, "entry": entry}
-                error_msg = f"JSON decode error in chat history: {str(decode_error)}"
-                print(error_msg)
-                admin_report(error_msg, decode_error, error_context)
-                continue
-
-        return list(reversed(messages))
-    except Exception as e:
-        error_context = {"chat_id": chat_id, "max_messages": max_messages}
-        error_msg = f"Error retrieving chat history: {str(e)}"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
-        return []
+    return _state_get_chat_history(
+        chat_id,
+        redis_client,
+        admin_reporter=admin_report,
+        max_messages=max_messages,
+    )
 
 
 def should_gordo_respond(
@@ -4258,61 +4136,14 @@ def should_gordo_respond(
     chat_config: Mapping[str, Any],
     reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
-    """Decide if the bot should respond to a message"""
-    # Get message context
-    message_lower = message_text.lower()
-    chat_type = message["chat"]["type"]
-    bot_username = environ.get("TELEGRAM_USERNAME")
-    bot_name = f"@{bot_username}"
-
-    # Ignore replies to link replacement messages
-    reply = message.get("reply_to_message", {})
-    if reply.get("from", {}).get("username") == bot_username:
-        reply_text = reply.get("text") or ""
-        replacement_domains = (
-            "fxtwitter.com",
-            "fixupx.com",
-            "fxbsky.app",
-            "kkinstagram.com",
-            "eeinstagram.com",
-            "rxddit.com",
-        )
-        if any(domain in reply_text for domain in replacement_domains):
-            return False
-
-    # Response conditions
-    is_command = command in commands
-    is_private = chat_type == "private"
-    is_mention = bot_name in message_lower
-    is_reply = reply.get("from", {}).get("username", "") == bot_username
-
-    if (
-        is_reply
-        and reply_metadata
-        and reply_metadata.get("type") == "command"
-        and not bool(reply_metadata.get("uses_ai", False))
-        and not bool(chat_config.get("ai_command_followups", True))
-    ):
-        return False
-
-    # Check trigger keywords with 10% chance
-    try:
-        config = load_bot_config()
-        trigger_words = config.get("trigger_words", ["bot", "assistant"])
-    except ValueError:
-        trigger_words = ["bot", "assistant"]
-    if bool(chat_config.get("ai_random_replies", True)):
-        is_trigger = (
-            any(word in message_lower for word in trigger_words)
-            and random.random() < 0.1
-        )
-    else:
-        is_trigger = False
-
-    return (
-        is_command
-        or not command.startswith("/")
-        and (is_trigger or is_private or is_mention or is_reply)
+    return _command_should_gordo_respond(
+        commands,
+        command,
+        message_text,
+        message,
+        chat_config,
+        reply_metadata,
+        load_bot_config_fn=load_bot_config,
     )
 
 
@@ -4322,29 +4153,12 @@ def should_auto_process_media(
     message_text: str,
     message: Mapping[str, Any],
 ) -> bool:
-    """Return whether incoming media should be auto transcribed/described."""
-
-    chat = cast(Mapping[str, Any], message.get("chat", {}))
-    chat_type = str(chat.get("type", ""))
-    if chat_type == "private":
-        return True
-
-    if command in commands:
-        return True
-
-    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
-    if not bot_username:
-        return False
-
-    bot_name = f"@{bot_username}"
-    lowered_text = (message_text or "").lower()
-    is_mention = bot_name.lower() in lowered_text
-
-    reply = cast(Mapping[str, Any], message.get("reply_to_message", {}))
-    reply_from = cast(Mapping[str, Any], reply.get("from", {}))
-    is_reply_to_bot = str(reply_from.get("username", "")) == bot_username
-
-    return is_mention or is_reply_to_bot
+    return _command_should_auto_process_media(
+        commands,
+        command,
+        message_text,
+        message,
+    )
 
 
 def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
@@ -4397,174 +4211,77 @@ def check_global_rate_limit(redis_client: redis.Redis) -> bool:
 
 
 def get_ai_credits_per_response() -> int:
-    """Return credits charged per AI response."""
-
-    raw_value = str(environ.get("AI_CREDITS_PER_RESPONSE") or "1").strip()
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        return 1
-    return max(1, parsed)
+    return _billing_get_ai_credits_per_response()
 
 
 def get_ai_onboarding_credits() -> int:
-    """Return onboarding credits granted once per user."""
-
-    raw_value = str(environ.get("AI_ONBOARDING_CREDITS") or "3").strip()
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        return 3
-    return max(0, parsed)
+    return _billing_get_ai_onboarding_credits()
 
 
 def get_ai_billing_packs() -> List[Dict[str, int]]:
-    """Load Stars billing packs from env or defaults."""
-
-    raw_value = str(environ.get("AI_STARS_PACKS_JSON") or "").strip()
-    if not raw_value:
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    try:
-        loaded = json.loads(raw_value)
-    except json.JSONDecodeError:
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    if not isinstance(loaded, list):
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    normalized: List[Dict[str, int]] = []
-    for item in loaded:
-        if not isinstance(item, Mapping):
-            continue
-        pack_id = str(item.get("id", "")).strip()
-        try:
-            credits = int(item.get("credits"))  # type: ignore[arg-type]
-            xtr = int(item.get("xtr"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-        if not pack_id or credits <= 0 or xtr <= 0:
-            continue
-        normalized.append({"id": pack_id, "credits": credits, "xtr": xtr})
-
-    return normalized or list(AI_BILLING_DEFAULT_PACKS)
+    return _billing_get_ai_billing_packs()
 
 
 def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
-    """Return the pack dict matching *pack_id*."""
-
-    for pack in get_ai_billing_packs():
-        if str(pack.get("id")) == str(pack_id):
-            return pack
-    return None
+    return _billing_get_ai_billing_pack(pack_id)
 
 
 def build_topup_keyboard() -> Dict[str, Any]:
-    """Build inline keyboard with top-up packs."""
-
-    rows: List[List[Dict[str, str]]] = []
-    for pack in get_ai_billing_packs():
-        pack_id = str(pack["id"])
-        rows.append(
-            [
-                {
-                    "text": f"{pack['credits']} créditos - {pack['xtr']} ⭐",
-                    "callback_data": f"topup:{pack_id}",
-                }
-            ]
-        )
-    return {"inline_keyboard": rows}
+    return _billing_build_topup_keyboard()
 
 
 def _parse_topup_payload(payload: str) -> Tuple[Optional[str], Optional[int]]:
-    """Parse invoice payload for top-up purchases."""
-
-    if not payload:
-        return None, None
-    parts = str(payload).split(":")
-    if len(parts) < 2 or parts[0] != "topup":
-        return None, None
-
-    user_id: Optional[int] = None
-    if len(parts) >= 3:
-        try:
-            user_id = int(parts[2])
-        except (TypeError, ValueError):
-            user_id = None
-    return parts[1], user_id
+    return _billing_parse_topup_payload(payload)
 
 
 def build_insufficient_credits_message(
     *, chat_type: str, user_balance: int, chat_balance: int
 ) -> str:
-    """Build a user-facing paywall message when no credits are available."""
-
-    if _is_group_chat_type(chat_type):
-        return (
-            "sin créditos para IA en este grupo, che.\n"
-            f"- Tu saldo: {user_balance}\n"
-            f"- Saldo del grupo: {chat_balance}\n"
-            "agregá créditos con /topup (por privado) y si querés pasá al grupo con /transfer <monto>.\n"
-            "podés ver todo con /balance"
-        )
-
-    return (
-        "te quedaste sin créditos IA.\n"
-        f"saldo actual: {user_balance}\n"
-        "agregá créditos con /topup para recargar con Stars ⭐"
+    return _billing_build_insufficient_credits_message(
+        chat_type=chat_type,
+        user_balance=user_balance,
+        chat_balance=chat_balance,
     )
 
 
 def _extract_numeric_chat_id(chat_id: str) -> Optional[int]:
-    try:
-        return int(chat_id)
-    except (TypeError, ValueError):
-        return None
+    return _billing_extract_numeric_chat_id(chat_id)
 
 
 def _extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
-    user = message.get("from") if message else None
-    if not isinstance(user, Mapping):
-        return None
-    try:
-        return int(cast(Mapping[str, Any], user).get("id"))
-    except (TypeError, ValueError):
-        return None
+    return _billing_extract_user_id(message)
 
 
 def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
-    if user_id is None:
-        return
-    onboarding_credits = get_ai_onboarding_credits()
-    if onboarding_credits <= 0:
-        return
-
-    try:
-        credits_db_service.grant_onboarding_if_needed(user_id, onboarding_credits)
-    except Exception as error:
-        admin_report("falló la acreditación de onboarding", error, {"user_id": user_id})
-
-
-def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
-    return credits_db_service.get_balance(scope_type, int(scope_id))
+    _billing_maybe_grant_onboarding_credits(
+        credits_db_service,
+        admin_report,
+        user_id,
+    )
 
 
 def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
-    user_balance = _fetch_balance("user", user_id)
-    if _is_group_chat_type(chat_type):
-        chat_balance = _fetch_balance("chat", chat_id)
-        return (
-            "saldos IA:\n"
-            f"- tu saldo personal: {user_balance}\n"
-            f"- saldo del grupo: {chat_balance}\n"
-            "si no te alcanza el saldo personal, se usa el del grupo.\n"
-            "para cargar créditos: /topup (por privado)\n"
-            "si querés pasar créditos al grupo: /transfer <monto>"
-        )
+    return _billing_format_balance_command(
+        credits_db_service,
+        chat_type=chat_type,
+        user_id=user_id,
+        chat_id=chat_id,
+    )
 
-    return (
-        f"tu saldo personal de IA es: {user_balance}\n"
-        "para cargar créditos: /topup"
+
+def _message_handler_maybe_grant_onboarding(
+    _service: Any,
+    _reporter: Callable[..., None],
+    user_id: Optional[int],
+) -> None:
+    _maybe_grant_onboarding_credits(user_id)
+
+
+def _message_handler_format_balance_command(_service: Any, **kwargs: Any) -> str:
+    return _format_balance_command(
+        kwargs["chat_type"],
+        kwargs["user_id"],
+        kwargs["chat_id"],
     )
 
 
@@ -4973,37 +4690,7 @@ def encode_image_to_base64(image_data: bytes) -> str:
 
 
 def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
-    """Parse command and message text from input"""
-    # Handle empty or whitespace-only messages
-    message_text = message_text.strip()
-    if not message_text:
-        return "", ""
-
-    # Split into command and rest of message
-    split_message = message_text.split(" ", 1)
-    command = split_message[0].lower().replace(bot_name, "")
-
-    # Normalize Hangul filler alias to /ask
-    if command.startswith("/"):
-        command_body = command[1:]
-        if command_body and all(char == "\u3164" for char in command_body):
-            command = "/ask"
-
-    # Get message text and handle extra spaces
-    if len(split_message) > 1:
-        message_text = split_message[1].lstrip()  # Remove leading spaces only
-    else:
-        message_text = ""
-
-    return command, message_text
-
-
-def _chat_config_key(chat_id: str) -> str:
-    return f"{CHAT_CONFIG_KEY_PREFIX}{chat_id}"
-
-
-def _legacy_link_mode_key(chat_id: str) -> str:
-    return f"link_mode:{chat_id}"
+    return _command_parse_command(message_text, bot_name)
 
 
 def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -> None:
@@ -5015,243 +4702,46 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
 
 
 def _decode_redis_value(value: Any) -> Optional[str]:
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", errors="replace")
-    if value is not None:
-        return str(value)
-    return None
+    return _chat_decode_redis_value(value)
 
 
 def _is_group_chat_type(chat_type: Optional[str]) -> bool:
-    return str(chat_type) in {"group", "supergroup"}
-
-
-def _load_chat_config_from_redis(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
-    config = dict(CHAT_CONFIG_DEFAULTS)
-    raw_value = redis_client.get(_chat_config_key(chat_id))
-    raw_value_text = _decode_redis_value(raw_value)
-    deserializable_value = raw_value_text
-    _log_config_event(
-        "Chat config raw value fetched",
-        {
-            "chat_id": chat_id,
-            "raw_value": raw_value_text,
-        },
-    )
-    if deserializable_value:
-        try:
-            loaded = json.loads(deserializable_value)
-            if isinstance(loaded, dict):
-                for key, value in loaded.items():
-                    if key in config:
-                        config[key] = value
-        except json.JSONDecodeError:
-            pass
-    else:
-        legacy_key = _legacy_link_mode_key(chat_id)
-        legacy_value = redis_client.get(legacy_key)
-        legacy_value_text = _decode_redis_value(legacy_value)
-        if legacy_value_text:
-            _log_config_event(
-                "Using legacy link mode config",
-                {
-                    "chat_id": chat_id,
-                    "legacy_value": legacy_value_text,
-                },
-            )
-            config["link_mode"] = legacy_value_text
-        else:
-            _log_config_event(
-                "No stored chat config found; using defaults",
-                {"chat_id": chat_id},
-            )
-
-    return config
-
-
-def _persist_chat_config_to_redis(
-    redis_client: redis.Redis,
-    chat_id: str,
-    config: Mapping[str, Any],
-) -> None:
-    redis_client.set(_chat_config_key(chat_id), json.dumps(dict(config)))
-    link_mode = str(config.get("link_mode", "off"))
-    legacy_key = _legacy_link_mode_key(chat_id)
-    if link_mode in {"reply", "delete"}:
-        redis_client.set(legacy_key, link_mode)
-        _log_config_event(
-            "Persisted legacy link mode",
-            {"chat_id": chat_id, "link_mode": link_mode},
-        )
-    else:
-        redis_client.delete(legacy_key)
-        _log_config_event("Cleared legacy link mode", {"chat_id": chat_id})
+    return _chat_is_group_chat_type(chat_type)
 
 
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
-    config = dict(CHAT_CONFIG_DEFAULTS)
-    try:
-        _log_config_event("Loading chat config", {"chat_id": chat_id})
-        if chat_config_db_service.is_configured():
-            pg_config = chat_config_db_service.get_chat_config(chat_id, CHAT_CONFIG_DEFAULTS)
-            if isinstance(pg_config, dict):
-                return pg_config
-
-            redis_config = _load_chat_config_from_redis(redis_client, chat_id)
-            try:
-                chat_config_db_service.set_chat_config(chat_id, redis_config)
-            except Exception as persist_error:
-                admin_report(
-                    "Error migrating chat config from Redis to Postgres",
-                    persist_error,
-                    {"chat_id": chat_id},
-                )
-                return config
-            return redis_config
-
-        return _load_chat_config_from_redis(redis_client, chat_id)
-    except Exception as error:
-        admin_report(
-            "Error loading chat config",
-            error,
-            {"chat_id": chat_id, "postgres_configured": chat_config_db_service.is_configured()},
-        )
-        if not chat_config_db_service.is_configured():
-            try:
-                return _load_chat_config_from_redis(redis_client, chat_id)
-            except Exception as redis_error:
-                admin_report(
-                    "Error loading chat config from Redis",
-                    redis_error,
-                    {"chat_id": chat_id},
-                )
-    return config
+    return _chat_get_chat_config(
+        redis_client,
+        chat_id,
+        chat_config_db_service=chat_config_db_service,
+        admin_reporter=admin_report,
+        log_event=_log_config_event,
+    )
 
 
 def set_chat_config(
     redis_client: redis.Redis, chat_id: str, **updates: Any
 ) -> Dict[str, Any]:
-    config = get_chat_config(redis_client, chat_id)
-    for key, value in updates.items():
-        if key in config:
-            config[key] = value
-
-    try:
-        _log_config_event(
-            "Saving chat config",
-            {"chat_id": chat_id, "updates": updates, "config": config},
-        )
-        if chat_config_db_service.is_configured():
-            chat_config_db_service.set_chat_config(chat_id, config)
-        else:
-            _persist_chat_config_to_redis(redis_client, chat_id, config)
-    except Exception as error:
-        admin_report(
-            "Error saving chat config",
-            error,
-            {"chat_id": chat_id, "updates": updates},
-        )
-
-    return config
-
-
-def _build_config_choice_button(
-    label: str, value: str, current: str, *, action: str
-) -> Dict[str, str]:
-    prefix = "✅" if current == value else "▫️"
-    return {
-        "text": f"{prefix} {label}",
-        "callback_data": f"cfg:{action}:{value}",
-    }
-
-
-def _build_config_toggle_button(label: str, enabled: bool, action: str) -> Dict[str, str]:
-    prefix = "✅" if enabled else "▫️"
-    return {
-        "text": f"{prefix} {label}",
-        "callback_data": f"cfg:{action}:toggle",
-    }
+    return _chat_set_chat_config(
+        redis_client,
+        chat_id,
+        chat_config_db_service=chat_config_db_service,
+        admin_reporter=admin_report,
+        log_event=_log_config_event,
+        **updates,
+    )
 
 
 def _coerce_bool(value: Any, *, default: bool) -> bool:
-    """Normalize truthy config values that might be stored as strings."""
-
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "1", "yes", "on", "enabled"}:
-            return True
-        if lowered in {"false", "0", "no", "off", "disabled"}:
-            return False
-
-    if isinstance(value, (int, float)):
-        return bool(value)
-
-    if value is None:
-        return default
-
-    return default
+    return _chat_coerce_bool(value, default=default)
 
 
 def build_config_text(config: Mapping[str, Any]) -> str:
-    link_mode = str(config.get("link_mode", "off"))
-    random_enabled = _coerce_bool(config.get("ai_random_replies"), default=True)
-    followups_enabled = _coerce_bool(
-        config.get("ai_command_followups"), default=True
-    )
-
-    link_labels = {
-        "delete": "borrar mensaje original",
-        "reply": "responder al mensaje original",
-        "off": "apagado",
-    }
-
-    lines = [
-        "Gordo config:",
-        "",
-        f"Arregla-links: {link_labels.get(link_mode, link_mode)}",
-        f"Respuestas random de IA: {'✅ activadas' if random_enabled else '▫️ desactivadas'}",
-        "Seguimientos para comandos no-IA: "
-        f"{'✅ activados' if followups_enabled else '▫️ desactivados'}",
-        "",
-        "tocá los botones de abajo para cambiar la config",
-    ]
-    return "\n".join(lines)
+    return _chat_build_config_text(config)
 
 
 def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
-    link_mode = str(config.get("link_mode", "off"))
-    random_enabled = _coerce_bool(config.get("ai_random_replies"), default=True)
-    followups_enabled = _coerce_bool(
-        config.get("ai_command_followups"), default=True
-    )
-
-    keyboard = [
-        [
-            _build_config_choice_button(
-                "responder al mensaje original", "reply", link_mode, action="link"
-            ),
-            _build_config_choice_button(
-                "borrar mensaje original", "delete", link_mode, action="link"
-            ),
-            _build_config_choice_button("apagado", "off", link_mode, action="link"),
-        ],
-        [
-            _build_config_toggle_button(
-                "respuestas random de IA", random_enabled, action="random"
-            ),
-        ],
-        [
-            _build_config_toggle_button(
-                "seguimientos para comandos no-IA",
-                followups_enabled,
-                action="followups",
-            ),
-        ],
-    ]
-    return {"inline_keyboard": keyboard}
+    return _chat_build_config_keyboard(config)
 
 
 _WEBHOOK_CALLBACKS_CHECKED = False
@@ -5647,10 +5137,6 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             _answer_callback_query(callback_id)
 
 
-def _bot_message_meta_key(chat_id: str, message_id: Union[str, int]) -> str:
-    return f"{BOT_MESSAGE_META_PREFIX}{chat_id}:{message_id}"
-
-
 def save_bot_message_metadata(
     redis_client: redis.Redis,
     chat_id: str,
@@ -5658,98 +5144,33 @@ def save_bot_message_metadata(
     metadata: Mapping[str, Any],
     ttl: int = BOT_MESSAGE_META_TTL,
 ) -> None:
-    try:
-        redis_client.setex(
-            _bot_message_meta_key(chat_id, message_id),
-            ttl,
-            json.dumps(dict(metadata)),
-        )
-    except Exception as error:
-        admin_report(
-            "Error saving bot message metadata",
-            error,
-            {"chat_id": chat_id, "message_id": message_id},
-        )
+    _state_save_bot_message_metadata(
+        redis_client,
+        chat_id,
+        message_id,
+        metadata,
+        admin_reporter=admin_report,
+        ttl=ttl,
+    )
 
 
 def get_bot_message_metadata(
     redis_client: redis.Redis, chat_id: str, message_id: Union[str, int]
 ) -> Optional[Dict[str, Any]]:
-    try:
-        raw_value = redis_client.get(_bot_message_meta_key(chat_id, message_id))
-        deserializable_value = _decode_redis_value(raw_value)
-        if deserializable_value:
-            try:
-                loaded = json.loads(deserializable_value)
-                if isinstance(loaded, dict):
-                    return loaded
-            except json.JSONDecodeError:
-                pass
-    except Exception as error:
-        admin_report(
-            "Error loading bot message metadata",
-            error,
-            {"chat_id": chat_id, "message_id": message_id},
-        )
-    return None
-
-
-def _format_user_identity(user: Mapping[str, Any]) -> str:
-    """Build a display name for a Telegram user"""
-
-    first_name = user.get("first_name", "") if user else ""
-    username = user.get("username", "") if user else ""
-
-    first_name = "" if first_name is None else str(first_name)
-    username = "" if username is None else str(username)
-
-    return f"{first_name}" + (f" ({username})" if username else "")
-
-
-def _describe_replied_message(reply_msg: Mapping[str, Any]) -> Optional[str]:
-    """Generate a short description for a replied-to message"""
-
-    reply_text = extract_message_text(cast(Dict[str, Any], reply_msg))
-    if reply_text:
-        return reply_text
-
-    if reply_msg.get("photo"):
-        return "una foto sin texto"
-    if reply_msg.get("sticker"):
-        sticker = reply_msg.get("sticker", {})
-        emoji_char = cast(Dict[str, Any], sticker).get("emoji")
-        if emoji_char:
-            return f"un sticker {emoji_char}"
-    if reply_msg.get("voice"):
-        return "un audio de voz"
-    if reply_msg.get("audio"):
-        return "un archivo de audio"
-    if reply_msg.get("video"):
-        return "un video"
-    if reply_msg.get("document"):
-        return "un archivo adjunto"
-
-    return None
+    return _state_get_bot_message_metadata(
+        redis_client,
+        chat_id,
+        message_id,
+        admin_reporter=admin_report,
+        decode_redis_value=_decode_redis_value,
+    )
 
 
 def build_reply_context_text(message: Mapping[str, Any]) -> Optional[str]:
-    """Return contextual text describing the message being replied to"""
-
-    reply_msg = message.get("reply_to_message") if message else None
-    if not isinstance(reply_msg, Mapping):
-        return None
-
-    reply_description = _describe_replied_message(reply_msg)
-    if not reply_description:
-        return None
-
-    reply_user = _format_user_identity(cast(Mapping[str, Any], reply_msg.get("from", {})))
-    reply_user = reply_user.strip()
-
-    if reply_user:
-        return f"{reply_user}: {reply_description}"
-
-    return reply_description
+    return _state_build_reply_context_text(
+        message,
+        extract_message_text_fn=extract_message_text,
+    )
 
 
 def format_user_message(
@@ -5757,540 +5178,58 @@ def format_user_message(
     message_text: str,
     reply_context: Optional[str] = None,
 ) -> str:
-    """Format message with user info and optional reply context"""
-
-    formatted_user = _format_user_identity(message.get("from", {}))
-
-    if reply_context:
-        if formatted_user:
-            return f"{formatted_user} (en respuesta a {reply_context}): {message_text}"
-        return f"(en respuesta a {reply_context}): {message_text}"
-
-    return f"{formatted_user}: {message_text}"
+    return _state_format_user_message(message, message_text, reply_context)
 
 
 def handle_msg(message: Dict) -> str:
-    try:
-        # Extract multimedia content
-        message_text, photo_file_id, audio_file_id = extract_message_content(message)
-        chat = cast(Dict[str, Any], message.get("chat", {}))
-        message_id = str(message.get("message_id"))
-        chat_id = str(chat.get("id"))
-        chat_type = str(chat.get("type", ""))
-        user_identity = _format_user_identity(message.get("from", {})).strip()
-        user_id = _extract_user_id(message)
-        numeric_chat_id = _extract_numeric_chat_id(chat_id)
-        if isinstance(message.get("successful_payment"), Mapping):
-            return handle_successful_payment_message(message)
-
-        redis_client = config_redis()
-        chat_config = get_chat_config(redis_client, chat_id)
-
-        commands = initialize_commands()
-        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-        command, _ = parse_command(message_text, bot_name)
-        auto_process_media = should_auto_process_media(
-            commands, command, message_text, message
-        )
-
-        def _build_insufficient_credits_reply(charge_result: Mapping[str, Any]) -> str:
-            random_name = str(message.get("from", {}).get("first_name") or "boludo")
-            random_response = gen_random(random_name)
-            credits_message = build_insufficient_credits_message(
-                chat_type=chat_type,
-                user_balance=int(charge_result.get("user_balance", 0)),
-                chat_balance=int(charge_result.get("chat_balance", 0)),
-            )
-            return f"{random_response}\n\n{credits_message}"
-
-        billing_not_configured_message = "el cobro IA no está configurado, avisale al admin."
-        billing_missing_scope_message = "no pude identificar usuario/chat para cobrar IA."
-        billing_charge_error_message = "error cobrando créditos IA, intentá de nuevo."
-        onboarding_checked = False
-
-        def _resolve_ai_charge_context() -> Tuple[Optional[int], Optional[str]]:
-            if not credits_db_service.is_configured():
-                return None, billing_not_configured_message
-            if user_id is None or numeric_chat_id is None:
-                return None, billing_missing_scope_message
-            return (
-                numeric_chat_id if _is_group_chat_type(chat_type) else None,
-                None,
-            )
-
-        def charge_one_ai_request(
-            usage_tag: str,
-        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-            nonlocal onboarding_checked
-            chat_scope_id, context_error = _resolve_ai_charge_context()
-            if context_error:
-                return None, context_error
-            if user_id is None:
-                return None, billing_missing_scope_message
-
-            if not onboarding_checked:
-                _maybe_grant_onboarding_credits(user_id)
-                onboarding_checked = True
-
-            credits_cost = get_ai_credits_per_response()
-            try:
-                charge_result = credits_db_service.charge_ai_credits(
-                    user_id=user_id,
-                    chat_id=chat_scope_id,
-                    amount=credits_cost,
-                )
-            except Exception as error:
-                admin_report(
-                    "Error charging IA credits",
-                    error,
-                    {
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "command": command,
-                        "usage_tag": usage_tag,
-                    },
-                )
-                return None, billing_charge_error_message
-
-            if not charge_result.get("ok"):
-                return None, _build_insufficient_credits_reply(charge_result)
-
-            return {
-                "credits_cost": credits_cost,
-                "chat_scope_id": chat_scope_id,
-                "source": str(charge_result.get("source") or "user"),
-            }, None
-
-        def refund_ai_charge_meta(
-            charge_meta: Optional[Mapping[str, Any]], reason: str
-        ) -> None:
-            if not charge_meta or user_id is None:
-                return
-
-            try:
-                credits_db_service.refund_ai_charge(
-                    user_id=user_id,
-                    chat_id=cast(Optional[int], charge_meta.get("chat_scope_id")),
-                    amount=int(charge_meta.get("credits_cost", 1)),
-                    source="chat" if str(charge_meta.get("source") or "user") == "chat" else "user",
-                )
-            except Exception as refund_error:
-                admin_report(
-                    "falló el reintegro de créditos IA",
-                    refund_error,
-                    {
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "reason": reason,
-                        "command": command,
-                    },
-                )
-
-        def _is_transcribe_success_response(text: Optional[str]) -> bool:
-            if not text:
-                return False
-            success_prefixes = (
-                "🎵 Transcripción: ",
-                "🖼️ Descripción: ",
-                "🎨 Descripción del sticker: ",
-            )
-            return text.startswith(success_prefixes)
-
-        # Process audio first if present (but not for /transcribe commands)
-        if auto_process_media and audio_file_id and not (
-            message_text and message_text.strip().lower().startswith("/transcribe")
-        ):
-            media_charge_meta, media_charge_error = charge_one_ai_request(
-                "auto_audio_media"
-            )
-            if media_charge_error:
-                return media_charge_error
-
-            print(f"Processing audio message: {audio_file_id}")
-            transcription, err = _transcribe_audio_file(audio_file_id, use_cache=False)
-            if transcription:
-                message_text = transcription
-                print(f"Audio transcribed: {message_text[:100]}...")
-            else:
-                refund_ai_charge_meta(media_charge_meta, "auto_audio_transcribe_failed")
-                message_text = _transcription_error_message(
-                    err,
-                    download_message="no pude bajar tu audio, mandalo de vuelta",
-                    transcribe_message="mandame texto que no soy alexa, boludo",
-                ) or "mandame texto que no soy alexa, boludo"
-
-        # Download image if present
-        image_base64 = None
-        resized_image_data = None
-        if auto_process_media and photo_file_id and not (
-            message_text and message_text.strip().lower().startswith("/transcribe")
-        ):
-            print(f"Processing image message: {photo_file_id}")
-            image_data = download_telegram_file(photo_file_id)
-            if image_data:
-                # Resize image if needed for vision compatibility
-                resized_image_data = resize_image_if_needed(image_data)
-                image_base64 = encode_image_to_base64(resized_image_data)
-                print(f"Image encoded to base64: {len(image_base64)} chars")
-                if not message_text:
-                    message_text = "que onda con esta foto"
-            else:
-                if not message_text:
-                    message_text = "no pude ver tu foto, boludo"
-
-        link_mode = str(chat_config.get("link_mode", "off"))
-        if link_mode != "off" and message_text and not message_text.startswith("/"):
-            fixed_text, changed, original_links = replace_links(message_text)
-            if changed:
-                user_info = message.get("from", {})
-                username = user_info.get("username")
-                if username:
-                    shared_by = f"@{username}"
-                else:
-                    name_parts = [
-                        part
-                        for part in (
-                            user_info.get("first_name"),
-                            user_info.get("last_name"),
-                        )
-                        if part
-                    ]
-                    shared_by = " ".join(name_parts)
-
-                if shared_by:
-                    fixed_text += f"\n\ncompartido por {shared_by}"
-                reply_id = message.get("reply_to_message", {}).get("message_id")
-                if reply_id is not None:
-                    reply_id = str(reply_id)
-                if link_mode == "delete":
-                    delete_msg(chat_id, message_id)
-                    if reply_id:
-                        send_msg(chat_id, fixed_text, reply_id, original_links)
-                    else:
-                        send_msg(chat_id, fixed_text, buttons=original_links)
-                else:
-                    send_msg(
-                        chat_id,
-                        fixed_text,
-                        reply_id or message_id,
-                        original_links,
-                    )
-                return "ok"
-            urls = re.findall(r"https?://\S+", message_text)
-            if urls:
-                return "ok"
-
-        # Get command and message text
-        command, sanitized_message_text = parse_command(message_text, bot_name)
-
-        reply_metadata: Optional[Dict[str, Any]] = None
-        if "reply_to_message" in message:
-            reply_msg = message["reply_to_message"]
-            if reply_msg.get("from", {}).get("username") == environ.get(
-                "TELEGRAM_USERNAME"
-            ):
-                reply_id = reply_msg.get("message_id")
-                if reply_id is not None:
-                    reply_metadata = get_bot_message_metadata(
-                        redis_client, chat_id, reply_id
-                    )
-
-        reply_context_text = build_reply_context_text(message)
-
-        # Check if we should respond
-        if not should_gordo_respond(
-            commands, command, sanitized_message_text, message, chat_config, reply_metadata
-        ):
-            # Even if we don't respond, save the message for context
-            if message_text:
-                formatted_message = format_user_message(
-                    message, message_text, reply_context_text
-                )
-                save_message_to_redis(
-                    chat_id, message_id, formatted_message, redis_client
-                )
-            return "ok"
-
-        # Handle /comando and /command with reply special case
-        if (
-            command in ["/comando", "/command"]
-            and not sanitized_message_text
-            and "reply_to_message" in message
-        ):
-            sanitized_message_text = extract_message_text(message["reply_to_message"])
-
-        # If this is a reply to another message, save that message for context
-        if "reply_to_message" in message:
-            reply_msg = message["reply_to_message"]
-            reply_text = extract_message_text(reply_msg)
-            reply_id = str(reply_msg["message_id"])
-            is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
-                "TELEGRAM_USERNAME"
-            )
-
-            # Save all replied-to messages regardless of source
-            if reply_text:
-                if is_bot:
-                    # For bot messages, just save the text directly
-                    save_message_to_redis(
-                        chat_id, f"bot_{reply_id}", reply_text, redis_client
-                    )
-                else:
-                    # For user messages, format with user info
-                    formatted_reply = format_user_message(reply_msg, reply_text)
-                    save_message_to_redis(
-                        chat_id, reply_id, formatted_reply, redis_client
-                    )
-
-        # Process command or conversation
-        response_msg: Optional[str] = None
-        response_markup: Optional[Dict[str, Any]] = None
-        response_uses_ai = False
-        response_command: Optional[str] = None
-
-        if (
-            command == "/config"
-            and _is_group_chat_type(chat_type)
-            and not is_chat_admin(
-                chat_id, message.get("from", {}).get("id"), redis_client=redis_client
-            )
-        ):
-            denial_message = "Solo los admins pueden cambiar la config del gordo acá."
-            send_msg(chat_id, denial_message, message_id)
-            _report_unauthorized_config_attempt(
-                chat_id,
-                message.get("from", {}),
-                chat_type=chat_type,
-                action="command:/config",
-            )
-            return "ok"
-
-        def run_ai_flow(handler_func: Callable[..., str], prompt_text: str) -> str:
-            nonlocal response_uses_ai
-
-            if not check_global_rate_limit(redis_client):
-                return handle_rate_limit(chat_id, message)
-
-            charges_applied: List[Dict[str, Any]] = []
-            base_charge_meta, base_charge_error = charge_one_ai_request("ai_response_base")
-            if base_charge_error:
-                return base_charge_error
-            if base_charge_meta:
-                charges_applied.append(base_charge_meta)
-
-            if resized_image_data and photo_file_id:
-                media_charge_meta, media_charge_error = charge_one_ai_request(
-                    "image_context_media"
-                )
-                if media_charge_error:
-                    return media_charge_error
-                if media_charge_meta:
-                    charges_applied.append(media_charge_meta)
-
-            chat_history = get_chat_history(chat_id, redis_client)
-            ai_messages = build_ai_messages(
-                message,
-                chat_history,
-                prompt_text,
-                reply_context_text,
-            )
-            ai_response_meta: Dict[str, Any] = {}
-            response_msg_inner = handle_ai_response(
-                chat_id,
-                handler_func,
-                ai_messages,
-                image_data=resized_image_data if photo_file_id else None,
-                image_file_id=photo_file_id or None,
-                context_texts=[reply_context_text],
-                user_identity=user_identity,
-                response_meta=ai_response_meta,
-            )
-            response_uses_ai = True
-
-            provider_request_count = max(
-                1, int(ai_response_meta.get("provider_request_count", 1))
-            )
-            for _ in range(max(0, provider_request_count - 1)):
-                extra_charge_meta, extra_charge_error = charge_one_ai_request(
-                    "ai_response_extra_provider_request"
-                )
-                if extra_charge_error:
-                    return extra_charge_error
-                if extra_charge_meta:
-                    charges_applied.append(extra_charge_meta)
-
-            if response_msg_inner in {
-                "error de IA, intentá de nuevo en un rato",
-                "no pude generar respuesta, intentá de nuevo",
-            } or bool(ai_response_meta.get("ai_fallback")):
-                for charge_meta in charges_applied:
-                    refund_ai_charge_meta(charge_meta, "ai_response_fallback")
-            return response_msg_inner
-
-        if command == "/config":
-            response_command = command
-            response_msg, response_markup = handle_config_command(chat_id)
-        elif command == "/topup":
-            response_command = command
-            if not credits_db_service.is_configured():
-                response_msg = "el cobro IA no está configurado, avisale al admin."
-            elif chat_type != "private":
-                bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
-                if bot_username:
-                    response_msg = (
-                        "la recarga va por privado.\n"
-                        f"abrime en @{bot_username}"
-                    )
-                else:
-                    response_msg = "la recarga va por privado, abrime en DM."
-            else:
-                ensure_callback_updates_enabled()
-                response_msg = "elegí un pack para recargar créditos IA:"
-                response_markup = build_topup_keyboard()
-        elif command == "/balance":
-            response_command = command
-            if not credits_db_service.is_configured():
-                response_msg = "el cobro IA no está configurado, avisale al admin."
-            elif user_id is None or numeric_chat_id is None:
-                response_msg = "no pude leer tu usuario para ver saldos."
-            else:
-                try:
-                    _maybe_grant_onboarding_credits(user_id)
-                    response_msg = _format_balance_command(
-                        chat_type, user_id, numeric_chat_id
-                    )
-                except Exception as error:
-                    admin_report(
-                        "Error loading balance",
-                        error,
-                        {"chat_id": chat_id, "user_id": user_id},
-                    )
-                    response_msg = "error leyendo tu saldo, intentá de nuevo."
-        elif command == "/transfer":
-            response_command = command
-            if not credits_db_service.is_configured():
-                response_msg = "el cobro IA no está configurado, avisale al admin."
-            elif not _is_group_chat_type(chat_type):
-                response_msg = "este comando es para grupos: /transfer <monto>"
-            elif user_id is None or numeric_chat_id is None:
-                response_msg = "no pude identificar usuario/chat para transferir."
-            else:
-                amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-                try:
-                    amount = int(amount_token)
-                except (TypeError, ValueError):
-                    response_msg = "uso: /transfer <monto>"
-                else:
-                    if amount <= 0:
-                        response_msg = "el monto tiene que ser mayor a 0"
-                    else:
-                        try:
-                            transfer_result = credits_db_service.transfer_user_to_chat(
-                                user_id=user_id,
-                                chat_id=numeric_chat_id,
-                                amount=amount,
-                            )
-                        except Exception as error:
-                            admin_report(
-                                "Error transferring credits",
-                                error,
-                                {
-                                    "chat_id": chat_id,
-                                    "user_id": user_id,
-                                    "amount": amount,
-                                },
-                            )
-                            response_msg = "error transfiriendo créditos, intentá de nuevo."
-                        else:
-                            if transfer_result.get("ok"):
-                                response_msg = (
-                                    f"transferidos {amount} créditos al grupo ✅\n"
-                                    f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
-                                    f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
-                                )
-                            else:
-                                response_msg = (
-                                    "no te alcanza el saldo personal para esa transferencia.\n"
-                                    f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
-                                )
-        elif command in {"/buscar", "/search"}:
-            response_command = command
-            response_msg = search_command(sanitized_message_text)
-        elif command in commands:
-            handler_func, uses_ai, takes_params = commands[command]
-            response_command = command
-
-            if uses_ai:
-                response_msg = run_ai_flow(handler_func, sanitized_message_text)
-            else:
-                if command == "/transcribe":
-                    media_charge_meta, media_charge_error = charge_one_ai_request(
-                        "transcribe_command_media"
-                    )
-                    if media_charge_error:
-                        response_msg = media_charge_error
-                    else:
-                        response_msg = handle_transcribe_with_message(message)
-                        if media_charge_meta and not _is_transcribe_success_response(
-                            response_msg
-                        ):
-                            refund_ai_charge_meta(
-                                media_charge_meta, "transcribe_command_unsuccessful"
-                            )
-                else:
-                    if takes_params:
-                        response_msg = handler_func(sanitized_message_text)
-                    else:
-                        response_msg = handler_func()
-        else:
-            response_msg = run_ai_flow(ask_ai, message_text)
-
-        # Only save messages AFTER we've generated a response
-        if message_text:
-            formatted_message = format_user_message(
-                message, message_text, reply_context_text
-            )
-            save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
-
-        # Save and send response
-        if response_msg:
-            # Save bot response
-            save_message_to_redis(
-                chat_id, f"bot_{message_id}", response_msg, redis_client
-            )
-            sent_message_id = send_msg(
-                chat_id,
-                response_msg,
-                message_id,
-                reply_markup=response_markup,
-            )
-            if sent_message_id is not None:
-                metadata: Dict[str, Any]
-                if response_command:
-                    metadata = {
-                        "type": "command",
-                        "command": response_command,
-                        "uses_ai": response_uses_ai,
-                    }
-                else:
-                    metadata = {"type": "ai"}
-                save_bot_message_metadata(
-                    redis_client, chat_id, sent_message_id, metadata
-                )
-
-        return "ok"
-
-    except Exception as e:
-        error_context = {
-            "message_id": message.get("message_id"),
-            "chat_id": message.get("chat", {}).get("id"),
-            "user": message.get("from", {}).get("username", "Unknown"),
-        }
-
-        error_msg = f"Message handling error: {str(e)}"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
-        return "error procesando mensaje"
+    return _handle_msg_impl(
+        message,
+        MessageHandlerDeps(
+            config_redis=config_redis,
+            get_chat_config=get_chat_config,
+            initialize_commands=initialize_commands,
+            parse_command=parse_command,
+            should_auto_process_media=should_auto_process_media,
+            extract_message_content=extract_message_content,
+            replace_links=replace_links,
+            send_msg=send_msg,
+            delete_msg=delete_msg,
+            admin_report=admin_report,
+            get_bot_message_metadata=get_bot_message_metadata,
+            save_bot_message_metadata=save_bot_message_metadata,
+            build_reply_context_text=build_reply_context_text,
+            should_gordo_respond=should_gordo_respond,
+            format_user_message=format_user_message,
+            save_message_to_redis=save_message_to_redis,
+            get_chat_history=get_chat_history,
+            build_ai_messages=build_ai_messages,
+            handle_ai_response=handle_ai_response,
+            ask_ai=ask_ai,
+            gen_random=gen_random,
+            build_insufficient_credits_message=build_insufficient_credits_message,
+            build_topup_keyboard=build_topup_keyboard,
+            credits_db_service=credits_db_service,
+            is_group_chat_type=_is_group_chat_type,
+            extract_user_id=_extract_user_id,
+            extract_numeric_chat_id=_extract_numeric_chat_id,
+            maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
+            format_balance_command=_message_handler_format_balance_command,
+            handle_transcribe_with_message=handle_transcribe_with_message,
+            check_global_rate_limit=check_global_rate_limit,
+            handle_rate_limit=handle_rate_limit,
+            handle_successful_payment_message=handle_successful_payment_message,
+            handle_config_command=handle_config_command,
+            ensure_callback_updates_enabled=ensure_callback_updates_enabled,
+            is_chat_admin=is_chat_admin,
+            report_unauthorized_config_attempt=_report_unauthorized_config_attempt,
+            handle_transcribe=handle_transcribe,
+            _transcribe_audio_file=_transcribe_audio_file,
+            _transcription_error_message=_transcription_error_message,
+            download_telegram_file=download_telegram_file,
+            resize_image_if_needed=resize_image_if_needed,
+            encode_image_to_base64=encode_image_to_base64,
+        ),
+    )
 
 
 def handle_rate_limit(chat_id: str, message: Dict) -> str:
@@ -6302,103 +5241,12 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     return gen_random(message["from"]["first_name"])
 
 
-GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
-
-
 def remove_gordo_prefix(text: Optional[str]) -> str:
-    """Strip leading 'gordo:' persona prefix from each line of a response."""
-    if not text:
-        return ""
-
-    cleaned_lines: List[str] = []
-    for line in text.splitlines():
-        cleaned_lines.append(GORDO_PREFIX_PATTERN.sub("", line, count=1))
-
-    return "\n".join(cleaned_lines).strip()
+    return _ai_remove_gordo_prefix(text)
 
 
 def clean_duplicate_response(response: str) -> str:
-    """Remove duplicate consecutive text in AI responses"""
-    if not response:
-        return response
-
-    # Split by lines and remove consecutive duplicates
-    lines = response.split("\n")
-    cleaned_lines = []
-
-    for line in lines:
-        line = line.strip()
-        if line and (not cleaned_lines or line != cleaned_lines[-1]):
-            cleaned_lines.append(line)
-
-    cleaned_response = "\n".join(cleaned_lines)
-
-    # Also check for repeated sentences within the same line
-    sentences = cleaned_response.split(". ")
-    cleaned_sentences = []
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if sentence and (not cleaned_sentences or sentence != cleaned_sentences[-1]):
-            cleaned_sentences.append(sentence)
-
-    final_response = ". ".join(cleaned_sentences)
-
-    # Clean up any double periods
-    final_response = final_response.replace("..", ".")
-
-    return final_response
-
-
-def _strip_leading_context(
-    response: str, contexts: Optional[Sequence[Optional[str]]]
-) -> str:
-    """Remove leading echoes of known context strings from an AI response."""
-
-    if not response or not contexts:
-        return response
-
-    trimmed_response = response
-    normalized_contexts = [
-        str(context).strip()
-        for context in contexts
-        if context is not None and str(context).strip()
-    ]
-
-    if not normalized_contexts:
-        return trimmed_response
-
-    changed = True
-    max_passes = len(normalized_contexts)
-    passes = 0
-
-    while changed and passes < max_passes:
-        changed = False
-        passes += 1
-        for context in normalized_contexts:
-            context_lower = context.lower()
-            if trimmed_response.lower().startswith(context_lower):
-                trimmed_response = trimmed_response[len(context) :].lstrip(" \t:-\n")
-                changed = True
-                break
-
-    return trimmed_response
-
-
-def _strip_user_identity_prefix(response: str, user_identity: Optional[str]) -> str:
-    """Remove a leading '<user>:' prefix that sometimes leaks into completions."""
-
-    if not response or not user_identity:
-        return response
-
-    normalized_identity = str(user_identity).strip()
-    if not normalized_identity:
-        return response
-
-    pattern = re.compile(
-        rf"^\s*{re.escape(normalized_identity)}\s*:\s*", flags=re.IGNORECASE
-    )
-    return pattern.sub("", response, count=1).lstrip()
+    return _ai_clean_duplicate_response(response)
 
 
 def handle_ai_response(
@@ -6411,77 +5259,23 @@ def handle_ai_response(
     user_identity: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Handle AI API responses"""
-    token = environ.get("TELEGRAM_TOKEN")
-    if token:
-        send_typing(token, chat_id)
-    time.sleep(random.uniform(0, 1))
-
-    handler_name = getattr(handler_func, "__name__", "")
-    is_ask_ai_handler = handler_name == "ask_ai"
-    request_count_token: Optional[Token] = None
-    if is_ask_ai_handler:
-        request_count_token = _reset_ai_provider_request_count()
-
-    try:
-        # Call handler with image if supported
-        if image_data and is_ask_ai_handler:
-            print("handle_ai_response: calling ask_ai with image context")
-            response = handler_func(
-                messages,
-                image_data=image_data,
-                image_file_id=image_file_id,
-                response_meta=response_meta,
-            )
-        else:
-            print(
-                f"handle_ai_response: calling {getattr(handler_func,'__name__','<callable>')} (text-only)"
-            )
-            if is_ask_ai_handler:
-                response = handler_func(messages, response_meta=response_meta)
-            else:
-                response = handler_func(messages)
-    finally:
-        if request_count_token is not None:
-            if response_meta is not None:
-                response_meta["provider_request_count"] = _get_ai_provider_request_count()
-            _restore_ai_provider_request_count(request_count_token)
-
-    response_text = str(response or "")
-    response_text, used_ai_fallback = _strip_ai_fallback_marker(response_text)
-    if response_meta is not None:
-        response_meta["ai_fallback"] = used_ai_fallback
-
-    # Remove any internal tool call lines before further processing
-    sanitized_response = sanitize_tool_artifacts(response_text)
-
-    # Strip persona prefixes that sometimes leak into completions
-    persona_stripped_response = remove_gordo_prefix(sanitized_response)
-
-    # Remove echoes of the original user/context text
-    context_stripped_response = _strip_leading_context(
-        persona_stripped_response, context_texts
+    return _ai_handle_response(
+        chat_id,
+        handler_func,
+        messages,
+        image_data=image_data,
+        image_file_id=image_file_id,
+        context_texts=context_texts,
+        user_identity=user_identity,
+        response_meta=response_meta,
+        send_typing_fn=send_typing,
+        telegram_token=environ.get("TELEGRAM_TOKEN"),
+        reset_request_count_fn=_reset_ai_provider_request_count,
+        restore_request_count_fn=_restore_ai_provider_request_count,
+        get_request_count_fn=_get_ai_provider_request_count,
+        sanitize_tool_artifacts_fn=sanitize_tool_artifacts,
+        strip_ai_fallback_marker_fn=_strip_ai_fallback_marker,
     )
-
-    # Remove leading user prefixes like "nombre (alias):"
-    prefix_stripped_response = _strip_user_identity_prefix(
-        context_stripped_response, user_identity
-    )
-
-    # Clean any duplicate text
-    cleaned_response = clean_duplicate_response(prefix_stripped_response)
-    try:
-        print(
-            f"handle_ai_response: response len={len(cleaned_response)} preview='{cleaned_response[:160].replace('\n',' ')}'"
-        )
-    except Exception:
-        pass
-
-    if not cleaned_response.strip():
-        print("handle_ai_response: empty sanitized response")
-        return "no pude generar respuesta, intentá de nuevo"
-
-    return cleaned_response
 
 
 def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
