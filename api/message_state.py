@@ -21,7 +21,7 @@ BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
 CHAT_HISTORY_MAX_MESSAGES = 4
 
 
-def truncate_text(text: Optional[str], max_length: int = 512) -> str:
+def truncate_text(text: Optional[str], max_length: int = 256) -> str:
     """Truncate text to max_length and add ellipsis if needed."""
 
     if text is None:
