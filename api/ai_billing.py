@@ -12,6 +12,7 @@ from api.chat_context import (
     extract_user_id,
     is_group_chat_type,
 )
+from api.groq_billing import calculate_billing_for_segments
 
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -234,10 +235,33 @@ class AIMessageBilling:
         )
         return f"{random_response}\n\n{credits_message}"
 
-    def charge_one_ai_request(
-        self, usage_tag: str
+    def _ensure_onboarding_checked(self) -> None:
+        if not self.onboarding_checked:
+            self.maybe_grant_onboarding_credits_fn(self.user_id)
+            self.onboarding_checked = True
+
+    def _build_charge_metadata(
+        self,
+        *,
+        usage_tag: str,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "command": self.command,
+            "usage_tag": usage_tag,
+        }
+        if extra:
+            metadata.update(dict(extra))
+        return metadata
+
+    def reserve_ai_credits(
+        self,
+        usage_tag: str,
+        estimated_credits: int,
+        *,
+        metadata: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        """Charge one AI request, returning charge metadata or a user-facing error."""
+        """Reserve a worst-case number of credits for a billable interaction."""
 
         chat_scope_id, context_error = self._resolve_ai_charge_context()
         if context_error:
@@ -245,26 +269,32 @@ class AIMessageBilling:
         if self.user_id is None:
             return None, self.billing_missing_scope_message
 
-        if not self.onboarding_checked:
-            self.maybe_grant_onboarding_credits_fn(self.user_id)
-            self.onboarding_checked = True
+        self._ensure_onboarding_checked()
 
-        credits_cost = self.get_ai_credits_per_response_fn()
+        reserve_amount = max(0, int(estimated_credits or 0))
+        reserve_metadata = self._build_charge_metadata(
+            usage_tag=usage_tag,
+            extra={"reserved_credits": reserve_amount, **dict(metadata or {})},
+        )
+
         try:
             charge_result = self.credits_db_service.charge_ai_credits(
                 user_id=self.user_id,
                 chat_id=chat_scope_id,
-                amount=credits_cost,
+                amount=reserve_amount,
+                event_type="ai_reserve",
+                metadata=reserve_metadata,
             )
         except Exception as error:
             self.admin_reporter(
-                "Error charging IA credits",
+                "Error reserving IA credits",
                 error,
                 {
                     "chat_id": self.chat_id,
                     "user_id": self.user_id,
                     "command": self.command,
                     "usage_tag": usage_tag,
+                    "estimated_credits": reserve_amount,
                 },
             )
             return None, self.billing_charge_error_message
@@ -273,29 +303,129 @@ class AIMessageBilling:
             return None, self._build_insufficient_credits_reply(charge_result)
 
         return {
-            "credits_cost": credits_cost,
+            "reserved_credits": reserve_amount,
             "chat_scope_id": chat_scope_id,
             "source": str(charge_result.get("source") or "user"),
+            "usage_tag": usage_tag,
+            "metadata": reserve_metadata,
         }, None
 
-    def refund_ai_charge_meta(
+    def settle_reserved_ai_credits(
         self,
-        charge_meta: Optional[Mapping[str, Any]],
+        reservation_meta: Optional[Mapping[str, Any]],
+        billing_segments: Optional[List[Mapping[str, Any]]],
+        *,
         reason: str,
     ) -> None:
-        """Refund a previously applied AI charge."""
+        """Settle a reservation using actual Groq usage, charging extra only if needed."""
 
-        if not charge_meta or self.user_id is None:
+        if not reservation_meta or self.user_id is None:
             return
+
+        reserved_credits = int(reservation_meta.get("reserved_credits", 0) or 0)
+        usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
+        breakdown = calculate_billing_for_segments(billing_segments or [])
+        if not billing_segments:
+            self.admin_reporter(
+                "respuesta IA exitosa sin usage billing; se conserva la reserva",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credits": reserved_credits,
+                },
+            )
+            return
+        actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        settlement_metadata = self._build_charge_metadata(
+            usage_tag=usage_tag,
+            extra={
+                "reason": reason,
+                "reserved_credits": reserved_credits,
+                "settled_credits": actual_credits,
+                "refunded_credits": 0,
+                "pricing_version": breakdown.get("pricing_version"),
+                "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
+                "markup_multiplier": breakdown.get("markup_multiplier"),
+                "model_breakdown": breakdown.get("model_breakdown", []),
+                "tool_breakdown": breakdown.get("tool_breakdown", []),
+                "unsupported_notes": breakdown.get("unsupported_notes", []),
+                "billing_segments": list(billing_segments or []),
+            },
+        )
+
+        if actual_credits > reserved_credits:
+            try:
+                extra_charge = self.credits_db_service.charge_ai_credits(
+                    user_id=self.user_id,
+                    chat_id=reservation_meta.get("chat_scope_id"),
+                    amount=actual_credits - reserved_credits,
+                    event_type="ai_settlement_charge",
+                    metadata=settlement_metadata,
+                )
+            except Exception as error:
+                self.admin_reporter(
+                    "falló el ajuste de liquidación IA",
+                    error,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                    },
+                )
+                extra_charge = {"ok": False}
+
+            if not extra_charge.get("ok"):
+                self.admin_reporter(
+                    "la liquidación IA superó la reserva y no pudo cobrar ajuste",
+                    None,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                        "billing_segments": list(billing_segments or []),
+                    },
+                )
+
+    def refund_reserved_ai_credits(
+        self,
+        reservation_meta: Optional[Mapping[str, Any]],
+        *,
+        reason: str,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Refund a full reservation when the interaction does not produce a billable result."""
+
+        if not reservation_meta or self.user_id is None:
+            return
+
+        reserved_credits = int(reservation_meta.get("reserved_credits", 0) or 0)
+        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
+        usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
+        refund_metadata = self._build_charge_metadata(
+            usage_tag=usage_tag,
+            extra={
+                "reason": reason,
+                "reserved_credits": reserved_credits,
+                "settled_credits": 0,
+                "refunded_credits": reserved_credits,
+                **dict(metadata or {}),
+            },
+        )
 
         try:
             self.credits_db_service.refund_ai_charge(
                 user_id=self.user_id,
-                chat_id=charge_meta.get("chat_scope_id"),
-                amount=int(charge_meta.get("credits_cost", 1)),
-                source="chat"
-                if str(charge_meta.get("source") or "user") == "chat"
-                else "user",
+                chat_id=reservation_meta.get("chat_scope_id"),
+                amount=reserved_credits,
+                source=source,
+                event_type="ai_refund",
+                metadata=refund_metadata,
             )
         except Exception as refund_error:
             self.admin_reporter(
@@ -308,6 +438,40 @@ class AIMessageBilling:
                     "command": self.command,
                 },
             )
+
+    def charge_one_ai_request(
+        self, usage_tag: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Charge one AI request, returning charge metadata or a user-facing error."""
+
+        chat_scope_id, context_error = self._resolve_ai_charge_context()
+        if context_error:
+            return None, context_error
+        if self.user_id is None:
+            return None, self.billing_missing_scope_message
+
+        return self.reserve_ai_credits(
+            usage_tag,
+            self.get_ai_credits_per_response_fn(),
+        )
+
+    def refund_ai_charge_meta(
+        self,
+        charge_meta: Optional[Mapping[str, Any]],
+        reason: str,
+    ) -> None:
+        """Refund a previously applied AI charge."""
+
+        if not charge_meta or self.user_id is None:
+            return
+
+        self.refund_reserved_ai_credits(
+            {
+                **dict(charge_meta),
+                "reserved_credits": int(charge_meta.get("credits_cost", charge_meta.get("reserved_credits", 1))),
+            },
+            reason=reason,
+        )
 
     @staticmethod
     def is_transcribe_success_response(text: Optional[str]) -> bool:

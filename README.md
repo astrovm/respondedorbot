@@ -44,13 +44,12 @@ This bot is configured entirely through environment variables, making it easy to
 - `/topup`: recharge credits with Telegram Stars (private chat).
 - `/balance`: in private shows personal balance; in groups shows personal + group balance.
 - `/transfer <amount>`: transfer credits from personal balance to group balance.
-- Operational exception: `?run_agent=true` does not consume user/group credits.
 
 ### Web Search and Tools
 
 - `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
 - In AI conversations, the bot may do a web lookup on its own when it needs up-to-date information.
-- It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses or when operating as an autonomous agent.
+- It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses.
 
 ## Testing
 
