@@ -697,6 +697,21 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
     mock_openai.assert_not_called()
 
 
+def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+
+    with patch("api.index._consume_groq_rate_limit", return_value=False), patch(
+        "api.index.OpenAI"
+    ) as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is None
+    mock_openai.assert_not_called()
+
+
 def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
     """Rate limit errors should trigger a backoff window and skip subsequent calls."""
 
@@ -732,6 +747,21 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
         assert mock_openai.call_count == 1
 
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+
+def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+
+    with patch("api.index._consume_groq_rate_limit", return_value=False), patch(
+        "api.index.OpenAI"
+    ) as mock_openai:
+        result = get_groq_compound_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is None
+    mock_openai.assert_not_called()
 
 
 def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):

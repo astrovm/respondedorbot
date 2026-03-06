@@ -144,22 +144,18 @@ def test_hash_cache_key_is_stable():
     assert key_one != other_key
 
 
-def test_check_rate_limit():
-    with patch("redis.Redis") as mock_redis:
-        mock_instance = MagicMock()
-        mock_redis.return_value = mock_instance
+def test_check_global_rate_limit():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"999", b"499999"]
+    assert check_global_rate_limit(redis_client) is True
 
-        # Test within limits
-        mock_instance.pipeline.return_value.execute.return_value = [10, True, 5, True]
-        assert check_rate_limit("test_chat", mock_instance) == True
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"1000", b"10"]
+    assert check_global_rate_limit(redis_client) is False
 
-        # Test exceeded global limit
-        mock_instance.pipeline.return_value.execute.return_value = [1025, True, 5, True]
-        assert check_rate_limit("test_chat", mock_instance) == False
-
-        # Test exceeded chat limit
-        mock_instance.pipeline.return_value.execute.return_value = [10, True, 129, True]
-        assert check_rate_limit("test_chat", mock_instance) == False
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"1", b"500000"]
+    assert check_global_rate_limit(redis_client) is False
 
 
 def test_extract_message_text():
@@ -515,36 +511,32 @@ def test_extract_message_text_edge_cases():
     assert extract_message_text(msg) == ""
 
 
-def test_check_rate_limit_edge_cases():
-    with patch("redis.Redis") as mock_redis:
-        mock_instance = MagicMock()
-        mock_redis.return_value = mock_instance
+def test_check_global_rate_limit_edge_cases():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"-1", b"-1"]
+    assert check_global_rate_limit(redis_client) is True
 
-        # Test with negative counts
-        mock_instance.pipeline.return_value.execute.return_value = [-1, True, -1, True]
-        assert check_rate_limit("test_chat", mock_instance) == True
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [None, None]
+    assert check_global_rate_limit(redis_client) is True
 
-        # Test with None values
-        mock_instance.pipeline.return_value.execute.return_value = [
-            None,
-            True,
-            None,
-            True,
-        ]
-        assert check_rate_limit("test_chat", mock_instance) == True
+    redis_client = MagicMock()
+    redis_client.get.side_effect = redis.RedisError
+    assert check_global_rate_limit(redis_client) is True
 
-        # Test with exactly at limits
-        mock_instance.pipeline.return_value.execute.return_value = [
-            1024,
-            True,
-            128,
-            True,
-        ]
-        assert check_rate_limit("test_chat", mock_instance) == True
 
-        # Test with Redis errors
-        mock_instance.pipeline.return_value.execute.side_effect = redis.RedisError
-        assert check_rate_limit("test_chat", mock_instance) == False
+def test_check_global_rate_limit_uses_groq_chat_budget():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"999", b"499999"]
+    assert check_global_rate_limit(redis_client) is True
+
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"1000", b"10"]
+    assert check_global_rate_limit(redis_client) is False
+
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"1", b"500000"]
+    assert check_global_rate_limit(redis_client) is False
 
 
 def test_initialize_commands():

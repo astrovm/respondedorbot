@@ -114,7 +114,7 @@ def handle_ai_response(
     sanitize_tool_artifacts_fn: Callable[[str], str],
     strip_ai_fallback_marker_fn: Callable[[str], Any],
 ) -> str:
-    """Handle AI API responses and apply the legacy cleanup pipeline."""
+    """Handle AI API responses and apply the response cleanup pipeline."""
 
     if telegram_token:
         send_typing_fn(telegram_token, chat_id)

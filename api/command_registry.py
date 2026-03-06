@@ -76,7 +76,7 @@ LINK_REPLACEMENT_DOMAINS = (
 def build_command_registry(
     handlers: Mapping[str, CommandHandler],
 ) -> Dict[str, CommandTuple]:
-    """Return the public command mapping expected by legacy callers."""
+    """Return the public command mapping used by the bot."""
 
     registry: Dict[str, CommandTuple] = {}
     for aliases, handler_name, uses_ai, takes_params in COMMAND_GROUPS:

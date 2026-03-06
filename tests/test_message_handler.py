@@ -23,7 +23,7 @@ def test_handle_msg_topup_private_returns_keyboard():
     assert result == "ok"
     mock_send_msg.assert_called_once_with(
         "100",
-        "elegí cuánto querés cargar, papá:",
+        "elegí cuánto querés cargar:",
         "10",
         reply_markup={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
     )
@@ -365,7 +365,7 @@ def test_handle_msg_with_crypto_command():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
+        "api.index.check_global_rate_limit"
     ) as mock_rate_limit, patch(
         "api.index.get_prices"
     ) as mock_get_prices:
@@ -587,7 +587,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
+        "api.index.check_global_rate_limit"
     ) as mock_rate_limit, patch(
         "api.index.handle_transcribe_with_message"
     ) as mock_handle_transcribe, patch(
@@ -1037,7 +1037,7 @@ def test_handle_msg_with_unknown_command():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_rate_limit"
+        "api.index.check_global_rate_limit"
     ) as mock_rate_limit, patch(
         "api.index.should_gordo_respond"
     ) as mock_should_respond:

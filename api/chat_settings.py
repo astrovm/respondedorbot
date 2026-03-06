@@ -32,12 +32,10 @@ def decode_redis_value(value: Any) -> Optional[str]:
     if value is not None:
         return str(value)
     return None
+
+
 def chat_config_key(chat_id: str) -> str:
     return f"{CHAT_CONFIG_KEY_PREFIX}{chat_id}"
-
-
-def legacy_link_mode_key(chat_id: str) -> str:
-    return f"link_mode:{chat_id}"
 
 
 def load_chat_config_from_redis(
@@ -46,7 +44,7 @@ def load_chat_config_from_redis(
     *,
     log_event: ConfigLogger,
 ) -> Dict[str, Any]:
-    """Load chat config from Redis, keeping legacy link_mode compatibility."""
+    """Load chat config from Redis."""
 
     config = dict(CHAT_CONFIG_DEFAULTS)
     raw_value = redis_client.get(chat_config_key(chat_id))
@@ -67,16 +65,7 @@ def load_chat_config_from_redis(
                     config[key] = value
             return config
 
-    legacy_value_text = decode_redis_value(redis_client.get(legacy_link_mode_key(chat_id)))
-    if legacy_value_text:
-        log_event(
-            "Using legacy link mode config",
-            {"chat_id": chat_id, "legacy_value": legacy_value_text},
-        )
-        config["link_mode"] = legacy_value_text
-    else:
-        log_event("No stored chat config found; using defaults", {"chat_id": chat_id})
-
+    log_event("No stored chat config found; using defaults", {"chat_id": chat_id})
     return config
 
 
@@ -87,18 +76,10 @@ def persist_chat_config_to_redis(
     *,
     log_event: ConfigLogger,
 ) -> None:
-    """Persist chat config in Redis and mirror legacy link_mode keys."""
+    """Persist chat config in Redis."""
 
     redis_client.set(chat_config_key(chat_id), json.dumps(dict(config)))
-    link_mode = str(config.get("link_mode", "off"))
-    legacy_key = legacy_link_mode_key(chat_id)
-    if link_mode in {"reply", "delete"}:
-        redis_client.set(legacy_key, link_mode)
-        log_event("Persisted legacy link mode", {"chat_id": chat_id, "link_mode": link_mode})
-        return
-
-    redis_client.delete(legacy_key)
-    log_event("Cleared legacy link mode", {"chat_id": chat_id})
+    log_event("Saved chat config in Redis", {"chat_id": chat_id, "config": dict(config)})
 
 
 def get_chat_config(

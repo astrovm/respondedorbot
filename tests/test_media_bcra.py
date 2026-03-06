@@ -614,7 +614,7 @@ def test_handle_transcribe():
     from api.index import handle_transcribe
 
     result = handle_transcribe()
-    assert result == "el /transcribe se usa respondiendo a un audio, imagen o sticker, papá"
+    assert result == "el /transcribe se usa respondiendo a un audio, imagen o sticker"
 
 
 def test_format_bcra_variables_empty():
@@ -1350,6 +1350,22 @@ def test_describe_image_groq_api_error():
         assert result is None
 
 
+def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
+    from api.index import describe_image_groq
+
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index._consume_groq_rate_limit", return_value=False
+    ), patch("api.index.OpenAI") as mock_openai:
+        mock_env.side_effect = lambda key, default=None: {
+            "GROQ_API_KEY": "test_api_key",
+        }.get(key, default)
+
+        result = describe_image_groq(b"image_data")
+
+        assert result is None
+        mock_openai.assert_not_called()
+
+
 def test_transcribe_audio_groq_success():
     """Test transcribe_audio_groq with successful transcription"""
     from api.index import transcribe_audio_groq
@@ -1392,6 +1408,22 @@ def test_transcribe_audio_groq_network_error():
         result = transcribe_audio_groq(b"audio_data")
 
         assert result is None
+
+
+def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
+    from api.index import transcribe_audio_groq
+
+    with patch("api.index.environ.get") as mock_env, patch(
+        "api.index._consume_groq_rate_limit", return_value=False
+    ), patch("api.index.OpenAI") as mock_openai:
+        mock_env.side_effect = lambda key, default=None: {
+            "GROQ_API_KEY": "test_api_key",
+        }.get(key, default)
+
+        result = transcribe_audio_groq(b"audio_data")
+
+        assert result is None
+        mock_openai.assert_not_called()
 
 
 # Tests for web search functionality
