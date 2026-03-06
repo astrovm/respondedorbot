@@ -632,7 +632,7 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
         "api.index.handle_transcribe_with_message",
-        return_value="No pude transcribir el audio, intentá más tarde",
+        return_value="no pude sacar nada de ese audio, probá más tarde",
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
