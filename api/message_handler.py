@@ -39,6 +39,7 @@ class MessageHandlerDeps:
     ask_ai: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
+    get_ai_credits_per_response: Callable[[], int]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
     credits_db_service: Any
     is_group_chat_type: Callable[[Optional[str]], bool]
@@ -86,6 +87,12 @@ def _build_billing_helper(
         admin_reporter=deps.admin_report,
         gen_random_fn=deps.gen_random,
         build_insufficient_credits_message_fn=deps.build_insufficient_credits_message,
+        maybe_grant_onboarding_credits_fn=lambda target_user_id: deps.maybe_grant_onboarding_credits(
+            deps.credits_db_service,
+            deps.admin_report,
+            target_user_id,
+        ),
+        get_ai_credits_per_response_fn=deps.get_ai_credits_per_response,
         command=command,
         chat_id=chat_id,
         chat_type=chat_type,
@@ -296,10 +303,10 @@ def _run_ai_flow(
         ai_messages,
         image_data=prepared_message.resized_image_data if prepared_message.photo_file_id else None,
         image_file_id=prepared_message.photo_file_id,
-        context_texts=(reply_context_text, prompt_text),
+        context_texts=[reply_context_text],
         user_identity=user_identity,
-            response_meta=ai_response_meta,
-        )
+        response_meta=ai_response_meta,
+    )
 
     provider_request_count = int(ai_response_meta.get("provider_request_count", 1) or 1)
     if provider_request_count > 1:

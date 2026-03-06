@@ -79,7 +79,6 @@ from api.ai_billing import (
     build_topup_keyboard as _billing_build_topup_keyboard,
     extract_numeric_chat_id as _billing_extract_numeric_chat_id,
     extract_user_id as _billing_extract_user_id,
-    format_balance_command as _billing_format_balance_command,
     get_ai_billing_pack as _billing_get_ai_billing_pack,
     get_ai_billing_packs as _billing_get_ai_billing_packs,
     get_ai_credits_per_response as _billing_get_ai_credits_per_response,
@@ -2081,14 +2080,8 @@ JAPANESE_TEXT_RE = re.compile(
 
 def romanize_japanese(text: str) -> str:
     """Convert Japanese kana/kanji text to romaji when possible."""
-    converter = kakasi()
-    converter.setMode("H", "a")
-    converter.setMode("K", "a")
-    converter.setMode("J", "a")
-    converter.setMode("r", "Hepburn")
-    converter.setMode("s", True)
-    converter.setMode("C", True)
-    return converter.getConverter().do(text)
+    segments = kakasi().convert(text)
+    return "".join(str(segment.get("hepburn") or segment.get("orig") or "") for segment in segments)
 
 
 def is_japanese_text(text: str) -> bool:
@@ -2414,6 +2407,8 @@ def is_chat_admin(
         optional_redis_client=_optional_redis_client,
         telegram_request=_telegram_request,
         log_event=_log_config_event,
+        redis_get_json_fn=redis_get_json,
+        redis_setex_json_fn=redis_setex_json,
     )
 
 
@@ -4261,12 +4256,22 @@ def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
 
 
 def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
-    return _billing_format_balance_command(
-        credits_db_service,
-        chat_type=chat_type,
-        user_id=user_id,
-        chat_id=chat_id,
-    )
+    user_balance = _fetch_balance("user", user_id)
+    if _is_group_chat_type(chat_type):
+        chat_balance = _fetch_balance("chat", chat_id)
+        return (
+            "saldos IA:\n"
+            f"- tu saldo personal: {user_balance}\n"
+            f"- saldo del grupo: {chat_balance}\n"
+            "si no te alcanza el saldo personal, se usa el del grupo.\n"
+            "para cargar créditos: /topup (por privado)\n"
+            "si querés pasar créditos al grupo: /transfer <monto>"
+        )
+    return f"tu saldo personal de IA es: {user_balance}\npara cargar créditos: /topup"
+
+
+def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
+    return credits_db_service.get_balance(scope_type, int(scope_id))
 
 
 def _message_handler_maybe_grant_onboarding(
@@ -5207,6 +5212,7 @@ def handle_msg(message: Dict) -> str:
             ask_ai=ask_ai,
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
+            get_ai_credits_per_response=get_ai_credits_per_response,
             build_topup_keyboard=build_topup_keyboard,
             credits_db_service=credits_db_service,
             is_group_chat_type=_is_group_chat_type,
