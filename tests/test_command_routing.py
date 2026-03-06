@@ -546,7 +546,6 @@ def test_initialize_commands():
         select_random,
         get_prices,
         get_dollar_rates as _get_dollar_rates,
-        show_agent_thoughts,
     )
     from api.index import (
         get_devo as _get_devo,  # noqa: F401
@@ -565,7 +564,6 @@ def test_initialize_commands():
     assert "/pregunta" in commands
     assert "/che" in commands
     assert "/gordo" in commands
-    assert "/agent" in commands
     assert "/random" in commands
     assert "/prices" in commands
     assert "/price" in commands
@@ -584,7 +582,6 @@ def test_initialize_commands():
     assert commands["/pregunta"][1] == True
     assert commands["/che"][1] == True
     assert commands["/gordo"][1] == True
-    assert commands["/agent"][1] == False
 
     # Test that non-AI commands are properly marked
     assert commands["/random"][1] == False
@@ -604,7 +601,6 @@ def test_initialize_commands():
     assert commands["/brecios"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
-    assert commands["/agent"][0] == show_agent_thoughts
     # Test search commands
     assert "/buscar" in commands
     assert "/search" in commands
@@ -992,36 +988,3 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         out = cached_requests("https://ex", {"a": 1}, None, 60)
         assert out is not None
         assert calls["n"] == 2  # one failure + one retry
-
-
-def test_find_repetitive_recent_thought_returns_match():
-    stored = [
-        "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias frescas",
-        "miré balances corporativos y anoté pendientes",
-    ]
-    repeated = "Estaba analizando que BTC rompió 116k pero ETH baja, voy a buscar noticias frescas"
-
-    match = find_repetitive_recent_thought(repeated, stored)
-    assert match == stored[0]
-
-
-def test_find_repetitive_recent_thought_allows_unique_note():
-    stored = [
-        "estaba analizando que btc rompió 116k pero eth baja, voy a buscar noticias",
-        "miré calendario y hay datos de inflación en dos días",
-    ]
-    new_entry = (
-        "escaneé titulares y encontré una nota de coindesk sobre flujos asiáticos, próximo paso: revisar volúmenes"
-    )
-
-    assert find_repetitive_recent_thought(new_entry, stored) is None
-
-
-def test_find_repetitive_recent_thought_flags_keyword_overlap():
-    stored = [
-        "seguí la rotación institucional ether bitcoin en etfs spot de estados unidos",
-        "miré balances corporativos yankees",
-    ]
-    repeated = "volví sobre rotación institucional ether bitcoin y etfs spot para comparar con europa"
-
-    assert find_repetitive_recent_thought(repeated, stored) == stored[0]

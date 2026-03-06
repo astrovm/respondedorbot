@@ -8,7 +8,6 @@ def test_build_command_registry_reuses_alias_metadata():
     registry = build_command_registry(
         {
             "ask_ai": prices,
-            "show_agent_thoughts": lambda: "agent",
             "config_command": lambda: "config",
             "convert_base": prices,
             "select_random": prices,

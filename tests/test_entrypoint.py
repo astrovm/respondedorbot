@@ -104,21 +104,6 @@ def test_process_request_parameters():
             assert status == 200
             assert "webhook acomodado" in response
 
-    with app.test_request_context("/?run_agent=true"):
-        with patch("api.index.run_agent_cycle") as mock_run_agent, patch(
-            "api.index.credits_db_service.charge_ai_credits"
-        ) as mock_charge:
-            mock_run_agent.return_value = {
-                "text": "pensé solo en la city",
-                "timestamp": 1_700_000_000,
-            }
-            response, status = process_request_parameters(request)
-            assert status == 200
-            assert "pensé solo" in response
-            mock_run_agent.assert_called_once()
-            mock_charge.assert_not_called()
-
-
 def test_process_request_parameters_handles_pre_checkout_query():
     from api.index import process_request_parameters
 

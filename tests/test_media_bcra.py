@@ -443,12 +443,19 @@ def test_handle_transcribe_with_message_voice_download_success():
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
-        "api.index.transcribe_audio_groq"
+        "api.index.measure_audio_duration_seconds", return_value=1.0
+    ) as mock_measure, patch(
+        "api.index._transcribe_audio_groq_result"
     ) as mock_transcribe:
 
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
-        mock_transcribe.return_value = "new transcription"
+        mock_transcribe.return_value = MagicMock(
+            text="new transcription",
+            kind="transcribe",
+            audio_seconds=1.0,
+            billing_segment=lambda: {"kind": "transcribe", "audio_seconds": 1.0},
+        )
 
         message = {
             "message_id": 1,
@@ -460,6 +467,7 @@ def test_handle_transcribe_with_message_voice_download_success():
         result = handle_transcribe_with_message(message)
         assert result == "🎵 te saqué esto del audio: new transcription"
         mock_download.assert_called_once_with("voice123")
+        mock_measure.assert_called_once_with(b"audio data")
         mock_transcribe.assert_called_once_with(
             b"audio data", "voice123", use_cache=True
         )
@@ -492,12 +500,19 @@ def test_handle_transcribe_with_message_audio_success():
     with patch("api.index.get_cached_transcription") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
-        "api.index.transcribe_audio_groq"
+        "api.index.measure_audio_duration_seconds", return_value=1.0
+    ) as mock_measure, patch(
+        "api.index._transcribe_audio_groq_result"
     ) as mock_transcribe:
 
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
-        mock_transcribe.return_value = "audio transcription"
+        mock_transcribe.return_value = MagicMock(
+            text="audio transcription",
+            kind="transcribe",
+            audio_seconds=1.0,
+            billing_segment=lambda: {"kind": "transcribe", "audio_seconds": 1.0},
+        )
 
         message = {
             "message_id": 1,
@@ -508,6 +523,7 @@ def test_handle_transcribe_with_message_audio_success():
 
         result = handle_transcribe_with_message(message)
         assert result == "🎵 te saqué esto del audio: audio transcription"
+        mock_measure.assert_called_once_with(b"audio data")
 
 
 def test_handle_transcribe_with_message_photo_cached():
@@ -534,13 +550,17 @@ def test_handle_transcribe_with_message_photo_success():
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
-        "api.index.describe_image_groq"
+        "api.index._describe_image_groq_result"
     ) as mock_describe:
 
         mock_cached.return_value = None
         mock_download.return_value = b"image data"
         mock_resize.return_value = b"resized image data"
-        mock_describe.return_value = "image description"
+        mock_describe.return_value = MagicMock(
+            text="image description",
+            kind="vision",
+            billing_segment=lambda: {"kind": "vision"},
+        )
 
         message = {
             "message_id": 1,
@@ -566,13 +586,17 @@ def test_handle_transcribe_with_message_sticker_success():
     with patch("api.index.get_cached_description") as mock_cached, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch("api.index.resize_image_if_needed") as mock_resize, patch(
-        "api.index.describe_image_groq"
+        "api.index._describe_image_groq_result"
     ) as mock_describe:
 
         mock_cached.return_value = None
         mock_download.return_value = b"sticker data"
         mock_resize.return_value = b"resized sticker data"
-        mock_describe.return_value = "sticker description"
+        mock_describe.return_value = MagicMock(
+            text="sticker description",
+            kind="vision",
+            billing_segment=lambda: {"kind": "vision"},
+        )
 
         message = {
             "message_id": 1,

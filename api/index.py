@@ -40,7 +40,9 @@ import redis
 import requests
 import time
 import traceback
+import wave
 from pykakasi import kakasi
+from mutagen import File as MutagenFile
 from openpyxl import load_workbook
 from decimal import Decimal
 import unicodedata
@@ -87,6 +89,17 @@ from api.ai_billing import (
     maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
     parse_topup_payload as _billing_parse_topup_payload,
 )
+from api.groq_billing import (
+    CHAT_OUTPUT_TOKEN_LIMIT,
+    GPT_OSS_120B_FALLBACK_MODEL,
+    GroqUsageResult,
+    VISION_OUTPUT_TOKEN_LIMIT,
+    estimate_chat_reserve_credits,
+    estimate_compound_reserve_credits,
+    estimate_vision_reserve_credits,
+    ensure_mapping,
+    ensure_mapping_list,
+)
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -125,39 +138,6 @@ from api.message_state import (
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
 from api.services import credits_db as credits_db_service
-from api.agent import (
-    AGENT_EMPTY_RESPONSE_FALLBACK,
-    AGENT_LOOP_FALLBACK_PREFIX,
-    AGENT_RECENT_THOUGHT_WINDOW,
-    AGENT_REPETITION_ESCALATION_HINT,
-    AGENT_REPETITION_RETRY_LIMIT,
-    AGENT_REQUIRED_SECTIONS,
-    AGENT_THOUGHTS_KEY,
-    AGENT_THOUGHT_CHAR_LIMIT,
-    AGENT_THOUGHT_DISPLAY_LIMIT,
-    MAX_AGENT_THOUGHTS,
-    build_agent_fallback_entry,
-    build_agent_retry_messages,
-    build_agent_retry_prompt,
-    build_agent_thoughts_context_message,
-    configure as configure_agent_memory,
-    ensure_agent_response_text,
-    extract_agent_keywords,
-    extract_agent_section_content,
-    find_repetitive_recent_thought,
-    format_agent_thoughts,
-    get_agent_retry_hint,
-    get_agent_text_features,
-    get_agent_thoughts,
-    agent_sections_are_valid,
-    is_empty_agent_thought_text,
-    is_loop_fallback_text,
-    is_repetitive_thought,
-    normalize_agent_text,
-    request_agent_response,
-    save_agent_thought,
-    summarize_recent_agent_topics,
-)
 from api.utils.http import request_with_ssl_fallback
 from api.utils.links import (
     can_embed_url as _links_can_embed_url,
@@ -187,7 +167,6 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "code_interpreter",
     "visit_website",
     "browser_automation",
-    "wolfram_alpha",
 )
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
@@ -376,16 +355,25 @@ def _run_forced_web_search(
     messages: List[Dict[str, Any]],
     system_message: Dict[str, Any],
     compound_system_message: Optional[Dict[str, Any]] = None,
+    response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not compound_system_message:
         return "la búsqueda web no está disponible en este momento"
 
     compound_messages = [{"role": "user", "content": query}]
-    compound_response = get_groq_compound_response(
-        compound_system_message, compound_messages
-    )
-    if compound_response:
-        return compound_response
+    if response_meta is None:
+        compound_response = get_groq_compound_response(
+            compound_system_message, compound_messages
+        )
+        if compound_response:
+            return compound_response
+    else:
+        compound_result = _get_groq_compound_response_result(
+            compound_system_message, compound_messages
+        )
+        if compound_result:
+            _append_billing_segment(response_meta, compound_result)
+            return compound_result.text
 
     return "no pude completar la búsqueda web ahora"
 
@@ -415,9 +403,6 @@ def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
     serialized = json.dumps(payload, sort_keys=True, default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
-
-
-configure_agent_memory(redis_factory=config_redis, tz=BA_TZ)
 
 
 _T = TypeVar("_T")
@@ -502,17 +487,6 @@ def get_cached_tcrm_100(
         cache_mayorista_missing_fn=cache_mayorista_missing,
         get_cache_history_fn=get_cache_history,
     )
-
-
-def get_agent_memory_context() -> Optional[Dict[str, Any]]:
-    thoughts = get_agent_thoughts()
-    return build_agent_thoughts_context_message(thoughts)
-
-
-def show_agent_thoughts() -> str:
-    thoughts = get_agent_thoughts()
-    visible = thoughts[:AGENT_THOUGHT_DISPLAY_LIMIT]
-    return format_agent_thoughts(visible)
 
 
 def can_embed_url(url: str) -> bool:
@@ -669,182 +643,6 @@ def _consume_groq_rate_limit(scope: str, redis_client: Optional[redis.Redis] = N
         return True
 
     return minute_count <= int(config["rpm"]) and day_count <= int(config["rpd"])
-
-def run_agent_cycle() -> Dict[str, Any]:
-    """Trigger the autonomous agent, persist its thought and return metadata."""
-
-    recent_thoughts = get_agent_thoughts()
-    recent_entry_texts: List[str] = []
-    if recent_thoughts:
-        for thought in recent_thoughts[:AGENT_RECENT_THOUGHT_WINDOW]:
-            candidate = str(thought.get("text", "")).strip()
-            if candidate:
-                recent_entry_texts.append(candidate)
-
-    last_entry_text = recent_entry_texts[0] if recent_entry_texts else None
-    recent_topic_summaries = summarize_recent_agent_topics(
-        recent_thoughts[:AGENT_RECENT_THOUGHT_WINDOW]
-    )
-    hacker_news_items = get_hacker_news_context(limit=3)
-
-    agent_prompt = (
-        "Estás operando en modo autónomo. Podés investigar, navegar y usar herramientas. "
-        "Registrá en primera persona qué investigaste, qué encontraste y recién después el próximo paso. "
-        'Devolvé la nota en dos secciones en mayúsculas: "HALLAZGOS:" con los datos concretos y "PRÓXIMO PASO:" con la acción puntual.'
-    )
-    if last_entry_text:
-        agent_prompt += (
-            "\n\nÚLTIMA MEMORIA GUARDADA:\n"
-            f"{truncate_text(last_entry_text, 220)}\n"
-            "Resolvé ese pendiente ahora mismo y deja asentado el resultado concreto antes de planear otra cosa."
-        )
-    if recent_topic_summaries:
-        topics_lines = "\n".join(f"- {value}" for value in recent_topic_summaries)
-        agent_prompt += (
-            "\nEstos fueron los últimos temas que trabajaste:\n"
-            f"{topics_lines}\n"
-            "Solo repetí uno si apareció un dato nuevo y específico; si no, cambiá a otro interés del gordo."
-        )
-    if hacker_news_items:
-        hn_lines = format_hacker_news_info(hacker_news_items, include_discussion=False)
-        agent_prompt += (
-            "\n\nHACKER NEWS HOY:\n"
-            f"{hn_lines}\n"
-            "Si alguna nota trae datos frescos que sumen, citá la fuente y metela en los hallazgos."
-        )
-    agent_prompt += (
-        "\nIncluí datos específicos (números, titulares, fuentes) de lo que investigues y evitá repetir entradas previas. "
-        "Si necesitás info fresca, llamá a la herramienta web_search con un query puntual y resumí el hallazgo. "
-        "Si hace falta leer una nota puntual, llamá a fetch_url con la URL (incluí https://) y anotá lo relevante. "
-        "Máximo 500 caracteres, sin saludar a nadie: es un apunte privado."
-    )
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": agent_prompt,
-                }
-            ],
-        }
-    ]
-
-    def generate_response(current_messages: List[Dict[str, Any]]) -> str:
-        raw = ask_ai(current_messages)
-        sanitized_response = sanitize_tool_artifacts(raw)
-        return clean_duplicate_response(sanitized_response).strip()
-
-    cleaned = request_agent_response(
-        generate_response, messages, "Autonomous agent execution failed"
-    )
-
-    if not agent_sections_are_valid(cleaned):
-        original_attempt = cleaned
-        corrective_prompt = build_agent_retry_prompt(original_attempt)
-        missing_sections = [
-            header
-            for header in AGENT_REQUIRED_SECTIONS
-            if not extract_agent_section_content(original_attempt, header)
-        ]
-        if missing_sections:
-            section_list = ", ".join(missing_sections)
-            corrective_prompt += (
-                f" La nota anterior no tenía contenido en: {section_list}. "
-                "Respetá ambas secciones con información concreta."
-            )
-        retry_messages = build_agent_retry_messages(
-            messages, original_attempt, corrective_prompt
-        )
-        cleaned = request_agent_response(
-            generate_response,
-            retry_messages,
-            "Autonomous agent execution failed (structure retry)",
-        )
-        if not agent_sections_are_valid(cleaned):
-            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-
-    matching_recent_text = find_repetitive_recent_thought(cleaned, recent_entry_texts)
-    repetition_attempt = 0
-    while matching_recent_text and repetition_attempt < AGENT_REPETITION_RETRY_LIMIT:
-        corrective_prompt = build_agent_retry_prompt(matching_recent_text)
-        if repetition_attempt == AGENT_REPETITION_RETRY_LIMIT - 1:
-            corrective_prompt += " " + AGENT_REPETITION_ESCALATION_HINT
-
-        retry_messages = build_agent_retry_messages(
-            messages, cleaned, corrective_prompt
-        )
-        cleaned = request_agent_response(
-            generate_response,
-            retry_messages,
-            "Autonomous agent execution failed (retry)",
-        )
-
-        if not agent_sections_are_valid(cleaned):
-            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-            matching_recent_text = None
-            break
-
-        repetition_attempt += 1
-        matching_recent_text = find_repetitive_recent_thought(
-            cleaned, recent_entry_texts
-        )
-
-    if matching_recent_text:
-        fallback = clean_duplicate_response(
-            build_agent_fallback_entry(matching_recent_text)
-        )
-        fallback_entry = ensure_agent_response_text(fallback)
-
-        comparison_texts: Iterable[str]
-        if recent_entry_texts:
-            filtered_recent_texts: List[str] = []
-            skip_match = False
-            for candidate_text in recent_entry_texts:
-                if not skip_match and candidate_text == matching_recent_text:
-                    skip_match = True
-                    continue
-                filtered_recent_texts.append(candidate_text)
-            comparison_texts = filtered_recent_texts
-        else:
-            comparison_texts = recent_entry_texts
-
-        if is_loop_fallback_text(fallback_entry) and find_repetitive_recent_thought(
-            fallback_entry, comparison_texts
-        ):
-            cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-        else:
-            cleaned = fallback_entry
-
-    if not agent_sections_are_valid(cleaned):
-        cleaned = AGENT_EMPTY_RESPONSE_FALLBACK
-
-    if is_empty_agent_thought_text(cleaned):
-        fallback_text = ensure_agent_response_text(cleaned)
-        return {"text": fallback_text, "persisted": False}
-
-    entry = save_agent_thought(cleaned)
-    if not entry:
-        admin_report(
-            "Autonomous agent could not persist thought",
-            None,
-            {"thought_preview": cleaned[:80]},
-        )
-        raise RuntimeError("Failed to persist autonomous agent thought")
-
-    result: Dict[str, Any] = {
-        "text": entry.get("text", cleaned),
-        "persisted": True,
-    }
-    timestamp_value = entry.get("timestamp")
-    if isinstance(timestamp_value, (int, float)):
-        ts_int = int(timestamp_value)
-        result["timestamp"] = ts_int
-        result["iso_time"] = datetime.fromtimestamp(ts_int, tz=BA_TZ).isoformat()
-
-    return result
-
 
 def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
     """Retrieve a cached media payload stored under the given prefix."""
@@ -1907,13 +1705,14 @@ def handle_bcra_variables() -> str:
 
 _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
     "download": "no pude bajar el audio, mandalo de nuevo",
+    "duration": "no pude medir la duración del audio",
     "transcribe": "no pude sacar nada de ese audio, probá más tarde",
 }
 
 
 def _transcribe_audio_file(
     file_id: str, *, use_cache: bool
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Wrapper for audio transcription with consistent error codes."""
 
     return transcribe_file_by_id(file_id, use_cache=use_cache)
@@ -1945,44 +1744,51 @@ def _describe_replied_media(
     success_prefix: str,
     download_error: str,
     describe_error: str,
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     media = replied_msg.get(media_key)
     if not media:
-        return None
+        return None, None
 
     file_id = extract_file_id(media)
     if not file_id:
-        return None
+        return None, None
 
-    description, error_code = describe_media_by_id(file_id, prompt)
+    description, error_code, billing_segment = describe_media_by_id(file_id, prompt)
     if description:
-        return f"{success_prefix}{description}"
+        return f"{success_prefix}{description}", billing_segment
 
     if error_code == "download":
-        return download_error
+        return download_error, None
 
-    return describe_error
+    return describe_error, None
 
 
-def handle_transcribe_with_message(message: Dict) -> str:
-    """Transcribe audio or describe image from replied message"""
+def handle_transcribe_with_message_result(
+    message: Dict,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Transcribe audio or describe image from replied message with billing metadata."""
     try:
         # Check if this is a reply to another message
         if "reply_to_message" not in message:
-            return "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí"
+            return "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí", []
 
         replied_msg = message["reply_to_message"]
 
         _, photo_file_id, audio_file_id = extract_message_content(replied_msg)
 
         if audio_file_id:
-            text, error_code = _transcribe_audio_file(audio_file_id, use_cache=True)
+            text, error_code, billing_segment = _transcribe_audio_file(
+                audio_file_id, use_cache=True
+            )
             if text:
-                return f"🎵 te saqué esto del audio: {text}"
+                return (
+                    f"🎵 te saqué esto del audio: {text}",
+                    [billing_segment] if billing_segment else [],
+                )
             error_message = _transcription_error_message(error_code)
             if error_message:
-                return error_message
-            return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
+                return error_message, []
+            return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"], []
 
         if photo_file_id:
             def _find_media_message(
@@ -2010,7 +1816,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
 
             photo_source = _find_media_message(replied_msg, "photo")
             if photo_source:
-                photo_response = _describe_replied_media(
+                photo_response, billing_segment = _describe_replied_media(
                     photo_source,
                     media_key="photo",
                     extract_file_id=lambda media: media[-1]["file_id"]
@@ -2024,11 +1830,11 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
                 )
                 if photo_response:
-                    return photo_response
+                    return photo_response, [billing_segment] if billing_segment else []
 
             sticker_source = _find_media_message(replied_msg, "sticker")
             if sticker_source:
-                sticker_response = _describe_replied_media(
+                sticker_response, billing_segment = _describe_replied_media(
                     sticker_source,
                     media_key="sticker",
                     extract_file_id=lambda media: media.get("file_id")
@@ -2040,13 +1846,18 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
                 if sticker_response:
-                    return sticker_response
+                    return sticker_response, [billing_segment] if billing_segment else []
 
-        return "ese mensaje no tiene audio, imagen ni sticker para laburar"
+        return "ese mensaje no tiene audio, imagen ni sticker para laburar", []
 
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
-        return "se trabó el /transcribe, probá más tarde"
+        return "se trabó el /transcribe, probá más tarde", []
+
+
+def handle_transcribe_with_message(message: Dict) -> str:
+    response_text, _billing_segments = handle_transcribe_with_message_result(message)
+    return response_text
 
 
 def handle_transcribe() -> str:
@@ -2227,8 +2038,6 @@ esto es lo que sé hacer, boludo:
 - /convertbase 101, 2, 10: te paso números entre bases
 
 - /buscar algo: te busco en la web
-
-- /agent: te muestro lo último que pensé con el agente autónomo
 
 - /eleccion: odds actuales de Polymarket para Diputados 2025
 
@@ -2590,6 +2399,7 @@ def resolve_tool_calls(
     system_message: Dict[str, Any],
     messages: List[Dict[str, Any]],
     initial_response: Optional[str],
+    response_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Resolve tool calls from an initial model response, returning a final reply."""
     if not initial_response:
@@ -2606,12 +2416,21 @@ def resolve_tool_calls(
             return "query vacío"
         if not should_use_groq_compound_tools():
             return "la búsqueda web no está disponible en este momento"
-        compound_response = get_groq_compound_response(
-            build_compound_system_message(),
-            [{"role": "user", "content": query}],
-        )
-        if compound_response:
-            return compound_response
+        if response_meta is None:
+            compound_response = get_groq_compound_response(
+                build_compound_system_message(),
+                [{"role": "user", "content": query}],
+            )
+            if compound_response:
+                return compound_response
+        else:
+            compound_result = _get_groq_compound_response_result(
+                build_compound_system_message(),
+                [{"role": "user", "content": query}],
+            )
+            if compound_result:
+                _append_billing_segment(response_meta, compound_result)
+                return compound_result.text
         return "no pude completar la búsqueda web ahora"
 
     try:
@@ -2646,7 +2465,14 @@ def resolve_tool_calls(
     attempts = 0
     final = None
     while attempts < 3:
-        final = complete_with_providers(system_message, messages)
+        if response_meta is None:
+            final = complete_with_providers(system_message, messages)
+        else:
+            final = complete_with_providers(
+                system_message,
+                messages,
+                response_meta=response_meta,
+            )
         if not final:
             print(
                 "ask_ai: second pass returned None; falling back to tool-output formatting"
@@ -2744,11 +2570,6 @@ def ask_ai(
     try:
         messages = list(messages or [])
 
-        # Prepend autonomous agent memory so the model can reference past thoughts
-        agent_memory = get_agent_memory_context()
-        if agent_memory:
-            messages = [agent_memory] + messages
-
         # Build context with market and weather data
         context_data = {
             "market": get_market_context(),
@@ -2771,9 +2592,13 @@ def ask_ai(
             user_text = "Describe what you see in this image in detail."
 
             # Describe the image using Groq
-            image_description = describe_image_groq(image_data, user_text, image_file_id)
+            image_result = _describe_image_groq_result(
+                image_data, user_text, image_file_id
+            )
+            image_description = image_result.text if image_result else None
 
             if image_description:
+                _append_billing_segment(response_meta, image_result)
                 # Add image description to the conversation context
                 image_context = f"[Imagen: {image_description}]"
 
@@ -2790,18 +2615,9 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text).
-        latest_user_text = ""
-        latest_user_message = ""
-        latest_user_index: Optional[int] = None
-        for idx in range(len(messages) - 1, -1, -1):
-            msg = messages[idx]
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    latest_user_text = content
-                    latest_user_message = extract_user_message_from_context(content)
-                    latest_user_index = idx
-                break
+        latest_user_text, latest_user_message, latest_user_index = _extract_latest_user_query_info(
+            messages
+        )
 
         if should_search_previous_query(latest_user_message):
             previous_query = ""
@@ -2816,6 +2632,7 @@ def ask_ai(
                 messages=messages,
                 system_message=system_message,
                 compound_system_message=compound_system_message,
+                response_meta=response_meta,
             )
 
         if should_force_web_search(latest_user_message):
@@ -2825,16 +2642,32 @@ def ask_ai(
                 messages=messages,
                 system_message=system_message,
                 compound_system_message=compound_system_message,
+                response_meta=response_meta,
             )
 
         # First pass: get an initial response that might include a tool call.
-        initial = complete_with_providers(system_message, messages)
+        if response_meta is None:
+            initial = complete_with_providers(system_message, messages)
+        else:
+            initial = complete_with_providers(
+                system_message,
+                messages,
+                response_meta=response_meta,
+            )
         if initial:
             print(
                 f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'"
             )
 
-        tool_final = resolve_tool_calls(system_message, messages, initial)
+        if response_meta is None:
+            tool_final = resolve_tool_calls(system_message, messages, initial)
+        else:
+            tool_final = resolve_tool_calls(
+                system_message,
+                messages,
+                initial,
+                response_meta=response_meta,
+            )
         if tool_final:
             return tool_final
 
@@ -2855,14 +2688,24 @@ def ask_ai(
 
 
 def complete_with_providers(
-    system_message: Dict[str, Any], messages: List[Dict[str, Any]]
+    system_message: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    response_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Try Groq and return the first response."""
 
-    response = get_groq_ai_response(system_message, messages)
-    if response:
-        print("complete_with_providers: got response from Groq")
-        return response
+    if response_meta is None:
+        response_text = get_groq_ai_response(system_message, messages)
+        if response_text:
+            print("complete_with_providers: got response from Groq")
+            return response_text
+    else:
+        response = _get_groq_ai_response_result(system_message, messages)
+        if response:
+            _append_billing_segment(response_meta, response)
+            print("complete_with_providers: got response from Groq")
+            return response.text
     return None
 
 
@@ -3721,9 +3564,191 @@ def _is_rate_limit_error(error: Exception) -> bool:
     return "429" in lowered
 
 
-def get_groq_ai_response(
+def _append_billing_segment(
+    response_meta: Optional[Dict[str, Any]],
+    result: Optional[GroqUsageResult],
+) -> None:
+    if response_meta is None or result is None:
+        return
+    response_meta.setdefault("billing_segments", []).append(result.billing_segment())
+
+
+def _extract_groq_usage_map(response: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(response, dict):
+        return ensure_mapping(response.get("usage"))
+    return ensure_mapping(getattr(response, "usage", None))
+
+
+def _extract_groq_usage_breakdown(response: Any) -> List[Dict[str, Any]]:
+    def _normalize(value: Any) -> List[Dict[str, Any]]:
+        usage_breakdown = ensure_mapping(value)
+        if usage_breakdown and isinstance(usage_breakdown.get("models"), Sequence):
+            return ensure_mapping_list(usage_breakdown.get("models"))
+        return ensure_mapping_list(value)
+
+    if isinstance(response, dict):
+        usage_breakdown = response.get("usage_breakdown")
+        if usage_breakdown is None and isinstance(response.get("usage"), Mapping):
+            usage_breakdown = cast(Mapping[str, Any], response["usage"]).get("usage_breakdown")
+        return _normalize(usage_breakdown)
+    usage_breakdown = getattr(response, "usage_breakdown", None)
+    if usage_breakdown is None:
+        usage = getattr(response, "usage", None)
+        usage_map = ensure_mapping(usage)
+        if usage_map:
+            usage_breakdown = usage_map.get("usage_breakdown")
+    return _normalize(usage_breakdown)
+
+
+def _extract_groq_executed_tools(response: Any) -> List[Dict[str, Any]]:
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, Sequence) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, Mapping):
+                message = first_choice.get("message")
+                if isinstance(message, Mapping):
+                    tools = message.get("executed_tools")
+                    if tools is not None:
+                        return ensure_mapping_list(tools)
+        return ensure_mapping_list(response.get("executed_tools"))
+
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, Sequence) and choices:
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        tools = getattr(message, "executed_tools", None)
+        if tools is not None:
+            return ensure_mapping_list(tools)
+    return ensure_mapping_list(getattr(response, "executed_tools", None))
+
+
+def _extract_latest_user_query_info(
+    messages: Sequence[Mapping[str, Any]],
+) -> Tuple[str, str, Optional[int]]:
+    latest_user_text = ""
+    latest_user_message = ""
+    latest_user_index: Optional[int] = None
+
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        latest_user_text = content
+        latest_user_message = extract_user_message_from_context(content)
+        latest_user_index = idx
+        break
+
+    return latest_user_text, latest_user_message, latest_user_index
+
+
+def estimate_ai_base_reserve_credits(
+    messages: List[Dict[str, Any]],
+    *,
+    extra_input_tokens: int = 0,
+) -> Tuple[int, Dict[str, Any]]:
+    system_message: Optional[Dict[str, Any]] = None
+    compound_system_message: Optional[Dict[str, Any]] = None
+    try:
+        context_data = {
+            "market": get_market_context(),
+            "weather": get_weather_context(),
+            "time": get_time_context(),
+            "hacker_news": get_hacker_news_context(),
+        }
+        system_message = build_system_message(context_data, include_tools=True)
+    except Exception as error:
+        print(f"estimate_ai_base_reserve_credits: failed to build system message: {error}")
+
+    try:
+        if should_use_groq_compound_tools():
+            compound_system_message = build_compound_system_message()
+    except Exception as error:
+        print(f"estimate_ai_base_reserve_credits: failed to build compound system message: {error}")
+
+    _, latest_user_message, latest_user_index = _extract_latest_user_query_info(messages)
+
+    if compound_system_message and should_search_previous_query(latest_user_message):
+        previous_query = ""
+        if latest_user_index is not None:
+            previous_query = _find_previous_user_text(messages, latest_user_index)
+        previous_message = extract_user_message_from_context(previous_query)
+        if previous_message:
+            enabled_tools = get_groq_compound_enabled_tools()
+            reserve = estimate_compound_reserve_credits(
+                system_message=compound_system_message,
+                messages=[{"role": "user", "content": previous_message}],
+                enabled_tools=enabled_tools,
+            )
+            return reserve, {
+                "reserve_mode": "compound",
+                "reserve_reason": "search_previous_query",
+                "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
+            }
+
+    if compound_system_message and should_force_web_search(latest_user_message):
+        enabled_tools = get_groq_compound_enabled_tools()
+        reserve = estimate_compound_reserve_credits(
+            system_message=compound_system_message,
+            messages=[{"role": "user", "content": latest_user_message}],
+            enabled_tools=enabled_tools,
+        )
+        return reserve, {
+            "reserve_mode": "compound",
+            "reserve_reason": "forced_web_search",
+            "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
+        }
+
+    reserve = estimate_chat_reserve_credits(
+        system_message=system_message,
+        messages=messages,
+        max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+        extra_input_tokens=extra_input_tokens,
+    )
+    return reserve, {
+        "reserve_mode": "chat",
+        "reserve_reason": "standard_chat",
+        "reserve_model": "moonshotai/kimi-k2-instruct-0905",
+    }
+
+
+def estimate_image_context_reserve_credits(image_data: bytes, prompt_text: str) -> int:
+    return estimate_vision_reserve_credits(
+        prompt_text=prompt_text,
+        image_data=image_data,
+        max_output_tokens=VISION_OUTPUT_TOKEN_LIMIT,
+    )
+
+
+def _build_groq_usage_result(
+    *,
+    kind: str,
+    text: str,
+    model: str,
+    response: Any,
+    audio_seconds: Optional[float] = None,
+    cached: bool = False,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> GroqUsageResult:
+    return GroqUsageResult(
+        kind=kind,
+        text=text,
+        model=model,
+        usage=_extract_groq_usage_map(response),
+        usage_breakdown=_extract_groq_usage_breakdown(response),
+        executed_tools=_extract_groq_executed_tools(response),
+        audio_seconds=audio_seconds,
+        cached=cached,
+        metadata=dict(metadata or {}),
+    )
+
+
+def _get_groq_ai_response_result(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
-) -> Optional[str]:
+) -> Optional[GroqUsageResult]:
     """First option using Groq AI"""
     provider_name = "groq"
     groq_api_key = environ.get("GROQ_API_KEY")
@@ -3731,7 +3756,7 @@ def get_groq_ai_response(
         print("Groq API key not configured")
         return None
 
-    def _attempt() -> Optional[str]:
+    def _attempt() -> Optional[GroqUsageResult]:
         print("Trying Groq AI as first option...")
         _increment_ai_provider_request_count()
         groq_client = OpenAI(
@@ -3748,7 +3773,12 @@ def get_groq_ai_response(
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason == "stop":
                 print("Groq AI response successful")
-                return response.choices[0].message.content
+                return _build_groq_usage_result(
+                    kind="chat",
+                    text=str(response.choices[0].message.content or ""),
+                    model="moonshotai/kimi-k2-instruct-0905",
+                    response=response,
+                )
         return None
 
     return _invoke_provider(
@@ -3760,9 +3790,18 @@ def get_groq_ai_response(
     )
 
 
-def get_groq_compound_response(
-    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
+def get_groq_ai_response(
+    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
+    result = _get_groq_ai_response_result(system_msg, messages)
+    if result:
+        return result.text
+    return None
+
+
+def _get_groq_compound_response_result(
+    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
+) -> Optional[GroqUsageResult]:
     """Use Groq Compound built-in tools for a single response."""
 
     provider_name = "groq"
@@ -3774,7 +3813,7 @@ def get_groq_compound_response(
     model = GROQ_COMPOUND_DEFAULT_MODEL
     enabled_tools = get_groq_compound_enabled_tools()
 
-    def _attempt() -> Optional[str]:
+    def _attempt() -> Optional[GroqUsageResult]:
         print("Trying Groq Compound tools...")
         _increment_ai_provider_request_count()
         groq_client = OpenAI(
@@ -3802,7 +3841,13 @@ def get_groq_compound_response(
             choice = response.choices[0]
             content = getattr(choice.message, "content", None)
             if content:
-                return content
+                return _build_groq_usage_result(
+                    kind="compound",
+                    text=str(content),
+                    model=model,
+                    response=response,
+                    metadata={"fallback_usage_model": GPT_OSS_120B_FALLBACK_MODEL},
+                )
         return None
 
     return _invoke_provider(
@@ -3812,6 +3857,15 @@ def get_groq_compound_response(
         label="Groq Compound",
         rate_limit_scope="compound",
     )
+
+
+def get_groq_compound_response(
+    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
+) -> Optional[str]:
+    result = _get_groq_compound_response_result(system_msg, messages)
+    if result:
+        return result.text
+    return None
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
@@ -3990,7 +4044,7 @@ def build_compound_system_message() -> Dict[str, Any]:
 def format_hacker_news_info(
     news: Optional[Iterable[Dict[str, Any]]], include_discussion: bool = True
 ) -> str:
-    """Format Hacker News context for system or agent prompts."""
+    """Format Hacker News context for system prompts."""
 
     if not news:
         return "- sin datos por ahora"
@@ -4080,10 +4134,12 @@ def build_ai_messages(
         )
 
     # Get user info and context
-    first_name = message["from"]["first_name"]
-    username = message["from"].get("username", "")
-    chat_type = message["chat"]["type"]
-    chat_title = message["chat"].get("title", "") if chat_type != "private" else ""
+    sender = cast(Mapping[str, Any], message.get("from", {}))
+    chat = cast(Mapping[str, Any], message.get("chat", {}))
+    first_name = str(sender.get("first_name") or "Usuario")
+    username = str(sender.get("username") or "")
+    chat_type = str(chat.get("type") or "private")
+    chat_title = str(chat.get("title") or "") if chat_type != "private" else ""
     current_time = datetime.now(BA_TZ)
 
     # Build context sections
@@ -4139,7 +4195,6 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
     return _build_command_registry(
         {
             "ask_ai": ask_ai,
-            "show_agent_thoughts": show_agent_thoughts,
             "config_command": _noop_command,
             "convert_base": convert_base,
             "select_random": select_random,
@@ -4167,14 +4222,6 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
 
 def truncate_text(text: Optional[str], max_length: int = 512) -> str:
     return _state_truncate_text(text, max_length)
-
-
-configure_agent_memory(
-    redis_factory=config_redis,
-    admin_reporter=admin_report,
-    truncate_text=truncate_text,
-    tz=BA_TZ,
-)
 
 
 def save_message_to_redis(
@@ -4500,24 +4547,57 @@ def _extract_response_text(response: Any) -> Optional[str]:
     return None
 
 
-def describe_image_groq(
+def measure_audio_duration_seconds(audio_data: bytes) -> Optional[float]:
+    """Measure audio duration from file bytes, returning None when it cannot be determined."""
+
+    if not audio_data:
+        return None
+
+    try:
+        parsed = MutagenFile(io.BytesIO(audio_data))
+        info = getattr(parsed, "info", None)
+        length = getattr(info, "length", None)
+        if isinstance(length, (int, float)) and length > 0:
+            return float(length)
+    except Exception:
+        pass
+
+    try:
+        with wave.open(io.BytesIO(audio_data), "rb") as wav_file:
+            frame_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            if frame_rate > 0 and frame_count > 0:
+                return float(frame_count) / float(frame_rate)
+    except Exception:
+        pass
+
+    return None
+
+
+def _describe_image_groq_result(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
-) -> Optional[str]:
+) -> Optional[GroqUsageResult]:
     """Describe image using Groq vision models."""
 
     if file_id and use_cache:
         cached = get_cached_description(file_id)
         if cached:
-            return str(cached)
+            return GroqUsageResult(
+                kind="vision",
+                text=str(cached),
+                model=GROQ_VISION_MODEL,
+                cached=True,
+                metadata={"file_id": file_id, "cache_hit": True},
+            )
 
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
 
-    def _attempt() -> Optional[str]:
+    def _attempt() -> Optional[GroqUsageResult]:
         groq_client = _get_groq_client()
         if groq_client is None:
             return None
@@ -4538,14 +4618,21 @@ def describe_image_groq(
         response = groq_client.responses.create(
             model=GROQ_VISION_MODEL,
             input=input_payload,
-            max_output_tokens=512,
+            max_output_tokens=VISION_OUTPUT_TOKEN_LIMIT,
         )
         description = _extract_response_text(response)
         if description:
             print(f"Image description successful: {description[:100]}...")
-        return description
+            return _build_groq_usage_result(
+                kind="vision",
+                text=description,
+                model=GROQ_VISION_MODEL,
+                response=response,
+                metadata={"file_id": file_id, "cache_hit": False},
+            )
+        return None
 
-    description = _invoke_provider(
+    result = _invoke_provider(
         "groq",
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
@@ -4553,26 +4640,49 @@ def describe_image_groq(
         rate_limit_scope="vision",
     )
 
-    if description and file_id:
-        cache_description(file_id, description)
+    if result and result.text and file_id:
+        cache_description(file_id, result.text)
 
-    return description
+    return result
 
 
-def transcribe_audio_groq(
-    audio_data: bytes,
+def describe_image_groq(
+    image_data: bytes,
+    user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
 ) -> Optional[str]:
+    result = _describe_image_groq_result(
+        image_data,
+        user_text,
+        file_id,
+        use_cache=use_cache,
+    )
+    if result:
+        return result.text
+    return None
+
+def _transcribe_audio_groq_result(
+    audio_data: bytes,
+    file_id: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+) -> Optional[GroqUsageResult]:
     """Transcribe audio using Groq Whisper."""
 
     if file_id and use_cache:
         cached = get_cached_transcription(file_id)
         if cached:
-            return str(cached)
+            return GroqUsageResult(
+                kind="transcribe",
+                text=str(cached),
+                model=GROQ_TRANSCRIBE_MODEL,
+                cached=True,
+                metadata={"file_id": file_id, "cache_hit": True},
+            )
 
-    def _attempt() -> Optional[str]:
+    def _attempt() -> Optional[GroqUsageResult]:
         groq_client = _get_groq_client()
         if groq_client is None:
             return None
@@ -4590,9 +4700,16 @@ def transcribe_audio_groq(
             transcription = getattr(response, "text", None)
         if transcription:
             print(f"Audio transcribed successfully: {transcription[:100]}...")
-        return transcription
+            return _build_groq_usage_result(
+                kind="transcribe",
+                text=str(transcription),
+                model=GROQ_TRANSCRIBE_MODEL,
+                response=response,
+                metadata={"file_id": file_id, "cache_hit": False},
+            )
+        return None
 
-    transcription = _invoke_provider(
+    result = _invoke_provider(
         "groq",
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
@@ -4600,10 +4717,26 @@ def transcribe_audio_groq(
         rate_limit_scope="transcribe",
     )
 
-    if transcription and file_id:
-        cache_transcription(file_id, transcription)
+    if result and result.text and file_id:
+        cache_transcription(file_id, result.text)
 
-    return transcription
+    return result
+
+
+def transcribe_audio_groq(
+    audio_data: bytes,
+    file_id: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+) -> Optional[str]:
+    result = _transcribe_audio_groq_result(
+        audio_data,
+        file_id,
+        use_cache=use_cache,
+    )
+    if result:
+        return result.text
+    return None
 
 
 def _process_media_with_cache(
@@ -4611,35 +4744,37 @@ def _process_media_with_cache(
     file_id: str,
     use_cache: bool,
     cache_lookup: Optional[Callable[[str], Optional[str]]],
-    processor: Callable[[bytes], Optional[str]],
+    processor: Callable[[bytes], Optional[GroqUsageResult]],
     downloader: Optional[Callable[[str], Optional[bytes]]] = None,
     failure_code: str,
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Shared helper for cached Telegram media download + processing."""
 
     try:
         if use_cache and cache_lookup:
             cached_value = cache_lookup(file_id)
             if cached_value:
-                return str(cached_value), None
+                return str(cached_value), None, None
 
         media_fetcher = downloader or download_telegram_file
         media_bytes = media_fetcher(file_id)
         if not media_bytes:
-            return None, "download"
+            return None, "download", None
 
         result = processor(media_bytes)
         if result:
-            return result, None
-        return None, failure_code
+            if not result.audio_seconds and result.kind == "transcribe":
+                result.audio_seconds = measure_audio_duration_seconds(media_bytes)
+            return result.text, None, result.billing_segment()
+        return None, failure_code, None
     except Exception as error:
         print(f"Error processing media {file_id}: {error}")
-        return None, failure_code
+        return None, failure_code, None
 
 
 def transcribe_file_by_id(
     file_id: str, use_cache: bool = True
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Fetch transcription for a Telegram file_id with cache and retries.
 
     Returns (text, error):
@@ -4647,20 +4782,36 @@ def transcribe_file_by_id(
     - If download failed: (None, "download")
     - If transcription failed: (None, "transcribe")
     """
-    return _process_media_with_cache(
-        file_id=file_id,
-        use_cache=use_cache,
-        cache_lookup=get_cached_transcription,
-        processor=lambda media: transcribe_audio_groq(
-            media, file_id, use_cache=use_cache
-        ),
-        failure_code="transcribe",
-    )
+    try:
+        if use_cache:
+            cached_value = get_cached_transcription(file_id)
+            if cached_value:
+                return str(cached_value), None, None
+
+        media_bytes = download_telegram_file(file_id)
+        if not media_bytes:
+            return None, "download", None
+
+        duration_seconds = measure_audio_duration_seconds(media_bytes)
+        if duration_seconds is None:
+            return None, "duration", None
+
+        result = _transcribe_audio_groq_result(
+            media_bytes, file_id, use_cache=use_cache
+        )
+        if result:
+            if not result.audio_seconds:
+                result.audio_seconds = duration_seconds
+            return result.text, None, result.billing_segment()
+        return None, "transcribe", None
+    except Exception as error:
+        print(f"Error processing media {file_id}: {error}")
+        return None, "transcribe", None
 
 
 def describe_media_by_id(
     file_id: str, prompt: str
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Fetch description for an image/sticker by Telegram file_id using Groq vision.
 
     Returns (description, error):
@@ -4668,9 +4819,9 @@ def describe_media_by_id(
     - If download failed: (None, "download")
     - If description failed: (None, "describe")
     """
-    def _processor(media: bytes) -> Optional[str]:
+    def _processor(media: bytes) -> Optional[GroqUsageResult]:
         resized = resize_image_if_needed(media)
-        return describe_image_groq(resized, prompt, file_id)
+        return _describe_image_groq_result(resized, prompt, file_id)
 
     return _process_media_with_cache(
         file_id=file_id,
@@ -5254,6 +5405,7 @@ def handle_msg(message: Dict) -> str:
             maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
             format_balance_command=_message_handler_format_balance_command,
             handle_transcribe_with_message=handle_transcribe_with_message,
+            handle_transcribe_with_message_result=handle_transcribe_with_message_result,
             check_global_rate_limit=check_global_rate_limit,
             handle_rate_limit=handle_rate_limit,
             handle_successful_payment_message=handle_successful_payment_message,
@@ -5262,9 +5414,12 @@ def handle_msg(message: Dict) -> str:
             is_chat_admin=is_chat_admin,
             report_unauthorized_config_attempt=_report_unauthorized_config_attempt,
             handle_transcribe=handle_transcribe,
+            estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+            estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
             _transcribe_audio_file=_transcribe_audio_file,
             _transcription_error_message=_transcription_error_message,
             download_telegram_file=download_telegram_file,
+            measure_audio_duration_seconds=measure_audio_duration_seconds,
             resize_image_if_needed=resize_image_if_needed,
             encode_image_to_base64=encode_image_to_base64,
         ),
@@ -5408,16 +5563,6 @@ def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
     if _arg_is_true(args, "update_dollars"):
         get_dollar_rates()
         return "dólares actualizados", 200
-
-    if _arg_is_true(args, "run_agent"):
-        try:
-            # Operational exception: autonomous run does not bill user/group AI credits.
-            thought_result = run_agent_cycle()
-            payload = json.dumps({"status": "ok", "thought": thought_result}, ensure_ascii=False)
-            return payload, 200
-        except Exception as agent_error:
-            admin_report("falló ejecución del agente", agent_error)
-            return "el agente se hizo mierda", 500
 
     return None
 

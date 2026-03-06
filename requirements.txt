@@ -9,3 +9,4 @@ ddgs>=9.10.0
 openpyxl>=3.1.5
 pykakasi>=2.3.0
 psycopg[binary]>=3.2.9
+mutagen>=1.47.0

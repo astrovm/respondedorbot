@@ -6,7 +6,6 @@ def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
         "code_interpreter",
         "visit_website",
         "browser_automation",
-        "wolfram_alpha",
     ]
 
 
@@ -55,6 +54,51 @@ def test_build_ai_messages_includes_reply_context():
     assert "respuesta" in content
 
 
+def test_extract_groq_executed_tools_reads_choice_message():
+    from api.index import _extract_groq_executed_tools
+
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "executed_tools": [
+                        {"type": "search", "mode": "advanced"},
+                        {"type": "visit", "count": 1},
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert _extract_groq_executed_tools(response) == [
+        {"type": "search", "mode": "advanced"},
+        {"type": "visit", "count": 1},
+    ]
+
+
+def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkeypatch):
+    from api.index import estimate_ai_base_reserve_credits
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.should_use_groq_compound_tools", lambda: True)
+    monkeypatch.setattr(
+        "api.index.get_groq_compound_enabled_tools",
+        lambda: ["web_search", "visit_website", "code_interpreter", "browser_automation"],
+    )
+
+    reserve, metadata = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
+    )
+
+    assert reserve == 3
+    assert metadata["reserve_mode"] == "compound"
+    assert metadata["reserve_reason"] == "forced_web_search"
+    assert metadata["reserve_model"] == "groq/compound"
+
+
 def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
@@ -65,18 +109,13 @@ def test_ask_ai_with_provider_success():
         "api.index.get_hacker_news_context"
     ) as mock_get_hn_context, patch(
         "api.index.get_time_context"
-    ) as mock_get_time_context, patch(
-        "api.index.get_agent_memory_context"
-    ) as mock_get_memory, patch(
-        "os.environ.get"
-    ) as mock_env:
+    ) as mock_get_time_context, patch("os.environ.get") as mock_env:
 
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
-        mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
@@ -97,18 +136,13 @@ def test_ask_ai_with_all_failures():
         "api.index.get_hacker_news_context"
     ) as mock_get_hn_context, patch(
         "api.index.get_time_context"
-    ) as mock_get_time_context, patch(
-        "api.index.get_agent_memory_context"
-    ) as mock_get_memory, patch(
-        "os.environ.get"
-    ) as mock_env:
+    ) as mock_get_time_context, patch("os.environ.get") as mock_env:
 
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
-        mock_get_memory.return_value = None
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
         messages = [{"role": "user", "content": "hello"}]
@@ -127,11 +161,7 @@ def test_ask_ai_with_image():
         "api.index.get_weather_context"
     ) as mock_get_weather_context, patch(
         "api.index.get_time_context"
-    ) as mock_get_time_context, patch(
-        "api.index.get_agent_memory_context"
-    ) as mock_get_memory, patch(
-        "api.index.describe_image_groq"
-    ) as mock_describe_image, patch(
+    ) as mock_get_time_context, patch("api.index.describe_image_groq") as mock_describe_image, patch(
         "os.environ.get"
     ) as mock_env:
 
@@ -139,7 +169,6 @@ def test_ask_ai_with_image():
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
-        mock_get_memory.return_value = None
         mock_describe_image.return_value = "A beautiful landscape"
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
@@ -174,8 +203,7 @@ def test_ask_ai_forced_search_uses_message_section():
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
         "api.index.get_time_context", return_value={}
-    ), patch("api.index.get_agent_memory_context", return_value=None), patch(
-        "api.index.build_system_message",
+    ), patch("api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
         "api.index._run_forced_web_search", return_value="ok"
@@ -200,9 +228,7 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
         "api.index.get_time_context", return_value={}
-    ), patch("api.index.get_agent_memory_context", return_value=None
-    ), patch(
-        "api.index.build_system_message",
+    ), patch("api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
         "api.index.OpenAI"
@@ -236,9 +262,7 @@ def test_ask_ai_handles_repeated_tool_calls():
         "api.index.get_weather_context", return_value={}
     ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
         "api.index.get_time_context", return_value={}
-    ), patch("api.index.get_agent_memory_context", return_value=None
-    ), patch(
-        "api.index.build_system_message",
+    ), patch("api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
         "api.index.OpenAI"
@@ -791,7 +815,6 @@ def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
         "code_interpreter",
         "visit_website",
         "browser_automation",
-        "wolfram_alpha",
     ]
 
 

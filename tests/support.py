@@ -15,7 +15,6 @@ from flask import Flask, request
 
 from api import config as config_module
 from api import index
-from api.agent import AGENT_THOUGHT_CHAR_LIMIT, AGENT_THOUGHT_DISPLAY_LIMIT
 from api.ai_pipeline import remove_gordo_prefix
 from api.chat_settings import (
     CHAT_ADMIN_STATUS_TTL,
@@ -66,13 +65,6 @@ handle_callback_query = index.handle_callback_query
 ensure_callback_updates_enabled = index.ensure_callback_updates_enabled
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE
 get_rulo = index.get_rulo
-is_repetitive_thought = index.is_repetitive_thought
-find_repetitive_recent_thought = index.find_repetitive_recent_thought
-build_agent_retry_prompt = index.build_agent_retry_prompt
-build_agent_fallback_entry = index.build_agent_fallback_entry
-summarize_recent_agent_topics = index.summarize_recent_agent_topics
-agent_sections_are_valid = index.agent_sections_are_valid
-get_agent_retry_hint = index.get_agent_retry_hint
 should_force_web_search = index.should_force_web_search
 should_search_previous_query = index.should_search_previous_query
 should_use_groq_compound_tools = index.should_use_groq_compound_tools
