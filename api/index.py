@@ -1909,7 +1909,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
         if audio_file_id:
             text, error_code = _transcribe_audio_file(audio_file_id, use_cache=True)
             if text:
-                return f"🎵 Transcripción: {text}"
+                return f"🎵 te saqué esto del audio: {text}"
             error_message = _transcription_error_message(error_code)
             if error_message:
                 return error_message
@@ -1950,7 +1950,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     and media
                     else None,
                     prompt="Describe what you see in this image in detail.",
-                    success_prefix="🖼️ Descripción: ",
+                    success_prefix="🖼️ en la imagen veo: ",
                     download_error="no pude bajar la imagen, mandala de nuevo",
                     describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
                 )
@@ -1966,7 +1966,7 @@ def handle_transcribe_with_message(message: Dict) -> str:
                     if isinstance(media, Mapping)
                     else None,
                     prompt="Describe what you see in this sticker in detail.",
-                    success_prefix="🎨 Descripción del sticker: ",
+                    success_prefix="🎨 en el sticker veo: ",
                     download_error="no pude bajar el sticker, mandalo de nuevo",
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
@@ -4852,7 +4852,7 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
         if callback_id:
             _answer_callback_query(
                 callback_id,
-                text="el cobro IA no está configurado, avisale al admin.",
+                text="el cobro de ia está hecho pelota, avisale al admin",
                 show_alert=True,
             )
         return
@@ -4861,7 +4861,7 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
         if callback_id:
             _answer_callback_query(
                 callback_id,
-                text="recargá por privado, pa",
+                text="cargá por privado, maestro",
                 show_alert=True,
             )
         return
@@ -4872,7 +4872,7 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
         if callback_id:
             _answer_callback_query(
                 callback_id,
-                text="ese pack no existe",
+                text="ese pack es fruta, elegí otro",
                 show_alert=True,
             )
         return
@@ -4887,11 +4887,11 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
     sent_ok = _send_stars_invoice(chat_id=str(chat_id), user_id=user_id, pack=pack)
     if callback_id:
         if sent_ok:
-            _answer_callback_query(callback_id, text="factura lista ✅")
+            _answer_callback_query(callback_id, text="listo, te dejé la factura")
         else:
             _answer_callback_query(
                 callback_id,
-                text="no pude generar la factura",
+                text="no pude armar la factura, probá de nuevo",
                 show_alert=True,
             )
 
@@ -4923,7 +4923,7 @@ def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
         _answer_pre_checkout_query(
             str(query_id),
             ok=False,
-            error_message="el cobro IA no está configurado, avisale al admin.",
+            error_message="el cobro de ia está hecho pelota, avisale al admin",
         )
         return
 
@@ -4939,7 +4939,7 @@ def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
         _answer_pre_checkout_query(
             str(query_id),
             ok=False,
-            error_message="usuario inválido para cobrar",
+            error_message="tu usuario vino medio roto para cobrar",
         )
         return
 
@@ -4957,7 +4957,7 @@ def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
         _answer_pre_checkout_query(
             str(query_id),
             ok=False,
-            error_message="no pude validar ese pago, intentá de nuevo",
+            error_message="ese pago vino raro y no te lo pude validar",
         )
         return
 
@@ -5086,7 +5086,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     is_config_callback = str(callback_data).startswith("cfg:")
     if is_config_callback and _is_group_chat_type(chat_type):
         if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
-            denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+            denial_message = "solo los admins pueden tocar esta config, maestro"
             if callback_id:
                 _answer_callback_query(callback_id)
             send_msg(chat_id_str, denial_message, str(message_id))
@@ -5355,14 +5355,18 @@ def _arg_is_true(args: Mapping[str, Any], key: str) -> bool:
 def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
     if _arg_is_true(args, "check_webhook"):
         webhook_verified = verify_webhook()
-        return ("webhook verificado", 200) if webhook_verified else ("error verificando webhook", 400)
+        return (
+            ("webhook joya", 200)
+            if webhook_verified
+            else ("el webhook está hecho pelota", 400)
+        )
 
     if _arg_is_true(args, "update_webhook"):
         function_url = environ.get("FUNCTION_URL")
         if not function_url:
-            return "error actualizando webhook", 400
+            return "no pude acomodar el webhook", 400
         updated = set_telegram_webhook(function_url)
-        return ("webhook actualizado", 200) if updated else ("error actualizando webhook", 400)
+        return ("webhook acomodado", 200) if updated else ("no pude acomodar el webhook", 400)
 
     return None
 
@@ -5380,7 +5384,7 @@ def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
             return payload, 200
         except Exception as agent_error:
             admin_report("falló ejecución del agente", agent_error)
-            return "falló la ejecución del agente", 500
+            return "el agente se hizo mierda", 500
 
     return None
 

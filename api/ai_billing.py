@@ -316,9 +316,9 @@ class AIMessageBilling:
         if not text:
             return False
         success_prefixes = (
-            "🎵 Transcripción: ",
-            "🖼️ Descripción: ",
-            "🎨 Descripción del sticker: ",
+            "🎵 te saqué esto del audio: ",
+            "🖼️ en la imagen veo: ",
+            "🎨 en el sticker veo: ",
         )
         return text.startswith(success_prefixes)
 

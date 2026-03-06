@@ -23,7 +23,7 @@ def test_responder_valid_key_with_webhook_check():
         mock_env.return_value = "valid_key"
         mock_verify.return_value = True
         response = responder()
-        assert response == ("webhook verificado", 200)
+        assert response == ("webhook joya", 200)
 
 
 def test_responder_valid_key_with_webhook_update():
@@ -36,7 +36,7 @@ def test_responder_valid_key_with_webhook_update():
         }.get(key, default)
         mock_set.return_value = True
         response = responder()
-        assert response == ("webhook actualizado", 200)
+        assert response == ("webhook acomodado", 200)
 
 
 def test_responder_valid_key_with_valid_message():
@@ -92,7 +92,7 @@ def test_process_request_parameters():
             mock_verify.return_value = True
             response, status = process_request_parameters(request)
             assert status == 200
-            assert "webhook verificado" in response
+            assert "webhook joya" in response
 
     with app.test_request_context("/?update_webhook=true"):
         with patch("api.index.set_telegram_webhook") as mock_set, patch(
@@ -102,7 +102,7 @@ def test_process_request_parameters():
             mock_env.return_value = "https://example.com/webhook"  # Mock FUNCTION_URL
             response, status = process_request_parameters(request)
             assert status == 200
-            assert "webhook actualizado" in response
+            assert "webhook acomodado" in response
 
     with app.test_request_context("/?run_agent=true"):
         with patch("api.index.run_agent_cycle") as mock_run_agent, patch(

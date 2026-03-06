@@ -603,7 +603,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
 
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_rate_limit.return_value = True
-        mock_handle_transcribe.return_value = "🎵 Transcripción: todo piola"
+        mock_handle_transcribe.return_value = "🎵 te saqué esto del audio: todo piola"
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -999,7 +999,7 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
         "api.index.handle_transcribe_with_message",
-        return_value="🖼️ Descripción: todo piola",
+        return_value="🖼️ en la imagen veo: todo piola",
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
