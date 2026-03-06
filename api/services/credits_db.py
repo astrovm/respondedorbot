@@ -14,6 +14,10 @@ ScopeType = Literal["user", "chat"]
 _SCHEMA_LOCK = Lock()
 _SCHEMA_READY = False
 
+ONBOARDING_MAX_GRANTS_PER_HOUR = 4
+ONBOARDING_MAX_GRANTS_PER_DAY = 16
+ONBOARDING_GRANTS_ADVISORY_LOCK_KEY = 48_610_001
+
 
 class CreditsDBError(RuntimeError):
     """Raised when credits persistence cannot be completed."""
@@ -195,6 +199,46 @@ def _set_balance(cur: Any, scope_type: ScopeType, scope_id: int, balance: int) -
     )
 
 
+def _get_recent_onboarding_grant_counts(cur: Any) -> Tuple[int, int]:
+    """Return onboarding grant counts for the last hour and day."""
+
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE granted_at >= NOW() - INTERVAL '1 hour') AS hourly_count,
+            COUNT(*) FILTER (WHERE granted_at >= NOW() - INTERVAL '1 day') AS daily_count
+        FROM onboarding_grants
+        """
+    )
+    row = cur.fetchone()
+    if not row:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def _should_deny_onboarding_grant(hourly_count: int, daily_count: int) -> bool:
+    """Return whether onboarding should be denied due to recent overflow."""
+
+    return (
+        hourly_count >= ONBOARDING_MAX_GRANTS_PER_HOUR
+        or daily_count >= ONBOARDING_MAX_GRANTS_PER_DAY
+    )
+
+
+def _has_existing_onboarding_grant(cur: Any, user_id: int) -> bool:
+    """Return whether the user already received onboarding credits."""
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM onboarding_grants
+        WHERE user_id = %s
+        """,
+        (int(user_id),),
+    )
+    return cur.fetchone() is not None
+
+
 def get_balance(scope_type: ScopeType, scope_id: int) -> int:
     """Return the current account balance."""
 
@@ -225,6 +269,48 @@ def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (ONBOARDING_GRANTS_ADVISORY_LOCK_KEY,),
+            )
+            user_balance = _get_balance_for_update(cur, "user", user_id)
+            if _has_existing_onboarding_grant(cur, user_id):
+                conn.commit()
+                return False, int(user_balance)
+
+            hourly_count, daily_count = _get_recent_onboarding_grant_counts(cur)
+
+            if _should_deny_onboarding_grant(hourly_count, daily_count):
+                cur.execute(
+                    """
+                    INSERT INTO credit_ledger (
+                        event_type,
+                        actor_user_id,
+                        user_id,
+                        amount,
+                        metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        "onboarding_denied_overflow",
+                        int(user_id),
+                        int(user_id),
+                        0,
+                        json.dumps(
+                            {
+                                "credits": int(credits),
+                                "hourly_count": int(hourly_count),
+                                "daily_count": int(daily_count),
+                                "hourly_limit": ONBOARDING_MAX_GRANTS_PER_HOUR,
+                                "daily_limit": ONBOARDING_MAX_GRANTS_PER_DAY,
+                            }
+                        ),
+                    ),
+                )
+                conn.commit()
+                return False, int(user_balance)
+
+            cur.execute(
                 """
                 INSERT INTO onboarding_grants (user_id, credits)
                 VALUES (%s, %s)
@@ -235,7 +321,6 @@ def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
             )
             granted = cur.fetchone() is not None
 
-            user_balance = _get_balance_for_update(cur, "user", user_id)
             if granted:
                 user_balance += int(credits)
                 _set_balance(cur, "user", user_id, user_balance)
