@@ -4162,7 +4162,7 @@ def _get_groq_ai_response_result(
         response = groq_client.chat.completions.create(
             model="moonshotai/kimi-k2-instruct-0905",
             messages=cast(Any, [system_msg] + messages),
-            max_tokens=1024,
+            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         )
 
         if response and hasattr(response, "choices") and response.choices:
@@ -4240,7 +4240,7 @@ def _get_groq_compound_response_result(
         response = groq_client.chat.completions.create(
             model=model,
             messages=cast(Any, payload_messages),
-            max_tokens=1024,
+            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
             extra_body={
                 "compound_custom": {
                     "tools": {"enabled_tools": enabled_tools},
