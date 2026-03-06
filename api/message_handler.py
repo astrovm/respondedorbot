@@ -54,7 +54,7 @@ class MessageHandlerDeps:
     format_balance_command: Callable[..., str]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
     handle_transcribe_with_message_result: Callable[[Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]]
-    check_global_rate_limit: Callable[[Any], bool]
+    check_global_rate_limit: Callable[..., bool]
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
     handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
@@ -64,6 +64,7 @@ class MessageHandlerDeps:
     handle_transcribe: Callable[[], str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
+    estimate_image_context_rate_limit_tokens: Callable[[bytes, str], int]
     _transcribe_audio_file: Callable[..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]]
     _transcription_error_message: Callable[..., Optional[str]]
     download_telegram_file: Callable[[str], Optional[bytes]]
@@ -118,6 +119,7 @@ def _prepare_message_content(
     auto_process_media: bool,
     deps: MessageHandlerDeps,
     billing_helper: AIMessageBilling,
+    redis_client: Any,
 ) -> PreparedMessage:
     message_text, photo_file_id, audio_file_id = deps.extract_message_content(message)
     audio_duration_seconds = 0.0
@@ -146,6 +148,19 @@ def _prepare_message_content(
                 early_response="ok",
             )
         audio_duration_seconds = resolved_audio_duration
+        if not deps.check_global_rate_limit(
+            redis_client,
+            scope="transcribe",
+            audio_seconds=audio_duration_seconds,
+        ):
+            rate_limited_chat_id = str(cast(Mapping[str, Any], message.get("chat") or {}).get("id") or "")
+            return PreparedMessage(
+                message_text=message_text,
+                photo_file_id=photo_file_id,
+                audio_file_id=audio_file_id,
+                audio_duration_seconds=audio_duration_seconds,
+                early_response=deps.handle_rate_limit(rate_limited_chat_id, message),
+            )
         reserved_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
         media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
             "auto_audio_media",
@@ -188,7 +203,6 @@ def _prepare_message_content(
         image_data = deps.download_telegram_file(photo_file_id)
         if image_data:
             resized_image_data = deps.resize_image_if_needed(image_data)
-            deps.encode_image_to_base64(resized_image_data)
             if not message_text:
                 message_text = "que onda con esta foto"
         elif not message_text:
@@ -362,9 +376,6 @@ def _run_ai_flow(
     handler_func: Callable[..., str],
     redis_client: Any,
 ) -> Tuple[str, bool]:
-    if not deps.check_global_rate_limit(redis_client):
-        return deps.handle_rate_limit(chat_id, message), False
-
     chat_history = deps.get_chat_history(chat_id, redis_client)
     ai_messages = deps.build_ai_messages(
         message,
@@ -381,6 +392,12 @@ def _run_ai_flow(
             else 0
         ),
     )
+    if not deps.check_global_rate_limit(
+        redis_client,
+        scope=str(reserve_meta.get("rate_limit_scope") or "chat"),
+        token_count=int(reserve_meta.get("estimated_rate_limit_tokens") or 0),
+    ):
+        return deps.handle_rate_limit(chat_id, message), False
     base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
         "ai_response_base",
         main_reserve_credits,
@@ -394,11 +411,24 @@ def _run_ai_flow(
 
     media_charge_meta: Optional[Dict[str, Any]] = None
     if prepared_message.resized_image_data and prepared_message.photo_file_id:
+        image_prompt = "Describe what you see in this image in detail."
+        if not deps.check_global_rate_limit(
+            redis_client,
+            scope="vision",
+            token_count=deps.estimate_image_context_rate_limit_tokens(
+                prepared_message.resized_image_data,
+                image_prompt,
+            ),
+        ):
+            billing_helper.refund_reserved_ai_credits(
+                base_charge_meta, reason="image_context_local_rate_limit"
+            )
+            return deps.handle_rate_limit(chat_id, message), False
         media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
             "image_context_media",
             deps.estimate_image_context_reserve_credits(
                 prepared_message.resized_image_data,
-                "Describe what you see in this image in detail.",
+                image_prompt,
             ),
             metadata={"photo_file_id": prepared_message.photo_file_id},
         )
@@ -620,6 +650,8 @@ def _handle_non_ai_command(
     commands: Mapping[str, CommandTuple],
     sanitized_message_text: str,
     message: Dict[str, Any],
+    chat_id: str,
+    redis_client: Any,
     billing_helper: AIMessageBilling,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
     if command not in commands:
@@ -647,6 +679,12 @@ def _handle_non_ai_command(
             )
             if audio_duration_seconds is None:
                 return "ok", None, False, None
+            if not deps.check_global_rate_limit(
+                redis_client,
+                scope="transcribe",
+                audio_seconds=audio_duration_seconds,
+            ):
+                return deps.handle_rate_limit(chat_id, message), None, False, command
             reserve_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
         else:
             replied_photo_file_id = deps.extract_message_content(message)[1]
@@ -656,8 +694,18 @@ def _handle_non_ai_command(
                 else None
             )
             if isinstance(replied_image_data, (bytes, bytearray)) and replied_image_data:
+                resized_image = deps.resize_image_if_needed(bytes(replied_image_data))
+                if not deps.check_global_rate_limit(
+                    redis_client,
+                    scope="vision",
+                    token_count=deps.estimate_image_context_rate_limit_tokens(
+                        resized_image,
+                        "Describe what you see in this image in detail.",
+                    ),
+                ):
+                    return deps.handle_rate_limit(chat_id, message), None, False, command
                 reserve_credits = deps.estimate_image_context_reserve_credits(
-                    deps.resize_image_if_needed(bytes(replied_image_data)),
+                    resized_image,
                     "Describe what you see in this image in detail.",
                 )
             else:
@@ -783,6 +831,8 @@ def _handle_known_command(
             commands=commands,
             sanitized_message_text=sanitized_message_text,
             message=message,
+            chat_id=chat_id,
+            redis_client=redis_client,
             billing_helper=billing_helper,
         )
         return response_msg, response_markup, False, response_command
@@ -849,9 +899,12 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             auto_process_media=auto_process_media,
             deps=deps,
             billing_helper=billing_helper,
+            redis_client=redis_client,
         )
         if prepared_message.early_response:
-            return prepared_message.early_response
+            if prepared_message.early_response != "ok":
+                deps.send_msg(chat_id, prepared_message.early_response, message_id)
+            return "ok"
 
         if _handle_link_replacement(
             deps,

@@ -17,6 +17,7 @@ class _FakeCursor:
         self.insert_granted = insert_granted
         self.has_existing_grant = has_existing_grant
         self.balance = 0
+        self.chat_balance = 0
         self.fetchone_result = None
         self.executed = []
 
@@ -39,7 +40,10 @@ class _FakeCursor:
             return
 
         if "SELECT balance" in normalized and "FOR UPDATE" in normalized:
-            self.fetchone_result = (self.balance,)
+            if params and params[0] == "chat":
+                self.fetchone_result = (self.chat_balance,)
+            else:
+                self.fetchone_result = (self.balance,)
             return
 
         if "FROM onboarding_grants" in normalized and "WHERE user_id = %s" in normalized:
@@ -47,7 +51,10 @@ class _FakeCursor:
             return
 
         if "UPDATE credit_accounts" in normalized and params is not None:
-            self.balance = int(params[0])
+            if params[1] == "chat":
+                self.chat_balance = int(params[0])
+            else:
+                self.balance = int(params[0])
 
         self.fetchone_result = None
 
@@ -158,4 +165,24 @@ def test_grant_onboarding_if_needed_skips_overflow_logic_for_existing_users():
     assert not any(
         "onboarding_denied_overflow" in str(params)
         for _query, params in fake_cursor.executed
+    )
+
+
+def test_apply_ai_debt_allows_negative_user_balance():
+    fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    fake_cursor.balance = 1
+    fake_connection = _FakeConnection(fake_cursor)
+
+    with patch("api.services.credits_db.ensure_schema"), patch(
+        "api.services.credits_db.connect", return_value=fake_connection
+    ):
+        balances = credits_db.apply_ai_debt(42, None, 3, "user")
+
+    assert balances == {"user_balance": -2, "chat_balance": 0}
+    assert any(
+        "INSERT INTO credit_ledger" in query
+        and params is not None
+        and params[0] == "ai_settlement_debt"
+        and params[4] == -3
+        for query, params in fake_cursor.executed
     )

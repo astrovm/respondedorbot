@@ -1,6 +1,7 @@
 from contextvars import ContextVar, Token
 from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone, date
+from email.utils import parsedate_to_datetime
 from flask import Flask, Request, request
 from html.parser import HTMLParser
 from html import unescape
@@ -96,6 +97,7 @@ from api.groq_billing import (
     VISION_OUTPUT_TOKEN_LIMIT,
     estimate_chat_reserve_credits,
     estimate_compound_reserve_credits,
+    estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
     ensure_mapping_list,
@@ -507,7 +509,7 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
     return _links_replace_links(text, embed_checker=can_embed_url)
 
 # Provider backoff windows (seconds)
-GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # wait 10 minutes after a rate limit response
+GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # fallback when Groq does not expose reset headers
 
 
 _provider_backoff_until: Dict[str, float] = {}
@@ -569,13 +571,35 @@ HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
 HACKER_NEWS_MAX_ITEMS = 5
 
 TTL_RATE_GROQ_MINUTE = 120
+TTL_RATE_GROQ_HOUR = 2 * 60 * 60
 TTL_RATE_GROQ_DAY = 2 * 24 * 60 * 60
 
 GROQ_RATE_LIMITS = {
-    "chat": {"rpm": 1000, "rpd": 500_000, "model": "moonshotai/kimi-k2-instruct-0905"},
-    "compound": {"rpm": 200, "rpd": 20_000, "model": GROQ_COMPOUND_DEFAULT_MODEL},
-    "vision": {"rpm": 1000, "rpd": 500_000, "model": GROQ_VISION_MODEL},
-    "transcribe": {"rpm": 400, "rpd": 200_000, "model": GROQ_TRANSCRIBE_MODEL},
+    "chat": {
+        "rpm": 1000,
+        "rpd": 500_000,
+        "tpm": 250_000,
+        "model": "moonshotai/kimi-k2-instruct-0905",
+    },
+    "compound": {
+        "rpm": 200,
+        "rpd": 20_000,
+        "tpm": 200_000,
+        "model": GROQ_COMPOUND_DEFAULT_MODEL,
+    },
+    "vision": {
+        "rpm": 1000,
+        "rpd": 500_000,
+        "tpm": 300_000,
+        "model": GROQ_VISION_MODEL,
+    },
+    "transcribe": {
+        "rpm": 400,
+        "rpd": 200_000,
+        "ash": 400_000,
+        "asd": 4_000_000,
+        "model": GROQ_TRANSCRIBE_MODEL,
+    },
 }
 
 
@@ -587,6 +611,33 @@ def _groq_rate_limit_minute_key(scope: str, bucket: Optional[int] = None) -> str
 def _groq_rate_limit_day_key(scope: str, day_bucket: Optional[str] = None) -> str:
     utc_day = day_bucket or datetime.now(timezone.utc).strftime("%Y%m%d")
     return f"rate_limit:groq:{scope}:day:{utc_day}"
+
+
+def _groq_rate_limit_metric_minute_key(
+    scope: str,
+    metric: str,
+    bucket: Optional[int] = None,
+) -> str:
+    minute_bucket = int(bucket if bucket is not None else time.time() // 60)
+    return f"rate_limit:groq:{scope}:{metric}:minute:{minute_bucket}"
+
+
+def _groq_rate_limit_metric_hour_key(
+    scope: str,
+    metric: str,
+    bucket: Optional[int] = None,
+) -> str:
+    hour_bucket = int(bucket if bucket is not None else time.time() // 3600)
+    return f"rate_limit:groq:{scope}:{metric}:hour:{hour_bucket}"
+
+
+def _groq_rate_limit_metric_day_key(
+    scope: str,
+    metric: str,
+    day_bucket: Optional[str] = None,
+) -> str:
+    utc_day = day_bucket or datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"rate_limit:groq:{scope}:{metric}:day:{utc_day}"
 
 
 def _decode_rate_counter(value: Any) -> int:
@@ -604,45 +655,354 @@ def _get_groq_rate_limit_config(scope: str) -> Dict[str, Any]:
     return dict(GROQ_RATE_LIMITS.get(scope, GROQ_RATE_LIMITS["chat"]))
 
 
-def _peek_groq_rate_limit(scope: str, redis_client: Optional[redis.Redis] = None) -> bool:
+def _is_groq_scope_backoff_active(scope: str) -> bool:
+    return bool(scope) and is_provider_backoff_active(scope)
+
+
+def _peek_groq_rate_limit(
+    scope: str,
+    *,
+    request_count: int = 1,
+    token_count: int = 0,
+    audio_seconds: float = 0.0,
+    redis_client: Optional[redis.Redis] = None,
+) -> bool:
+    if _is_groq_scope_backoff_active(scope):
+        return False
+
     redis_client = redis_client or _optional_redis_client()
     if redis_client is None:
         return True
 
     config = _get_groq_rate_limit_config(scope)
     try:
-        minute_count = _decode_rate_counter(
-            redis_client.get(_groq_rate_limit_minute_key(scope))
-        )
+        minute_count = _decode_rate_counter(redis_client.get(_groq_rate_limit_minute_key(scope)))
         day_count = _decode_rate_counter(redis_client.get(_groq_rate_limit_day_key(scope)))
+        token_minute_count = 0
+        if "tpm" in config and token_count > 0:
+            token_minute_count = _decode_rate_counter(
+                redis_client.get(_groq_rate_limit_metric_minute_key(scope, "tokens"))
+            )
+        audio_hour_count = 0
+        audio_day_count = 0
+        if "ash" in config and audio_seconds > 0:
+            audio_hour_count = _decode_rate_counter(
+                redis_client.get(_groq_rate_limit_metric_hour_key(scope, "audio_seconds"))
+            )
+        if "asd" in config and audio_seconds > 0:
+            audio_day_count = _decode_rate_counter(
+                redis_client.get(_groq_rate_limit_metric_day_key(scope, "audio_seconds"))
+            )
     except redis.RedisError:
         return True
 
-    return minute_count < int(config["rpm"]) and day_count < int(config["rpd"])
+    if minute_count + max(0, int(request_count)) > int(config["rpm"]):
+        return False
+    if day_count + max(0, int(request_count)) > int(config["rpd"]):
+        return False
+    if "tpm" in config and token_minute_count + max(0, int(token_count)) > int(config["tpm"]):
+        return False
+    if "ash" in config and audio_hour_count + max(0, int(round(audio_seconds))) > int(config["ash"]):
+        return False
+    if "asd" in config and audio_day_count + max(0, int(round(audio_seconds))) > int(config["asd"]):
+        return False
+    return True
 
 
-def _consume_groq_rate_limit(scope: str, redis_client: Optional[redis.Redis] = None) -> bool:
+def _apply_rate_counter_delta(
+    redis_client: redis.Redis,
+    *,
+    key: str,
+    ttl_seconds: int,
+    delta: int,
+) -> int:
+    pipe = redis_client.pipeline()
+    pipe.incrby(key, int(delta))
+    pipe.expire(key, ttl_seconds, nx=True)
+    results = pipe.execute()
+    return _decode_rate_counter(results[0] if results else 0)
+
+
+def _build_groq_rate_limit_reservation(
+    *,
+    scope: str,
+    request_count: int = 1,
+    token_count: int = 0,
+    audio_seconds: float = 0.0,
+) -> Dict[str, Any]:
+    return {
+        "scope": scope,
+        "request_count": max(0, int(request_count)),
+        "token_count": max(0, int(token_count)),
+        "audio_seconds": max(0, int(round(audio_seconds))),
+    }
+
+
+def _reserve_groq_rate_limit(
+    scope: str,
+    *,
+    request_count: int = 1,
+    token_count: int = 0,
+    audio_seconds: float = 0.0,
+    redis_client: Optional[redis.Redis] = None,
+) -> Optional[Dict[str, Any]]:
+    if _is_groq_scope_backoff_active(scope):
+        return None
+
     redis_client = redis_client or _optional_redis_client()
     if redis_client is None:
-        return True
+        return _build_groq_rate_limit_reservation(
+            scope=scope,
+            request_count=request_count,
+            token_count=token_count,
+            audio_seconds=audio_seconds,
+        )
 
     config = _get_groq_rate_limit_config(scope)
-    minute_key = _groq_rate_limit_minute_key(scope)
-    day_key = _groq_rate_limit_day_key(scope)
+    request_count = max(0, int(request_count))
+    token_count = max(0, int(token_count))
+    audio_seconds_int = max(0, int(round(audio_seconds)))
 
     try:
-        pipe = redis_client.pipeline()
-        pipe.incr(minute_key)
-        pipe.expire(minute_key, TTL_RATE_GROQ_MINUTE, nx=True)
-        pipe.incr(day_key)
-        pipe.expire(day_key, TTL_RATE_GROQ_DAY, nx=True)
-        results = pipe.execute()
-        minute_count = _decode_rate_counter(results[0] if results else 0)
-        day_count = _decode_rate_counter(results[2] if len(results) > 2 else 0)
+        minute_count = _apply_rate_counter_delta(
+            redis_client,
+            key=_groq_rate_limit_minute_key(scope),
+            ttl_seconds=TTL_RATE_GROQ_MINUTE,
+            delta=request_count,
+        )
+        day_count = _apply_rate_counter_delta(
+            redis_client,
+            key=_groq_rate_limit_day_key(scope),
+            ttl_seconds=TTL_RATE_GROQ_DAY,
+            delta=request_count,
+        )
+        token_minute_count = 0
+        if token_count > 0:
+            token_minute_count = _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_minute_key(scope, "tokens"),
+                ttl_seconds=TTL_RATE_GROQ_MINUTE,
+                delta=token_count,
+            )
+        audio_hour_count = 0
+        audio_day_count = 0
+        if audio_seconds_int > 0:
+            audio_hour_count = _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_hour_key(scope, "audio_seconds"),
+                ttl_seconds=TTL_RATE_GROQ_HOUR,
+                delta=audio_seconds_int,
+            )
+            audio_day_count = _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_day_key(scope, "audio_seconds"),
+                ttl_seconds=TTL_RATE_GROQ_DAY,
+                delta=audio_seconds_int,
+            )
     except redis.RedisError:
-        return True
+        return _build_groq_rate_limit_reservation(
+            scope=scope,
+            request_count=request_count,
+            token_count=token_count,
+            audio_seconds=audio_seconds_int,
+        )
 
-    return minute_count <= int(config["rpm"]) and day_count <= int(config["rpd"])
+    exceeded = (
+        minute_count > int(config["rpm"])
+        or day_count > int(config["rpd"])
+        or ("tpm" in config and token_minute_count > int(config["tpm"]))
+        or ("ash" in config and audio_hour_count > int(config["ash"]))
+        or ("asd" in config and audio_day_count > int(config["asd"]))
+    )
+    if exceeded:
+        _reconcile_groq_rate_limit(
+            _build_groq_rate_limit_reservation(
+                scope=scope,
+                request_count=request_count,
+                token_count=token_count,
+                audio_seconds=audio_seconds_int,
+            ),
+            actual_request_count=0,
+            actual_token_count=0,
+            actual_audio_seconds=0.0,
+            redis_client=redis_client,
+        )
+        return None
+
+    return _build_groq_rate_limit_reservation(
+        scope=scope,
+        request_count=request_count,
+        token_count=token_count,
+        audio_seconds=audio_seconds_int,
+    )
+
+
+def _reconcile_groq_rate_limit(
+    reservation: Optional[Mapping[str, Any]],
+    *,
+    actual_request_count: int = 1,
+    actual_token_count: int = 0,
+    actual_audio_seconds: float = 0.0,
+    redis_client: Optional[redis.Redis] = None,
+) -> None:
+    if not reservation:
+        return
+
+    redis_client = redis_client or _optional_redis_client()
+    if redis_client is None:
+        return
+
+    scope = str(reservation.get("scope") or "")
+    reserved_requests = max(0, int(reservation.get("request_count") or 0))
+    reserved_tokens = max(0, int(reservation.get("token_count") or 0))
+    reserved_audio = max(0, int(reservation.get("audio_seconds") or 0))
+    actual_requests = max(0, int(actual_request_count))
+    actual_tokens = max(0, int(actual_token_count))
+    actual_audio = max(0, int(round(actual_audio_seconds)))
+
+    request_delta = actual_requests - reserved_requests
+    token_delta = actual_tokens - reserved_tokens
+    audio_delta = actual_audio - reserved_audio
+
+    try:
+        if request_delta != 0:
+            _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_minute_key(scope),
+                ttl_seconds=TTL_RATE_GROQ_MINUTE,
+                delta=request_delta,
+            )
+            _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_day_key(scope),
+                ttl_seconds=TTL_RATE_GROQ_DAY,
+                delta=request_delta,
+            )
+        if token_delta != 0:
+            _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_minute_key(scope, "tokens"),
+                ttl_seconds=TTL_RATE_GROQ_MINUTE,
+                delta=token_delta,
+            )
+        if audio_delta != 0:
+            _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_hour_key(scope, "audio_seconds"),
+                ttl_seconds=TTL_RATE_GROQ_HOUR,
+                delta=audio_delta,
+            )
+            _apply_rate_counter_delta(
+                redis_client,
+                key=_groq_rate_limit_metric_day_key(scope, "audio_seconds"),
+                ttl_seconds=TTL_RATE_GROQ_DAY,
+                delta=audio_delta,
+            )
+    except redis.RedisError:
+        return
+
+
+def _extract_groq_usage_token_count(usage: Optional[Mapping[str, Any]]) -> int:
+    usage_map = ensure_mapping(usage) or {}
+    try:
+        input_tokens = int(
+            usage_map.get("input_tokens")
+            or usage_map.get("prompt_tokens")
+            or 0
+        )
+    except (TypeError, ValueError):
+        input_tokens = 0
+    try:
+        output_tokens = int(
+            usage_map.get("output_tokens")
+            or usage_map.get("completion_tokens")
+            or 0
+        )
+    except (TypeError, ValueError):
+        output_tokens = 0
+    return max(0, input_tokens) + max(0, output_tokens)
+
+
+def _extract_result_token_count(result: Optional[GroqUsageResult]) -> int:
+    if result is None:
+        return 0
+    if result.kind == "compound":
+        total = 0
+        for item in ensure_mapping_list(result.usage_breakdown):
+            item_usage = ensure_mapping(item.get("usage")) or item
+            total += _extract_groq_usage_token_count(item_usage)
+        if total > 0:
+            return total
+    return _extract_groq_usage_token_count(result.usage)
+
+
+def _extract_error_headers(error: Exception) -> Dict[str, str]:
+    possible_headers = getattr(error, "headers", None)
+    response = getattr(error, "response", None)
+    if not possible_headers and response is not None:
+        possible_headers = getattr(response, "headers", None)
+    if not possible_headers:
+        return {}
+    headers: Dict[str, str] = {}
+    if isinstance(possible_headers, Mapping):
+        for key, value in possible_headers.items():
+            headers[str(key).lower()] = str(value)
+        return headers
+    try:
+        for key, value in dict(possible_headers).items():
+            headers[str(key).lower()] = str(value)
+    except Exception:
+        return {}
+    return headers
+
+
+def _parse_retry_window_seconds(value: Optional[str]) -> Optional[int]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        numeric = float(raw_value)
+        return max(0, int(numeric))
+    except (TypeError, ValueError):
+        pass
+
+    normalized = raw_value.lower()
+    match = re.fullmatch(r"(?P<amount>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)?", normalized)
+    if match:
+        amount = float(match.group("amount"))
+        unit = match.group("unit") or "s"
+        multiplier = {
+            "ms": 0.001,
+            "s": 1.0,
+            "m": 60.0,
+            "h": 3600.0,
+        }.get(unit, 1.0)
+        return max(0, int(amount * multiplier))
+
+    try:
+        parsed_dt = parsedate_to_datetime(raw_value)
+    except Exception:
+        return None
+    if parsed_dt.tzinfo is None:
+        parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+    return max(0, int((parsed_dt - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _extract_rate_limit_backoff_seconds(
+    error: Exception,
+    fallback_seconds: Optional[int] = None,
+) -> Optional[int]:
+    headers = _extract_error_headers(error)
+    for header_name in (
+        "retry-after",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-reset-tokens",
+        "x-ratelimit-reset",
+    ):
+        parsed = _parse_retry_window_seconds(headers.get(header_name))
+        if parsed is not None:
+            return parsed
+    return fallback_seconds
 
 def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
     """Retrieve a cached media payload stored under the given prefix."""
@@ -3521,15 +3881,12 @@ def _invoke_provider(
     """Execute a provider call with shared backoff and error handling."""
 
     display_name = label or provider_name.capitalize()
-    if is_provider_backoff_active(provider_name):
-        remaining = int(get_provider_backoff_remaining(provider_name))
+    backoff_key = str(rate_limit_scope or provider_name or "").lower()
+    if backoff_key and is_provider_backoff_active(backoff_key):
+        remaining = int(get_provider_backoff_remaining(backoff_key))
         print(
             f"{display_name} backoff active ({remaining}s remaining), skipping API call"
         )
-        return None
-
-    if rate_limit_scope and not _consume_groq_rate_limit(rate_limit_scope):
-        print(f"{display_name} local rate limit reached for scope={rate_limit_scope}, skipping API call")
         return None
 
     try:
@@ -3537,8 +3894,11 @@ def _invoke_provider(
     except Exception as error:
         print(f"{display_name} error: {error}")
         if _is_rate_limit_error(error):
-            _set_provider_backoff(provider_name, rate_limit_backoff)
-            remaining = int(get_provider_backoff_remaining(provider_name))
+            _set_provider_backoff(
+                backoff_key or provider_name,
+                _extract_rate_limit_backoff_seconds(error, rate_limit_backoff),
+            )
+            remaining = int(get_provider_backoff_remaining(backoff_key or provider_name))
             print(
                 f"{display_name} rate limit detected; backing off for {remaining}s"
             )
@@ -3677,19 +4037,30 @@ def estimate_ai_base_reserve_credits(
             previous_query = _find_previous_user_text(messages, latest_user_index)
         previous_message = extract_user_message_from_context(previous_query)
         if previous_message:
+            rate_limit_input_messages = [{"role": "user", "content": previous_message}]
+            estimated_rate_limit_tokens = estimate_message_tokens(rate_limit_input_messages)
+            if compound_system_message:
+                estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
+            estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
             enabled_tools = get_groq_compound_enabled_tools()
             reserve = estimate_compound_reserve_credits(
                 system_message=compound_system_message,
-                messages=[{"role": "user", "content": previous_message}],
+                messages=rate_limit_input_messages,
                 enabled_tools=enabled_tools,
             )
             return reserve, {
                 "reserve_mode": "compound",
                 "reserve_reason": "search_previous_query",
                 "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
+                "rate_limit_scope": "compound",
+                "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
             }
 
     if compound_system_message and should_force_web_search(latest_user_message):
+        estimated_rate_limit_tokens = estimate_message_tokens(messages)
+        if compound_system_message:
+            estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
+        estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
         enabled_tools = get_groq_compound_enabled_tools()
         reserve = estimate_compound_reserve_credits(
             system_message=compound_system_message,
@@ -3700,8 +4071,14 @@ def estimate_ai_base_reserve_credits(
             "reserve_mode": "compound",
             "reserve_reason": "forced_web_search",
             "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
+            "rate_limit_scope": "compound",
+            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
         }
 
+    estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
+    if system_message:
+        estimated_rate_limit_tokens += estimate_message_tokens([system_message])
+    estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
     reserve = estimate_chat_reserve_credits(
         system_message=system_message,
         messages=messages,
@@ -3712,6 +4089,8 @@ def estimate_ai_base_reserve_credits(
         "reserve_mode": "chat",
         "reserve_reason": "standard_chat",
         "reserve_model": "moonshotai/kimi-k2-instruct-0905",
+        "rate_limit_scope": "chat",
+        "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
     }
 
 
@@ -3721,6 +4100,21 @@ def estimate_image_context_reserve_credits(image_data: bytes, prompt_text: str) 
         image_data=image_data,
         max_output_tokens=VISION_OUTPUT_TOKEN_LIMIT,
     )
+
+
+def estimate_image_context_rate_limit_tokens(image_data: bytes, prompt_text: str) -> int:
+    image_base64 = encode_image_to_base64(image_data)
+    image_url = f"data:image/jpeg;base64,{image_base64}"
+    input_payload = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt_text},
+                {"type": "input_image", "image_url": image_url},
+            ],
+        }
+    ]
+    return estimate_message_tokens(input_payload) + VISION_OUTPUT_TOKEN_LIMIT
 
 
 def _build_groq_usage_result(
@@ -3756,6 +4150,15 @@ def _get_groq_ai_response_result(
         print("Groq API key not configured")
         return None
 
+    estimated_token_count = estimate_message_tokens([system_msg] + messages) + CHAT_OUTPUT_TOKEN_LIMIT
+    reservation = _reserve_groq_rate_limit(
+        "chat",
+        token_count=estimated_token_count,
+    )
+    if reservation is None:
+        print("Groq AI local rate limit reached for scope=chat, skipping API call")
+        return None
+
     def _attempt() -> Optional[GroqUsageResult]:
         print("Trying Groq AI as first option...")
         _increment_ai_provider_request_count()
@@ -3781,13 +4184,19 @@ def _get_groq_ai_response_result(
                 )
         return None
 
-    return _invoke_provider(
+    result = _invoke_provider(
         provider_name,
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq AI",
         rate_limit_scope="chat",
     )
+    _reconcile_groq_rate_limit(
+        reservation,
+        actual_request_count=1 if result else 0,
+        actual_token_count=_extract_result_token_count(result),
+    )
+    return result
 
 
 def get_groq_ai_response(
@@ -3812,6 +4221,16 @@ def _get_groq_compound_response_result(
 
     model = GROQ_COMPOUND_DEFAULT_MODEL
     enabled_tools = get_groq_compound_enabled_tools()
+    estimated_token_count = estimate_message_tokens(messages) + CHAT_OUTPUT_TOKEN_LIMIT
+    if system_msg:
+        estimated_token_count += estimate_message_tokens([system_msg])
+    reservation = _reserve_groq_rate_limit(
+        "compound",
+        token_count=estimated_token_count,
+    )
+    if reservation is None:
+        print("Groq Compound local rate limit reached for scope=compound, skipping API call")
+        return None
 
     def _attempt() -> Optional[GroqUsageResult]:
         print("Trying Groq Compound tools...")
@@ -3850,13 +4269,19 @@ def _get_groq_compound_response_result(
                 )
         return None
 
-    return _invoke_provider(
+    result = _invoke_provider(
         provider_name,
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Compound",
         rate_limit_scope="compound",
     )
+    _reconcile_groq_rate_limit(
+        reservation,
+        actual_request_count=1 if result else 0,
+        actual_token_count=_extract_result_token_count(result),
+    )
+    return result
 
 
 def get_groq_compound_response(
@@ -4280,10 +4705,23 @@ def should_auto_process_media(
     )
 
 
-def check_global_rate_limit(redis_client: redis.Redis) -> bool:
-    """Check whether the main Groq chat lane still has minute/day budget."""
+def check_global_rate_limit(
+    redis_client: Optional[redis.Redis],
+    *,
+    scope: str = "chat",
+    request_count: int = 1,
+    token_count: int = 0,
+    audio_seconds: float = 0.0,
+) -> bool:
+    """Check whether a Groq scope still has local budget available."""
 
-    return _peek_groq_rate_limit("chat", redis_client)
+    return _peek_groq_rate_limit(
+        scope,
+        request_count=request_count,
+        token_count=token_count,
+        audio_seconds=audio_seconds,
+        redis_client=redis_client,
+    )
 
 
 def get_ai_credits_per_response() -> int:
@@ -4596,6 +5034,24 @@ def _describe_image_groq_result(
 
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
+    estimated_token_count = estimate_message_tokens(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": user_text},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ]
+    ) + VISION_OUTPUT_TOKEN_LIMIT
+    reservation = _reserve_groq_rate_limit(
+        "vision",
+        token_count=estimated_token_count,
+    )
+    if reservation is None:
+        print("Groq Vision local rate limit reached for scope=vision, skipping API call")
+        return None
 
     def _attempt() -> Optional[GroqUsageResult]:
         groq_client = _get_groq_client()
@@ -4638,6 +5094,11 @@ def _describe_image_groq_result(
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Vision",
         rate_limit_scope="vision",
+    )
+    _reconcile_groq_rate_limit(
+        reservation,
+        actual_request_count=1 if result else 0,
+        actual_token_count=_extract_result_token_count(result),
     )
 
     if result and result.text and file_id:
@@ -4682,6 +5143,15 @@ def _transcribe_audio_groq_result(
                 metadata={"file_id": file_id, "cache_hit": True},
             )
 
+    measured_audio_seconds = measure_audio_duration_seconds(audio_data)
+    reservation = _reserve_groq_rate_limit(
+        "transcribe",
+        audio_seconds=measured_audio_seconds or 0.0,
+    )
+    if reservation is None:
+        print("Groq Whisper local rate limit reached for scope=transcribe, skipping API call")
+        return None
+
     def _attempt() -> Optional[GroqUsageResult]:
         groq_client = _get_groq_client()
         if groq_client is None:
@@ -4705,6 +5175,7 @@ def _transcribe_audio_groq_result(
                 text=str(transcription),
                 model=GROQ_TRANSCRIBE_MODEL,
                 response=response,
+                audio_seconds=measured_audio_seconds,
                 metadata={"file_id": file_id, "cache_hit": False},
             )
         return None
@@ -4715,6 +5186,11 @@ def _transcribe_audio_groq_result(
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Whisper",
         rate_limit_scope="transcribe",
+    )
+    _reconcile_groq_rate_limit(
+        reservation,
+        actual_request_count=1 if result else 0,
+        actual_audio_seconds=result.audio_seconds if result and result.audio_seconds else 0.0,
     )
 
     if result and result.text and file_id:
@@ -5416,6 +5892,7 @@ def handle_msg(message: Dict) -> str:
             handle_transcribe=handle_transcribe,
             estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
             estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+            estimate_image_context_rate_limit_tokens=estimate_image_context_rate_limit_tokens,
             _transcribe_audio_file=_transcribe_audio_file,
             _transcription_error_message=_transcription_error_message,
             download_telegram_file=download_telegram_file,

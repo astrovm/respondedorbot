@@ -539,6 +539,116 @@ def test_check_global_rate_limit_uses_groq_chat_budget():
     assert check_global_rate_limit(redis_client) is False
 
 
+def test_groq_rate_limits_match_developer_plan_constants():
+    assert index.GROQ_RATE_LIMITS["chat"] == {
+        "rpm": 1000,
+        "rpd": 500_000,
+        "tpm": 250_000,
+        "model": "moonshotai/kimi-k2-instruct-0905",
+    }
+    assert index.GROQ_RATE_LIMITS["compound"] == {
+        "rpm": 200,
+        "rpd": 20_000,
+        "tpm": 200_000,
+        "model": "groq/compound",
+    }
+    assert index.GROQ_RATE_LIMITS["vision"] == {
+        "rpm": 1000,
+        "rpd": 500_000,
+        "tpm": 300_000,
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+    }
+    assert index.GROQ_RATE_LIMITS["transcribe"] == {
+        "rpm": 400,
+        "rpd": 200_000,
+        "ash": 400_000,
+        "asd": 4_000_000,
+        "model": "whisper-large-v3-turbo",
+    }
+
+
+def test_check_global_rate_limit_enforces_chat_tpm():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"0", b"0", b"249999"]
+
+    assert check_global_rate_limit(
+        redis_client,
+        scope="chat",
+        token_count=2,
+    ) is False
+
+
+def test_check_global_rate_limit_enforces_transcribe_audio_limits():
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"0", b"0", b"399999", b"3999999"]
+
+    assert check_global_rate_limit(
+        redis_client,
+        scope="transcribe",
+        audio_seconds=2.0,
+    ) is False
+
+
+def test_reserve_and_reconcile_groq_rate_limit_releases_unused_tokens():
+    class FakePipeline:
+        def __init__(self, store):
+            self.store = store
+            self.ops = []
+
+        def incrby(self, key, delta):
+            self.ops.append(("incrby", key, int(delta)))
+            return self
+
+        def expire(self, key, ttl, nx=True):
+            self.ops.append(("expire", key, int(ttl), bool(nx)))
+            return self
+
+        def execute(self):
+            results = []
+            for op in self.ops:
+                if op[0] == "incrby":
+                    _, key, delta = op
+                    self.store[key] = int(self.store.get(key, 0)) + delta
+                    results.append(self.store[key])
+                else:
+                    results.append(True)
+            self.ops = []
+            return results
+
+    class FakeRedis:
+        def __init__(self):
+            self.store = {}
+
+        def get(self, key):
+            value = self.store.get(key)
+            return str(value).encode("utf-8") if value is not None else None
+
+        def pipeline(self):
+            return FakePipeline(self.store)
+
+    fake_redis = FakeRedis()
+    reservation = index._reserve_groq_rate_limit(
+        "chat",
+        request_count=1,
+        token_count=1000,
+        redis_client=fake_redis,
+    )
+
+    assert reservation is not None
+
+    token_key = index._groq_rate_limit_metric_minute_key("chat", "tokens")
+    assert fake_redis.store[token_key] == 1000
+
+    index._reconcile_groq_rate_limit(
+        reservation,
+        actual_request_count=1,
+        actual_token_count=400,
+        redis_client=fake_redis,
+    )
+
+    assert fake_redis.store[token_key] == 400
+
+
 def test_initialize_commands():
     from api.index import (
         initialize_commands,
