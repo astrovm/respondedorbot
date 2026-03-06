@@ -8,6 +8,10 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
+from api.groq_billing import (
+    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+    estimate_transcribe_reserve_credits,
+)
 
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
@@ -49,6 +53,7 @@ class MessageHandlerDeps:
     maybe_grant_onboarding_credits: Callable[[Any, Callable[..., None], Optional[int]], None]
     format_balance_command: Callable[..., str]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
+    handle_transcribe_with_message_result: Callable[[Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]]
     check_global_rate_limit: Callable[[Any], bool]
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
@@ -57,9 +62,12 @@ class MessageHandlerDeps:
     is_chat_admin: Callable[..., bool]
     report_unauthorized_config_attempt: Callable[..., None]
     handle_transcribe: Callable[[], str]
-    _transcribe_audio_file: Callable[..., Tuple[Optional[str], Optional[str]]]
+    estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
+    estimate_image_context_reserve_credits: Callable[[bytes, str], int]
+    _transcribe_audio_file: Callable[..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]]
     _transcription_error_message: Callable[..., Optional[str]]
     download_telegram_file: Callable[[str], Optional[bytes]]
+    measure_audio_duration_seconds: Callable[[bytes], Optional[float]]
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
 
@@ -71,6 +79,7 @@ class PreparedMessage:
     audio_file_id: Optional[str]
     resized_image_data: Optional[bytes] = None
     early_response: Optional[str] = None
+    audio_duration_seconds: float = 0.0
 
 
 def _build_billing_helper(
@@ -111,27 +120,60 @@ def _prepare_message_content(
     billing_helper: AIMessageBilling,
 ) -> PreparedMessage:
     message_text, photo_file_id, audio_file_id = deps.extract_message_content(message)
+    audio_duration_seconds = 0.0
 
     if auto_process_media and audio_file_id and not (
         message_text and message_text.strip().lower().startswith("/transcribe")
     ):
-        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
-            "auto_audio_media"
+        resolved_audio_duration = _resolve_audio_duration_seconds(
+            message,
+            audio_file_id=audio_file_id,
+            deps=deps,
+        )
+        if resolved_audio_duration is None:
+            if message_text:
+                return PreparedMessage(
+                    message_text=message_text,
+                    photo_file_id=photo_file_id,
+                    audio_file_id=audio_file_id,
+                    audio_duration_seconds=0.0,
+                )
+            return PreparedMessage(
+                message_text=message_text,
+                photo_file_id=photo_file_id,
+                audio_file_id=audio_file_id,
+                audio_duration_seconds=0.0,
+                early_response="ok",
+            )
+        audio_duration_seconds = resolved_audio_duration
+        reserved_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
+        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
+            "auto_audio_media",
+            reserved_credits,
+            metadata={"audio_seconds": audio_duration_seconds},
         )
         if media_charge_error:
             return PreparedMessage(
                 message_text=message_text,
                 photo_file_id=photo_file_id,
                 audio_file_id=audio_file_id,
+                audio_duration_seconds=audio_duration_seconds,
                 early_response=media_charge_error,
             )
 
-        transcription, err = deps._transcribe_audio_file(audio_file_id, use_cache=False)
+        transcription, err, billing_segment = deps._transcribe_audio_file(
+            audio_file_id, use_cache=False
+        )
         if transcription:
+            billing_helper.settle_reserved_ai_credits(
+                media_charge_meta,
+                [billing_segment] if billing_segment else [],
+                reason="auto_audio_media_success",
+            )
             message_text = transcription
         else:
-            billing_helper.refund_ai_charge_meta(
-                media_charge_meta, "auto_audio_transcribe_failed"
+            billing_helper.refund_reserved_ai_credits(
+                media_charge_meta, reason="auto_audio_transcribe_failed"
             )
             message_text = deps._transcription_error_message(
                 err,
@@ -157,7 +199,58 @@ def _prepare_message_content(
         photo_file_id=photo_file_id,
         audio_file_id=audio_file_id,
         resized_image_data=resized_image_data,
+        audio_duration_seconds=audio_duration_seconds,
     )
+
+
+def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
+    for container in (
+        message,
+        cast(Mapping[str, Any], message.get("reply_to_message") or {}),
+    ):
+        voice = container.get("voice")
+        if isinstance(voice, Mapping):
+            try:
+                return max(0.0, float(voice.get("duration") or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+        audio = container.get("audio")
+        if isinstance(audio, Mapping):
+            try:
+                return max(0.0, float(audio.get("duration") or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _resolve_audio_duration_seconds(
+    message: Mapping[str, Any],
+    *,
+    audio_file_id: Optional[str],
+    deps: MessageHandlerDeps,
+) -> Optional[float]:
+    metadata_duration = _extract_audio_duration_seconds(message)
+    if metadata_duration > 0:
+        return metadata_duration
+    if not audio_file_id:
+        return None
+    media_bytes = deps.download_telegram_file(audio_file_id)
+    if not media_bytes:
+        return None
+    measured_duration = deps.measure_audio_duration_seconds(media_bytes)
+    if measured_duration is None or measured_duration <= 0:
+        return None
+    return measured_duration
+
+
+def _select_main_billing_segments(
+    billing_segments: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    return [
+        dict(segment)
+        for segment in billing_segments
+        if str(segment.get("kind") or "") != "vision"
+    ]
 
 
 def _handle_link_replacement(
@@ -272,24 +365,6 @@ def _run_ai_flow(
     if not deps.check_global_rate_limit(redis_client):
         return deps.handle_rate_limit(chat_id, message), False
 
-    charges_applied: List[Dict[str, Any]] = []
-    base_charge_meta, base_charge_error = billing_helper.charge_one_ai_request(
-        "ai_response_base"
-    )
-    if base_charge_error:
-        return base_charge_error, False
-    if base_charge_meta:
-        charges_applied.append(base_charge_meta)
-
-    if prepared_message.resized_image_data and prepared_message.photo_file_id:
-        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
-            "image_context_media"
-        )
-        if media_charge_error:
-            return media_charge_error, False
-        if media_charge_meta:
-            charges_applied.append(media_charge_meta)
-
     chat_history = deps.get_chat_history(chat_id, redis_client)
     ai_messages = deps.build_ai_messages(
         message,
@@ -297,6 +372,42 @@ def _run_ai_flow(
         prompt_text,
         reply_context_text,
     )
+
+    main_reserve_credits, reserve_meta = deps.estimate_ai_base_reserve_credits(
+        ai_messages,
+        extra_input_tokens=(
+            IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+            if prepared_message.resized_image_data and prepared_message.photo_file_id
+            else 0
+        ),
+    )
+    base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
+        "ai_response_base",
+        main_reserve_credits,
+        metadata={
+            "estimated_prompt_messages": len(ai_messages),
+            **reserve_meta,
+        },
+    )
+    if base_charge_error:
+        return base_charge_error, False
+
+    media_charge_meta: Optional[Dict[str, Any]] = None
+    if prepared_message.resized_image_data and prepared_message.photo_file_id:
+        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
+            "image_context_media",
+            deps.estimate_image_context_reserve_credits(
+                prepared_message.resized_image_data,
+                "Describe what you see in this image in detail.",
+            ),
+            metadata={"photo_file_id": prepared_message.photo_file_id},
+        )
+        if media_charge_error:
+            billing_helper.refund_reserved_ai_credits(
+                base_charge_meta, reason="image_context_reserve_failed"
+            )
+            return media_charge_error, False
+
     ai_response_meta: Dict[str, Any] = {}
     response_msg = deps.handle_ai_response(
         chat_id,
@@ -309,22 +420,36 @@ def _run_ai_flow(
         response_meta=ai_response_meta,
     )
 
-    provider_request_count = int(ai_response_meta.get("provider_request_count", 1) or 1)
-    if provider_request_count > 1:
-        for _ in range(provider_request_count - 1):
-            extra_charge_meta, extra_charge_error = billing_helper.charge_one_ai_request(
-                "ai_response_extra_provider_request"
-            )
-            if extra_charge_error:
-                return extra_charge_error, False
-            if extra_charge_meta:
-                charges_applied.append(extra_charge_meta)
-
+    billing_segments = list(ai_response_meta.get("billing_segments") or [])
     if response_msg == "me quedé reculando y no te pude responder, probá de nuevo" or bool(
         ai_response_meta.get("ai_fallback")
     ):
-        for charge_meta in charges_applied:
-            billing_helper.refund_ai_charge_meta(charge_meta, "ai_response_fallback")
+        if media_charge_meta:
+            billing_helper.refund_reserved_ai_credits(
+                media_charge_meta, reason="ai_response_fallback"
+            )
+        billing_helper.refund_reserved_ai_credits(
+            base_charge_meta, reason="ai_response_fallback"
+        )
+        return response_msg, True
+
+    if media_charge_meta:
+        image_segments = [
+            dict(segment)
+            for segment in billing_segments
+            if str(segment.get("kind") or "") == "vision"
+        ]
+        billing_helper.settle_reserved_ai_credits(
+            media_charge_meta,
+            image_segments,
+            reason="image_context_media_success",
+        )
+
+    billing_helper.settle_reserved_ai_credits(
+        base_charge_meta,
+        _select_main_billing_segments(billing_segments),
+        reason="ai_response_success",
+    )
 
     return response_msg, True
 
@@ -505,16 +630,59 @@ def _handle_non_ai_command(
         return None, None, False, None
 
     if command == "/transcribe":
-        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
-            "transcribe_command_media"
+        reserve_credits = 0
+        replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})
+        if replied_message.get("voice") or replied_message.get("audio"):
+            replied_audio_file_id = None
+            voice = replied_message.get("voice")
+            if isinstance(voice, Mapping):
+                replied_audio_file_id = str(voice.get("file_id") or "") or None
+            audio = replied_message.get("audio")
+            if not replied_audio_file_id and isinstance(audio, Mapping):
+                replied_audio_file_id = str(audio.get("file_id") or "") or None
+            audio_duration_seconds = _resolve_audio_duration_seconds(
+                message,
+                audio_file_id=replied_audio_file_id,
+                deps=deps,
+            )
+            if audio_duration_seconds is None:
+                return "ok", None, False, None
+            reserve_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
+        else:
+            replied_photo_file_id = deps.extract_message_content(message)[1]
+            replied_image_data = (
+                deps.download_telegram_file(replied_photo_file_id)
+                if replied_photo_file_id
+                else None
+            )
+            if isinstance(replied_image_data, (bytes, bytearray)) and replied_image_data:
+                reserve_credits = deps.estimate_image_context_reserve_credits(
+                    deps.resize_image_if_needed(bytes(replied_image_data)),
+                    "Describe what you see in this image in detail.",
+                )
+            else:
+                reserve_credits = 1
+
+        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
+            "transcribe_command_media",
+            reserve_credits,
         )
         if media_charge_error:
             return media_charge_error, None, False, command
 
-        response_msg = deps.handle_transcribe_with_message(message)
-        if media_charge_meta and not billing_helper.is_transcribe_success_response(response_msg):
-            billing_helper.refund_ai_charge_meta(
-                media_charge_meta, "transcribe_command_unsuccessful"
+        response_msg, billing_segments = deps.handle_transcribe_with_message_result(message)
+        transcribe_succeeded = bool(billing_segments) or billing_helper.is_transcribe_success_response(
+            response_msg
+        )
+        if media_charge_meta and not transcribe_succeeded:
+            billing_helper.refund_reserved_ai_credits(
+                media_charge_meta, reason="transcribe_command_unsuccessful"
+            )
+        else:
+            billing_helper.settle_reserved_ai_credits(
+                media_charge_meta,
+                billing_segments,
+                reason="transcribe_command_success",
             )
         return response_msg, None, False, command
 
@@ -639,10 +807,13 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
 
     try:
         chat = cast(Dict[str, Any], message.get("chat", {}))
+        sender = cast(Mapping[str, Any], message.get("from", {}))
+        if not chat or chat.get("id") is None or not sender:
+            return "ok"
         message_id = str(message.get("message_id"))
         chat_id = str(chat.get("id"))
         chat_type = str(chat.get("type", ""))
-        user_identity = format_user_identity(cast(Mapping[str, Any], message.get("from", {})))
+        user_identity = format_user_identity(sender)
 
         user_id = deps.extract_user_id(message)
         numeric_chat_id = deps.extract_numeric_chat_id(chat_id)

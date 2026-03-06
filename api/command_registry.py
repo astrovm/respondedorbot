@@ -23,7 +23,6 @@ class CommandSpec:
 
 COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/ask", "/pregunta", "/che", "/gordo"), "ask_ai", True, True),
-    (("/agent",), "show_agent_thoughts", False, False),
     (("/config",), "config_command", False, False),
     (("/convertbase",), "convert_base", False, True),
     (("/random",), "select_random", False, True),

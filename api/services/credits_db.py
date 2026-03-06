@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from os import environ
 from threading import Lock
-from typing import Any, Dict, Iterator, Literal, Optional, Tuple
+from typing import Any, Dict, Iterator, Literal, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import json
 
@@ -352,6 +352,9 @@ def charge_ai_credits(
     user_id: int,
     chat_id: Optional[int],
     amount: int,
+    *,
+    event_type: str = "ai_charge",
+    metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Charge credits for an AI interaction.
 
@@ -360,6 +363,7 @@ def charge_ai_credits(
 
     ensure_schema()
     charge_amount = int(amount)
+    metadata_dict = dict(metadata or {})
 
     with connect() as conn:
         with conn.cursor() as cur:
@@ -384,12 +388,12 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                     (
-                        "ai_charge",
+                        str(event_type or "ai_charge"),
                         int(user_id),
                         int(user_id),
                         int(chat_id) if chat_id is not None else None,
                         -charge_amount,
-                        json.dumps({"source": "user"}),
+                        json.dumps({"source": "user", **metadata_dict}),
                     ),
                 )
                 conn.commit()
@@ -416,12 +420,12 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                     (
-                        "ai_charge",
+                        str(event_type or "ai_charge"),
                         int(user_id),
                         int(user_id),
                         int(chat_id),
                         -charge_amount,
-                        json.dumps({"source": "chat"}),
+                        json.dumps({"source": "chat", **metadata_dict}),
                     ),
                 )
                 conn.commit()
@@ -446,11 +450,15 @@ def refund_ai_charge(
     chat_id: Optional[int],
     amount: int,
     source: ScopeType,
+    *,
+    event_type: str = "ai_refund",
+    metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, int]:
     """Refund a previously charged AI credit."""
 
     ensure_schema()
     refund_amount = int(amount)
+    metadata_dict = dict(metadata or {})
 
     with connect() as conn:
         with conn.cursor() as cur:
@@ -471,12 +479,12 @@ def refund_ai_charge(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                     (
-                        "ai_refund",
+                        str(event_type or "ai_refund"),
                         int(user_id),
                         int(user_id),
                         int(chat_id),
                         refund_amount,
-                        json.dumps({"source": "chat"}),
+                        json.dumps({"source": "chat", **metadata_dict}),
                     ),
                 )
                 conn.commit()
@@ -501,12 +509,12 @@ def refund_ai_charge(
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
                 (
-                    "ai_refund",
+                    str(event_type or "ai_refund"),
                     int(user_id),
                     int(user_id),
                     int(chat_id) if chat_id is not None else None,
                     refund_amount,
-                    json.dumps({"source": "user"}),
+                    json.dumps({"source": "user", **metadata_dict}),
                 ),
             )
             conn.commit()

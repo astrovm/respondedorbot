@@ -225,8 +225,7 @@ def test_handle_msg_refunds_all_charges_when_fallback_after_multiple_provider_re
         result = handle_msg(message)
 
     assert result == "ok"
-    # provider_request_count=3 => 3 cobros y 3 reintegros en fallback
-    assert mock_refund.call_count == 3
+    assert mock_refund.call_count == 1
 
 
 def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypatch):
@@ -302,6 +301,8 @@ def test_handle_msg():
     ) as mock_send_typing, patch(
         "api.index.check_global_rate_limit", side_effect=[True, False]
     ) as mock_global_rate_limit, patch(
+        "api.index.admin_report"
+    ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.credits_db_service.charge_ai_credits",
@@ -312,7 +313,7 @@ def test_handle_msg():
         "time.sleep"
     ) as _mock_sleep:  # Add sleep mock to avoid delays  # noqa: F841
 
-        mock_env.return_value = "testbot"
+        mock_env.side_effect = lambda key, default=None: "testbot"
         mock_ask_ai.return_value = "test response"  # Mock ai response
 
         # Mock Redis instance
@@ -461,10 +462,8 @@ def test_handle_msg_with_audio():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.transcribe_audio_groq"
+        "api.index._transcribe_audio_file"
     ) as mock_transcribe, patch(
-        "api.index.download_telegram_file"
-    ) as mock_download, patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.check_global_rate_limit", return_value=True
@@ -475,12 +474,19 @@ def test_handle_msg_with_audio():
         "api.index._maybe_grant_onboarding_credits"
     ):
 
-        mock_env.side_effect = lambda key: {
+        mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
             "GROQ_API_KEY": "test_key",
-        }.get(key)
-        mock_download.return_value = b"audio data"
-        mock_transcribe.return_value = "transcribed text"
+        }.get(key, default)
+        mock_transcribe.return_value = (
+            "transcribed text",
+            None,
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3-turbo",
+                "audio_seconds": 1,
+            },
+        )
 
         # Mock Redis instance
         mock_redis = MagicMock()
@@ -490,12 +496,12 @@ def test_handle_msg_with_audio():
             "message_id": 1,
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 12, "first_name": "John", "username": "john"},
-            "voice": {"file_id": "voice_123"},
+            "voice": {"file_id": "voice_123", "duration": 10},
         }
 
         result = handle_msg(message)
         assert result == "ok"
-        mock_transcribe.assert_called_once()
+        mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
         mock_send_msg.assert_called_once()
 
 
@@ -517,7 +523,7 @@ def test_handle_msg_group_audio_without_invocation_skips_auto_transcription():
             return env_vars.get(key, default)
 
         mock_env.side_effect = env_side_effect
-        mock_transcribe.return_value = ("transcribed text", None)
+        mock_transcribe.return_value = ("transcribed text", None, None)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -550,7 +556,7 @@ def test_handle_msg_with_transcribe_command():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.handle_transcribe_with_message"
+        "api.index.handle_transcribe_with_message_result"
     ) as mock_handle_transcribe, patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
@@ -560,8 +566,11 @@ def test_handle_msg_with_transcribe_command():
         "api.index._maybe_grant_onboarding_credits"
     ):
 
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
-        mock_handle_transcribe.return_value = "Transcription result"
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+        mock_handle_transcribe.return_value = (
+            "Transcription result",
+            [{"kind": "transcribe", "model": "whisper-large-v3-turbo", "audio_seconds": 1}],
+        )
 
         # Mock Redis instance
         mock_redis = MagicMock()
@@ -572,7 +581,7 @@ def test_handle_msg_with_transcribe_command():
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 13, "first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123"}},
+            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123", "duration": 10}},
         }
 
         result = handle_msg(message)
@@ -589,7 +598,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
         "api.index.check_global_rate_limit"
     ) as mock_rate_limit, patch(
-        "api.index.handle_transcribe_with_message"
+        "api.index.handle_transcribe_with_message_result"
     ) as mock_handle_transcribe, patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
@@ -601,9 +610,12 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
         "api.index.credits_db_service.refund_ai_charge"
     ) as mock_refund:
 
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
         mock_rate_limit.return_value = True
-        mock_handle_transcribe.return_value = "🎵 te saqué esto del audio: todo piola"
+        mock_handle_transcribe.return_value = (
+            "🎵 te saqué esto del audio: todo piola",
+            [{"kind": "transcribe", "model": "whisper-large-v3-turbo", "audio_seconds": 1}],
+        )
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -615,12 +627,13 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 77, "first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123"}},
+            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123", "duration": 10}},
         }
 
         result = handle_msg(message)
         assert result == "ok"
-        mock_charge.assert_called_once_with(user_id=77, chat_id=None, amount=1)
+        assert mock_charge.call_count == 1
+        assert mock_charge.call_args.kwargs["amount"] == 1
         mock_refund.assert_not_called()
         mock_send_msg.assert_called_once()
 
@@ -631,8 +644,8 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.handle_transcribe_with_message",
-        return_value="no pude sacar nada de ese audio, probá más tarde",
+        "api.index.handle_transcribe_with_message_result",
+        return_value=("no pude sacar nada de ese audio, probá más tarde", []),
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
@@ -643,7 +656,49 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
     ) as mock_charge, patch(
         "api.index.credits_db_service.refund_ai_charge"
     ) as mock_refund:
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 2,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 177, "first_name": "John", "username": "john"},
+            "text": "/transcribe",
+            "reply_to_message": {"message_id": 3, "voice": {"file_id": "voice_123", "duration": 10}},
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert mock_charge.call_count == 1
+    assert mock_charge.call_args.kwargs["amount"] == 1
+    mock_refund.assert_called_once()
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_with_transcribe_command_rejects_audio_without_duration():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index.handle_transcribe_with_message_result"
+    ) as mock_handle_transcribe, patch(
+        "api.index.download_telegram_file", return_value=b"audio-bytes"
+    ), patch(
+        "api.index.measure_audio_duration_seconds", return_value=None
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits"
+    ) as mock_charge:
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -661,9 +716,9 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_charge.assert_called_once_with(user_id=177, chat_id=None, amount=1)
-    mock_refund.assert_called_once()
-    mock_send_msg.assert_called_once()
+    mock_charge.assert_not_called()
+    mock_handle_transcribe.assert_not_called()
+    mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_auto_audio_charges_media_credits():
@@ -672,7 +727,16 @@ def test_handle_msg_auto_audio_charges_media_credits():
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file", return_value=("audio transcripto", None)
+        "api.index._transcribe_audio_file",
+        return_value=(
+            "audio transcripto",
+            None,
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3-turbo",
+                "audio_seconds": 1,
+            },
+        ),
     ) as mock_transcribe, patch(
         "api.index.should_gordo_respond", return_value=False
     ), patch(
@@ -685,7 +749,47 @@ def test_handle_msg_auto_audio_charges_media_credits():
         "api.index.credits_db_service.charge_ai_credits",
         return_value={"ok": True, "source": "user"},
     ) as mock_charge:
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 88, "first_name": "John", "username": "john"},
+            "voice": {"file_id": "voice_123", "duration": 10},
+        }
+
+        result = handle_msg(message)
+        assert result == "ok"
+        mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
+        assert mock_charge.call_count == 1
+        assert mock_charge.call_args.kwargs["amount"] == 1
+        mock_send_msg.assert_not_called()
+
+
+def test_handle_msg_auto_audio_rejects_missing_duration():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index._transcribe_audio_file"
+    ) as mock_transcribe, patch(
+        "api.index.download_telegram_file", return_value=b"audio-bytes"
+    ), patch(
+        "api.index.measure_audio_duration_seconds", return_value=None
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits"
+    ) as mock_charge:
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -700,10 +804,67 @@ def test_handle_msg_auto_audio_charges_media_credits():
         }
 
         result = handle_msg(message)
-        assert result == "ok"
-        mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
-        mock_charge.assert_called_once_with(user_id=88, chat_id=None, amount=1)
-        mock_send_msg.assert_not_called()
+
+    assert result == "ok"
+    mock_charge.assert_not_called()
+    mock_transcribe.assert_not_called()
+    mock_send_msg.assert_not_called()
+
+
+def test_handle_msg_auto_audio_measures_duration_when_missing_in_message():
+    from api.index import handle_msg
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
+        "api.index._transcribe_audio_file",
+        return_value=(
+            "audio transcripto",
+            None,
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3-turbo",
+                "audio_seconds": 12,
+            },
+        ),
+    ) as mock_transcribe, patch(
+        "api.index.download_telegram_file", return_value=b"audio-bytes"
+    ) as mock_download, patch(
+        "api.index.measure_audio_duration_seconds", return_value=12.0
+    ) as mock_measure, patch(
+        "api.index.should_gordo_respond", return_value=False
+    ), patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge:
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+
+        mock_redis = MagicMock()
+        mock_config_redis.return_value = mock_redis
+        mock_redis.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        mock_redis.lrange.return_value = []
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 88, "first_name": "John", "username": "john"},
+            "voice": {"file_id": "voice_123"},
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_download.assert_called_once_with("voice_123")
+    mock_measure.assert_called_once_with(b"audio-bytes")
+    mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
+    assert mock_charge.call_count == 1
+    mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
@@ -712,13 +873,32 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
     def fake_handle_ai_response(*args, **kwargs):
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
-            response_meta["provider_request_count"] = 2
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                }
+            ]
         return "respuesta final"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file", return_value=("audio transcripto", None)
+        "api.index._transcribe_audio_file",
+        return_value=(
+            "audio transcripto",
+            None,
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3-turbo",
+                "audio_seconds": 1,
+            },
+        ),
     ), patch(
         "api.index.should_gordo_respond", return_value=True
     ), patch(
@@ -739,7 +919,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
     ), patch(
         "api.index.save_message_to_redis"
     ):
-        mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
+        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -750,14 +930,13 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
             "message_id": 31,
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 89, "first_name": "John", "username": "john"},
-            "voice": {"file_id": "voice_123"},
+            "voice": {"file_id": "voice_123", "duration": 10},
         }
 
         result = handle_msg(message)
 
     assert result == "ok"
-    # 1 por transcripción de audio + 2 por respuesta IA con provider_request_count=2
-    assert mock_charge.call_count == 3
+    assert mock_charge.call_count == 2
     mock_send_msg.assert_called_once()
 
 
@@ -811,13 +990,37 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits():
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_image_conversation_with_two_provider_requests_charges_three():
+def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_and_media():
     from api.index import handle_msg
 
     def fake_handle_ai_response(*args, **kwargs):
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
-            response_meta["provider_request_count"] = 2
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "vision",
+                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+            ]
         return "todo piola x2"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
@@ -862,8 +1065,8 @@ def test_handle_msg_image_conversation_with_two_provider_requests_charges_three(
 
     assert result == "ok"
     assert mock_download.called
-    # 1 base + 1 media imagen + 1 extra por segundo request de proveedor
-    assert mock_charge.call_count == 3
+    # El usage real mockeado es mínimo, así que quedan solo las dos reservas iniciales.
+    assert mock_charge.call_count == 2
     mock_send_msg.assert_called_once()
 
 
@@ -897,13 +1100,32 @@ def test_handle_msg_search_command_does_not_charge():
     assert mock_send_msg.call_args[0][1] == "resultado web"
 
 
-def test_handle_msg_ai_flow_charges_each_provider_request():
+def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny():
     from api.index import handle_msg
 
     def fake_handle_ai_response(*args, **kwargs):
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
-            response_meta["provider_request_count"] = 2
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+            ]
         return "respuesta ok"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
@@ -939,18 +1161,45 @@ def test_handle_msg_ai_flow_charges_each_provider_request():
         result = handle_msg(message)
 
     assert result == "ok"
-    # 1 cobro base + 1 cobro extra por segundo request real al proveedor IA
-    assert mock_charge.call_count == 2
+    assert mock_charge.call_count == 1
     assert mock_send_msg.call_args[0][1] == "respuesta ok"
 
 
-def test_handle_msg_ai_flow_charges_three_provider_requests():
+def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
     from api.index import handle_msg
 
     def fake_handle_ai_response(*args, **kwargs):
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
-            response_meta["provider_request_count"] = 3
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {
+                        "input_tokens": 1,
+                        "input_non_cached_tokens": 1,
+                        "output_tokens": 1,
+                    },
+                },
+            ]
         return "respuesta ok x3"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
@@ -986,7 +1235,7 @@ def test_handle_msg_ai_flow_charges_three_provider_requests():
         result = handle_msg(message)
 
     assert result == "ok"
-    assert mock_charge.call_count == 3
+    assert mock_charge.call_count == 1
     assert mock_send_msg.call_args[0][1] == "respuesta ok x3"
 
 
@@ -998,8 +1247,17 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
     ) as mock_send_msg, patch(
         "api.index.download_telegram_file"
     ) as mock_download, patch(
-        "api.index.handle_transcribe_with_message",
-        return_value="🖼️ en la imagen veo: todo piola",
+        "api.index.handle_transcribe_with_message_result",
+        return_value=(
+            "🖼️ en la imagen veo: todo piola",
+            [
+                {
+                    "kind": "vision",
+                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ],
+        ),
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
@@ -1024,10 +1282,11 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
         result = handle_msg(message)
 
     assert result == "ok"
-    # /transcribe maneja la imagen dentro de su flujo; no debería predescargar acá
-    mock_download.assert_not_called()
+    # /transcribe ahora predescarga la imagen para estimar una reserva precisa
+    mock_download.assert_called_once_with("img_reply")
     # Debe cobrar solo una vez por el comando /transcribe
-    mock_charge.assert_called_once_with(user_id=100, chat_id=None, amount=1)
+    assert mock_charge.call_count == 1
+    assert mock_charge.call_args.kwargs["amount"] == 1
     mock_send_msg.assert_called_once()
 
 
