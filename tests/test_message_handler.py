@@ -23,7 +23,7 @@ def test_handle_msg_topup_private_returns_keyboard():
     assert result == "ok"
     mock_send_msg.assert_called_once_with(
         "100",
-        "elegí un pack para recargar créditos IA:",
+        "elegí cuánto querés cargar, papá:",
         "10",
         reply_markup={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
     )
@@ -103,7 +103,7 @@ def test_handle_msg_transfer_group_moves_credits():
 
     assert result == "ok"
     mock_transfer.assert_called_once_with(user_id=55, chat_id=202, amount=20)
-    assert "transferidos 20" in mock_send_msg.call_args[0][1]
+    assert "le pasé 20 créditos al grupo" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_successful_payment_credits_user():
@@ -265,7 +265,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     assert result == "ok"
     assert (
         mock_send.call_args[0][1]
-        == "no boludo\n\nte quedaste sin créditos IA.\nsaldo actual: 0\nagregá créditos con /topup para recargar con Stars ⭐"
+        == "no boludo\n\nte quedaste seco de créditos ia, boludo.\nsaldo: 0\nmetele /topup si querés que siga laburando"
     )
 
 
