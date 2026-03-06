@@ -15,8 +15,8 @@ def test_build_insufficient_credits_message_mentions_group_balances():
         user_balance=2,
         chat_balance=5,
     )
-    assert "Tu saldo: 2" in message
-    assert "Saldo del grupo: 5" in message
+    assert "lo tuyo: 2" in message
+    assert "lo del grupo: 5" in message
 
 
 def test_ai_message_billing_transcribe_success_response_prefixes():
@@ -35,6 +35,6 @@ def test_ai_message_billing_transcribe_success_response_prefixes():
         message={"from": {"first_name": "Ana"}},
     )
 
-    assert billing.is_transcribe_success_response("🎵 Transcripción: hola")
-    assert billing.is_transcribe_success_response("🖼️ Descripción: foto")
+    assert billing.is_transcribe_success_response("🎵 te saqué esto del audio: hola")
+    assert billing.is_transcribe_success_response("🖼️ en la imagen veo: foto")
     assert not billing.is_transcribe_success_response("error")
