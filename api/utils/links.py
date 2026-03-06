@@ -247,7 +247,7 @@ def _eeinstagram_preview_check(
 
 
 def url_is_embedable(url: str) -> bool:
-    """Backwards-compatible wrapper around :func:`can_embed_url`."""
+    """Return whether a URL should keep its current form for embeds."""
     return can_embed_url(url)
 
 

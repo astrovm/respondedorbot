@@ -383,7 +383,7 @@ def _handle_topup_command(
         return response_msg, None, False, command
 
     deps.ensure_callback_updates_enabled()
-    return "elegí cuánto querés cargar, papá:", deps.build_topup_keyboard(), False, command
+    return "elegí cuánto querés cargar:", deps.build_topup_keyboard(), False, command
 
 
 def _handle_balance_command(
@@ -450,7 +450,7 @@ def _handle_transfer_command(
     try:
         amount = int(amount_token)
     except (TypeError, ValueError):
-        return "mandalo bien, papá: /transfer <monto>", None, False, command
+        return "mandalo bien: /transfer <monto>", None, False, command
 
     if amount <= 0:
         return "el monto tiene que ser mayor a 0, no me rompas las bolas", None, False, command

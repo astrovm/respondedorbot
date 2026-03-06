@@ -26,16 +26,6 @@ def test_get_chat_config_decodes_string():
     assert config["link_mode"] == "reply"
 
 
-def test_get_chat_config_legacy_bytes():
-    redis_client = MagicMock(spec=redis.Redis)
-    redis_client.get.side_effect = [None, b"delete"]
-
-    config = get_chat_config(redis_client, "chat-3")
-
-    assert config["link_mode"] == "delete"
-    assert config["ai_random_replies"] is True
-
-
 def test_get_chat_config_uses_postgres_when_available():
     redis_client = MagicMock(spec=redis.Redis)
     pg_config = {
@@ -366,14 +356,12 @@ def test_set_chat_config_updates_link_mode_and_persists():
 
     config = set_chat_config(redis_client, "123", link_mode="reply")
 
-    chat_config_call = redis_client.set.call_args_list[0]
+    redis_client.set.assert_called_once()
+    chat_config_call = redis_client.set.call_args
     assert chat_config_call[0][0] == "chat_config:123"
     saved_config = json.loads(chat_config_call[0][1])
     assert saved_config["link_mode"] == "reply"
     assert saved_config["ai_random_replies"] is True
-
-    legacy_call = redis_client.set.call_args_list[1]
-    assert legacy_call[0] == ("link_mode:123", "reply")
     assert config["link_mode"] == "reply"
 
 
@@ -384,7 +372,7 @@ def test_set_chat_config_turns_off_link_mode():
     set_chat_config(redis_client, "123", link_mode="off")
 
     redis_client.set.assert_called_once()
-    redis_client.delete.assert_called_with("link_mode:123")
+    redis_client.delete.assert_not_called()
 
 
 def test_set_chat_config_persists_to_postgres_when_available():
@@ -401,15 +389,13 @@ def test_set_chat_config_persists_to_postgres_when_available():
     redis_client.set.assert_not_called()
 
 
-def test_get_chat_config_uses_defaults_and_legacy():
+def test_get_chat_config_uses_defaults_when_missing():
     redis_client = MagicMock()
-    redis_client.get.side_effect = (
-        lambda key: "reply" if key == "link_mode:123" else None
-    )
+    redis_client.get.return_value = None
 
     config = get_chat_config(redis_client, "123")
 
-    assert config["link_mode"] == "reply"
+    assert config["link_mode"] == "off"
     assert config["ai_random_replies"] is True
     assert config["ai_command_followups"] is True
 

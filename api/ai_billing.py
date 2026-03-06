@@ -189,7 +189,7 @@ def format_balance_command(
             "si querés pasarle al grupo: /transfer <monto>"
         )
 
-    return f"tenés {user_balance} créditos ia, papá\nsi querés cargar más mandale /topup"
+    return f"tenés {user_balance} créditos ia\nsi querés cargar más mandale /topup"
 
 
 @dataclass

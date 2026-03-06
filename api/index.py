@@ -594,10 +594,81 @@ HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
 HACKER_NEWS_MAX_ITEMS = 5
 
-RATE_LIMIT_GLOBAL_MAX = 1024
-RATE_LIMIT_CHAT_MAX = 128
-TTL_RATE_GLOBAL = 3600  # 1 hour
-TTL_RATE_CHAT = 600  # 10 minutes
+TTL_RATE_GROQ_MINUTE = 120
+TTL_RATE_GROQ_DAY = 2 * 24 * 60 * 60
+
+GROQ_RATE_LIMITS = {
+    "chat": {"rpm": 1000, "rpd": 500_000, "model": "moonshotai/kimi-k2-instruct-0905"},
+    "compound": {"rpm": 200, "rpd": 20_000, "model": GROQ_COMPOUND_DEFAULT_MODEL},
+    "vision": {"rpm": 1000, "rpd": 500_000, "model": GROQ_VISION_MODEL},
+    "transcribe": {"rpm": 400, "rpd": 200_000, "model": GROQ_TRANSCRIBE_MODEL},
+}
+
+
+def _groq_rate_limit_minute_key(scope: str, bucket: Optional[int] = None) -> str:
+    minute_bucket = int(bucket if bucket is not None else time.time() // 60)
+    return f"rate_limit:groq:{scope}:minute:{minute_bucket}"
+
+
+def _groq_rate_limit_day_key(scope: str, day_bucket: Optional[str] = None) -> str:
+    utc_day = day_bucket or datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"rate_limit:groq:{scope}:day:{utc_day}"
+
+
+def _decode_rate_counter(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="replace")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _get_groq_rate_limit_config(scope: str) -> Dict[str, Any]:
+    return dict(GROQ_RATE_LIMITS.get(scope, GROQ_RATE_LIMITS["chat"]))
+
+
+def _peek_groq_rate_limit(scope: str, redis_client: Optional[redis.Redis] = None) -> bool:
+    redis_client = redis_client or _optional_redis_client()
+    if redis_client is None:
+        return True
+
+    config = _get_groq_rate_limit_config(scope)
+    try:
+        minute_count = _decode_rate_counter(
+            redis_client.get(_groq_rate_limit_minute_key(scope))
+        )
+        day_count = _decode_rate_counter(redis_client.get(_groq_rate_limit_day_key(scope)))
+    except redis.RedisError:
+        return True
+
+    return minute_count < int(config["rpm"]) and day_count < int(config["rpd"])
+
+
+def _consume_groq_rate_limit(scope: str, redis_client: Optional[redis.Redis] = None) -> bool:
+    redis_client = redis_client or _optional_redis_client()
+    if redis_client is None:
+        return True
+
+    config = _get_groq_rate_limit_config(scope)
+    minute_key = _groq_rate_limit_minute_key(scope)
+    day_key = _groq_rate_limit_day_key(scope)
+
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incr(minute_key)
+        pipe.expire(minute_key, TTL_RATE_GROQ_MINUTE, nx=True)
+        pipe.incr(day_key)
+        pipe.expire(day_key, TTL_RATE_GROQ_DAY, nx=True)
+        results = pipe.execute()
+        minute_count = _decode_rate_counter(results[0] if results else 0)
+        day_count = _decode_rate_counter(results[2] if len(results) > 2 else 0)
+    except redis.RedisError:
+        return True
+
+    return minute_count <= int(config["rpm"]) and day_count <= int(config["rpd"])
 
 def run_agent_cycle() -> Dict[str, Any]:
     """Trigger the autonomous agent, persist its thought and return metadata."""
@@ -837,7 +908,6 @@ def get_cache_history(hours_ago, request_hash, redis_client):
         return cache_history
 
 
-# generic proxy for caching any request
 def cached_requests(
     api_url,
     parameters,
@@ -847,7 +917,7 @@ def cached_requests(
     get_history=False,
     verify_ssl=True,
 ):
-    """Generic proxy for caching any request"""
+    """Cache any outbound HTTP request by payload and TTL."""
     try:
         arguments_dict = {
             "api_url": api_url,
@@ -1175,7 +1245,6 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
     Uses the unified prices helper with limit=1 and extracts the first row.
     """
     try:
-        # Keep call signature compatible with tests that patch this helper
         data = get_api_or_cache_prices(convert_to)
         if not data or "data" not in data or not data["data"]:
             return None
@@ -1981,8 +2050,8 @@ def handle_transcribe_with_message(message: Dict) -> str:
 
 
 def handle_transcribe() -> str:
-    """Transcribe command wrapper - requires special handling in message processor"""
-    return "el /transcribe se usa respondiendo a un audio, imagen o sticker, papá"
+    """Return the marker command handled by the message processor."""
+    return "el /transcribe se usa respondiendo a un audio, imagen o sticker"
 
 
 def powerlaw() -> str:
@@ -3604,6 +3673,7 @@ def _invoke_provider(
     attempt: Callable[[], Optional[str]],
     rate_limit_backoff: Optional[int] = None,
     label: Optional[str] = None,
+    rate_limit_scope: Optional[str] = None,
 ) -> Optional[str]:
     """Execute a provider call with shared backoff and error handling."""
 
@@ -3613,6 +3683,10 @@ def _invoke_provider(
         print(
             f"{display_name} backoff active ({remaining}s remaining), skipping API call"
         )
+        return None
+
+    if rate_limit_scope and not _consume_groq_rate_limit(rate_limit_scope):
+        print(f"{display_name} local rate limit reached for scope={rate_limit_scope}, skipping API call")
         return None
 
     try:
@@ -3682,6 +3756,7 @@ def get_groq_ai_response(
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq AI",
+        rate_limit_scope="chat",
     )
 
 
@@ -3735,6 +3810,7 @@ def get_groq_compound_response(
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Compound",
+        rate_limit_scope="compound",
     )
 
 
@@ -4157,53 +4233,10 @@ def should_auto_process_media(
     )
 
 
-def check_rate_limit(chat_id: str, redis_client: redis.Redis) -> bool:
-    """
-    Checkea si un chat_id o el bot global superó el rate limit
-    Returns True si puede hacer requests, False si está limitado
-    """
-    try:
-        pipe = redis_client.pipeline()
-
-        # Check global rate limit (requests/hour)
-        hour_key = "rate_limit:global:hour"
-        pipe.incr(hour_key)
-        pipe.expire(hour_key, TTL_RATE_GLOBAL, nx=True)
-
-        # Check individual chat rate limit (requests/10 minutes)
-        chat_key = f"rate_limit:chat:{chat_id}"
-        pipe.incr(chat_key)
-        pipe.expire(chat_key, TTL_RATE_CHAT, nx=True)
-
-        # Execute all commands atomically
-        results = pipe.execute()
-
-        # Get the final counts (every 2nd index starting from 0)
-        hour_count = results[0] or 0  # Convert None to 0
-        chat_count = results[2] or 0  # Convert None to 0
-
-        return hour_count <= RATE_LIMIT_GLOBAL_MAX and chat_count <= RATE_LIMIT_CHAT_MAX
-    except redis.RedisError:
-        return False
-
-
 def check_global_rate_limit(redis_client: redis.Redis) -> bool:
-    """Check only the global hourly limit."""
+    """Check whether the main Groq chat lane still has minute/day budget."""
 
-    try:
-        pipe = redis_client.pipeline()
-        hour_key = "rate_limit:global:hour"
-        pipe.incr(hour_key)
-        pipe.expire(hour_key, TTL_RATE_GLOBAL, nx=True)
-        results = pipe.execute()
-        hour_count_raw = results[0] if results else 0
-        try:
-            hour_count = int(hour_count_raw or 0)
-        except (TypeError, ValueError):
-            return True
-        return hour_count <= RATE_LIMIT_GLOBAL_MAX
-    except redis.RedisError:
-        return False
+    return _peek_groq_rate_limit("chat", redis_client)
 
 
 def get_ai_credits_per_response() -> int:
@@ -4481,14 +4514,13 @@ def describe_image_groq(
         if cached:
             return str(cached)
 
-    groq_client = _get_groq_client()
-    if groq_client is None:
-        return None
-
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
 
     def _attempt() -> Optional[str]:
+        groq_client = _get_groq_client()
+        if groq_client is None:
+            return None
         print("Describing image with Groq vision model...")
         input_payload = cast(
             ResponseInputParam,
@@ -4518,6 +4550,7 @@ def describe_image_groq(
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Vision",
+        rate_limit_scope="vision",
     )
 
     if description and file_id:
@@ -4539,11 +4572,10 @@ def transcribe_audio_groq(
         if cached:
             return str(cached)
 
-    groq_client = _get_groq_client()
-    if groq_client is None:
-        return None
-
     def _attempt() -> Optional[str]:
+        groq_client = _get_groq_client()
+        if groq_client is None:
+            return None
         print("Transcribing audio with Groq Whisper...")
         audio_file = io.BytesIO(audio_data)
         audio_file.name = "audio.webm"
@@ -4565,6 +4597,7 @@ def transcribe_audio_groq(
         attempt=_attempt,
         rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
         label="Groq Whisper",
+        rate_limit_scope="transcribe",
     )
 
     if transcription and file_id:
@@ -5036,7 +5069,7 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         send_msg(
             chat_id,
             (
-                f"listo, te cargué {pack['credits']} créditos, papá\n"
+                f"listo, te cargué {pack['credits']} créditos\n"
                 f"ahora te quedaron {balance}\n"
                 "si querés mandarle al grupo: /transfer <monto>"
             ),
