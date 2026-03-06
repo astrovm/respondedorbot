@@ -161,7 +161,7 @@ def handle_ai_response(
     cleaned_response = clean_duplicate_response(prefix_stripped_response)
 
     if not cleaned_response.strip():
-        return "no pude generar respuesta, intentá de nuevo"
+        return "me quedé reculando y no te pude responder, probá de nuevo"
 
     return cleaned_response
 
