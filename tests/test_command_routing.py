@@ -451,8 +451,8 @@ def test_format_balance_command_private_includes_topup_hint():
     with patch("api.index._fetch_balance", return_value=42):
         text = _format_balance_command("private", 1, 2)
 
-    assert "tu saldo personal de IA es: 42" in text
-    assert "para cargar créditos: /topup" in text
+    assert "tenés 42 créditos ia" in text
+    assert "mandale /topup" in text
 
 
 def test_format_balance_command_group_includes_topup_and_transfer_hints():
@@ -461,8 +461,8 @@ def test_format_balance_command_group_includes_topup_and_transfer_hints():
     with patch("api.index._fetch_balance", side_effect=[30, 120]):
         text = _format_balance_command("group", 1, 2)
 
-    assert "tu saldo personal: 30" in text
-    assert "saldo del grupo: 120" in text
+    assert "lo tuyo: 30" in text
+    assert "lo del grupo: 120" in text
     assert "/topup" in text
     assert "/transfer <monto>" in text
 

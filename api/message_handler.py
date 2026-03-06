@@ -347,7 +347,7 @@ def _handle_config_command(
         message.get("from", {}).get("id"),
         redis_client=redis_client,
     ):
-        denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+        denial_message = "solo los admins pueden tocar esta config, maestro"
         deps.send_msg(chat_id, denial_message, str(message.get("message_id")))
         deps.report_unauthorized_config_attempt(
             chat_id,
@@ -371,20 +371,20 @@ def _handle_topup_command(
         return None, None, False, None
 
     if not deps.credits_db_service.is_configured():
-        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
 
     if chat_type != "private":
         bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
         response_msg = (
-            "la recarga va por privado.\n"
+            "la recarga va por privado, boludo.\n"
             f"abrime en @{bot_username}"
             if bot_username
-            else "la recarga va por privado, abrime en DM."
+            else "la recarga va por privado, abrime en dm"
         )
         return response_msg, None, False, command
 
     deps.ensure_callback_updates_enabled()
-    return "elegí un pack para recargar créditos IA:", deps.build_topup_keyboard(), False, command
+    return "elegí cuánto querés cargar, papá:", deps.build_topup_keyboard(), False, command
 
 
 def _handle_balance_command(
@@ -400,10 +400,10 @@ def _handle_balance_command(
         return None, None, False, None
 
     if not deps.credits_db_service.is_configured():
-        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
 
     if user_id is None or numeric_chat_id is None:
-        return "no pude leer tu usuario para ver saldos.", None, False, command
+        return "no te pude leer bien el usuario para ver los saldos", None, False, command
 
     try:
         deps.maybe_grant_onboarding_credits(
@@ -421,7 +421,7 @@ def _handle_balance_command(
             error,
             {"chat_id": chat_id, "user_id": user_id},
         )
-        response_msg = "error leyendo tu saldo, intentá de nuevo."
+        response_msg = "se trabó leyendo tu saldo, probá de nuevo"
     return response_msg, None, False, command
 
 
@@ -439,22 +439,22 @@ def _handle_transfer_command(
         return None, None, False, None
 
     if not deps.credits_db_service.is_configured():
-        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
 
     if not deps.is_group_chat_type(chat_type):
-        return "este comando es para grupos: /transfer <monto>", None, False, command
+        return "esto es para grupos, capo: /transfer <monto>", None, False, command
 
     if user_id is None or numeric_chat_id is None:
-        return "no pude identificar usuario/chat para transferir.", None, False, command
+        return "no te pude sacar bien el usuario o el grupo para transferir", None, False, command
 
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
     try:
         amount = int(amount_token)
     except (TypeError, ValueError):
-        return "uso: /transfer <monto>", None, False, command
+        return "mandalo bien, papá: /transfer <monto>", None, False, command
 
     if amount <= 0:
-        return "el monto tiene que ser mayor a 0", None, False, command
+        return "el monto tiene que ser mayor a 0, no me rompas las bolas", None, False, command
 
     try:
         transfer_result = deps.credits_db_service.transfer_user_to_chat(
@@ -472,19 +472,19 @@ def _handle_transfer_command(
                 "amount": amount,
             },
         )
-        return "error transfiriendo créditos, intentá de nuevo.", None, False, command
+        return "se trabó la transferencia, probá de nuevo", None, False, command
 
     if transfer_result.get("ok"):
         response_msg = (
-            f"transferidos {amount} créditos al grupo ✅\n"
-            f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
-            f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
+            f"listo, le pasé {amount} créditos al grupo\n"
+            f"- lo tuyo: {int(transfer_result.get('user_balance', 0))}\n"
+            f"- lo del grupo: {int(transfer_result.get('chat_balance', 0))}"
         )
         return response_msg, None, False, command
 
     response_msg = (
-        "no te alcanza el saldo personal para esa transferencia.\n"
-        f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
+        "no te alcanza lo tuyo para pasar esa guita al grupo\n"
+        f"te quedan: {int(transfer_result.get('user_balance', 0))}"
     )
     return response_msg, None, False, command
 

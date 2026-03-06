@@ -132,17 +132,17 @@ def build_insufficient_credits_message(
 
     if is_group_chat_type(chat_type):
         return (
-            "sin créditos para IA en este grupo, che.\n"
-            f"- Tu saldo: {user_balance}\n"
-            f"- Saldo del grupo: {chat_balance}\n"
-            "agregá créditos con /topup (por privado) y si querés pasá al grupo con /transfer <monto>.\n"
-            "podés ver todo con /balance"
+            "se quedaron secos de créditos ia en este grupo, boludo.\n"
+            f"- lo tuyo: {user_balance}\n"
+            f"- lo del grupo: {chat_balance}\n"
+            "metele /topup por privado y si querés pasá saldo al grupo con /transfer <monto>\n"
+            "si querés ver bien la miseria, mandá /balance"
         )
 
     return (
-        "te quedaste sin créditos IA.\n"
-        f"saldo actual: {user_balance}\n"
-        "agregá créditos con /topup para recargar con Stars ⭐"
+        "te quedaste seco de créditos ia, boludo.\n"
+        f"saldo: {user_balance}\n"
+        "metele /topup si querés que siga laburando"
     )
 def maybe_grant_onboarding_credits(
     credits_db_service: Any,
@@ -181,15 +181,15 @@ def format_balance_command(
     if is_group_chat_type(chat_type):
         chat_balance = credits_db_service.get_balance("chat", int(chat_id))
         return (
-            "saldos IA:\n"
-            f"- tu saldo personal: {user_balance}\n"
-            f"- saldo del grupo: {chat_balance}\n"
-            "si no te alcanza el saldo personal, se usa el del grupo.\n"
-            "para cargar créditos: /topup (por privado)\n"
-            "si querés pasar créditos al grupo: /transfer <monto>"
+            "saldos ia, maestro:\n"
+            f"- lo tuyo: {user_balance}\n"
+            f"- lo del grupo: {chat_balance}\n"
+            "si no alcanza lo tuyo, manoteo del grupo\n"
+            "si querés cargar más: /topup por privado\n"
+            "si querés pasarle al grupo: /transfer <monto>"
         )
 
-    return f"tu saldo personal de IA es: {user_balance}\npara cargar créditos: /topup"
+    return f"tenés {user_balance} créditos ia, papá\nsi querés cargar más mandale /topup"
 
 
 @dataclass
@@ -209,9 +209,9 @@ class AIMessageBilling:
     numeric_chat_id: Optional[int]
     message: Mapping[str, Any]
     onboarding_checked: bool = False
-    billing_not_configured_message: str = "el cobro IA no está configurado, avisale al admin."
-    billing_missing_scope_message: str = "no pude identificar usuario/chat para cobrar IA."
-    billing_charge_error_message: str = "error cobrando créditos IA, intentá de nuevo."
+    billing_not_configured_message: str = "el cobro de ia no está andando, avisale al admin"
+    billing_missing_scope_message: str = "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
+    billing_charge_error_message: str = "se trabó el cobro de ia, probá de nuevo"
     charge_errors: List[str] = field(default_factory=list)
 
     def _resolve_ai_charge_context(self) -> Tuple[Optional[int], Optional[str]]:
