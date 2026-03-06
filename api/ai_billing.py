@@ -219,6 +219,8 @@ class AIMessageBilling:
     admin_reporter: AdminReporter
     gen_random_fn: Callable[[str], str]
     build_insufficient_credits_message_fn: Callable[..., str]
+    maybe_grant_onboarding_credits_fn: Callable[[Optional[int]], None]
+    get_ai_credits_per_response_fn: Callable[[], int]
     command: str
     chat_id: str
     chat_type: str
@@ -263,14 +265,10 @@ class AIMessageBilling:
             return None, self.billing_missing_scope_message
 
         if not self.onboarding_checked:
-            maybe_grant_onboarding_credits(
-                self.credits_db_service,
-                self.admin_reporter,
-                self.user_id,
-            )
+            self.maybe_grant_onboarding_credits_fn(self.user_id)
             self.onboarding_checked = True
 
-        credits_cost = get_ai_credits_per_response()
+        credits_cost = self.get_ai_credits_per_response_fn()
         try:
             charge_result = self.credits_db_service.charge_ai_credits(
                 user_id=self.user_id,
