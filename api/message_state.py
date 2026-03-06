@@ -18,6 +18,7 @@ ExtractMessageText = Callable[[Dict[str, Any]], str]
 
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
+CHAT_HISTORY_MAX_MESSAGES = 4
 
 
 def truncate_text(text: Optional[str], max_length: int = 512) -> str:
@@ -62,7 +63,7 @@ def save_message_to_redis(
         pipe = redis_client.pipeline()
         pipe.lpush(chat_history_key, history_entry)
         pipe.sadd(message_ids_key, message_id)
-        pipe.ltrim(chat_history_key, 0, 31)
+        pipe.ltrim(chat_history_key, 0, max(0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1))
         pipe.lrange(chat_history_key, 0, -1)
         results = pipe.execute()
 
@@ -102,7 +103,7 @@ def get_chat_history(
     redis_client: redis.Redis,
     *,
     admin_reporter: AdminReporter,
-    max_messages: int = 8,
+    max_messages: int = CHAT_HISTORY_MAX_MESSAGES,
 ) -> List[Dict[str, Any]]:
     """Return the latest chat history in chronological order."""
 
