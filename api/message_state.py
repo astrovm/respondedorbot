@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 
 import redis
 
+from api.chat_context import format_user_identity
+
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 DecodeRedisValue = Callable[[Any], Optional[str]]
@@ -194,16 +196,6 @@ def get_bot_message_metadata(
             {"chat_id": chat_id, "message_id": message_id},
         )
     return None
-
-
-def format_user_identity(user: Mapping[str, Any]) -> str:
-    """Build a display name for a Telegram user."""
-
-    first_name = "" if user.get("first_name") is None else str(user.get("first_name", ""))
-    username = "" if user.get("username") is None else str(user.get("username", ""))
-    return first_name + (f" ({username})" if username else "")
-
-
 def describe_replied_message(
     reply_msg: Mapping[str, Any],
     *,
@@ -273,6 +265,7 @@ def format_user_message(
 __all__ = [
     "BOT_MESSAGE_META_TTL",
     "build_reply_context_text",
+    "format_user_identity",
     "format_user_message",
     "get_bot_message_metadata",
     "get_chat_history",

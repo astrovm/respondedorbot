@@ -7,6 +7,7 @@ from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 from api.ai_billing import AIMessageBilling
+from api.chat_context import format_user_identity
 
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
@@ -329,6 +330,199 @@ def _run_ai_flow(
     return response_msg, True
 
 
+def _handle_config_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_id: str,
+    chat_type: str,
+    message: Dict[str, Any],
+    redis_client: Any,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/config":
+        return None, None, False, None
+
+    if deps.is_group_chat_type(chat_type) and not deps.is_chat_admin(
+        chat_id,
+        message.get("from", {}).get("id"),
+        redis_client=redis_client,
+    ):
+        denial_message = "Solo los admins pueden cambiar la config del gordo acá."
+        deps.send_msg(chat_id, denial_message, str(message.get("message_id")))
+        deps.report_unauthorized_config_attempt(
+            chat_id,
+            message.get("from", {}),
+            chat_type=chat_type,
+            action="command:/config",
+        )
+        return "ok", None, False, None
+
+    response_msg, response_markup = deps.handle_config_command(chat_id)
+    return response_msg, response_markup, False, command
+
+
+def _handle_topup_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_type: str,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/topup":
+        return None, None, False, None
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+
+    if chat_type != "private":
+        bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
+        response_msg = (
+            "la recarga va por privado.\n"
+            f"abrime en @{bot_username}"
+            if bot_username
+            else "la recarga va por privado, abrime en DM."
+        )
+        return response_msg, None, False, command
+
+    deps.ensure_callback_updates_enabled()
+    return "elegí un pack para recargar créditos IA:", deps.build_topup_keyboard(), False, command
+
+
+def _handle_balance_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_type: str,
+    chat_id: str,
+    user_id: Optional[int],
+    numeric_chat_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/balance":
+        return None, None, False, None
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+
+    if user_id is None or numeric_chat_id is None:
+        return "no pude leer tu usuario para ver saldos.", None, False, command
+
+    try:
+        deps.maybe_grant_onboarding_credits(
+            deps.credits_db_service, deps.admin_report, user_id
+        )
+        response_msg = deps.format_balance_command(
+            deps.credits_db_service,
+            chat_type=chat_type,
+            user_id=user_id,
+            chat_id=numeric_chat_id,
+        )
+    except Exception as error:
+        deps.admin_report(
+            "Error loading balance",
+            error,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        response_msg = "error leyendo tu saldo, intentá de nuevo."
+    return response_msg, None, False, command
+
+
+def _handle_transfer_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    sanitized_message_text: str,
+    chat_id: str,
+    chat_type: str,
+    user_id: Optional[int],
+    numeric_chat_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/transfer":
+        return None, None, False, None
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro IA no está configurado, avisale al admin.", None, False, command
+
+    if not deps.is_group_chat_type(chat_type):
+        return "este comando es para grupos: /transfer <monto>", None, False, command
+
+    if user_id is None or numeric_chat_id is None:
+        return "no pude identificar usuario/chat para transferir.", None, False, command
+
+    amount_token = sanitized_message_text.split(" ", 1)[0].strip()
+    try:
+        amount = int(amount_token)
+    except (TypeError, ValueError):
+        return "uso: /transfer <monto>", None, False, command
+
+    if amount <= 0:
+        return "el monto tiene que ser mayor a 0", None, False, command
+
+    try:
+        transfer_result = deps.credits_db_service.transfer_user_to_chat(
+            user_id=user_id,
+            chat_id=numeric_chat_id,
+            amount=amount,
+        )
+    except Exception as error:
+        deps.admin_report(
+            "Error transferring credits",
+            error,
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "amount": amount,
+            },
+        )
+        return "error transfiriendo créditos, intentá de nuevo.", None, False, command
+
+    if transfer_result.get("ok"):
+        response_msg = (
+            f"transferidos {amount} créditos al grupo ✅\n"
+            f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
+            f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
+        )
+        return response_msg, None, False, command
+
+    response_msg = (
+        "no te alcanza el saldo personal para esa transferencia.\n"
+        f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
+    )
+    return response_msg, None, False, command
+
+
+def _handle_non_ai_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    commands: Mapping[str, CommandTuple],
+    sanitized_message_text: str,
+    message: Dict[str, Any],
+    billing_helper: AIMessageBilling,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command not in commands:
+        return None, None, False, None
+
+    handler_func, uses_ai, takes_params = commands[command]
+    if uses_ai:
+        return None, None, False, None
+
+    if command == "/transcribe":
+        media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
+            "transcribe_command_media"
+        )
+        if media_charge_error:
+            return media_charge_error, None, False, command
+
+        response_msg = deps.handle_transcribe_with_message(message)
+        if media_charge_meta and not billing_helper.is_transcribe_success_response(response_msg):
+            billing_helper.refund_ai_charge_meta(
+                media_charge_meta, "transcribe_command_unsuccessful"
+            )
+        return response_msg, None, False, command
+
+    response_msg = handler_func(sanitized_message_text) if takes_params else handler_func()
+    return response_msg, None, False, command
+
+
 def _handle_known_command(
     deps: MessageHandlerDeps,
     *,
@@ -346,127 +540,50 @@ def _handle_known_command(
     user_identity: str,
     redis_client: Any,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    response_msg: Optional[str] = None
     response_markup: Optional[Dict[str, Any]] = None
-    response_uses_ai = False
     response_command: Optional[str] = None
 
-    if (
-        command == "/config"
-        and deps.is_group_chat_type(chat_type)
-        and not deps.is_chat_admin(
-            chat_id,
-            message.get("from", {}).get("id"),
-            redis_client=redis_client,
-        )
-    ):
-        denial_message = "Solo los admins pueden cambiar la config del gordo acá."
-        deps.send_msg(chat_id, denial_message, str(message.get("message_id")))
-        deps.report_unauthorized_config_attempt(
-            chat_id,
-            message.get("from", {}),
-            chat_type=chat_type,
-            action="command:/config",
-        )
-        return "ok", None, False, None
+    response = _handle_config_command(
+        deps,
+        command=command,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        message=message,
+        redis_client=redis_client,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
 
-    if command == "/config":
-        response_command = command
-        response_msg, response_markup = deps.handle_config_command(chat_id)
-        return response_msg, response_markup, False, response_command
+    response = _handle_topup_command(
+        deps,
+        command=command,
+        chat_type=chat_type,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
 
-    if command == "/topup":
-        response_command = command
-        if not deps.credits_db_service.is_configured():
-            response_msg = "el cobro IA no está configurado, avisale al admin."
-        elif chat_type != "private":
-            bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
-            response_msg = (
-                "la recarga va por privado.\n"
-                f"abrime en @{bot_username}"
-                if bot_username
-                else "la recarga va por privado, abrime en DM."
-            )
-        else:
-            deps.ensure_callback_updates_enabled()
-            response_msg = "elegí un pack para recargar créditos IA:"
-            response_markup = deps.build_topup_keyboard()
-        return response_msg, response_markup, False, response_command
+    response = _handle_balance_command(
+        deps,
+        command=command,
+        chat_type=chat_type,
+        chat_id=chat_id,
+        user_id=user_id,
+        numeric_chat_id=numeric_chat_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
 
-    if command == "/balance":
-        response_command = command
-        if not deps.credits_db_service.is_configured():
-            response_msg = "el cobro IA no está configurado, avisale al admin."
-        elif user_id is None or numeric_chat_id is None:
-            response_msg = "no pude leer tu usuario para ver saldos."
-        else:
-            try:
-                deps.maybe_grant_onboarding_credits(
-                    deps.credits_db_service, deps.admin_report, user_id
-                )
-                response_msg = deps.format_balance_command(
-                    deps.credits_db_service,
-                    chat_type=chat_type,
-                    user_id=user_id,
-                    chat_id=numeric_chat_id,
-                )
-            except Exception as error:
-                deps.admin_report(
-                    "Error loading balance",
-                    error,
-                    {"chat_id": chat_id, "user_id": user_id},
-                )
-                response_msg = "error leyendo tu saldo, intentá de nuevo."
-        return response_msg, response_markup, False, response_command
-
-    if command == "/transfer":
-        response_command = command
-        if not deps.credits_db_service.is_configured():
-            response_msg = "el cobro IA no está configurado, avisale al admin."
-        elif not deps.is_group_chat_type(chat_type):
-            response_msg = "este comando es para grupos: /transfer <monto>"
-        elif user_id is None or numeric_chat_id is None:
-            response_msg = "no pude identificar usuario/chat para transferir."
-        else:
-            amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-            try:
-                amount = int(amount_token)
-            except (TypeError, ValueError):
-                response_msg = "uso: /transfer <monto>"
-            else:
-                if amount <= 0:
-                    response_msg = "el monto tiene que ser mayor a 0"
-                else:
-                    try:
-                        transfer_result = deps.credits_db_service.transfer_user_to_chat(
-                            user_id=user_id,
-                            chat_id=numeric_chat_id,
-                            amount=amount,
-                        )
-                    except Exception as error:
-                        deps.admin_report(
-                            "Error transferring credits",
-                            error,
-                            {
-                                "chat_id": chat_id,
-                                "user_id": user_id,
-                                "amount": amount,
-                            },
-                        )
-                        response_msg = "error transfiriendo créditos, intentá de nuevo."
-                    else:
-                        if transfer_result.get("ok"):
-                            response_msg = (
-                                f"transferidos {amount} créditos al grupo ✅\n"
-                                f"- tu saldo personal: {int(transfer_result.get('user_balance', 0))}\n"
-                                f"- saldo del grupo: {int(transfer_result.get('chat_balance', 0))}"
-                            )
-                        else:
-                            response_msg = (
-                                "no te alcanza el saldo personal para esa transferencia.\n"
-                                f"tu saldo: {int(transfer_result.get('user_balance', 0))}"
-                            )
-        return response_msg, response_markup, False, response_command
+    response = _handle_transfer_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        user_id=user_id,
+        numeric_chat_id=numeric_chat_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
 
     if command in {"/buscar", "/search"}:
         response_command = command
@@ -493,23 +610,14 @@ def _handle_known_command(
             )
             return response_msg, response_markup, response_uses_ai, response_command
 
-        if command == "/transcribe":
-            media_charge_meta, media_charge_error = billing_helper.charge_one_ai_request(
-                "transcribe_command_media"
-            )
-            if media_charge_error:
-                response_msg = media_charge_error
-            else:
-                response_msg = deps.handle_transcribe_with_message(message)
-                if media_charge_meta and not billing_helper.is_transcribe_success_response(
-                    response_msg
-                ):
-                    billing_helper.refund_ai_charge_meta(
-                        media_charge_meta, "transcribe_command_unsuccessful"
-                    )
-            return response_msg, response_markup, False, response_command
-
-        response_msg = handler_func(sanitized_message_text) if takes_params else handler_func()
+        response_msg, response_markup, _, response_command = _handle_non_ai_command(
+            deps,
+            command=command,
+            commands=commands,
+            sanitized_message_text=sanitized_message_text,
+            message=message,
+            billing_helper=billing_helper,
+        )
         return response_msg, response_markup, False, response_command
 
     response_msg, response_uses_ai = _run_ai_flow(
@@ -535,10 +643,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         message_id = str(message.get("message_id"))
         chat_id = str(chat.get("id"))
         chat_type = str(chat.get("type", ""))
-        user_identity = str(message.get("from", {}).get("first_name") or "")
-        username = message.get("from", {}).get("username")
-        if username:
-            user_identity = f"{user_identity} ({username})".strip()
+        user_identity = format_user_identity(cast(Mapping[str, Any], message.get("from", {})))
 
         user_id = deps.extract_user_id(message)
         numeric_chat_id = deps.extract_numeric_chat_id(chat_id)
