@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from api.chat_context import (
+    extract_numeric_chat_id,
+    extract_user_id,
+    is_group_chat_type,
+)
+
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
@@ -18,12 +24,6 @@ AI_BILLING_DEFAULT_PACKS = [
     {"id": "p1000", "credits": 1000, "xtr": 500},
     {"id": "p2500", "credits": 2500, "xtr": 1250},
 ]
-
-
-def is_group_chat_type(chat_type: Optional[str]) -> bool:
-    return str(chat_type) in {"group", "supergroup"}
-
-
 def get_ai_credits_per_response() -> int:
     """Return credits charged per AI response."""
 
@@ -144,25 +144,6 @@ def build_insufficient_credits_message(
         f"saldo actual: {user_balance}\n"
         "agregá créditos con /topup para recargar con Stars ⭐"
     )
-
-
-def extract_numeric_chat_id(chat_id: str) -> Optional[int]:
-    try:
-        return int(chat_id)
-    except (TypeError, ValueError):
-        return None
-
-
-def extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
-    user = message.get("from") if message else None
-    if not isinstance(user, Mapping):
-        return None
-    try:
-        return int(user.get("id"))
-    except (TypeError, ValueError):
-        return None
-
-
 def maybe_grant_onboarding_credits(
     credits_db_service: Any,
     admin_reporter: AdminReporter,

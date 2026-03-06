@@ -79,6 +79,7 @@ from api.ai_billing import (
     build_topup_keyboard as _billing_build_topup_keyboard,
     extract_numeric_chat_id as _billing_extract_numeric_chat_id,
     extract_user_id as _billing_extract_user_id,
+    format_balance_command as _billing_format_balance_command,
     get_ai_billing_pack as _billing_get_ai_billing_pack,
     get_ai_billing_packs as _billing_get_ai_billing_packs,
     get_ai_credits_per_response as _billing_get_ai_credits_per_response,
@@ -4256,18 +4257,17 @@ def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
 
 
 def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
-    user_balance = _fetch_balance("user", user_id)
-    if _is_group_chat_type(chat_type):
-        chat_balance = _fetch_balance("chat", chat_id)
-        return (
-            "saldos IA:\n"
-            f"- tu saldo personal: {user_balance}\n"
-            f"- saldo del grupo: {chat_balance}\n"
-            "si no te alcanza el saldo personal, se usa el del grupo.\n"
-            "para cargar créditos: /topup (por privado)\n"
-            "si querés pasar créditos al grupo: /transfer <monto>"
-        )
-    return f"tu saldo personal de IA es: {user_balance}\npara cargar créditos: /topup"
+    class _BalanceServiceAdapter:
+        @staticmethod
+        def get_balance(scope_type: str, scope_id: int) -> int:
+            return _fetch_balance(cast(Literal["user", "chat"], scope_type), scope_id)
+
+    return _billing_format_balance_command(
+        _BalanceServiceAdapter(),
+        chat_type=chat_type,
+        user_id=user_id,
+        chat_id=chat_id,
+    )
 
 
 def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:

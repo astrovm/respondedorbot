@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import redis
 
+from api.chat_context import is_group_chat_type
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 
 
@@ -31,14 +32,6 @@ def decode_redis_value(value: Any) -> Optional[str]:
     if value is not None:
         return str(value)
     return None
-
-
-def is_group_chat_type(chat_type: Optional[str]) -> bool:
-    """Return True for group or supergroup chats."""
-
-    return str(chat_type) in {"group", "supergroup"}
-
-
 def chat_config_key(chat_id: str) -> str:
     return f"{CHAT_CONFIG_KEY_PREFIX}{chat_id}"
 
