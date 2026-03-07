@@ -709,7 +709,9 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
     from api import index as index_module
 
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    index_module._provider_backoff_until["chat"] = time.time() + 30
+    index_module._provider_backoff_until[
+        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+    ] = time.time() + 30
 
     with patch("api.index.OpenAI") as mock_openai:
         result = get_groq_ai_response(
@@ -757,7 +759,9 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
         )
 
         assert result is None
-        remaining = index_module.get_provider_backoff_remaining("chat")
+        remaining = index_module.get_provider_backoff_remaining(
+            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+        )
         assert remaining > 0
         assert mock_openai.call_count == 1
 
@@ -795,8 +799,116 @@ def test_get_groq_ai_response_uses_retry_after_header_for_scope_backoff(monkeypa
         )
 
     assert result is None
-    remaining = index_module.get_provider_backoff_remaining("chat")
+    remaining = index_module.get_provider_backoff_remaining(
+        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+    )
     assert 0 < remaining <= 30
+
+
+def test_get_groq_ai_response_prefers_free_account(monkeypatch):
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    free_choice = MagicMock()
+    free_choice.message.content = "free wins"
+    free_choice.finish_reason = "stop"
+
+    free_response = MagicMock()
+    free_response.choices = [free_choice]
+
+    free_client = MagicMock()
+    free_client.chat.completions.create.return_value = free_response
+
+    with patch("api.index.OpenAI", return_value=free_client) as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result == "free wins"
+    assert mock_openai.call_count == 1
+    assert mock_openai.call_args.kwargs["api_key"] == "free_key"
+
+
+def test_get_groq_ai_response_falls_back_to_paid_when_free_local_limit_hits(monkeypatch):
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    paid_choice = MagicMock()
+    paid_choice.message.content = "paid fallback"
+    paid_choice.finish_reason = "stop"
+
+    paid_response = MagicMock()
+    paid_response.choices = [paid_choice]
+
+    paid_client = MagicMock()
+    paid_client.chat.completions.create.return_value = paid_response
+
+    def reserve_side_effect(account, scope, **kwargs):
+        if account == "free" and scope == "chat":
+            return None
+        return {
+            "account": account,
+            "scope": scope,
+            "request_count": 1,
+            "token_count": 100,
+            "audio_seconds": 0,
+        }
+
+    with patch("api.index._reserve_groq_rate_limit", side_effect=reserve_side_effect), patch(
+        "api.index.OpenAI", return_value=paid_client
+    ) as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result == "paid fallback"
+    assert mock_openai.call_count == 1
+    assert mock_openai.call_args.kwargs["api_key"] == "paid_key"
+
+
+def test_get_groq_ai_response_falls_back_to_paid_after_free_429(monkeypatch):
+    from api import index as index_module
+
+    index_module._provider_backoff_until.clear()
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    free_client = MagicMock()
+    free_client.chat.completions.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    paid_choice = MagicMock()
+    paid_choice.message.content = "paid fallback"
+    paid_choice.finish_reason = "stop"
+
+    paid_response = MagicMock()
+    paid_response.choices = [paid_choice]
+
+    paid_client = MagicMock()
+    paid_client.chat.completions.create.return_value = paid_response
+
+    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result == "paid fallback"
+    assert mock_openai.call_count == 2
+    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
+    assert index_module.get_provider_backoff_remaining(
+        index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
+    ) > 0
+    assert (
+        index_module.get_provider_backoff_remaining(
+            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+        )
+        == 0
+    )
 
 
 def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkeypatch):
@@ -812,6 +924,37 @@ def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkey
 
     assert result is None
     mock_openai.assert_not_called()
+
+
+def test_get_groq_compound_response_falls_back_to_paid_after_free_429(monkeypatch):
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    free_client = MagicMock()
+    free_client.chat.completions.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    paid_choice = MagicMock()
+    paid_choice.message.content = "compound fallback"
+    paid_choice.finish_reason = "stop"
+
+    paid_response = MagicMock()
+    paid_response.choices = [paid_choice]
+
+    paid_client = MagicMock()
+    paid_client.chat.completions.create.return_value = paid_response
+
+    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
+        result = get_groq_compound_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result == "compound fallback"
+    assert mock_openai.call_count == 2
+    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
 
 
 def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
