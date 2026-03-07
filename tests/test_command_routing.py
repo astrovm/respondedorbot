@@ -74,6 +74,10 @@ def test_should_use_groq_compound_tools_truthy(monkeypatch):
     assert should_use_groq_compound_tools() is True
 
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_test_key")
+    assert should_use_groq_compound_tools() is True
+
+    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
     assert should_use_groq_compound_tools() is False
 
 
@@ -144,7 +148,8 @@ def test_hash_cache_key_is_stable():
     assert key_one != other_key
 
 
-def test_check_global_rate_limit():
+def test_check_global_rate_limit(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"999", b"499999"]
     assert check_global_rate_limit(redis_client) is True
@@ -511,7 +516,8 @@ def test_extract_message_text_edge_cases():
     assert extract_message_text(msg) == ""
 
 
-def test_check_global_rate_limit_edge_cases():
+def test_check_global_rate_limit_edge_cases(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"-1", b"-1"]
     assert check_global_rate_limit(redis_client) is True
@@ -525,7 +531,8 @@ def test_check_global_rate_limit_edge_cases():
     assert check_global_rate_limit(redis_client) is True
 
 
-def test_check_global_rate_limit_uses_groq_chat_budget():
+def test_check_global_rate_limit_uses_groq_chat_budget(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"999", b"499999"]
     assert check_global_rate_limit(redis_client) is True
@@ -565,9 +572,37 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "asd": 4_000_000,
         "model": "whisper-large-v3-turbo",
     }
+    assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
+        "rpm": 60,
+        "rpd": 1_000,
+        "tpm": 10_000,
+        "tpd": 300_000,
+        "model": "moonshotai/kimi-k2-instruct-0905",
+    }
+    assert index.GROQ_FREE_RATE_LIMITS["compound"] == {
+        "rpm": 30,
+        "rpd": 250,
+        "tpm": 70_000,
+        "model": "groq/compound",
+    }
+    assert index.GROQ_FREE_RATE_LIMITS["vision"] == {
+        "rpm": 30,
+        "rpd": 1_000,
+        "tpm": 30_000,
+        "tpd": 500_000,
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+    }
+    assert index.GROQ_FREE_RATE_LIMITS["transcribe"] == {
+        "rpm": 20,
+        "rpd": 2_000,
+        "ash": 7_200,
+        "asd": 28_800,
+        "model": "whisper-large-v3-turbo",
+    }
 
 
-def test_check_global_rate_limit_enforces_chat_tpm():
+def test_check_global_rate_limit_enforces_chat_tpm(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"0", b"0", b"249999"]
 
@@ -578,7 +613,8 @@ def test_check_global_rate_limit_enforces_chat_tpm():
     ) is False
 
 
-def test_check_global_rate_limit_enforces_transcribe_audio_limits():
+def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"0", b"0", b"399999", b"3999999"]
 
@@ -586,6 +622,35 @@ def test_check_global_rate_limit_enforces_transcribe_audio_limits():
         redis_client,
         scope="transcribe",
         audio_seconds=2.0,
+    ) is False
+
+
+def test_check_global_rate_limit_uses_paid_when_free_is_exhausted(monkeypatch):
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [
+        b"60",
+        b"10",
+        b"0",
+        b"999",
+        b"499999",
+    ]
+
+    assert check_global_rate_limit(redis_client) is True
+
+
+def test_check_global_rate_limit_enforces_free_daily_token_budget(monkeypatch):
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+
+    redis_client = MagicMock()
+    redis_client.get.side_effect = [b"0", b"0", b"0", b"299999"]
+
+    assert check_global_rate_limit(
+        redis_client,
+        scope="chat",
+        token_count=2,
     ) is False
 
 
@@ -628,6 +693,7 @@ def test_reserve_and_reconcile_groq_rate_limit_releases_unused_tokens():
 
     fake_redis = FakeRedis()
     reservation = index._reserve_groq_rate_limit(
+        index.GROQ_PAID_ACCOUNT,
         "chat",
         request_count=1,
         token_count=1000,
@@ -636,7 +702,11 @@ def test_reserve_and_reconcile_groq_rate_limit_releases_unused_tokens():
 
     assert reservation is not None
 
-    token_key = index._groq_rate_limit_metric_minute_key("chat", "tokens")
+    token_key = index._groq_rate_limit_metric_minute_key(
+        index.GROQ_PAID_ACCOUNT,
+        "chat",
+        "tokens",
+    )
     assert fake_redis.store[token_key] == 1000
 
     index._reconcile_groq_rate_limit(

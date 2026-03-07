@@ -1390,6 +1390,35 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
         mock_openai.assert_not_called()
 
 
+def test_describe_image_groq_falls_back_to_paid_after_free_429(monkeypatch):
+    from api.index import describe_image_groq
+
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
+
+    free_client = MagicMock()
+    free_client.responses.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    paid_response = MagicMock()
+    paid_response.output_text = "A paid fallback image description"
+
+    paid_client = MagicMock()
+    paid_client.responses.create.return_value = paid_response
+
+    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
+        result = describe_image_groq(b"image_data")
+
+    assert result == "A paid fallback image description"
+    assert mock_openai.call_count == 2
+    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
+    assert index.get_provider_backoff_remaining(
+        index._get_groq_backoff_key(index.GROQ_FREE_ACCOUNT, "vision")
+    ) > 0
+
+
 def test_transcribe_audio_groq_success():
     """Test transcribe_audio_groq with successful transcription"""
     from api.index import transcribe_audio_groq
@@ -1448,6 +1477,35 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
 
         assert result is None
         mock_openai.assert_not_called()
+
+
+def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
+    from api.index import transcribe_audio_groq
+
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
+
+    free_client = MagicMock()
+    free_client.audio.transcriptions.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    paid_response = MagicMock()
+    paid_response.text = "paid fallback transcription"
+
+    paid_client = MagicMock()
+    paid_client.audio.transcriptions.create.return_value = paid_response
+
+    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
+        result = transcribe_audio_groq(b"audio_data")
+
+    assert result == "paid fallback transcription"
+    assert mock_openai.call_count == 2
+    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
+    assert index.get_provider_backoff_remaining(
+        index._get_groq_backoff_key(index.GROQ_FREE_ACCOUNT, "transcribe")
+    ) > 0
 
 
 # Tests for web search functionality
