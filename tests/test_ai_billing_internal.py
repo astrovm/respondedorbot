@@ -268,3 +268,31 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
+
+
+def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
+    billing = _build_billing_helper()
+
+    billing.settle_reserved_ai_credits(
+        {
+            "reserved_credits": 2,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "image_context_media",
+        },
+        [],
+        reason="image_context_media_success",
+    )
+
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.admin_reporter.assert_called_once_with(
+        "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
+        None,
+        {
+            "chat_id": "1",
+            "user_id": 1,
+            "reason": "image_context_media_success",
+            "reserved_credits": 2,
+        },
+    )
