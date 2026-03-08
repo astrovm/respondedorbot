@@ -327,7 +327,7 @@ class AIMessageBilling:
         breakdown = calculate_billing_for_segments(billing_segments or [])
         if not billing_segments:
             self.admin_reporter(
-                "respuesta IA exitosa sin usage billing; se conserva la reserva",
+                "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
                 None,
                 {
                     "chat_id": self.chat_id,
