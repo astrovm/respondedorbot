@@ -21,7 +21,7 @@ flask --app api/index run --host 0.0.0.0 --port 8080
 ## Features
 
 - AI chat replies with configurable personality and trigger words.
-- Market and utility commands such as `/prices`, `/usd`, `/devo`, `/powerlaw`, `/rainbow`, `/random`, `/convertbase`, and `/time`.
+- Market and utility commands such as `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/random`, `/convertbase`, and `/time`.
 - Media handling for image description and audio transcription.
 - Built-in web lookup support through `/buscar` / `/search` and provider-triggered search when the bot needs fresh information.
 - AI credit billing with `/topup`, `/balance`, and `/transfer`.

@@ -1169,3 +1169,27 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         out = cached_requests("https://ex", {"a": 1}, None, 60)
         assert out is not None
         assert calls["n"] == 2  # one failure + one retry
+
+
+def test_get_oil_price_success():
+    mock_text_wti = "CL.F,20260309,144312,106.75,119.43,96.45,99.64,,\n"
+    mock_text_brent = "CB.F,20260309,144324,107.6,119.46,100.06,101.9,,\n"
+
+    with patch("api.index.requests.get") as mock_get:
+        mock_get.side_effect = [
+            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
+            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
+        ]
+
+        result = get_oil_price()
+
+    assert "Petróleo (USD/barril):" in result
+    assert "Brent: 101.9" in result
+    assert "WTI: 99.64" in result
+
+
+def test_get_oil_price_failure():
+    with patch("api.index.requests.get", side_effect=Exception("boom")):
+        result = get_oil_price()
+
+    assert result == "no pude traer el precio del petróleo boludo"

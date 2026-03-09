@@ -13,6 +13,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "select_random": prices,
             "get_prices": prices,
             "get_dollar_rates": lambda: "usd",
+            "get_oil_price": lambda: "oil",
             "get_polymarket_argentina_election": lambda: "election",
             "get_rulo": lambda: "rulo",
             "get_devo": prices,
