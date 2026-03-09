@@ -2586,6 +2586,53 @@ esto es lo que sé hacer, boludo:
 def get_oil_price() -> str:
     """Return latest Brent and WTI oil prices in USD with 24-hour variation."""
 
+    def parse_daily_rows(rows: List[str]) -> Optional[Tuple[float, float]]:
+        data_rows = rows
+        if rows and rows[0].lower().startswith("date"):
+            data_rows = rows[1:]
+        if len(data_rows) < 2:
+            return None
+
+        latest_row = [field.strip() for field in data_rows[-1].split(",")]
+        previous_row = [field.strip() for field in data_rows[-2].split(",")]
+        if len(latest_row) < 5 or len(previous_row) < 5:
+            return None
+
+        close_price = latest_row[4]
+        previous_close = previous_row[4]
+        if close_price in {"N/D", ""} or previous_close in {"N/D", ""}:
+            return None
+
+        current_value = float(close_price)
+        previous_value = float(previous_close)
+        if previous_value == 0:
+            return None
+
+        variation = ((current_value - previous_value) / previous_value) * 100
+        return current_value, variation
+
+    def parse_stooq_quote(raw_response: str) -> Optional[Tuple[float, float]]:
+        rows = [line.strip() for line in raw_response.splitlines() if line.strip()]
+        if not rows:
+            return None
+
+        row = [field.strip() for field in rows[-1].split(",")]
+        if len(row) < 7 or row[0].lower() == "symbol":
+            return None
+
+        open_price = row[3]
+        close_price = row[6]
+        if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
+            return None
+
+        current_value = float(close_price)
+        open_value = float(open_price)
+        if open_value == 0:
+            return None
+
+        variation = ((current_value - open_value) / open_value) * 100
+        return current_value, variation
+
     symbols = {
         "Brent": "cb.f",
         "WTI": "cl.f",
@@ -2597,19 +2644,12 @@ def get_oil_price() -> str:
             response = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5)
             response.raise_for_status()
             rows = [line.strip() for line in response.text.splitlines() if line.strip()]
-            if len(rows) < 3:
+            parsed = parse_daily_rows(rows)
+            if not parsed:
+                parsed = parse_stooq_quote(response.text)
+            if not parsed:
                 continue
-            latest_row = [field.strip() for field in rows[-1].split(",")]
-            previous_row = [field.strip() for field in rows[-2].split(",")]
-            if len(latest_row) < 5 or len(previous_row) < 5:
-                continue
-            close_price = latest_row[4]
-            previous_close = previous_row[4]
-            if close_price in {"N/D", ""} or previous_close in {"N/D", ""}:
-                continue
-            current_value = float(close_price)
-            previous_value = float(previous_close)
-            variation = ((current_value - previous_value) / previous_value) * 100
+            current_value, variation = parsed
             prices[name] = {"price": current_value, "variation": variation}
         except Exception:
             continue
