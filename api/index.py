@@ -2584,42 +2584,48 @@ esto es lo que sé hacer, boludo:
 
 
 def get_oil_price() -> str:
-    """Return latest Brent and WTI oil prices in USD using Stooq quotes."""
+    """Return latest Brent and WTI oil prices in USD with 24-hour variation."""
 
     symbols = {
-        "WTI": "cl.f",
         "Brent": "cb.f",
+        "WTI": "cl.f",
     }
-    prices: Dict[str, float] = {}
+    prices: Dict[str, Dict[str, float]] = {}
 
     for name, symbol in symbols.items():
         try:
-            response = requests.get(
-                f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
-            )
+            response = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5)
             response.raise_for_status()
-            raw_line = response.text.strip()
-            if not raw_line:
+            rows = [line.strip() for line in response.text.splitlines() if line.strip()]
+            if len(rows) < 3:
                 continue
-            row = [field.strip() for field in raw_line.split(",")]
-            if len(row) < 7:
+            latest_row = [field.strip() for field in rows[-1].split(",")]
+            previous_row = [field.strip() for field in rows[-2].split(",")]
+            if len(latest_row) < 5 or len(previous_row) < 5:
                 continue
-            close_price = row[6]
-            if close_price in {"N/D", ""}:
+            close_price = latest_row[4]
+            previous_close = previous_row[4]
+            if close_price in {"N/D", ""} or previous_close in {"N/D", ""}:
                 continue
-            prices[name] = float(close_price)
+            current_value = float(close_price)
+            previous_value = float(previous_close)
+            variation = ((current_value - previous_value) / previous_value) * 100
+            prices[name] = {"price": current_value, "variation": variation}
         except Exception:
             continue
 
     if not prices:
         return "no pude traer el precio del petróleo boludo"
 
-    lines = ["Petróleo (USD/barril):"]
-    if "Brent" in prices:
-        lines.append(f"- Brent: {fmt_num(prices['Brent'], 2)}")
-    if "WTI" in prices:
-        lines.append(f"- WTI: {fmt_num(prices['WTI'], 2)}")
-    lines.append("Fuente: stooq.com")
+    lines = []
+    for name in ("Brent", "WTI"):
+        if name not in prices:
+            continue
+        price = fmt_num(prices[name]["price"], 2)
+        percentage = fmt_num(prices[name]["variation"], 2)
+        sign = "+" if prices[name]["variation"] >= 0 else ""
+        lines.append(f"{name}: {price} USD ({sign}{percentage}% 24hs)")
+
     return "\n".join(lines)
 
 
