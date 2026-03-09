@@ -44,6 +44,7 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
         True,
     ),
     (("/dolar", "/dollar", "/usd"), "get_dollar_rates", False, False),
+    (("/petroleo", "/oil"), "get_oil_price", False, False),
     (("/eleccion",), "get_polymarket_argentina_election", False, False),
     (("/rulo",), "get_rulo", False, False),
     (("/devo",), "get_devo", False, True),
