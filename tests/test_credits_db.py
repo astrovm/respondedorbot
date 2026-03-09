@@ -186,3 +186,25 @@ def test_apply_ai_debt_allows_negative_user_balance():
         and params[4] == -3
         for query, params in fake_cursor.executed
     )
+
+
+def test_mint_user_credits_increases_balance_and_writes_ledger():
+    fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    fake_cursor.balance = 20
+    fake_connection = _FakeConnection(fake_cursor)
+
+    with patch("api.services.credits_db.ensure_schema"), patch(
+        "api.services.credits_db.connect", return_value=fake_connection
+    ):
+        result = credits_db.mint_user_credits(user_id=42, amount=50, actor_user_id=99)
+
+    assert result == {"user_balance": 70}
+    assert any(
+        "INSERT INTO credit_ledger" in query
+        and params is not None
+        and params[0] == "printcredits"
+        and params[1] == 99
+        and params[2] == 42
+        and params[3] == 50
+        for query, params in fake_cursor.executed
+    )

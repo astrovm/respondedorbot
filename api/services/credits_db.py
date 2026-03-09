@@ -262,6 +262,7 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
     return int(row[0])
 
 
+
 def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     """Grant onboarding credits once and return (granted, user_balance)."""
 
@@ -675,6 +676,43 @@ def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, 
                 "chat_balance": chat_balance,
             }
 
+
+
+def mint_user_credits(user_id: int, amount: int, actor_user_id: Optional[int] = None) -> Dict[str, int]:
+    """Mint credits to a user account and return the updated balance."""
+
+    ensure_schema()
+    mint_amount = int(amount)
+    actor_id = int(actor_user_id) if actor_user_id is not None else int(user_id)
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            user_balance = _get_balance_for_update(cur, "user", user_id)
+            user_balance += mint_amount
+            _set_balance(cur, "user", user_id, user_balance)
+
+            cur.execute(
+                """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    "printcredits",
+                    actor_id,
+                    int(user_id),
+                    mint_amount,
+                    json.dumps({"source": "admin_command"}),
+                ),
+            )
+        conn.commit()
+
+    return {"user_balance": int(user_balance)}
 
 def record_star_payment(
     telegram_payment_charge_id: str,
