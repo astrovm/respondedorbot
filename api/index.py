@@ -363,21 +363,44 @@ def _run_forced_web_search(
         return "la búsqueda web no está disponible en este momento"
 
     compound_messages = [{"role": "user", "content": query}]
+    source_text: Optional[str] = None
+
     if response_meta is None:
-        compound_response = get_groq_compound_response(
+        source_text = get_groq_compound_response(
             compound_system_message, compound_messages
         )
-        if compound_response:
-            return compound_response
     else:
         compound_result = _get_groq_compound_response_result(
             compound_system_message, compound_messages
         )
         if compound_result:
             _append_billing_segment(response_meta, compound_result)
-            return compound_result.text
+            source_text = compound_result.text
 
-    return "no pude completar la búsqueda web ahora"
+    if not source_text:
+        return "no pude completar la búsqueda web ahora"
+
+    source_context = (
+        "FUENTE WEB (resumen preliminar):\n"
+        f"{source_text}\n\n"
+        "Instrucciones: usá la fuente solo como referencia, verificá consistencia "
+        "y respondé al usuario con la personalidad configurada."
+    )
+    enriched_messages = list(messages) + [{"role": "system", "content": source_context}]
+
+    if response_meta is None:
+        final_response = complete_with_providers(system_message, enriched_messages)
+    else:
+        final_response = complete_with_providers(
+            system_message,
+            enriched_messages,
+            response_meta=response_meta,
+        )
+
+    if final_response:
+        return final_response
+
+    return source_text
 
 
 def config_redis(host=None, port=None, password=None):

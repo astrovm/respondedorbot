@@ -987,12 +987,14 @@ def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
     ]
 
 
-def test_run_forced_web_search_prefers_compound_tools():
+def test_run_forced_web_search_uses_compound_as_source_for_main_model():
     from api.index import _run_forced_web_search
 
     with patch(
         "api.index.get_groq_compound_response", return_value="compuesto"
-    ) as mock_compound, patch("api.index.execute_tool") as mock_tool:
+    ) as mock_compound, patch(
+        "api.index.complete_with_providers", return_value="respuesta final"
+    ) as mock_complete:
         result = _run_forced_web_search(
             query="algo",
             messages=[{"role": "user", "content": "algo"}],
@@ -1000,12 +1002,18 @@ def test_run_forced_web_search_prefers_compound_tools():
             compound_system_message={"role": "system", "content": "sys"},
         )
 
-    assert result == "compuesto"
+    assert result == "respuesta final"
     mock_compound.assert_called_once_with(
         {"role": "system", "content": "sys"},
         [{"role": "user", "content": "algo"}],
     )
-    mock_tool.assert_not_called()
+    mock_complete.assert_called_once()
+    complete_args, complete_kwargs = mock_complete.call_args
+    assert complete_args[0] == {"role": "system", "content": "sys"}
+    assert complete_kwargs == {}
+    assert complete_args[1][0] == {"role": "user", "content": "algo"}
+    assert "FUENTE WEB" in complete_args[1][-1]["content"]
+    assert "compuesto" in complete_args[1][-1]["content"]
 
 
 def test_web_search_uses_ttl_constant(monkeypatch):
