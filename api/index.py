@@ -2584,7 +2584,7 @@ esto es lo que sé hacer, boludo:
 
 
 def get_oil_price() -> str:
-    """Return latest Brent and WTI oil prices in USD with 24-hour variation."""
+    """Return latest Brent and WTI oil prices in USD with daily variation."""
 
     def parse_daily_rows(rows: List[str]) -> Optional[Tuple[float, float]]:
         data_rows = rows
@@ -2641,12 +2641,22 @@ def get_oil_price() -> str:
 
     for name, symbol in symbols.items():
         try:
-            response = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5)
-            response.raise_for_status()
-            rows = [line.strip() for line in response.text.splitlines() if line.strip()]
+            parsed = None
+
+            daily_response = requests.get(
+                f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5
+            )
+            daily_response.raise_for_status()
+            rows = [line.strip() for line in daily_response.text.splitlines() if line.strip()]
             parsed = parse_daily_rows(rows)
+
             if not parsed:
-                parsed = parse_stooq_quote(response.text)
+                quote_response = requests.get(
+                    f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
+                )
+                quote_response.raise_for_status()
+                parsed = parse_stooq_quote(quote_response.text)
+
             if not parsed:
                 continue
             current_value, variation = parsed
