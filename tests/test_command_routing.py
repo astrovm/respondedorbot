@@ -755,6 +755,7 @@ def test_initialize_commands():
     assert "/usd" in commands
     assert "/topup" in commands
     assert "/balance" in commands
+    assert "/printcredits" in commands
     assert "/transfer" in commands
 
     # Test that AI commands are properly marked

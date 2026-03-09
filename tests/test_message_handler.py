@@ -106,6 +106,58 @@ def test_handle_msg_transfer_group_moves_credits():
     assert "le pasé 20 créditos al grupo" in mock_send_msg.call_args[0][1]
 
 
+def test_handle_msg_printcredits_requires_admin():
+    message = {
+        "message_id": "12b",
+        "chat": {"id": "202", "type": "group"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/printcredits 100",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "os.environ.get",
+        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert "solo para el admin" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_printcredits_admin_mints_credits():
+    message = {
+        "message_id": "12c",
+        "chat": {"id": "202", "type": "private"},
+        "from": {"id": 99, "first_name": "Admin", "username": "boss"},
+        "text": "/printcredits 100",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.mint_user_credits",
+        return_value={"user_balance": 120},
+    ) as mock_mint, patch(
+        "os.environ.get",
+        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_mint.assert_called_once_with(user_id=99, amount=100, actor_user_id=99)
+    sent_text = mock_send_msg.call_args[0][1]
+    assert "te imprimí 100 créditos" in sent_text
+    assert "te quedaron 120" in sent_text
+
+
 def test_handle_msg_successful_payment_credits_user():
     message = {
         "message_id": "13",
