@@ -108,21 +108,6 @@ def test_should_search_previous_query_ignores_other_text(text):
     assert should_search_previous_query(text) is False
 
 
-def test_build_compound_system_message_includes_bot_personality(monkeypatch):
-    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "Sos el gordo de prueba")
-    monkeypatch.setenv("BOT_TRIGGER_WORDS", "gordo")
-    config_module.reset_cache()
-
-    try:
-        message = index.build_compound_system_message()
-    finally:
-        config_module.reset_cache()
-
-    content = message["content"][0]["text"]
-    assert "Sos el gordo de prueba" in content
-    assert "Respondé directo al usuario" in content
-
-
 def test_optional_redis_client_success():
     from api.index import _optional_redis_client
 

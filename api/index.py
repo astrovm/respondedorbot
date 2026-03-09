@@ -4542,12 +4542,6 @@ CONTEXTO POLITICO:
 def build_compound_system_message() -> Dict[str, Any]:
     """Build a minimal system message tailored for Groq Compound tools."""
 
-    try:
-        config = load_bot_config()
-        base_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
-    except ValueError:
-        base_prompt = "You are a helpful AI assistant."
-
     tool_hint = (
         "Respondé directo al usuario con síntesis breve."
         " Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
@@ -4558,7 +4552,7 @@ def build_compound_system_message() -> Dict[str, Any]:
         "content": [
             {
                 "type": "text",
-                "text": f"{base_prompt}\n\n{tool_hint}",
+                "text": tool_hint,
             }
         ],
     }
