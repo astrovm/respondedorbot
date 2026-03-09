@@ -579,6 +579,55 @@ def _handle_balance_command(
     return response_msg, None, False, command
 
 
+def _handle_admin_printcredits_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    sanitized_message_text: str,
+    chat_id: str,
+    user_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/printcredits":
+        return None, None, False, None
+
+    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    if not admin_chat_id or str(user_id or "") != admin_chat_id:
+        return "este comando es solo para el admin", None, False, command
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
+
+    amount_token = sanitized_message_text.split(" ", 1)[0].strip()
+    try:
+        amount = int(amount_token)
+    except (TypeError, ValueError):
+        return "mandalo bien: /printcredits <monto>", None, False, command
+
+    if amount <= 0:
+        return "el monto tiene que ser mayor a 0, no me rompas las bolas", None, False, command
+
+    try:
+        mint_result = deps.credits_db_service.mint_user_credits(
+            user_id=int(user_id),
+            amount=amount,
+            actor_user_id=int(user_id),
+        )
+    except Exception as error:
+        deps.admin_report(
+            "Error minting credits with /printcredits",
+            error,
+            {"chat_id": chat_id, "user_id": user_id, "amount": amount},
+        )
+        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+
+    return (
+        f"listo, te imprimí {amount} créditos\nte quedaron {int(mint_result.get('user_balance', 0))}",
+        None,
+        False,
+        command,
+    )
+
+
 def _handle_transfer_command(
     deps: MessageHandlerDeps,
     *,
@@ -796,6 +845,16 @@ def _handle_known_command(
         chat_type=chat_type,
         user_id=user_id,
         numeric_chat_id=numeric_chat_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
+
+    response = _handle_admin_printcredits_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
     )
     if response[0] is not None or response[3] is not None:
         return response
