@@ -2549,6 +2549,8 @@ esto es lo que sé hacer, boludo:
 
 - /dolar, /dollar, /usd: te tiro la posta del blue y todos los dólares
 
+- /petroleo, /oil: te paso el precio del Brent y del WTI
+
 - /instance: te digo donde estoy corriendo
 
 - /config: tocás la config del gordo y de los links
@@ -2579,6 +2581,46 @@ esto es lo que sé hacer, boludo:
 
 - /transcribe: te transcribo audio o describo imagen (responde a un mensaje)
 """
+
+
+def get_oil_price() -> str:
+    """Return latest Brent and WTI oil prices in USD using Stooq quotes."""
+
+    symbols = {
+        "WTI": "cl.f",
+        "Brent": "cb.f",
+    }
+    prices: Dict[str, float] = {}
+
+    for name, symbol in symbols.items():
+        try:
+            response = requests.get(
+                f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
+            )
+            response.raise_for_status()
+            raw_line = response.text.strip()
+            if not raw_line:
+                continue
+            row = [field.strip() for field in raw_line.split(",")]
+            if len(row) < 7:
+                continue
+            close_price = row[6]
+            if close_price in {"N/D", ""}:
+                continue
+            prices[name] = float(close_price)
+        except Exception:
+            continue
+
+    if not prices:
+        return "no pude traer el precio del petróleo boludo"
+
+    lines = ["Petróleo (USD/barril):"]
+    if "Brent" in prices:
+        lines.append(f"- Brent: {fmt_num(prices['Brent'], 2)}")
+    if "WTI" in prices:
+        lines.append(f"- WTI: {fmt_num(prices['WTI'], 2)}")
+    lines.append("Fuente: stooq.com")
+    return "\n".join(lines)
 
 
 def get_instance_name() -> str:
@@ -4788,6 +4830,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "select_random": select_random,
             "get_prices": get_prices,
             "get_dollar_rates": get_dollar_rates,
+            "get_oil_price": get_oil_price,
             "get_polymarket_argentina_election": get_polymarket_argentina_election,
             "get_rulo": get_rulo,
             "get_devo": get_devo,
