@@ -19,6 +19,7 @@ AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], N
 
 
 AI_BILLING_DEFAULT_PACKS = [
+    {"id": "p50", "credits": 50, "xtr": 25},
     {"id": "p100", "credits": 100, "xtr": 50},
     {"id": "p250", "credits": 250, "xtr": 125},
     {"id": "p500", "credits": 500, "xtr": 250},
