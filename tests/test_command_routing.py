@@ -1195,6 +1195,26 @@ def test_get_oil_price_success():
     ]
 
 
+
+
+def test_get_oil_price_success_without_csv_header():
+    mock_text_brent = "CB.F,20260309,161651,103.23,119.46,100.02,101.17,,\n"
+    mock_text_wti = "CL.F,20260309,161655,92.31,119.43,96.45,98.77,,\n"
+
+    with patch("api.index.requests.get") as mock_get:
+        mock_get.side_effect = [
+            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
+            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
+        ]
+
+        result = get_oil_price()
+
+    assert result.splitlines() == [
+        "Brent: 101.17 USD (-2% 24hs)",
+        "WTI: 98.77 USD (+7% 24hs)",
+    ]
+
+
 def test_get_oil_price_failure():
     with patch("api.index.requests.get", side_effect=Exception("boom")):
         result = get_oil_price()

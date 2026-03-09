@@ -2586,6 +2586,33 @@ esto es lo que sé hacer, boludo:
 def get_oil_price() -> str:
     """Return latest Brent and WTI oil prices in USD with variation."""
 
+    def parse_stooq_quote(raw_response: str) -> Optional[Tuple[float, float]]:
+        rows = [line.strip() for line in raw_response.splitlines() if line.strip()]
+        if not rows:
+            return None
+
+        row = [field.strip() for field in rows[-1].split(",")]
+        if len(row) >= 7 and row[0].lower() != "symbol":
+            open_price = row[3]
+            close_price = row[6]
+        elif len(row) >= 7 and row[0].lower() == "symbol" and len(rows) >= 2:
+            row = [field.strip() for field in rows[-1].split(",")]
+            open_price = row[3]
+            close_price = row[6]
+        else:
+            return None
+
+        if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
+            return None
+
+        current_value = float(close_price)
+        open_value = float(open_price)
+        if open_value == 0:
+            return None
+
+        variation = ((current_value - open_value) / open_value) * 100
+        return current_value, variation
+
     symbols = {
         "Brent": "cb.f",
         "WTI": "cl.f",
@@ -2598,24 +2625,10 @@ def get_oil_price() -> str:
                 f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv", timeout=5
             )
             response.raise_for_status()
-            rows = [line.strip() for line in response.text.splitlines() if line.strip()]
-            if len(rows) < 2:
+            parsed = parse_stooq_quote(response.text)
+            if not parsed:
                 continue
-            row = [field.strip() for field in rows[-1].split(",")]
-            if len(row) < 7:
-                continue
-
-            open_price = row[3]
-            close_price = row[6]
-            if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
-                continue
-
-            current_value = float(close_price)
-            open_value = float(open_price)
-            if open_value == 0:
-                continue
-
-            variation = ((current_value - open_value) / open_value) * 100
+            current_value, variation = parsed
             prices[name] = {"price": current_value, "variation": variation}
         except Exception:
             continue
