@@ -1172,20 +1172,27 @@ def test_cached_requests_retries_on_failure(monkeypatch):
 
 
 def test_get_oil_price_success():
-    mock_text_wti = "CL.F,20260309,144312,106.75,119.43,96.45,99.64,,\n"
-    mock_text_brent = "CB.F,20260309,144324,107.6,119.46,100.06,101.9,,\n"
+    mock_text_brent = (
+        "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
+        "CB.F,2026-03-09,16:17:05,103.23,110,100,101.17,\n"
+    )
+    mock_text_wti = (
+        "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
+        "CL.F,2026-03-09,16:17:05,92.31,100,90,98.77,\n"
+    )
 
     with patch("api.index.requests.get") as mock_get:
         mock_get.side_effect = [
-            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
             MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
+            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
         ]
 
         result = get_oil_price()
 
-    assert "Petróleo (USD/barril):" in result
-    assert "Brent: 101.9" in result
-    assert "WTI: 99.64" in result
+    assert result.splitlines() == [
+        "Brent: 101.17 USD (-2% 24hs)",
+        "WTI: 98.77 USD (+7% 24hs)",
+    ]
 
 
 def test_get_oil_price_failure():
