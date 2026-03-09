@@ -1271,3 +1271,40 @@ def test_get_weather_description_unknown():
 
     assert get_weather_description(999) == "clima raro"
     assert get_weather_description(-1) == "clima raro"
+
+
+def test_get_oil_price_falls_back_to_stooq_quote_endpoint_when_daily_is_empty():
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, timeout=5):
+        if "q/d/l" in url:
+            return MockResponse("")
+        if "s=cb.f" in url:
+            return MockResponse("CB.F,20260309,165822,107.6,119.46,97.65,98.15,,\r\n")
+        if "s=cl.f" in url:
+            return MockResponse("CL.F,20260309,165820,106.75,119.43,94.71,95.45,,\r\n")
+        raise AssertionError(f"unexpected url {url}")
+
+    with patch("api.index.requests.get", side_effect=fake_get):
+        result = get_oil_price()
+
+    assert "Brent: 98.15 USD (-8.78% 24hs)" in result
+    assert "WTI: 95.45 USD (-10.59% 24hs)" in result
+
+
+def test_get_oil_price_returns_error_when_all_sources_fail():
+    class MockResponse:
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+    with patch("api.index.requests.get", return_value=MockResponse()):
+        result = get_oil_price()
+
+    assert result == "no pude traer el precio del petróleo boludo"
