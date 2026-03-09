@@ -1,12 +1,26 @@
 from unittest.mock import MagicMock
 
-from api.ai_billing import AIMessageBilling, build_insufficient_credits_message, parse_topup_payload
+from api.ai_billing import (
+    AIMessageBilling,
+    build_insufficient_credits_message,
+    get_ai_billing_packs,
+    parse_topup_payload,
+)
 from api.groq_billing import (
     calculate_billing_for_segments,
     estimate_compound_reserve_credits,
     estimate_vision_reserve_credits,
 )
 
+
+
+
+def test_get_ai_billing_packs_default_includes_50_credit_option(monkeypatch):
+    monkeypatch.delenv("AI_STARS_PACKS_JSON", raising=False)
+
+    packs = get_ai_billing_packs()
+
+    assert packs[0] == {"id": "p50", "credits": 50, "xtr": 25}
 
 def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("topup:p250:99") == ("p250", 99)
