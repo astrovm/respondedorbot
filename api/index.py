@@ -2651,6 +2651,9 @@ def get_oil_price() -> str:
             parsed = parse_daily_rows(rows)
 
             if not parsed:
+                parsed = parse_stooq_quote(daily_response.text)
+
+            if not parsed:
                 quote_response = requests.get(
                     f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
                 )
