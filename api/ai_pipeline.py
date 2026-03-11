@@ -9,6 +9,16 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
+LOG_PREVIEW_LIMIT = 160
+
+
+def _preview_for_log(text: Optional[str], limit: int = LOG_PREVIEW_LIMIT) -> str:
+    """Return a single-line preview suitable for debug logging."""
+
+    preview = str(text or "").replace("\n", " ").strip()
+    if len(preview) <= limit:
+        return preview
+    return preview[:limit] + "..."
 
 
 def remove_gordo_prefix(text: Optional[str]) -> str:
@@ -161,6 +171,22 @@ def handle_ai_response(
     cleaned_response = clean_duplicate_response(prefix_stripped_response)
 
     if not cleaned_response.strip():
+        print(
+            "handle_ai_response: cleaned response empty after normalization "
+            f"handler={handler_name or '<unknown>'} ai_fallback={used_ai_fallback} "
+            f"raw_len={len(response_text)} sanitized_len={len(sanitized_response)} "
+            f"persona_len={len(persona_stripped_response)} "
+            f"context_len={len(context_stripped_response)} "
+            f"prefix_len={len(prefix_stripped_response)}"
+        )
+        print(
+            "handle_ai_response: previews "
+            f"raw='{_preview_for_log(response_text)}' "
+            f"sanitized='{_preview_for_log(sanitized_response)}' "
+            f"persona='{_preview_for_log(persona_stripped_response)}' "
+            f"context='{_preview_for_log(context_stripped_response)}' "
+            f"prefix='{_preview_for_log(prefix_stripped_response)}'"
+        )
         return "me quedé reculando y no te pude responder, probá de nuevo"
 
     return cleaned_response
