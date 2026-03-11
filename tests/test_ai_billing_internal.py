@@ -4,8 +4,10 @@ from api.ai_billing import (
     AIMessageBilling,
     build_insufficient_credits_message,
     get_ai_billing_packs,
+    get_ai_credits_per_response,
     parse_topup_payload,
 )
+from api.credit_units import whole_credits_to_units
 from api.groq_billing import (
     calculate_billing_for_segments,
     estimate_compound_reserve_credits,
@@ -20,7 +22,7 @@ def test_get_ai_billing_packs_default_includes_50_credit_option(monkeypatch):
 
     packs = get_ai_billing_packs()
 
-    assert packs[0] == {"id": "p50", "credits": 50, "xtr": 25}
+    assert packs[0] == {"id": "p50", "credits": 500, "xtr": 25}
 
 def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("topup:p250:99") == ("p250", 99)
@@ -28,14 +30,29 @@ def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("other") == (None, None)
 
 
+def test_get_ai_credits_per_response_accepts_one_decimal(monkeypatch):
+    monkeypatch.setenv("AI_CREDITS_PER_RESPONSE", "1.5")
+
+    assert get_ai_credits_per_response() == 15
+
+
+def test_get_ai_billing_packs_accept_decimal_credits(monkeypatch):
+    monkeypatch.setenv(
+        "AI_STARS_PACKS_JSON",
+        '[{"id":"p15","credits":1.5,"xtr":5}]',
+    )
+
+    assert get_ai_billing_packs() == [{"id": "p15", "credits": 15, "xtr": 5}]
+
+
 def test_build_insufficient_credits_message_mentions_group_balances():
     message = build_insufficient_credits_message(
         chat_type="group",
-        user_balance=2,
-        chat_balance=5,
+        user_balance=whole_credits_to_units(2),
+        chat_balance=whole_credits_to_units(5),
     )
-    assert "lo tuyo: 2" in message
-    assert "lo del grupo: 5" in message
+    assert "lo tuyo: 2.0" in message
+    assert "lo del grupo: 5.0" in message
 
 
 def test_ai_message_billing_transcribe_success_response_prefixes():
@@ -45,7 +62,7 @@ def test_ai_message_billing_transcribe_success_response_prefixes():
         gen_random_fn=lambda _: "random",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: 1,
+        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/transcribe",
         chat_id="1",
         chat_type="private",
@@ -76,7 +93,8 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
     )
 
     assert breakdown["raw_usd_micros"] == 2_050
-    assert breakdown["charged_credits"] == 1
+    assert breakdown["charged_credit_units"] == 6
+    assert breakdown["charged_credits_display"] == "0.6"
     assert breakdown["model_breakdown"] == [
         {
             "model": "moonshotai/kimi-k2-instruct-0905",
@@ -105,7 +123,8 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
     )
 
     assert breakdown["raw_usd_micros"] == 1_550
-    assert breakdown["charged_credits"] == 1
+    assert breakdown["charged_credit_units"] == 4
+    assert breakdown["charged_credits_display"] == "0.4"
     assert breakdown["model_breakdown"] == [
         {
             "model": "moonshotai/kimi-k2-instruct-0905",
@@ -140,7 +159,8 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     )
 
     assert breakdown["raw_usd_micros"] == 0
-    assert breakdown["charged_credits"] == 0
+    assert breakdown["charged_credit_units"] == 0
+    assert breakdown["charged_credits_display"] == "0.0"
     assert breakdown["model_breakdown"] == []
     assert breakdown["tool_breakdown"] == []
     assert breakdown["unsupported_notes"] == []
@@ -173,7 +193,8 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
     )
 
     assert breakdown["raw_usd_micros"] == 16_300
-    assert breakdown["charged_credits"] == 5
+    assert breakdown["charged_credit_units"] == 41
+    assert breakdown["charged_credits_display"] == "4.1"
     assert breakdown["model_breakdown"] == [
         {
             "model": "openai/gpt-oss-120b",
@@ -239,7 +260,8 @@ def test_calculate_billing_for_segments_uses_usage_total_time_for_browser_tools(
     )
 
     assert breakdown["raw_usd_micros"] == 7_466
-    assert breakdown["charged_credits"] == 2
+    assert breakdown["charged_credit_units"] == 19
+    assert breakdown["charged_credits_display"] == "1.9"
     assert breakdown["tool_breakdown"] == [
         {
             "tool": "browser",
@@ -286,6 +308,19 @@ def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
         ]
     )
 
+    assert breakdown["raw_usd_micros"] == 8_133
+    assert breakdown["charged_credit_units"] == 21
+    assert breakdown["charged_credits_display"] == "2.1"
+    assert breakdown["model_breakdown"] == [
+        {
+            "model": "openai/gpt-oss-120b",
+            "usd_micros": 1_800,
+            "input_tokens": 10_000,
+            "input_cached_tokens": 0,
+            "input_non_cached_tokens": 10_000,
+            "output_tokens": 500,
+        }
+    ]
     assert breakdown["tool_breakdown"] == [
         {
             "tool": "browser",
@@ -324,7 +359,7 @@ def test_estimate_compound_reserve_credits_only_reserves_predictable_request_too
         enabled_tools=["web_search", "visit_website", "code_interpreter", "browser_automation"],
     )
 
-    assert reserve == 3
+    assert reserve == 23
 
 
 def _build_billing_helper() -> AIMessageBilling:
@@ -334,7 +369,7 @@ def _build_billing_helper() -> AIMessageBilling:
         gen_random_fn=lambda _: "random",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: 1,
+        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/ask",
         chat_id="1",
         chat_type="private",
@@ -349,7 +384,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
 
     billing.settle_reserved_ai_credits(
         {
-            "reserved_credits": 3,
+            "reserved_credit_units": whole_credits_to_units(3),
             "chat_scope_id": 1,
             "source": "user",
             "usage_tag": "ai_response_base",
@@ -368,7 +403,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
     )
 
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 2
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 29
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -379,7 +414,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
 
     billing.settle_reserved_ai_credits(
         {
-            "reserved_credits": 1,
+            "reserved_credit_units": whole_credits_to_units(1),
             "chat_scope_id": 1,
             "source": "user",
             "usage_tag": "ai_response_base",
@@ -398,7 +433,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 2
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 15
     assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"] == "ai_settlement_charge"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
@@ -410,7 +445,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.settle_reserved_ai_credits(
         {
-            "reserved_credits": 1,
+            "reserved_credit_units": whole_credits_to_units(1),
             "chat_scope_id": 1,
             "source": "user",
             "usage_tag": "ai_response_base",
@@ -430,7 +465,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 2
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 15
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
@@ -443,13 +478,13 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
     billing.settle_reserved_ai_credits_batch(
         [
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "ai_response_base",
             },
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "image_context_media",
@@ -477,7 +512,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
     )
 
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 1
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 19
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -489,13 +524,13 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     billing.settle_reserved_ai_credits_batch(
         [
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "ai_response_base",
             },
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "image_context_media",
@@ -523,7 +558,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 1
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 5
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -533,7 +568,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
 
     billing.settle_reserved_ai_credits(
         {
-            "reserved_credits": 3,
+            "reserved_credit_units": whole_credits_to_units(3),
             "chat_scope_id": 1,
             "source": "user",
             "usage_tag": "ai_response_base",
@@ -556,8 +591,8 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
     assert metadata["billing_zero_usage_fallback"] is True
-    assert metadata["settled_credits"] == 3
-    assert metadata["refunded_credits"] == 0
+    assert metadata["settled_credit_units"] == 30
+    assert metadata["refunded_credit_units"] == 0
 
 
 def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is_zero():
@@ -566,13 +601,13 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
     billing.settle_reserved_ai_credits_batch(
         [
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "ai_response_base",
             },
             {
-                "reserved_credits": 1,
+                "reserved_credit_units": whole_credits_to_units(1),
                 "chat_scope_id": 1,
                 "source": "user",
                 "usage_tag": "image_context_media",
@@ -604,8 +639,8 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
     assert metadata["billing_zero_usage_fallback"] is True
-    assert metadata["settled_credits"] == 2
-    assert metadata["refunded_credits"] == 0
+    assert metadata["settled_credit_units"] == 20
+    assert metadata["refunded_credit_units"] == 0
 
 
 def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
@@ -613,7 +648,7 @@ def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
 
     billing.settle_reserved_ai_credits(
         {
-            "reserved_credits": 2,
+            "reserved_credit_units": whole_credits_to_units(2),
             "chat_scope_id": 1,
             "source": "user",
             "usage_tag": "image_context_media",
@@ -632,6 +667,6 @@ def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
             "chat_id": "1",
             "user_id": 1,
             "reason": "image_context_media_success",
-            "reserved_credits": 2,
+            "reserved_credit_units": 20,
         },
     )

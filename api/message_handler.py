@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
+from api.credit_units import format_credit_units, parse_credit_units
 from api.groq_billing import (
     IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
     MODEL_PRICING_USD_MICROS,
@@ -581,9 +582,8 @@ def _handle_admin_printcredits_command(
         return "el cobro de ia no está andando, avisale al admin", None, False, command
 
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-    try:
-        amount = int(amount_token)
-    except (TypeError, ValueError):
+    amount = parse_credit_units(amount_token)
+    if amount is None:
         return "mandalo bien: /printcredits <monto>", None, False, command
 
     if amount <= 0:
@@ -604,7 +604,10 @@ def _handle_admin_printcredits_command(
         return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
 
     return (
-        f"listo, te imprimí {amount} créditos\nte quedaron {int(mint_result.get('user_balance', 0))}",
+        (
+            f"listo, te imprimí {format_credit_units(amount)} créditos\n"
+            f"te quedaron {format_credit_units(mint_result.get('user_balance', 0))}"
+        ),
         None,
         False,
         command,
@@ -723,12 +726,32 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         created_at = str(entry.get("created_at") or "")
         created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
         reserved_total = int(
-            metadata.get("reserved_credits_total") or metadata.get("reserved_credits") or 0
+            metadata.get("reserved_credit_units_total")
+            or metadata.get("reserved_credit_units")
+            or metadata.get("reserved_credits_total")
+            or metadata.get("reserved_credits")
+            or 0
         )
-        settled_credits = int(metadata.get("settled_credits") or 0)
-        refunded_credits = int(metadata.get("refunded_credits") or 0)
-        extra_charged_credits = int(metadata.get("extra_charged_credits") or 0)
-        debt_applied_credits = int(metadata.get("debt_applied_credits") or 0)
+        settled_credits = int(
+            metadata.get("settled_credit_units")
+            or metadata.get("settled_credits")
+            or 0
+        )
+        refunded_credits = int(
+            metadata.get("refunded_credit_units")
+            or metadata.get("refunded_credits")
+            or 0
+        )
+        extra_charged_credits = int(
+            metadata.get("extra_charged_credit_units")
+            or metadata.get("extra_charged_credits")
+            or 0
+        )
+        debt_applied_credits = int(
+            metadata.get("debt_applied_credit_units")
+            or metadata.get("debt_applied_credits")
+            or 0
+        )
         raw_usd_micros = int(metadata.get("raw_usd_micros") or 0)
         chat_value = metadata.get("chat_id", entry.get("chat_id"))
         user_value = metadata.get("user_id", entry.get("user_id"))
@@ -745,7 +768,14 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         cache_summary = _summarize_cache(model_breakdown)
         detail_lines = [
             f"{created_label} | cmd={command} | {status_label}",
-            f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
+            (
+                f"chat={chat_value} user={user_value} "
+                f"reservado={format_credit_units(reserved_total)} "
+                f"cobrado={format_credit_units(settled_credits)} "
+                f"refund={format_credit_units(refunded_credits)} "
+                f"extra={format_credit_units(extra_charged_credits)} "
+                f"deuda={format_credit_units(debt_applied_credits)}"
+            ),
             f"usd_micros={raw_usd_micros}",
             f"requests: {segment_summary}",
         ]
@@ -882,9 +912,8 @@ def _handle_transfer_command(
         return "no te pude sacar bien el usuario o el grupo para transferir", None, False, command
 
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-    try:
-        amount = int(amount_token)
-    except (TypeError, ValueError):
+    amount = parse_credit_units(amount_token)
+    if amount is None:
         return "mandalo bien: /transfer <monto>", None, False, command
 
     if amount <= 0:
@@ -910,15 +939,15 @@ def _handle_transfer_command(
 
     if transfer_result.get("ok"):
         response_msg = (
-            f"listo, le pasé {amount} créditos al grupo\n"
-            f"- lo tuyo: {int(transfer_result.get('user_balance', 0))}\n"
-            f"- lo del grupo: {int(transfer_result.get('chat_balance', 0))}"
+            f"listo, le pasé {format_credit_units(amount)} créditos al grupo\n"
+            f"- lo tuyo: {format_credit_units(transfer_result.get('user_balance', 0))}\n"
+            f"- lo del grupo: {format_credit_units(transfer_result.get('chat_balance', 0))}"
         )
         return response_msg, None, False, command
 
     response_msg = (
         "no te alcanza lo tuyo para pasar esa guita al grupo\n"
-        f"te quedan: {int(transfer_result.get('user_balance', 0))}"
+        f"te quedan: {format_credit_units(transfer_result.get('user_balance', 0))}"
     )
     return response_msg, None, False, command
 
