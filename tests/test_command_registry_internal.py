@@ -30,6 +30,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "topup_command": lambda: "topup",
             "balance_command": lambda: "balance",
             "printcredits_command": lambda x: "printcredits",
+            "creditlog_command": lambda x: "creditlog",
             "transfer_command": prices,
         }
     )

@@ -61,6 +61,7 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/topup",), "topup_command", False, False),
     (("/balance",), "balance_command", False, False),
     (("/printcredits",), "printcredits_command", False, True),
+    (("/creditlog",), "creditlog_command", False, True),
     (("/transfer",), "transfer_command", False, True),
 )
 

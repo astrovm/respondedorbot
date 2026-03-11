@@ -368,19 +368,44 @@ def _calculate_tool_cost(tool: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _estimate_max_time_based_tool_cost(normalized_tool: str) -> int:
+def _coerce_clamped_seconds(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0:
+        return 0.0
+    return min(parsed, MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST)
+
+
+def _extract_time_based_tool_seconds(
+    metadata: Optional[Mapping[str, Any]],
+    usage: Optional[Mapping[str, Any]],
+) -> Tuple[float, str]:
+    metadata_map = ensure_mapping(metadata) or {}
+    usage_map = ensure_mapping(usage) or {}
+
+    request_elapsed_seconds = _coerce_clamped_seconds(
+        metadata_map.get("request_elapsed_seconds")
+    )
+    if request_elapsed_seconds is not None:
+        return request_elapsed_seconds, "estimated_from_request_elapsed_seconds"
+
+    total_time_seconds = _coerce_clamped_seconds(usage_map.get("total_time"))
+    if total_time_seconds is not None:
+        return total_time_seconds, "estimated_from_usage_total_time"
+
+    return (
+        MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST,
+        "estimated_max_60_second_request_cap",
+    )
+
+
+def _estimate_time_based_tool_cost(normalized_tool: str, seconds: float) -> int:
     if normalized_tool == "code_execution":
-        return int(
-            MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST
-            * CODE_EXECUTION_USD_MICROS_PER_HOUR
-            / 3600
-        )
+        return int(seconds * CODE_EXECUTION_USD_MICROS_PER_HOUR / 3600)
     if normalized_tool == "browser_automation":
-        return int(
-            MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST
-            * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR
-            / 3600
-        )
+        return int(seconds * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR / 3600)
     return 0
 
 
@@ -397,6 +422,7 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
         kind = str(segment.get("kind") or "")
         model = str(segment.get("model") or "")
         usage = ensure_mapping(segment.get("usage")) or {}
+        metadata = ensure_mapping(segment.get("metadata")) or {}
         usage_breakdown = _normalize_usage_breakdown(segment.get("usage_breakdown"))
         executed_tools = ensure_mapping_list(segment.get("executed_tools"))
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
@@ -440,7 +466,7 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
             model_breakdown.append(model_cost)
 
         segment_tool_breakdown: List[Dict[str, Any]] = []
-        estimated_time_based_candidates: List[Tuple[int, int]] = []
+        estimated_time_based_candidates: List[Tuple[int, int, str]] = []
 
         for tool in executed_tools:
             tool_cost = _calculate_tool_cost(tool)
@@ -450,22 +476,30 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
                 note == "duration_not_documented_in_api_response"
                 and normalized_tool in {"code_execution", "browser_automation"}
             ):
+                estimated_seconds, estimated_note = _extract_time_based_tool_seconds(
+                    metadata,
+                    usage,
+                )
                 estimated_time_based_candidates.append(
-                    (len(segment_tool_breakdown), _estimate_max_time_based_tool_cost(normalized_tool))
+                    (
+                        len(segment_tool_breakdown),
+                        _estimate_time_based_tool_cost(normalized_tool, estimated_seconds),
+                        estimated_note,
+                    )
                 )
             segment_tool_breakdown.append(tool_cost)
 
         if estimated_time_based_candidates:
-            selected_index, selected_cost = max(
+            selected_index, selected_cost, selected_note = max(
                 estimated_time_based_candidates, key=lambda item: item[1]
             )
-            for idx, _ in estimated_time_based_candidates:
+            for idx, _, _ in estimated_time_based_candidates:
                 if idx == selected_index:
                     segment_tool_breakdown[idx]["usd_micros"] = selected_cost
-                    segment_tool_breakdown[idx]["note"] = "estimated_max_1_minute_request_cap"
+                    segment_tool_breakdown[idx]["note"] = selected_note
                 else:
                     segment_tool_breakdown[idx]["usd_micros"] = 0
-                    segment_tool_breakdown[idx]["note"] = "estimated_shared_1_minute_request_cap"
+                    segment_tool_breakdown[idx]["note"] = f"estimated_shared_cap_from:{selected_note}"
 
         for tool_cost in segment_tool_breakdown:
             tool_cost.pop("normalized_tool", None)

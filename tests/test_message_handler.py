@@ -158,6 +158,82 @@ def test_handle_msg_printcredits_admin_mints_credits():
     assert "te quedaron 120" in sent_text
 
 
+def test_handle_msg_creditlog_requires_admin():
+    message = {
+        "message_id": "12d",
+        "chat": {"id": "202", "type": "group"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/creditlog",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "os.environ.get",
+        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    assert "solo para el admin" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_creditlog_admin_shows_recent_settlements():
+    message = {
+        "message_id": "12e",
+        "chat": {"id": "202", "type": "private"},
+        "from": {"id": 99, "first_name": "Admin", "username": "boss"},
+        "text": "/creditlog 2",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.list_recent_ai_settlement_results",
+        return_value=[
+            {
+                "id": 1,
+                "event_type": "ai_settlement_result",
+                "user_id": 99,
+                "chat_id": 202,
+                "amount": 0,
+                "created_at": "2026-03-11T17:35:10+00:00",
+                "metadata": {
+                    "command": "/ask",
+                    "reserved_credits_total": 2,
+                    "settled_credits": 1,
+                    "refunded_credits": 1,
+                    "extra_charged_credits": 0,
+                    "raw_usd_micros": 2188,
+                    "model_breakdown": [
+                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 2188}
+                    ],
+                    "tool_breakdown": [
+                        {"tool": "search", "usd_micros": 0}
+                    ],
+                },
+            }
+        ],
+    ) as mock_creditlog, patch(
+        "os.environ.get",
+        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_creditlog.assert_called_once_with(limit=2)
+    sent_text = mock_send_msg.call_args[0][1]
+    assert "últimas liquidaciones IA" in sent_text
+    assert "cmd=/ask" in sent_text
+    assert "reservado=2 cobrado=1 refund=1 extra=0" in sent_text
+
+
 def test_handle_msg_successful_payment_credits_user():
     message = {
         "message_id": "13",
@@ -1159,6 +1235,80 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
     assert mock_download.called
     # El usage real mockeado es mínimo, así que quedan solo las dos reservas iniciales.
     assert mock_charge.call_count == 2
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_image_conversation_settles_in_single_batch():
+    from api.index import handle_msg
+
+    def fake_handle_ai_response(*args, **kwargs):
+        response_meta = kwargs.get("response_meta")
+        if isinstance(response_meta, dict):
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "vision",
+                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+                {
+                    "kind": "chat",
+                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            ]
+        return "todo piola"
+
+    with patch("api.index.config_redis") as mock_config_redis, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.download_telegram_file", return_value=b"img-bytes"
+    ), patch(
+        "api.index.resize_image_if_needed", return_value=b"img-resized"
+    ), patch(
+        "api.index.encode_image_to_base64", return_value="abc"
+    ), patch(
+        "api.index.should_gordo_respond", return_value=True
+    ), patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ), patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    ), patch(
+        "api.message_handler.AIMessageBilling.settle_reserved_ai_credits_batch",
+        autospec=True,
+    ) as mock_settle_batch, patch(
+        "api.message_handler.AIMessageBilling.settle_reserved_ai_credits",
+        autospec=True,
+    ) as mock_settle_single:
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        message = {
+            "message_id": 44,
+            "chat": {"id": 555, "type": "private"},
+            "from": {"id": 992, "first_name": "Ana", "username": "ana"},
+            "photo": [{"file_id": "img1"}],
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_settle_batch.assert_called_once()
+    reservations = mock_settle_batch.call_args.args[1]
+    assert len(reservations) == 2
+    mock_settle_single.assert_not_called()
     mock_send_msg.assert_called_once()
 
 
