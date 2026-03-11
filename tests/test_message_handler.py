@@ -212,10 +212,18 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                     "extra_charged_credits": 0,
                     "raw_usd_micros": 2188,
                     "model_breakdown": [
-                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 2188}
+                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 2000},
+                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 188},
                     ],
                     "tool_breakdown": [
-                        {"tool": "search", "usd_micros": 0}
+                        {"tool": "search", "usd_micros": 8000, "count": 1},
+                        {"tool": "search", "usd_micros": 0, "count": 1},
+                        {"tool": "python", "usd_micros": 500, "count": 1},
+                    ],
+                    "billing_segments": [
+                        {"kind": "chat"},
+                        {"kind": "compound"},
+                        {"kind": "chat"},
                     ],
                 },
             }
@@ -232,6 +240,10 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     assert "últimas liquidaciones IA" in sent_text
     assert "cmd=/ask" in sent_text
     assert "reservado=2 cobrado=1 refund=1 extra=0" in sent_text
+    assert "requests: chat=2, compound=1" in sent_text
+    assert "moonshotai/kimi-k2-instruct-0905=2188" in sent_text
+    assert "search=8000 (2x)" in sent_text
+    assert "python=500 (1x)" in sent_text
 
 
 def test_handle_msg_creditlog_marks_zero_usage_fallback():
