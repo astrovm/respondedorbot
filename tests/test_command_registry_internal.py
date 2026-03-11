@@ -31,6 +31,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "balance_command": lambda: "balance",
             "printcredits_command": lambda x: "printcredits",
             "creditlog_command": lambda x: "creditlog",
+            "purgeailog_command": lambda: "purgeailog",
             "transfer_command": prices,
         }
     )

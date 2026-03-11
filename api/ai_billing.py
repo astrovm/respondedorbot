@@ -340,6 +340,7 @@ class AIMessageBilling:
         breakdown: Mapping[str, Any],
         billing_segments: Sequence[Mapping[str, Any]],
         missing_usage_billing: bool,
+        billing_zero_usage_fallback: bool,
     ) -> Dict[str, Any]:
         return self._build_charge_metadata(
             usage_tag=usage_tag,
@@ -363,6 +364,7 @@ class AIMessageBilling:
                 "unsupported_notes": breakdown.get("unsupported_notes", []),
                 "billing_segments": list(billing_segments or []),
                 "missing_usage_billing": bool(missing_usage_billing),
+                "billing_zero_usage_fallback": bool(billing_zero_usage_fallback),
             },
         )
 
@@ -428,6 +430,7 @@ class AIMessageBilling:
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
                 missing_usage_billing=True,
+                billing_zero_usage_fallback=False,
             )
             self._record_ai_settlement_result(
                 chat_scope_id=reservation_meta.get("chat_scope_id"),
@@ -446,13 +449,16 @@ class AIMessageBilling:
             return
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
         refunded_credits = 0
         extra_charged_credits = 0
         debt_applied_credits = 0
         chat_scope_id = reservation_meta.get("chat_scope_id")
         source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
 
-        if actual_credits < reserved_credits:
+        if raw_usd_micros == 0:
+            actual_credits = reserved_credits
+        elif actual_credits < reserved_credits:
             refunded_credits = reserved_credits - actual_credits
             try:
                 self.credits_db_service.refund_ai_charge(
@@ -574,6 +580,7 @@ class AIMessageBilling:
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
             missing_usage_billing=False,
+            billing_zero_usage_fallback=raw_usd_micros == 0,
         )
         self._record_ai_settlement_result(
             chat_scope_id=chat_scope_id,
@@ -649,6 +656,7 @@ class AIMessageBilling:
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
                 missing_usage_billing=True,
+                billing_zero_usage_fallback=False,
             )
             self._record_ai_settlement_result(
                 chat_scope_id=chat_scope_id,
@@ -668,11 +676,14 @@ class AIMessageBilling:
 
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
         refunded_credits = 0
         extra_charged_credits = 0
         debt_applied_credits = 0
 
-        if actual_credits < reserved_credits_total:
+        if raw_usd_micros == 0:
+            actual_credits = reserved_credits_total
+        elif actual_credits < reserved_credits_total:
             refunded_credits = reserved_credits_total - actual_credits
             try:
                 self.credits_db_service.refund_ai_charge(
@@ -798,6 +809,7 @@ class AIMessageBilling:
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
             missing_usage_billing=False,
+            billing_zero_usage_fallback=raw_usd_micros == 0,
         )
         self._record_ai_settlement_result(
             chat_scope_id=chat_scope_id,
