@@ -39,6 +39,7 @@ import random
 import re
 import redis
 import requests
+import threading
 import time
 import traceback
 import wave
@@ -836,7 +837,7 @@ def _get_webhook_idempotency_ttl_seconds() -> int:
             return max(10, int(raw_value))
         except (TypeError, ValueError):
             pass
-    return int(_get_webhook_max_runtime_seconds()) + 15
+    return max(180, int(_get_webhook_max_runtime_seconds()) + 60)
 
 
 def _get_webhook_force_paid_retry_ttl_seconds() -> int:
@@ -847,9 +848,15 @@ def _get_webhook_force_paid_retry_ttl_seconds() -> int:
         except (TypeError, ValueError):
             pass
     return max(
+        300,
         _get_webhook_idempotency_ttl_seconds(),
-        int(_get_webhook_max_runtime_seconds()) + 30,
+        int(_get_webhook_max_runtime_seconds()) + 120,
     )
+
+
+def _get_webhook_lock_refresh_interval_seconds() -> float:
+    ttl_seconds = float(_get_webhook_idempotency_ttl_seconds())
+    return max(5.0, min(30.0, ttl_seconds / 3.0))
 
 
 def _set_webhook_request_context(
@@ -1021,6 +1028,62 @@ def _release_webhook_processing_lock(
         return
 
 
+def _refresh_webhook_processing_lock(
+    redis_client: Optional[redis.Redis],
+    operation_key: Optional[str],
+    owner_token: Optional[str],
+) -> bool:
+    if redis_client is None or not operation_key or not owner_token:
+        return False
+    lock_key = _webhook_processing_lock_key(operation_key)
+    try:
+        current_owner = redis_client.get(lock_key)
+        if current_owner != owner_token:
+            return False
+        redis_client.expire(lock_key, _get_webhook_idempotency_ttl_seconds())
+        return True
+    except Exception:
+        return False
+
+
+def _start_webhook_processing_lock_heartbeat(
+    redis_client: Optional[redis.Redis],
+    operation_key: Optional[str],
+    owner_token: Optional[str],
+) -> Tuple[threading.Event, Optional[threading.Thread]]:
+    stop_event = threading.Event()
+    if redis_client is None or not operation_key or not owner_token:
+        return stop_event, None
+
+    interval_seconds = _get_webhook_lock_refresh_interval_seconds()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(interval_seconds):
+            if not _refresh_webhook_processing_lock(
+                redis_client,
+                operation_key,
+                owner_token,
+            ):
+                break
+
+    thread = threading.Thread(
+        target=_heartbeat,
+        name=f"webhook-lock-heartbeat:{operation_key}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def _stop_webhook_processing_lock_heartbeat(
+    heartbeat: Tuple[threading.Event, Optional[threading.Thread]]
+) -> None:
+    stop_event, thread = heartbeat
+    stop_event.set()
+    if thread is not None:
+        thread.join(timeout=0.2)
+
+
 def _load_persisted_webhook_reservation(usage_tag: str) -> Optional[Mapping[str, Any]]:
     operation_key = _webhook_operation_key.get()
     redis_client = _webhook_redis_client.get()
@@ -1087,6 +1150,26 @@ def _maybe_abort_webhook_for_paid_retry(
         f"remaining_seconds={remaining_seconds:.3f} margin_seconds={margin_seconds:.3f}"
     )
     raise ForceWebhookRetry(reason)
+
+
+def _mark_webhook_paid_retry_preferred(
+    *,
+    scope: str,
+    account: str,
+    has_paid_fallback: bool,
+    reason: str,
+) -> None:
+    if scope != "compound" or account != GROQ_FREE_ACCOUNT or not has_paid_fallback:
+        return
+    operation_key = _webhook_operation_key.get()
+    redis_client = _webhook_redis_client.get()
+    if redis_client is None or not operation_key:
+        return
+    _mark_webhook_force_paid_retry_pending(
+        redis_client,
+        operation_key,
+        reason=reason,
+    )
 
 
 def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
@@ -5836,6 +5919,8 @@ def _execute_groq_request_with_fallback(
                 )
 
     for index, account in enumerate(configured_accounts):
+        remaining_accounts = configured_accounts[index + 1 :]
+        has_paid_fallback = GROQ_PAID_ACCOUNT in remaining_accounts
         reservation = _reserve_groq_rate_limit(
             account,
             scope,
@@ -5843,6 +5928,12 @@ def _execute_groq_request_with_fallback(
             audio_seconds=audio_seconds,
         )
         if reservation is None:
+            _mark_webhook_paid_retry_preferred(
+                scope=scope,
+                account=account,
+                has_paid_fallback=has_paid_fallback,
+                reason="free_compound_local_limit_paid_preferred",
+            )
             print(
                 f"{label} local rate limit reached for account={account} scope={scope}, skipping API call"
             )
@@ -5900,9 +5991,13 @@ def _execute_groq_request_with_fallback(
         if result:
             result.metadata.setdefault("groq_account", account)
             return result
-        remaining_accounts = configured_accounts[index + 1 :]
-        has_paid_fallback = GROQ_PAID_ACCOUNT in remaining_accounts
         if last_error and _should_try_next_groq_account_after_error(last_error):
+            _mark_webhook_paid_retry_preferred(
+                scope=scope,
+                account=account,
+                has_paid_fallback=has_paid_fallback,
+                reason="recoverable_free_compound_error_paid_preferred",
+            )
             _maybe_abort_webhook_for_paid_retry(
                 label=label,
                 scope=scope,
@@ -5915,6 +6010,12 @@ def _execute_groq_request_with_fallback(
             )
             continue
         if is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
+            _mark_webhook_paid_retry_preferred(
+                scope=scope,
+                account=account,
+                has_paid_fallback=has_paid_fallback,
+                reason="free_compound_backoff_paid_preferred",
+            )
             _maybe_abort_webhook_for_paid_retry(
                 label=label,
                 scope=scope,
@@ -7051,11 +7152,21 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
             return "json inválido", 400
         operation_key = _extract_webhook_operation_key(request_json)
         redis_client = _optional_redis_client()
+        message = request_json.get("message")
+        if message and redis_client is None:
+            print(
+                "webhook redis unavailable; refusing message processing because AI idempotency is unsafe"
+            )
+            return "retry", 503
         force_paid_retry = _has_webhook_force_paid_retry_pending(
             redis_client, operation_key
         )
         owner_token: Optional[str] = None
         lock_status = "unavailable"
+        lock_heartbeat: Tuple[threading.Event, Optional[threading.Thread]] = (
+            threading.Event(),
+            None,
+        )
         if redis_client is not None and operation_key:
             owner_token = hashlib.sha256(
                 f"{operation_key}:{time.time_ns()}:{random.random()}".encode("utf-8")
@@ -7075,6 +7186,12 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
                     f"webhook duplicate in-flight skipped operation={operation_key}"
                 )
                 return "retry", 503
+            if lock_status == "acquired":
+                lock_heartbeat = _start_webhook_processing_lock_heartbeat(
+                    redis_client,
+                    operation_key,
+                    owner_token,
+                )
 
         context_tokens = _set_webhook_request_context(
             request_started_at=time.monotonic(),
@@ -7091,7 +7208,6 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
                 if pre_checkout_query:
                     handle_pre_checkout_query(cast(Dict[str, Any], pre_checkout_query))
                 else:
-                    message = request_json.get("message")
                     if not message:
                         return "sin mensaje", 200
                     handle_msg(cast(Dict[str, Any], message))
@@ -7114,6 +7230,7 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
                 _release_webhook_processing_lock(redis_client, operation_key, owner_token)
             return "ok", 200
         finally:
+            _stop_webhook_processing_lock_heartbeat(lock_heartbeat)
             _restore_webhook_request_context(context_tokens)
 
     except Exception as e:
