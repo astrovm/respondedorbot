@@ -212,8 +212,20 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                     "extra_charged_credits": 0,
                     "raw_usd_micros": 2188,
                     "model_breakdown": [
-                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 2000},
-                        {"model": "moonshotai/kimi-k2-instruct-0905", "usd_micros": 188},
+                        {
+                            "model": "moonshotai/kimi-k2-instruct-0905",
+                            "usd_micros": 2000,
+                            "input_tokens": 1000,
+                            "input_cached_tokens": 800,
+                            "input_non_cached_tokens": 200,
+                        },
+                        {
+                            "model": "moonshotai/kimi-k2-instruct-0905",
+                            "usd_micros": 188,
+                            "input_tokens": 200,
+                            "input_cached_tokens": 100,
+                            "input_non_cached_tokens": 100,
+                        },
                     ],
                     "tool_breakdown": [
                         {"tool": "search", "usd_micros": 8000, "count": 1},
@@ -241,6 +253,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     assert "cmd=/ask" in sent_text
     assert "reservado=2 cobrado=1 refund=1 extra=0" in sent_text
     assert "requests: chat=2, compound=1" in sent_text
+    assert "cacheados=900 ahorro_cache=450" in sent_text
     assert "moonshotai/kimi-k2-instruct-0905=2188" in sent_text
     assert "search=8000 (2x)" in sent_text
     assert "python=500 (1x)" in sent_text

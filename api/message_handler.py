@@ -10,6 +10,7 @@ from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
 from api.groq_billing import (
     IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+    MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
 
@@ -665,6 +666,36 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         ordered = sorted(totals.items(), key=lambda entry: (entry[0]))
         return ", ".join(f"{kind}={count}" for kind, count in ordered)
 
+    def _summarize_cache(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
+        total_cached_tokens = 0
+        total_cached_savings_usd_micros = 0
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            cached_tokens = int(item.get("input_cached_tokens") or 0)
+            non_cached_tokens = int(item.get("input_non_cached_tokens") or 0)
+            input_tokens = int(item.get("input_tokens") or 0)
+            if cached_tokens <= 0:
+                continue
+            model_name = str(item.get("model") or "")
+            pricing = MODEL_PRICING_USD_MICROS.get(model_name) or {}
+            input_per_million = int(pricing.get("input_per_million") or 0)
+            cached_input_per_million = int(
+                pricing.get("cached_input_per_million") or input_per_million
+            )
+            total_cached_tokens += cached_tokens
+            if input_per_million > cached_input_per_million:
+                total_cached_savings_usd_micros += (
+                    cached_tokens * (input_per_million - cached_input_per_million)
+                ) // 1_000_000
+            elif input_tokens > 0 and non_cached_tokens == 0:
+                continue
+        if total_cached_tokens <= 0:
+            return None
+        return (
+            f"cacheados={total_cached_tokens} ahorro_cache={total_cached_savings_usd_micros}"
+        )
+
     lines: List[str] = ["últimas liquidaciones IA:"]
     for entry in entries:
         raw_metadata = entry.get("metadata")
@@ -694,17 +725,23 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         model_summary = _summarize_models(model_breakdown)
         tool_summary = _summarize_tools(tool_breakdown)
         segment_summary = _summarize_segments(billing_segments)
+        cache_summary = _summarize_cache(model_breakdown)
+        detail_lines = [
+            f"{created_label} | cmd={command} | {status_label}",
+            f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
+            f"usd_micros={raw_usd_micros}",
+            f"requests: {segment_summary}",
+        ]
+        if cache_summary:
+            detail_lines.append(cache_summary)
+        detail_lines.extend(
+            [
+                f"modelos: {model_summary}",
+                f"tools: {tool_summary}",
+            ]
+        )
         lines.append(
-            "\n".join(
-                [
-                    f"{created_label} | cmd={command} | {status_label}",
-                    f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
-                    f"usd_micros={raw_usd_micros}",
-                    f"requests: {segment_summary}",
-                    f"modelos: {model_summary}",
-                    f"tools: {tool_summary}",
-                ]
-            )
+            "\n".join(detail_lines)
         )
     return lines
 
