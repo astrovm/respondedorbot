@@ -95,6 +95,7 @@ from api.groq_billing import (
     GPT_OSS_120B_FALLBACK_MODEL,
     GroqUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
+    calculate_billing_for_segments,
     estimate_chat_reserve_credits,
     estimate_compound_reserve_credits,
     estimate_message_tokens,
@@ -4306,6 +4307,53 @@ def _append_billing_segment(
     response_meta.setdefault("billing_segments", []).append(result.billing_segment())
 
 
+def _log_groq_request_result(
+    *,
+    label: str,
+    scope: str,
+    account: str,
+    token_count: int,
+    audio_seconds: float,
+    default_headers: Optional[Mapping[str, str]],
+    result: Optional[GroqUsageResult],
+) -> None:
+    log_entry: Dict[str, Any] = {
+        "scope": "groq_request",
+        "label": label,
+        "request_scope": scope,
+        "account": account,
+        "estimated_token_count": int(max(0, token_count)),
+        "estimated_audio_seconds": float(max(0.0, audio_seconds)),
+        "default_headers": dict(default_headers or {}),
+        "status": "success" if result else "empty",
+    }
+
+    if result is not None:
+        billing = calculate_billing_for_segments([result.billing_segment()])
+        log_entry.update(
+            {
+                "kind": result.kind,
+                "model": result.model,
+                "cached": bool(result.cached),
+                "text_length": len(result.text or ""),
+                "usage": ensure_mapping(result.usage) or {},
+                "usage_breakdown": ensure_mapping_list(result.usage_breakdown),
+                "executed_tools": ensure_mapping_list(result.executed_tools),
+                "audio_seconds": result.audio_seconds,
+                "metadata": dict(result.metadata or {}),
+                "local_billing": {
+                    "raw_usd_micros": billing.get("raw_usd_micros", 0),
+                    "charged_credits": billing.get("charged_credits", 0),
+                    "model_breakdown": billing.get("model_breakdown", []),
+                    "tool_breakdown": billing.get("tool_breakdown", []),
+                    "unsupported_notes": billing.get("unsupported_notes", []),
+                },
+            }
+        )
+
+    print(json.dumps(log_entry, ensure_ascii=False, default=str))
+
+
 def _extract_groq_usage_map(response: Any) -> Optional[Dict[str, Any]]:
     if isinstance(response, dict):
         return ensure_mapping(response.get("usage"))
@@ -5405,6 +5453,15 @@ def _execute_groq_request_with_fallback(
             actual_request_count=1 if result else 0,
             actual_token_count=_extract_result_token_count(result),
             actual_audio_seconds=result.audio_seconds if result and result.audio_seconds else 0.0,
+        )
+        _log_groq_request_result(
+            label=label,
+            scope=scope,
+            account=account,
+            token_count=token_count,
+            audio_seconds=audio_seconds,
+            default_headers=default_headers,
+            result=result,
         )
         if result:
             result.metadata.setdefault("groq_account", account)
