@@ -630,6 +630,12 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         raw_usd_micros = int(metadata.get("raw_usd_micros") or 0)
         chat_value = metadata.get("chat_id", entry.get("chat_id"))
         user_value = metadata.get("user_id", entry.get("user_id"))
+        if bool(metadata.get("billing_zero_usage_fallback")):
+            status_label = "estado=groq_zero_usage"
+        elif bool(metadata.get("missing_usage_billing")):
+            status_label = "estado=missing_usage"
+        else:
+            status_label = "estado=ok"
         model_summary = ", ".join(
             f"{str(item.get('model') or '?')}={int(item.get('usd_micros') or 0)}"
             for item in model_breakdown[:2]
@@ -643,7 +649,7 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         lines.append(
             "\n".join(
                 [
-                    f"{created_label} | cmd={command}",
+                    f"{created_label} | cmd={command} | {status_label}",
                     f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
                     f"usd_micros={raw_usd_micros}",
                     f"modelos: {model_summary}",
@@ -703,6 +709,45 @@ def _handle_admin_creditlog_command(
 
     return (
         _truncate_creditlog_message("\n\n".join(_build_creditlog_lines(entries))),
+        None,
+        False,
+        command,
+    )
+
+
+def _handle_admin_purge_ai_log_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_id: str,
+    user_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/purgeailog":
+        return None, None, False, None
+
+    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    if not admin_chat_id or str(user_id or "") != admin_chat_id:
+        return "este comando es solo para el admin", None, False, command
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
+
+    try:
+        purge_result = deps.credits_db_service.purge_expired_ai_ledger_events(
+            retention_days=30
+        )
+    except Exception as error:
+        deps.admin_report(
+            "Error purging /purgeailog",
+            error,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        return "se trabó purgando el ai log, probá de nuevo", None, False, command
+
+    deleted_rows = int(purge_result.get("deleted_rows") or 0)
+    retention_days = int(purge_result.get("retention_days") or 30)
+    return (
+        f"listo, purgué {deleted_rows} eventos ai del ledger con más de {retention_days} días",
         None,
         False,
         command,
@@ -944,6 +989,15 @@ def _handle_known_command(
         deps,
         command=command,
         sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
+
+    response = _handle_admin_purge_ai_log_command(
+        deps,
+        command=command,
         chat_id=chat_id,
         user_id=user_id,
     )

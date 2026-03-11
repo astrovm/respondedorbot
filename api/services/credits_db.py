@@ -17,6 +17,13 @@ _SCHEMA_READY = False
 ONBOARDING_MAX_GRANTS_PER_HOUR = 4
 ONBOARDING_MAX_GRANTS_PER_DAY = 16
 ONBOARDING_GRANTS_ADVISORY_LOCK_KEY = 48_610_001
+AI_LEDGER_EVENT_TYPES = (
+    "ai_reserve",
+    "ai_refund",
+    "ai_settlement_charge",
+    "ai_settlement_debt",
+    "ai_settlement_result",
+)
 
 
 class CreditsDBError(RuntimeError):
@@ -806,6 +813,31 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
             }
         )
     return results
+
+
+def purge_expired_ai_ledger_events(retention_days: int = 30) -> Dict[str, Any]:
+    """Delete AI ledger events older than the retention window."""
+
+    ensure_schema()
+    normalized_retention_days = max(1, int(retention_days or 30))
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM credit_ledger
+                WHERE event_type = ANY(%s)
+                  AND created_at < NOW() - (%s * INTERVAL '1 day')
+                """,
+                (list(AI_LEDGER_EVENT_TYPES), normalized_retention_days),
+            )
+            deleted_rows = int(cur.rowcount or 0)
+        conn.commit()
+
+    return {
+        "deleted_rows": deleted_rows,
+        "retention_days": normalized_retention_days,
+    }
 
 def record_star_payment(
     telegram_payment_charge_id: str,
