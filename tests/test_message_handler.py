@@ -550,6 +550,46 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     )
 
 
+def test_handle_msg_returns_random_when_ai_billing_backend_is_down(monkeypatch):
+    message = {
+        "message_id": "15b",
+        "chat": {"id": "405", "type": "private"},
+        "from": {"id": 78, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.credits_db_service.is_configured", return_value=False
+    ), patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
+    ), patch(
+        "api.index.handle_rate_limit", return_value="no boludo"
+    ) as mock_rate_limit, patch(
+        "api.index.ask_ai"
+    ) as mock_ask_ai, patch(
+        "api.index.credits_db_service.charge_ai_credits"
+    ) as mock_charge, patch(
+        "api.index.send_msg", return_value=1002
+    ) as mock_send, patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.save_bot_message_metadata"
+    ):
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_rate_limit.assert_called_once_with("405", message)
+    mock_ask_ai.assert_not_called()
+    mock_charge.assert_not_called()
+    assert mock_send.call_args[0][1] == "no boludo"
+
+
 def test_handle_rate_limit():
     from api.index import handle_rate_limit
 
@@ -569,6 +609,18 @@ def test_handle_rate_limit():
         mock_send_typing.assert_called_once()
         mock_sleep.assert_called_once()
         assert response == "no boludo"
+
+
+def test_handle_rate_limit_uses_username_when_first_name_is_missing():
+    from api.index import handle_rate_limit
+
+    with patch("api.index.send_typing"), patch("time.sleep"), patch(
+        "api.index.gen_random", return_value="no ana_user"
+    ) as mock_gen_random, patch("os.environ.get", return_value="fake_token"):
+        response = handle_rate_limit("123", {"from": {"username": "ana_user"}})
+
+    mock_gen_random.assert_called_once_with("ana_user")
+    assert response == "no ana_user"
 
 
 def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):

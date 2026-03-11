@@ -931,6 +931,22 @@ def _extract_webhook_operation_key(request_json: Mapping[str, Any]) -> Optional[
     return None
 
 
+def _send_random_degraded_reply(message: Mapping[str, Any], *, reason: str) -> Tuple[str, int]:
+    chat = cast(Mapping[str, Any], message.get("chat") or {})
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return "ok", 200
+    reply_to = message.get("message_id")
+    degraded_text = handle_rate_limit(str(chat_id), cast(Dict[str, Any], message))
+    send_msg(
+        str(chat_id),
+        degraded_text,
+        str(reply_to) if reply_to is not None else None,
+    )
+    print(f"webhook degraded random reply sent reason={reason} chat_id={chat_id}")
+    return "ok", 200
+
+
 def _mark_webhook_completed(
     redis_client: redis.Redis,
     operation_key: str,
@@ -1939,6 +1955,16 @@ def gen_random(name: str) -> str:
         msg = f"{msg} {name}"
 
     return msg
+
+
+def _random_name_from_sender(sender: Mapping[str, Any]) -> str:
+    first_name = str(sender.get("first_name") or "").strip()
+    if first_name:
+        return first_name
+    username = str(sender.get("username") or "").strip()
+    if username:
+        return username
+    return ""
 
 
 def select_random(msg_text: str) -> str:
@@ -5160,12 +5186,12 @@ def get_groq_compound_response(
 
 def get_fallback_response(messages: List[Dict]) -> str:
     """Generate fallback random response"""
-    first_name = ""
+    display_name = ""
     if messages and len(messages) > 0:
         last_message = messages[-1]["content"]
         if "Usuario: " in last_message:
-            first_name = last_message.split("Usuario: ")[1].split(" ")[0]
-    return gen_random(first_name)
+            display_name = last_message.split("Usuario: ")[1].split(" ")[0]
+    return gen_random(display_name)
 
 
 def _mark_ai_fallback_response(text: str) -> str:
@@ -6994,7 +7020,7 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     if token:
         send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
-    return gen_random(message["from"]["first_name"])
+    return gen_random(_random_name_from_sender(cast(Mapping[str, Any], message.get("from") or {})))
 
 
 def remove_gordo_prefix(text: Optional[str]) -> str:
@@ -7152,12 +7178,19 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
             return "json inválido", 400
         operation_key = _extract_webhook_operation_key(request_json)
         redis_client = _optional_redis_client()
+        callback_query = request_json.get("callback_query")
+        pre_checkout_query = request_json.get("pre_checkout_query")
         message = request_json.get("message")
-        if message and redis_client is None:
+        if redis_client is None and (callback_query or pre_checkout_query):
             print(
-                "webhook redis unavailable; refusing message processing because AI idempotency is unsafe"
+                "webhook redis unavailable; refusing update processing because retry safety is unavailable"
             )
             return "retry", 503
+        if redis_client is None and message:
+            return _send_random_degraded_reply(
+                cast(Mapping[str, Any], message),
+                reason="redis_unavailable",
+            )
         force_paid_retry = _has_webhook_force_paid_retry_pending(
             redis_client, operation_key
         )
@@ -7200,11 +7233,9 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
             force_paid_retry=force_paid_retry,
         )
         try:
-            callback_query = request_json.get("callback_query")
             if callback_query:
                 handle_callback_query(cast(Dict[str, Any], callback_query))
             else:
-                pre_checkout_query = request_json.get("pre_checkout_query")
                 if pre_checkout_query:
                     handle_pre_checkout_query(cast(Dict[str, Any], pre_checkout_query))
                 else:

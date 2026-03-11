@@ -378,6 +378,9 @@ def _run_ai_flow(
     handler_func: Callable[..., str],
     redis_client: Any,
 ) -> Tuple[str, bool]:
+    if not deps.credits_db_service.is_configured():
+        return deps.handle_rate_limit(chat_id, message), False
+
     chat_history = deps.get_chat_history(chat_id, redis_client)
     ai_messages = deps.build_ai_messages(
         message,
