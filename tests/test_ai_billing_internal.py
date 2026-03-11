@@ -105,15 +105,15 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
                 "executed_tools": [
                     {"type": "search", "mode": "basic", "count": 2},
                     {"type": "visit", "count": 3},
-                    {"name": "python", "duration_seconds": 10},
-                    {"type": "browser", "duration_seconds": 15},
+                    {"name": "python"},
+                    {"type": "browser"},
                 ],
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 15_633
-    assert breakdown["charged_credits"] == 4
+    assert breakdown["raw_usd_micros"] == 17_800
+    assert breakdown["charged_credits"] == 5
     assert breakdown["model_breakdown"] == [
         {
             "model": "openai/gpt-oss-120b",
@@ -127,34 +127,31 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
             "tool": "search",
             "usd_micros": 10_000,
             "count": 2,
-            "duration_seconds": 0.0,
             "note": "",
         },
         {
             "tool": "visit",
             "usd_micros": 3_000,
             "count": 3,
-            "duration_seconds": 0.0,
             "note": "",
         },
         {
             "tool": "python",
-            "usd_micros": 500,
+            "usd_micros": 3_000,
             "count": 1,
-            "duration_seconds": 10.0,
-            "note": "",
+            "note": "estimated_max_1_minute_request_cap",
         },
         {
             "tool": "browser",
-            "usd_micros": 333,
+            "usd_micros": 0,
             "count": 1,
-            "duration_seconds": 15.0,
-            "note": "",
+            "note": "estimated_shared_1_minute_request_cap",
         },
     ]
+    assert breakdown["unsupported_notes"] == []
 
 
-def test_calculate_billing_for_segments_uses_max_estimate_for_missing_duration_tools():
+def test_calculate_billing_for_segments_uses_browser_cap_when_only_browser_tools_exist():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -170,44 +167,33 @@ def test_calculate_billing_for_segments_uses_max_estimate_for_missing_duration_t
                     ]
                 },
                 "executed_tools": [
+                    {"type": "browser"},
                     {"type": "browser_automation"},
-                    {"type": "browser_automation"},
-                    {"name": "python"},
                     {"type": "search", "mode": "basic", "count": 1},
                 ],
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 9_800
+    assert breakdown["raw_usd_micros"] == 8_133
     assert breakdown["charged_credits"] == 3
     assert breakdown["tool_breakdown"] == [
         {
-            "tool": "browser_automation",
-            "usd_micros": 0,
+            "tool": "browser",
+            "usd_micros": 1_333,
             "count": 1,
-            "duration_seconds": 0.0,
-            "note": "estimated_request_cap_shared",
+            "note": "estimated_max_1_minute_request_cap",
         },
         {
             "tool": "browser_automation",
             "usd_micros": 0,
             "count": 1,
-            "duration_seconds": 0.0,
-            "note": "estimated_request_cap_shared",
-        },
-        {
-            "tool": "python",
-            "usd_micros": 3_000,
-            "count": 1,
-            "duration_seconds": 0.0,
-            "note": "estimated_max_request_duration",
+            "note": "estimated_shared_1_minute_request_cap",
         },
         {
             "tool": "search",
             "usd_micros": 5_000,
             "count": 1,
-            "duration_seconds": 0.0,
             "note": "",
         },
     ]
