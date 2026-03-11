@@ -17,6 +17,7 @@ from api.groq_billing import (
 
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
+_BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,99 @@ class PreparedMessage:
     resized_image_data: Optional[bytes] = None
     early_response: Optional[str] = None
     audio_duration_seconds: float = 0.0
+
+
+def _billing_is_available(deps: MessageHandlerDeps) -> bool:
+    return bool(deps.credits_db_service.is_configured())
+
+
+def _billing_unavailable_command_response(
+    command: str,
+) -> Tuple[str, None, bool, str]:
+    return _BILLING_UNAVAILABLE_MESSAGE, None, False, command
+
+
+def _require_billing_for_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+) -> Optional[Tuple[str, None, bool, str]]:
+    if _billing_is_available(deps):
+        return None
+    return _billing_unavailable_command_response(command)
+
+
+def _degrade_when_billing_unavailable(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message: Dict[str, Any],
+) -> Optional[Tuple[str, bool]]:
+    if _billing_is_available(deps):
+        return None
+    return deps.handle_rate_limit(chat_id, message), False
+
+
+def _store_user_message_if_present(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message_id: str,
+    message: Dict[str, Any],
+    message_text: str,
+    reply_context_text: Optional[str],
+    redis_client: Any,
+) -> None:
+    if not message_text:
+        return
+    formatted_message = deps.format_user_message(
+        message,
+        message_text,
+        reply_context_text,
+    )
+    deps.save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+
+
+def _send_response_and_store_metadata(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message_id: str,
+    response_msg: str,
+    response_markup: Optional[Dict[str, Any]],
+    response_command: Optional[str],
+    response_uses_ai: bool,
+    redis_client: Any,
+) -> None:
+    deps.save_message_to_redis(
+        chat_id,
+        f"bot_{message_id}",
+        response_msg,
+        redis_client,
+    )
+    sent_message_id = deps.send_msg(
+        chat_id,
+        response_msg,
+        message_id,
+        reply_markup=response_markup,
+    )
+    if sent_message_id is None:
+        return
+    metadata = (
+        {
+            "type": "command",
+            "command": response_command,
+            "uses_ai": response_uses_ai,
+        }
+        if response_command
+        else {"type": "ai"}
+    )
+    deps.save_bot_message_metadata(
+        redis_client,
+        chat_id,
+        sent_message_id,
+        metadata,
+    )
 
 
 def _build_billing_helper(
@@ -378,8 +472,13 @@ def _run_ai_flow(
     handler_func: Callable[..., str],
     redis_client: Any,
 ) -> Tuple[str, bool]:
-    if not deps.credits_db_service.is_configured():
-        return deps.handle_rate_limit(chat_id, message), False
+    billing_unavailable = _degrade_when_billing_unavailable(
+        deps,
+        chat_id=chat_id,
+        message=message,
+    )
+    if billing_unavailable is not None:
+        return billing_unavailable
 
     chat_history = deps.get_chat_history(chat_id, redis_client)
     ai_messages = deps.build_ai_messages(
@@ -521,8 +620,9 @@ def _handle_topup_command(
     if command != "/topup":
         return None, None, False, None
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     if chat_type != "private":
         bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
@@ -550,8 +650,9 @@ def _handle_balance_command(
     if command != "/balance":
         return None, None, False, None
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     if user_id is None or numeric_chat_id is None:
         return "no te pude leer bien el usuario para ver los saldos", None, False, command
@@ -591,8 +692,9 @@ def _handle_admin_printcredits_command(
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
     amount = parse_credit_units(amount_token)
@@ -830,8 +932,9 @@ def _handle_admin_creditlog_command(
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     raw_limit = str(sanitized_message_text or "").strip()
     limit = 10
@@ -877,8 +980,9 @@ def _handle_admin_purge_ai_log_command(
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     try:
         purge_result = deps.credits_db_service.purge_expired_ai_ledger_events(
@@ -915,8 +1019,9 @@ def _handle_transfer_command(
     if command != "/transfer":
         return None, None, False, None
 
-    if not deps.credits_db_service.is_configured():
-        return "el cobro de ia no está andando, avisale al admin", None, False, command
+    billing_required_response = _require_billing_for_command(deps, command=command)
+    if billing_required_response is not None:
+        return billing_required_response
 
     if not deps.is_group_chat_type(chat_type):
         return "esto es para grupos, capo: /transfer <monto>", None, False, command
@@ -1286,15 +1391,15 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             chat_config,
             reply_metadata,
         ):
-            if prepared_message.message_text:
-                formatted_message = deps.format_user_message(
-                    message,
-                    prepared_message.message_text,
-                    reply_context_text,
-                )
-                deps.save_message_to_redis(
-                    chat_id, message_id, formatted_message, redis_client
-                )
+            _store_user_message_if_present(
+                deps,
+                chat_id=chat_id,
+                message_id=message_id,
+                message=message,
+                message_text=prepared_message.message_text,
+                reply_context_text=reply_context_text,
+                redis_client=redis_client,
+            )
             return "ok"
 
         if (
@@ -1333,43 +1438,27 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         if response_msg == "ok" and response_command is None and response_markup is None:
             return "ok"
 
-        if prepared_message.message_text:
-            formatted_message = deps.format_user_message(
-                message,
-                prepared_message.message_text,
-                reply_context_text,
-            )
-            deps.save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+        _store_user_message_if_present(
+            deps,
+            chat_id=chat_id,
+            message_id=message_id,
+            message=message,
+            message_text=prepared_message.message_text,
+            reply_context_text=reply_context_text,
+            redis_client=redis_client,
+        )
 
         if response_msg:
-            deps.save_message_to_redis(
-                chat_id,
-                f"bot_{message_id}",
-                response_msg,
-                redis_client,
+            _send_response_and_store_metadata(
+                deps,
+                chat_id=chat_id,
+                message_id=message_id,
+                response_msg=response_msg,
+                response_markup=response_markup,
+                response_command=response_command,
+                response_uses_ai=response_uses_ai,
+                redis_client=redis_client,
             )
-            sent_message_id = deps.send_msg(
-                chat_id,
-                response_msg,
-                message_id,
-                reply_markup=response_markup,
-            )
-            if sent_message_id is not None:
-                metadata = (
-                    {
-                        "type": "command",
-                        "command": response_command,
-                        "uses_ai": response_uses_ai,
-                    }
-                    if response_command
-                    else {"type": "ai"}
-                )
-                deps.save_bot_message_metadata(
-                    redis_client,
-                    chat_id,
-                    sent_message_id,
-                    metadata,
-                )
 
         return "ok"
 
