@@ -822,11 +822,11 @@ def _get_webhook_max_runtime_seconds() -> float:
 
 
 def _get_webhook_retry_safety_margin_seconds() -> float:
-    raw_value = str(environ.get("WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS") or "12").strip()
+    raw_value = str(environ.get("WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS") or "30").strip()
     try:
         return max(1.0, float(raw_value))
     except (TypeError, ValueError):
-        return 12.0
+        return 30.0
 
 
 def _get_webhook_idempotency_ttl_seconds() -> int:
