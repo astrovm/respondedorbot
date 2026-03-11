@@ -611,12 +611,67 @@ def _handle_admin_printcredits_command(
 
 
 def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    def _summarize_models(items: Sequence[Mapping[str, Any]]) -> str:
+        totals: Dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("model") or "?")
+            totals[name] = totals.get(name, 0) + int(item.get("usd_micros") or 0)
+        if not totals:
+            return "sin modelos"
+        ordered = sorted(totals.items(), key=lambda entry: (-entry[1], entry[0]))
+        visible = ordered[:5]
+        summary = ", ".join(f"{name}={usd}" for name, usd in visible)
+        hidden_count = len(ordered) - len(visible)
+        if hidden_count > 0:
+            summary += f", +{hidden_count} más"
+        return summary
+
+    def _summarize_tools(items: Sequence[Mapping[str, Any]]) -> str:
+        totals: Dict[str, Dict[str, int]] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("tool") or "?")
+            current = totals.setdefault(name, {"usd_micros": 0, "count": 0})
+            current["usd_micros"] += int(item.get("usd_micros") or 0)
+            current["count"] += int(item.get("count") or 0)
+        if not totals:
+            return "sin tools"
+        ordered = sorted(
+            totals.items(),
+            key=lambda entry: (-entry[1]["usd_micros"], -entry[1]["count"], entry[0]),
+        )
+        visible = ordered[:5]
+        summary = ", ".join(
+            f"{name}={values['usd_micros']} ({values['count']}x)"
+            for name, values in visible
+        )
+        hidden_count = len(ordered) - len(visible)
+        if hidden_count > 0:
+            summary += f", +{hidden_count} más"
+        return summary
+
+    def _summarize_segments(items: Sequence[Mapping[str, Any]]) -> str:
+        totals: Dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            kind = str(item.get("kind") or "unknown")
+            totals[kind] = totals.get(kind, 0) + 1
+        if not totals:
+            return "sin segmentos"
+        ordered = sorted(totals.items(), key=lambda entry: (entry[0]))
+        return ", ".join(f"{kind}={count}" for kind, count in ordered)
+
     lines: List[str] = ["últimas liquidaciones IA:"]
     for entry in entries:
         raw_metadata = entry.get("metadata")
         metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
         model_breakdown = metadata.get("model_breakdown") or []
         tool_breakdown = metadata.get("tool_breakdown") or []
+        billing_segments = metadata.get("billing_segments") or []
         command = str(metadata.get("command") or metadata.get("usage_tag") or "sin comando")
         created_at = str(entry.get("created_at") or "")
         created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
@@ -636,22 +691,16 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             status_label = "estado=missing_usage"
         else:
             status_label = "estado=ok"
-        model_summary = ", ".join(
-            f"{str(item.get('model') or '?')}={int(item.get('usd_micros') or 0)}"
-            for item in model_breakdown[:2]
-            if isinstance(item, Mapping)
-        ) or "sin modelos"
-        tool_summary = ", ".join(
-            f"{str(item.get('tool') or '?')}={int(item.get('usd_micros') or 0)}"
-            for item in tool_breakdown[:3]
-            if isinstance(item, Mapping)
-        ) or "sin tools"
+        model_summary = _summarize_models(model_breakdown)
+        tool_summary = _summarize_tools(tool_breakdown)
+        segment_summary = _summarize_segments(billing_segments)
         lines.append(
             "\n".join(
                 [
                     f"{created_label} | cmd={command} | {status_label}",
                     f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
                     f"usd_micros={raw_usd_micros}",
+                    f"requests: {segment_summary}",
                     f"modelos: {model_summary}",
                     f"tools: {tool_summary}",
                 ]
