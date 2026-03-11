@@ -614,9 +614,13 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
     def fake_handler(_messages):
         return '[TOOL] web_search {"query": "test"}'
 
-    result = handle_ai_response("123", fake_handler, [])
+    with patch("builtins.print") as mock_print:
+        result = handle_ai_response("123", fake_handler, [])
 
     assert result == "me quedé reculando y no te pude responder, probá de nuevo"
+    assert mock_print.call_count == 2
+    assert "cleaned response empty after normalization" in mock_print.call_args_list[0].args[0]
+    assert "previews raw='[TOOL] web_search" in mock_print.call_args_list[1].args[0]
 
 
 def test_handle_ai_response_strips_context_echo(monkeypatch):
