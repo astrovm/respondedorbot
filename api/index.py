@@ -39,7 +39,6 @@ import random
 import re
 import redis
 import requests
-import threading
 import time
 import traceback
 import wave
@@ -140,6 +139,7 @@ from api.message_state import (
     save_message_to_redis as _state_save_message_to_redis,
     truncate_text as _state_truncate_text,
 )
+from api.random_replies import build_random_reply
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
 from api.services import credits_db as credits_db_service
@@ -148,6 +148,32 @@ from api.utils.links import (
     can_embed_url as _links_can_embed_url,
     is_social_frontend as _links_is_social_frontend,
     replace_links as _links_replace_links,
+)
+from api.webhook_state import (
+    ForceWebhookRetry,
+    WebhookLockHeartbeat,
+    _acquire_webhook_processing_lock,
+    _clear_persisted_webhook_reservation,
+    _clear_webhook_force_paid_retry_pending,
+    _extract_webhook_operation_key,
+    _get_webhook_max_runtime_seconds,
+    _get_webhook_retry_safety_margin_seconds,
+    _has_webhook_force_paid_retry_pending,
+    _load_persisted_webhook_reservation,
+    _mark_webhook_completed,
+    _mark_webhook_force_paid_retry_pending,
+    _mark_webhook_paid_retry_preferred,
+    _maybe_abort_webhook_for_paid_retry,
+    _persist_webhook_reservation,
+    _release_webhook_processing_lock,
+    _restore_webhook_request_context,
+    _set_webhook_request_context,
+    _start_webhook_processing_lock_heartbeat,
+    _stop_webhook_processing_lock_heartbeat,
+    _webhook_force_paid_retry,
+    _webhook_operation_key,
+    _webhook_redis_client,
+    _webhook_request_started_at,
 )
 
 
@@ -778,24 +804,6 @@ _provider_backoff_until: Dict[str, float] = {}
 _ai_provider_request_count: ContextVar[int] = ContextVar(
     "ai_provider_request_count", default=0
 )
-_webhook_request_started_at: ContextVar[Optional[float]] = ContextVar(
-    "webhook_request_started_at", default=None
-)
-_webhook_operation_key: ContextVar[Optional[str]] = ContextVar(
-    "webhook_operation_key", default=None
-)
-_webhook_redis_client: ContextVar[Optional[redis.Redis]] = ContextVar(
-    "webhook_redis_client", default=None
-)
-_webhook_force_paid_retry: ContextVar[bool] = ContextVar(
-    "webhook_force_paid_retry", default=False
-)
-
-WEBHOOK_IDEMPOTENCY_PREFIX = "webhook:idempotency"
-
-
-class ForceWebhookRetry(RuntimeError):
-    """Abort current webhook processing so Telegram retries the same update."""
 
 
 def _reset_ai_provider_request_count() -> Token:
@@ -814,123 +822,6 @@ def _get_ai_provider_request_count() -> int:
     return int(_ai_provider_request_count.get() or 0)
 
 
-def _get_webhook_max_runtime_seconds() -> float:
-    raw_value = str(environ.get("WEBHOOK_MAX_RUNTIME_SECONDS") or "60").strip()
-    try:
-        return max(1.0, float(raw_value))
-    except (TypeError, ValueError):
-        return 60.0
-
-
-def _get_webhook_retry_safety_margin_seconds() -> float:
-    raw_value = str(environ.get("WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS") or "30").strip()
-    try:
-        return max(1.0, float(raw_value))
-    except (TypeError, ValueError):
-        return 30.0
-
-
-def _get_webhook_idempotency_ttl_seconds() -> int:
-    raw_value = str(environ.get("WEBHOOK_IDEMPOTENCY_TTL_SECONDS") or "").strip()
-    if raw_value:
-        try:
-            return max(10, int(raw_value))
-        except (TypeError, ValueError):
-            pass
-    return max(180, int(_get_webhook_max_runtime_seconds()) + 60)
-
-
-def _get_webhook_force_paid_retry_ttl_seconds() -> int:
-    raw_value = str(environ.get("WEBHOOK_FORCE_PAID_RETRY_TTL_SECONDS") or "").strip()
-    if raw_value:
-        try:
-            return max(10, int(raw_value))
-        except (TypeError, ValueError):
-            pass
-    return max(
-        300,
-        _get_webhook_idempotency_ttl_seconds(),
-        int(_get_webhook_max_runtime_seconds()) + 120,
-    )
-
-
-def _get_webhook_lock_refresh_interval_seconds() -> float:
-    ttl_seconds = float(_get_webhook_idempotency_ttl_seconds())
-    return max(5.0, min(30.0, ttl_seconds / 3.0))
-
-
-def _set_webhook_request_context(
-    *,
-    request_started_at: float,
-    operation_key: Optional[str],
-    redis_client: Optional[redis.Redis],
-    force_paid_retry: bool,
-) -> Tuple[Token, Token, Token, Token]:
-    return (
-        _webhook_request_started_at.set(request_started_at),
-        _webhook_operation_key.set(operation_key),
-        _webhook_redis_client.set(redis_client),
-        _webhook_force_paid_retry.set(bool(force_paid_retry)),
-    )
-
-
-def _restore_webhook_request_context(tokens: Tuple[Token, Token, Token, Token]) -> None:
-    started_token, operation_token, redis_token, force_paid_token = tokens
-    _webhook_request_started_at.reset(started_token)
-    _webhook_operation_key.reset(operation_token)
-    _webhook_redis_client.reset(redis_token)
-    _webhook_force_paid_retry.reset(force_paid_token)
-
-
-def _get_webhook_time_remaining_seconds() -> Optional[float]:
-    started_at = _webhook_request_started_at.get()
-    if started_at is None:
-        return None
-    elapsed_seconds = max(0.0, time.monotonic() - started_at)
-    return max(0.0, _get_webhook_max_runtime_seconds() - elapsed_seconds)
-
-
-def _webhook_processing_lock_key(operation_key: str) -> str:
-    return f"{WEBHOOK_IDEMPOTENCY_PREFIX}:{operation_key}:lock"
-
-
-def _webhook_completed_key(operation_key: str) -> str:
-    return f"{WEBHOOK_IDEMPOTENCY_PREFIX}:{operation_key}:completed"
-
-
-def _webhook_force_paid_retry_key(operation_key: str) -> str:
-    return f"{WEBHOOK_IDEMPOTENCY_PREFIX}:{operation_key}:force_paid_retry"
-
-
-def _webhook_reservation_key(operation_key: str, usage_tag: str) -> str:
-    safe_usage_tag = re.sub(r"[^a-zA-Z0-9:_-]", "_", str(usage_tag or "ai_usage"))
-    return f"{WEBHOOK_IDEMPOTENCY_PREFIX}:{operation_key}:reservation:{safe_usage_tag}"
-
-
-def _extract_webhook_operation_key(request_json: Mapping[str, Any]) -> Optional[str]:
-    callback_query = request_json.get("callback_query")
-    if isinstance(callback_query, Mapping):
-        callback_id = str(callback_query.get("id") or "").strip()
-        if callback_id:
-            return f"callback:{callback_id}"
-
-    pre_checkout_query = request_json.get("pre_checkout_query")
-    if isinstance(pre_checkout_query, Mapping):
-        query_id = str(pre_checkout_query.get("id") or "").strip()
-        if query_id:
-            return f"pre_checkout:{query_id}"
-
-    message = request_json.get("message")
-    if isinstance(message, Mapping):
-        chat = cast(Mapping[str, Any], message.get("chat") or {})
-        chat_id = chat.get("id")
-        message_id = message.get("message_id")
-        if chat_id is not None and message_id is not None:
-            return f"message:{chat_id}:{message_id}"
-
-    return None
-
-
 def _send_random_degraded_reply(message: Mapping[str, Any], *, reason: str) -> Tuple[str, int]:
     chat = cast(Mapping[str, Any], message.get("chat") or {})
     chat_id = chat.get("id")
@@ -945,247 +836,6 @@ def _send_random_degraded_reply(message: Mapping[str, Any], *, reason: str) -> T
     )
     print(f"webhook degraded random reply sent reason={reason} chat_id={chat_id}")
     return "ok", 200
-
-
-def _mark_webhook_completed(
-    redis_client: redis.Redis,
-    operation_key: str,
-) -> None:
-    redis_setex_json(
-        redis_client,
-        _webhook_completed_key(operation_key),
-        _get_webhook_idempotency_ttl_seconds(),
-        {"status": "completed", "completed_at": now_utc_iso()},
-    )
-
-
-def _mark_webhook_force_paid_retry_pending(
-    redis_client: redis.Redis,
-    operation_key: str,
-    *,
-    reason: str,
-) -> None:
-    redis_setex_json(
-        redis_client,
-        _webhook_force_paid_retry_key(operation_key),
-        _get_webhook_force_paid_retry_ttl_seconds(),
-        {
-            "status": "force_paid_retry_pending",
-            "reason": reason,
-            "created_at": now_utc_iso(),
-        },
-    )
-
-
-def _has_webhook_force_paid_retry_pending(
-    redis_client: Optional[redis.Redis],
-    operation_key: Optional[str],
-) -> bool:
-    if redis_client is None or not operation_key:
-        return False
-    return bool(redis_get_json(redis_client, _webhook_force_paid_retry_key(operation_key)))
-
-
-def _clear_webhook_force_paid_retry_pending(
-    redis_client: Optional[redis.Redis],
-    operation_key: Optional[str],
-) -> None:
-    if redis_client is None or not operation_key:
-        return
-    try:
-        redis_client.delete(_webhook_force_paid_retry_key(operation_key))
-    except Exception:
-        return
-
-
-def _acquire_webhook_processing_lock(
-    redis_client: redis.Redis,
-    operation_key: str,
-    owner_token: str,
-) -> str:
-    completed = redis_get_json(redis_client, _webhook_completed_key(operation_key))
-    if completed:
-        return "completed"
-
-    try:
-        acquired = bool(
-            redis_client.set(
-                _webhook_processing_lock_key(operation_key),
-                owner_token,
-                ex=_get_webhook_idempotency_ttl_seconds(),
-                nx=True,
-            )
-        )
-    except Exception:
-        return "unavailable"
-
-    if acquired:
-        return "acquired"
-
-    completed = redis_get_json(redis_client, _webhook_completed_key(operation_key))
-    if completed:
-        return "completed"
-    return "in_flight"
-
-
-def _release_webhook_processing_lock(
-    redis_client: Optional[redis.Redis],
-    operation_key: Optional[str],
-    owner_token: Optional[str],
-) -> None:
-    if redis_client is None or not operation_key or not owner_token:
-        return
-    lock_key = _webhook_processing_lock_key(operation_key)
-    try:
-        current_owner = redis_client.get(lock_key)
-        if current_owner == owner_token:
-            redis_client.delete(lock_key)
-    except Exception:
-        return
-
-
-def _refresh_webhook_processing_lock(
-    redis_client: Optional[redis.Redis],
-    operation_key: Optional[str],
-    owner_token: Optional[str],
-) -> bool:
-    if redis_client is None or not operation_key or not owner_token:
-        return False
-    lock_key = _webhook_processing_lock_key(operation_key)
-    try:
-        current_owner = redis_client.get(lock_key)
-        if current_owner != owner_token:
-            return False
-        redis_client.expire(lock_key, _get_webhook_idempotency_ttl_seconds())
-        return True
-    except Exception:
-        return False
-
-
-def _start_webhook_processing_lock_heartbeat(
-    redis_client: Optional[redis.Redis],
-    operation_key: Optional[str],
-    owner_token: Optional[str],
-) -> Tuple[threading.Event, Optional[threading.Thread]]:
-    stop_event = threading.Event()
-    if redis_client is None or not operation_key or not owner_token:
-        return stop_event, None
-
-    interval_seconds = _get_webhook_lock_refresh_interval_seconds()
-
-    def _heartbeat() -> None:
-        while not stop_event.wait(interval_seconds):
-            if not _refresh_webhook_processing_lock(
-                redis_client,
-                operation_key,
-                owner_token,
-            ):
-                break
-
-    thread = threading.Thread(
-        target=_heartbeat,
-        name=f"webhook-lock-heartbeat:{operation_key}",
-        daemon=True,
-    )
-    thread.start()
-    return stop_event, thread
-
-
-def _stop_webhook_processing_lock_heartbeat(
-    heartbeat: Tuple[threading.Event, Optional[threading.Thread]]
-) -> None:
-    stop_event, thread = heartbeat
-    stop_event.set()
-    if thread is not None:
-        thread.join(timeout=0.2)
-
-
-def _load_persisted_webhook_reservation(usage_tag: str) -> Optional[Mapping[str, Any]]:
-    operation_key = _webhook_operation_key.get()
-    redis_client = _webhook_redis_client.get()
-    if redis_client is None or not operation_key:
-        return None
-    cached = redis_get_json(redis_client, _webhook_reservation_key(operation_key, usage_tag))
-    if not isinstance(cached, Mapping):
-        return None
-    return cached
-
-
-def _persist_webhook_reservation(usage_tag: str, reservation: Mapping[str, Any]) -> None:
-    operation_key = _webhook_operation_key.get()
-    redis_client = _webhook_redis_client.get()
-    if redis_client is None or not operation_key:
-        return
-    redis_setex_json(
-        redis_client,
-        _webhook_reservation_key(operation_key, usage_tag),
-        _get_webhook_force_paid_retry_ttl_seconds(),
-        dict(reservation),
-    )
-
-
-def _clear_persisted_webhook_reservation(usage_tag: str) -> None:
-    operation_key = _webhook_operation_key.get()
-    redis_client = _webhook_redis_client.get()
-    if redis_client is None or not operation_key:
-        return
-    try:
-        redis_client.delete(_webhook_reservation_key(operation_key, usage_tag))
-    except Exception:
-        return
-
-
-def _maybe_abort_webhook_for_paid_retry(
-    *,
-    label: str,
-    scope: str,
-    account: str,
-    has_paid_fallback: bool,
-    reason: str,
-) -> None:
-    if scope != "compound" or account != GROQ_FREE_ACCOUNT or not has_paid_fallback:
-        return
-    operation_key = _webhook_operation_key.get()
-    redis_client = _webhook_redis_client.get()
-    if redis_client is None or not operation_key:
-        return
-    remaining_seconds = _get_webhook_time_remaining_seconds()
-    if remaining_seconds is None:
-        return
-    margin_seconds = _get_webhook_retry_safety_margin_seconds()
-    if remaining_seconds > margin_seconds:
-        return
-    _mark_webhook_force_paid_retry_pending(
-        redis_client,
-        operation_key,
-        reason=reason,
-    )
-    print(
-        f"{label} aborting for paid retry due to low remaining time "
-        f"on operation={operation_key} account={account} scope={scope} "
-        f"remaining_seconds={remaining_seconds:.3f} margin_seconds={margin_seconds:.3f}"
-    )
-    raise ForceWebhookRetry(reason)
-
-
-def _mark_webhook_paid_retry_preferred(
-    *,
-    scope: str,
-    account: str,
-    has_paid_fallback: bool,
-    reason: str,
-) -> None:
-    if scope != "compound" or account != GROQ_FREE_ACCOUNT or not has_paid_fallback:
-        return
-    operation_key = _webhook_operation_key.get()
-    redis_client = _webhook_redis_client.get()
-    if redis_client is None or not operation_key:
-        return
-    _mark_webhook_force_paid_retry_pending(
-        redis_client,
-        operation_key,
-        reason=reason,
-    )
 
 
 def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
@@ -1955,16 +1605,6 @@ def gen_random(name: str) -> str:
         msg = f"{msg} {name}"
 
     return msg
-
-
-def _random_name_from_sender(sender: Mapping[str, Any]) -> str:
-    first_name = str(sender.get("first_name") or "").strip()
-    if first_name:
-        return first_name
-    username = str(sender.get("username") or "").strip()
-    if username:
-        return username
-    return ""
 
 
 def select_random(msg_text: str) -> str:
@@ -5957,6 +5597,7 @@ def _execute_groq_request_with_fallback(
             _mark_webhook_paid_retry_preferred(
                 scope=scope,
                 account=account,
+                free_account=GROQ_FREE_ACCOUNT,
                 has_paid_fallback=has_paid_fallback,
                 reason="free_compound_local_limit_paid_preferred",
             )
@@ -6021,6 +5662,7 @@ def _execute_groq_request_with_fallback(
             _mark_webhook_paid_retry_preferred(
                 scope=scope,
                 account=account,
+                free_account=GROQ_FREE_ACCOUNT,
                 has_paid_fallback=has_paid_fallback,
                 reason="recoverable_free_compound_error_paid_preferred",
             )
@@ -6028,6 +5670,7 @@ def _execute_groq_request_with_fallback(
                 label=label,
                 scope=scope,
                 account=account,
+                free_account=GROQ_FREE_ACCOUNT,
                 has_paid_fallback=has_paid_fallback,
                 reason="recoverable_free_compound_error_low_time",
             )
@@ -6039,6 +5682,7 @@ def _execute_groq_request_with_fallback(
             _mark_webhook_paid_retry_preferred(
                 scope=scope,
                 account=account,
+                free_account=GROQ_FREE_ACCOUNT,
                 has_paid_fallback=has_paid_fallback,
                 reason="free_compound_backoff_paid_preferred",
             )
@@ -6046,6 +5690,7 @@ def _execute_groq_request_with_fallback(
                 label=label,
                 scope=scope,
                 account=account,
+                free_account=GROQ_FREE_ACCOUNT,
                 has_paid_fallback=has_paid_fallback,
                 reason="free_compound_backoff_low_time",
             )
@@ -6595,6 +6240,18 @@ def _answer_callback_query(
     )
 
 
+def _billing_unavailable_alert_text() -> str:
+    return "el cobro de ia está hecho pelota, avisale al admin"
+
+
+def _billing_unavailable_message_text() -> str:
+    return "el cobro de ia no está andando, avisale al admin"
+
+
+def _billing_is_available() -> bool:
+    return bool(credits_db_service.is_configured())
+
+
 def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
     callback_data = str(callback_query.get("data") or "")
     callback_id = callback_query.get("id")
@@ -6609,11 +6266,11 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
             _answer_callback_query(callback_id)
         return
 
-    if not credits_db_service.is_configured():
+    if not _billing_is_available():
         if callback_id:
             _answer_callback_query(
                 callback_id,
-                text="el cobro de ia está hecho pelota, avisale al admin",
+                text=_billing_unavailable_alert_text(),
                 show_alert=True,
             )
         return
@@ -6680,11 +6337,11 @@ def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
     if not query_id:
         return
 
-    if not credits_db_service.is_configured():
+    if not _billing_is_available():
         _answer_pre_checkout_query(
             str(query_id),
             ok=False,
-            error_message="el cobro de ia está hecho pelota, avisale al admin",
+            error_message=_billing_unavailable_alert_text(),
         )
         return
 
@@ -6732,8 +6389,8 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         return "ok"
     chat_id = str(chat_id_raw)
 
-    if not credits_db_service.is_configured():
-        send_msg(chat_id, "el cobro de ia no está andando, avisale al admin")
+    if not _billing_is_available():
+        send_msg(chat_id, _billing_unavailable_message_text())
         return "ok"
 
     user_id = _extract_user_id(message)
@@ -6954,64 +6611,65 @@ def format_user_message(
     return _state_format_user_message(message, message_text, reply_context)
 
 
-def handle_msg(message: Dict) -> str:
-    return _handle_msg_impl(
-        message,
-        MessageHandlerDeps(
-            config_redis=config_redis,
-            get_chat_config=get_chat_config,
-            initialize_commands=initialize_commands,
-            parse_command=parse_command,
-            should_auto_process_media=should_auto_process_media,
-            extract_message_content=extract_message_content,
-            replace_links=replace_links,
-            send_msg=send_msg,
-            delete_msg=delete_msg,
-            admin_report=admin_report,
-            get_bot_message_metadata=get_bot_message_metadata,
-            save_bot_message_metadata=save_bot_message_metadata,
-            build_reply_context_text=build_reply_context_text,
-            should_gordo_respond=should_gordo_respond,
-            format_user_message=format_user_message,
-            save_message_to_redis=save_message_to_redis,
-            get_chat_history=get_chat_history,
-            build_ai_messages=build_ai_messages,
-            handle_ai_response=handle_ai_response,
-            ask_ai=ask_ai,
-            gen_random=gen_random,
-            build_insufficient_credits_message=build_insufficient_credits_message,
-            get_ai_credits_per_response=get_ai_credits_per_response,
-            build_topup_keyboard=build_topup_keyboard,
-            credits_db_service=credits_db_service,
-            is_group_chat_type=_is_group_chat_type,
-            extract_user_id=_extract_user_id,
-            extract_numeric_chat_id=_extract_numeric_chat_id,
-            maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
-            format_balance_command=_message_handler_format_balance_command,
-            handle_transcribe_with_message=handle_transcribe_with_message,
-            handle_transcribe_with_message_result=handle_transcribe_with_message_result,
-            check_global_rate_limit=check_global_rate_limit,
-            handle_rate_limit=handle_rate_limit,
-            handle_successful_payment_message=handle_successful_payment_message,
-            handle_config_command=handle_config_command,
-            ensure_callback_updates_enabled=ensure_callback_updates_enabled,
-            is_chat_admin=is_chat_admin,
-            report_unauthorized_config_attempt=_report_unauthorized_config_attempt,
-            handle_transcribe=handle_transcribe,
-            estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
-            estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
-            estimate_image_context_rate_limit_tokens=estimate_image_context_rate_limit_tokens,
-            _transcribe_audio_file=_transcribe_audio_file,
-            _transcription_error_message=_transcription_error_message,
-            download_telegram_file=download_telegram_file,
-            measure_audio_duration_seconds=measure_audio_duration_seconds,
-            resize_image_if_needed=resize_image_if_needed,
-            encode_image_to_base64=encode_image_to_base64,
-            load_persisted_reservation=_load_persisted_webhook_reservation,
-            persist_reservation=_persist_webhook_reservation,
-            clear_persisted_reservation=_clear_persisted_webhook_reservation,
-        ),
+def _build_message_handler_deps() -> MessageHandlerDeps:
+    return MessageHandlerDeps(
+        config_redis=config_redis,
+        get_chat_config=get_chat_config,
+        initialize_commands=initialize_commands,
+        parse_command=parse_command,
+        should_auto_process_media=should_auto_process_media,
+        extract_message_content=extract_message_content,
+        replace_links=replace_links,
+        send_msg=send_msg,
+        delete_msg=delete_msg,
+        admin_report=admin_report,
+        get_bot_message_metadata=get_bot_message_metadata,
+        save_bot_message_metadata=save_bot_message_metadata,
+        build_reply_context_text=build_reply_context_text,
+        should_gordo_respond=should_gordo_respond,
+        format_user_message=format_user_message,
+        save_message_to_redis=save_message_to_redis,
+        get_chat_history=get_chat_history,
+        build_ai_messages=build_ai_messages,
+        handle_ai_response=handle_ai_response,
+        ask_ai=ask_ai,
+        gen_random=gen_random,
+        build_insufficient_credits_message=build_insufficient_credits_message,
+        get_ai_credits_per_response=get_ai_credits_per_response,
+        build_topup_keyboard=build_topup_keyboard,
+        credits_db_service=credits_db_service,
+        is_group_chat_type=_is_group_chat_type,
+        extract_user_id=_extract_user_id,
+        extract_numeric_chat_id=_extract_numeric_chat_id,
+        maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
+        format_balance_command=_message_handler_format_balance_command,
+        handle_transcribe_with_message=handle_transcribe_with_message,
+        handle_transcribe_with_message_result=handle_transcribe_with_message_result,
+        check_global_rate_limit=check_global_rate_limit,
+        handle_rate_limit=handle_rate_limit,
+        handle_successful_payment_message=handle_successful_payment_message,
+        handle_config_command=handle_config_command,
+        ensure_callback_updates_enabled=ensure_callback_updates_enabled,
+        is_chat_admin=is_chat_admin,
+        report_unauthorized_config_attempt=_report_unauthorized_config_attempt,
+        handle_transcribe=handle_transcribe,
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+        estimate_image_context_rate_limit_tokens=estimate_image_context_rate_limit_tokens,
+        _transcribe_audio_file=_transcribe_audio_file,
+        _transcription_error_message=_transcription_error_message,
+        download_telegram_file=download_telegram_file,
+        measure_audio_duration_seconds=measure_audio_duration_seconds,
+        resize_image_if_needed=resize_image_if_needed,
+        encode_image_to_base64=encode_image_to_base64,
+        load_persisted_reservation=_load_persisted_webhook_reservation,
+        persist_reservation=_persist_webhook_reservation,
+        clear_persisted_reservation=_clear_persisted_webhook_reservation,
     )
+
+
+def handle_msg(message: Dict) -> str:
+    return _handle_msg_impl(message, _build_message_handler_deps())
 
 
 def handle_rate_limit(chat_id: str, message: Dict) -> str:
@@ -7020,7 +6678,10 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     if token:
         send_typing(token, chat_id)
     time.sleep(random.uniform(0, 1))
-    return gen_random(_random_name_from_sender(cast(Mapping[str, Any], message.get("from") or {})))
+    return build_random_reply(
+        gen_random,
+        cast(Mapping[str, Any], message.get("from") or {}),
+    )
 
 
 def remove_gordo_prefix(text: Optional[str]) -> str:
@@ -7196,8 +6857,9 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
         )
         owner_token: Optional[str] = None
         lock_status = "unavailable"
-        lock_heartbeat: Tuple[threading.Event, Optional[threading.Thread]] = (
-            threading.Event(),
+        lock_heartbeat: WebhookLockHeartbeat = _start_webhook_processing_lock_heartbeat(
+            None,
+            None,
             None,
         )
         if redis_client is not None and operation_key:
