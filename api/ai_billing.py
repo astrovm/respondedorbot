@@ -225,6 +225,13 @@ class AIMessageBilling:
     billing_missing_scope_message: str = "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
     billing_charge_error_message: str = "se trabó el cobro de ia, probá de nuevo"
     charge_errors: List[str] = field(default_factory=list)
+    load_persisted_reservation_fn: Callable[[str], Optional[Mapping[str, Any]]] = (
+        lambda _usage_tag: None
+    )
+    persist_reservation_fn: Callable[[str, Mapping[str, Any]], None] = (
+        lambda _usage_tag, _reservation: None
+    )
+    clear_persisted_reservation_fn: Callable[[str], None] = lambda _usage_tag: None
 
     def _resolve_ai_charge_context(self) -> Tuple[Optional[int], Optional[str]]:
         if not self.credits_db_service.is_configured():
@@ -280,6 +287,20 @@ class AIMessageBilling:
         if self.user_id is None:
             return None, self.billing_missing_scope_message
 
+        persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
+        if persisted_reservation:
+            return {
+                "reserved_credit_units": int(
+                    persisted_reservation.get("reserved_credit_units", 0) or 0
+                ),
+                "chat_scope_id": persisted_reservation.get(
+                    "chat_scope_id", chat_scope_id
+                ),
+                "source": str(persisted_reservation.get("source") or "user"),
+                "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
+                "metadata": dict(persisted_reservation.get("metadata") or {}),
+            }, None
+
         self._ensure_onboarding_checked()
 
         reserve_amount = max(0, int(estimated_credit_units or 0))
@@ -313,13 +334,15 @@ class AIMessageBilling:
         if not charge_result.get("ok"):
             return None, self._build_insufficient_credits_reply(charge_result)
 
-        return {
+        reservation_payload = {
             "reserved_credit_units": reserve_amount,
             "chat_scope_id": chat_scope_id,
             "source": str(charge_result.get("source") or "user"),
             "usage_tag": usage_tag,
             "metadata": reserve_metadata,
-        }, None
+        }
+        self.persist_reservation_fn(usage_tag, reservation_payload)
+        return reservation_payload, None
 
     def settle_reserved_ai_credits(
         self,
@@ -456,6 +479,7 @@ class AIMessageBilling:
                     "reserved_credit_units": reserved_credit_units,
                 },
             )
+            self.clear_persisted_reservation_fn(usage_tag)
             return
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
@@ -597,6 +621,7 @@ class AIMessageBilling:
             chat_scope_id=chat_scope_id,
             settlement_metadata=settlement_metadata,
         )
+        self.clear_persisted_reservation_fn(usage_tag)
 
     def settle_reserved_ai_credits_batch(
         self,
@@ -683,6 +708,10 @@ class AIMessageBilling:
                     "reserved_credit_units": reserved_credit_units_total,
                 },
             )
+            for item in reservations:
+                self.clear_persisted_reservation_fn(
+                    str(item.get("usage_tag") or "ai_usage")
+                )
             return
 
         breakdown = calculate_billing_for_segments(billing_segments or [])
@@ -826,6 +855,8 @@ class AIMessageBilling:
             chat_scope_id=chat_scope_id,
             settlement_metadata=settlement_metadata,
         )
+        for item in reservations:
+            self.clear_persisted_reservation_fn(str(item.get("usage_tag") or "ai_usage"))
 
     def refund_reserved_ai_credits(
         self,
@@ -873,6 +904,9 @@ class AIMessageBilling:
                     "command": self.command,
                 },
             )
+            return
+
+        self.clear_persisted_reservation_fn(usage_tag)
 
     def charge_one_ai_request(
         self, usage_tag: str

@@ -1,5 +1,28 @@
 from tests.support import *  # noqa: F401,F403
 
+
+class FakeWebhookRedis:
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.data:
+            return False
+        self.data[key] = value
+        return True
+
+    def setex(self, key, ttl, value):
+        self.data[key] = value
+        return True
+
+    def delete(self, key):
+        self.data.pop(key, None)
+        return 1
+
+
 def test_responder_no_args():
     with app.test_request_context("/?"):
         response = responder()
@@ -116,6 +139,67 @@ def test_process_request_parameters_handles_pre_checkout_query():
     assert status == 200
     assert response == "ok"
     mock_handle.assert_called_once_with({"id": "pcq_1"})
+
+
+def test_process_request_parameters_returns_ok_for_completed_duplicate_without_reprocessing():
+    from api.index import process_request_parameters
+
+    redis_client = FakeWebhookRedis()
+    redis_client.setex(
+        "webhook:idempotency:message:123:1:completed",
+        60,
+        json.dumps({"status": "completed"}),
+    )
+
+    with app.test_request_context(
+        "/",
+        method="POST",
+        json={
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 123, "type": "private"},
+                "text": "hola",
+            }
+        },
+    ):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index._optional_redis_client", return_value=redis_client
+        ), patch("api.index.handle_msg") as mock_handle:
+            response, status = process_request_parameters(request)
+
+    assert (response, status) == ("ok", 200)
+    mock_handle.assert_not_called()
+
+
+def test_process_request_parameters_returns_retry_for_in_flight_duplicate():
+    from api.index import process_request_parameters
+
+    redis_client = FakeWebhookRedis()
+    redis_client.set(
+        "webhook:idempotency:message:123:1:lock",
+        "owner-1",
+        ex=60,
+        nx=False,
+    )
+
+    with app.test_request_context(
+        "/",
+        method="POST",
+        json={
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 123, "type": "private"},
+                "text": "hola",
+            }
+        },
+    ):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index._optional_redis_client", return_value=redis_client
+        ), patch("api.index.handle_msg") as mock_handle:
+            response, status = process_request_parameters(request)
+
+    assert (response, status) == ("retry", 503)
+    mock_handle.assert_not_called()
 
 
 def test_verify_webhook():
