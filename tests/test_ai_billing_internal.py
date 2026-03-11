@@ -475,6 +475,32 @@ def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():
     billing.credits_db_service.charge_ai_credits.assert_not_called()
 
 
+def test_build_insufficient_credits_reply_uses_username_when_first_name_is_missing():
+    billing = AIMessageBilling(
+        credits_db_service=MagicMock(),
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda name: f"random:{name}",
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
+        command="/ask",
+        chat_id="1",
+        chat_type="private",
+        user_id=1,
+        numeric_chat_id=1,
+        message={"from": {"username": "ana_user"}},
+    )
+
+    reply = billing._build_insufficient_credits_reply(
+        {
+            "user_balance_credit_units": 0,
+            "chat_balance_credit_units": 0,
+        }
+    )
+
+    assert reply.startswith("random:ana_user")
+
+
 def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
     billing = _build_billing_helper()
     billing.credits_db_service.charge_ai_credits.return_value = {"ok": False}
