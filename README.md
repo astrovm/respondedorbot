@@ -26,6 +26,21 @@ flask --app api/index run --host 0.0.0.0 --port 8080
 - Built-in web lookup support through `/buscar` / `/search` and provider-triggered search when the bot needs fresh information.
 - AI credit billing with `/topup`, `/balance`, and `/transfer`.
 
+### AI Credits Billing (Telegram Stars)
+
+- AI responses are billed with credits (default: `1.0` credit per AI response).
+- New users receive onboarding credits once (default: `3.0`).
+- In groups, spending priority is: personal balance first, then group balance.
+- `/topup`: recharge credits with Telegram Stars (private chat).
+- `/balance`: in private shows personal balance; in groups shows personal + group balance.
+- `/transfer <amount>`: transfer credits from personal balance to group balance.
+
+### Web Search and Tools
+
+- `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
+- In AI conversations, the bot may do a web lookup on its own when it needs up-to-date information.
+- It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses.
+
 ## Required Config
 
 ```bash
@@ -46,6 +61,12 @@ DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
 COINMARKETCAP_KEY=your_coinmarketcap_key
 GROQ_API_KEY=your_paid_groq_api_key
 
+# AI Credits Billing (always enabled; defaults shown)
+AI_CREDITS_PER_RESPONSE=1.0
+AI_ONBOARDING_CREDITS=3.0
+AI_STARS_PACKS_JSON='[{"id":"p50","credits":50.0,"xtr":25},{"id":"p100","credits":100.0,"xtr":50},{"id":"p250","credits":250.0,"xtr":125},{"id":"p500","credits":500.0,"xtr":250},{"id":"p1000","credits":1000.0,"xtr":500},{"id":"p2500","credits":2500.0,"xtr":1250}]'
+
+# Monitoring (Required)
 ADMIN_CHAT_ID=your_telegram_chat_id
 FRIENDLY_INSTANCE_NAME=My_Bot_Instance
 ```

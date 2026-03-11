@@ -12,6 +12,11 @@ from api.chat_context import (
     extract_user_id,
     is_group_chat_type,
 )
+from api.credit_units import (
+    format_credit_units,
+    parse_credit_units,
+    whole_credits_to_units,
+)
 from api.groq_billing import calculate_billing_for_segments
 
 
@@ -19,32 +24,32 @@ AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], N
 
 
 AI_BILLING_DEFAULT_PACKS = [
-    {"id": "p50", "credits": 50, "xtr": 25},
-    {"id": "p100", "credits": 100, "xtr": 50},
-    {"id": "p250", "credits": 250, "xtr": 125},
-    {"id": "p500", "credits": 500, "xtr": 250},
-    {"id": "p1000", "credits": 1000, "xtr": 500},
-    {"id": "p2500", "credits": 2500, "xtr": 1250},
+    {"id": "p50", "credits": whole_credits_to_units(50), "xtr": 25},
+    {"id": "p100", "credits": whole_credits_to_units(100), "xtr": 50},
+    {"id": "p250", "credits": whole_credits_to_units(250), "xtr": 125},
+    {"id": "p500", "credits": whole_credits_to_units(500), "xtr": 250},
+    {"id": "p1000", "credits": whole_credits_to_units(1000), "xtr": 500},
+    {"id": "p2500", "credits": whole_credits_to_units(2500), "xtr": 1250},
 ]
+
+
 def get_ai_credits_per_response() -> int:
-    """Return credits charged per AI response."""
+    """Return credit units charged per AI response."""
 
     raw_value = str(environ.get("AI_CREDITS_PER_RESPONSE") or "1").strip()
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        return 1
+    parsed = parse_credit_units(raw_value)
+    if parsed is None:
+        return whole_credits_to_units(1)
     return max(1, parsed)
 
 
 def get_ai_onboarding_credits() -> int:
-    """Return onboarding credits granted once per user."""
+    """Return onboarding credit units granted once per user."""
 
     raw_value = str(environ.get("AI_ONBOARDING_CREDITS") or "3").strip()
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        return 3
+    parsed = parse_credit_units(raw_value)
+    if parsed is None:
+        return whole_credits_to_units(3)
     return max(0, parsed)
 
 
@@ -68,12 +73,12 @@ def get_ai_billing_packs() -> List[Dict[str, int]]:
         if not isinstance(item, Mapping):
             continue
         pack_id = str(item.get("id", "")).strip()
+        credits = parse_credit_units(item.get("credits"))
         try:
-            credits = int(item.get("credits"))  # type: ignore[arg-type]
             xtr = int(item.get("xtr"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
-        if not pack_id or credits <= 0 or xtr <= 0:
+        if not pack_id or credits is None or credits <= 0 or xtr <= 0:
             continue
         normalized.append({"id": pack_id, "credits": credits, "xtr": xtr})
 
@@ -98,7 +103,7 @@ def build_topup_keyboard() -> Dict[str, Any]:
         rows.append(
             [
                 {
-                    "text": f"{pack['credits']} créditos - {pack['xtr']} ⭐",
+                    "text": f"{format_credit_units(pack['credits'])} créditos - {pack['xtr']} ⭐",
                     "callback_data": f"topup:{pack_id}",
                 }
             ]
@@ -135,17 +140,19 @@ def build_insufficient_credits_message(
     if is_group_chat_type(chat_type):
         return (
             "se quedaron secos de créditos ia en este grupo, boludo.\n"
-            f"- lo tuyo: {user_balance}\n"
-            f"- lo del grupo: {chat_balance}\n"
+            f"- lo tuyo: {format_credit_units(user_balance)}\n"
+            f"- lo del grupo: {format_credit_units(chat_balance)}\n"
             "metele /topup por privado y si querés pasá saldo al grupo con /transfer <monto>\n"
             "si querés ver bien la miseria, mandá /balance"
         )
 
     return (
         "te quedaste seco de créditos ia, boludo.\n"
-        f"saldo: {user_balance}\n"
+        f"saldo: {format_credit_units(user_balance)}\n"
         "metele /topup si querés que siga laburando"
     )
+
+
 def maybe_grant_onboarding_credits(
     credits_db_service: Any,
     admin_reporter: AdminReporter,
@@ -184,14 +191,17 @@ def format_balance_command(
         chat_balance = credits_db_service.get_balance("chat", int(chat_id))
         return (
             "saldos ia, maestro:\n"
-            f"- lo tuyo: {user_balance}\n"
-            f"- lo del grupo: {chat_balance}\n"
+            f"- lo tuyo: {format_credit_units(user_balance)}\n"
+            f"- lo del grupo: {format_credit_units(chat_balance)}\n"
             "si no alcanza lo tuyo, manoteo del grupo\n"
             "si querés cargar más: /topup por privado\n"
             "si querés pasarle al grupo: /transfer <monto>"
         )
 
-    return f"tenés {user_balance} créditos ia\nsi querés cargar más mandale /topup"
+    return (
+        f"tenés {format_credit_units(user_balance)} créditos ia\n"
+        "si querés cargar más mandale /topup"
+    )
 
 
 @dataclass
@@ -231,8 +241,8 @@ class AIMessageBilling:
         random_response = self.gen_random_fn(random_name)
         credits_message = self.build_insufficient_credits_message_fn(
             chat_type=self.chat_type,
-            user_balance=int(charge_result.get("user_balance", 0)),
-            chat_balance=int(charge_result.get("chat_balance", 0)),
+            user_balance=int(charge_result.get("user_balance_credit_units", 0)),
+            chat_balance=int(charge_result.get("chat_balance_credit_units", 0)),
         )
         return f"{random_response}\n\n{credits_message}"
 
@@ -258,7 +268,7 @@ class AIMessageBilling:
     def reserve_ai_credits(
         self,
         usage_tag: str,
-        estimated_credits: int,
+        estimated_credit_units: int,
         *,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -272,10 +282,10 @@ class AIMessageBilling:
 
         self._ensure_onboarding_checked()
 
-        reserve_amount = max(0, int(estimated_credits or 0))
+        reserve_amount = max(0, int(estimated_credit_units or 0))
         reserve_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
-            extra={"reserved_credits": reserve_amount, **dict(metadata or {})},
+            extra={"reserved_credit_units": reserve_amount, **dict(metadata or {})},
         )
 
         try:
@@ -295,7 +305,7 @@ class AIMessageBilling:
                     "user_id": self.user_id,
                     "command": self.command,
                     "usage_tag": usage_tag,
-                    "estimated_credits": reserve_amount,
+                    "estimated_credit_units": reserve_amount,
                 },
             )
             return None, self.billing_charge_error_message
@@ -304,7 +314,7 @@ class AIMessageBilling:
             return None, self._build_insufficient_credits_reply(charge_result)
 
         return {
-            "reserved_credits": reserve_amount,
+            "reserved_credit_units": reserve_amount,
             "chat_scope_id": chat_scope_id,
             "source": str(charge_result.get("source") or "user"),
             "usage_tag": usage_tag,
@@ -331,11 +341,11 @@ class AIMessageBilling:
         *,
         usage_tag: str,
         usage_tags: Sequence[str],
-        reserved_credits_total: int,
-        settled_credits: int,
-        refunded_credits: int,
-        extra_charged_credits: int,
-        debt_applied_credits: int,
+        reserved_credit_units_total: int,
+        settled_credit_units: int,
+        refunded_credit_units: int,
+        extra_charged_credit_units: int,
+        debt_applied_credit_units: int,
         reason: str,
         breakdown: Mapping[str, Any],
         billing_segments: Sequence[Mapping[str, Any]],
@@ -351,11 +361,11 @@ class AIMessageBilling:
                 "user_id": self.user_id,
                 "command": self.command,
                 "usage_tags": list(usage_tags),
-                "reserved_credits_total": reserved_credits_total,
-                "settled_credits": settled_credits,
-                "refunded_credits": refunded_credits,
-                "extra_charged_credits": extra_charged_credits,
-                "debt_applied_credits": debt_applied_credits,
+                "reserved_credit_units_total": reserved_credit_units_total,
+                "settled_credit_units": settled_credit_units,
+                "refunded_credit_units": refunded_credit_units,
+                "extra_charged_credit_units": extra_charged_credit_units,
+                "debt_applied_credit_units": debt_applied_credit_units,
                 "pricing_version": breakdown.get("pricing_version"),
                 "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
                 "markup_multiplier": breakdown.get("markup_multiplier"),
@@ -406,7 +416,7 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credits = int(reservation_meta.get("reserved_credits", 0) or 0)
+        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
         if not billing_segments:
@@ -421,11 +431,11 @@ class AIMessageBilling:
             settlement_metadata = self._build_settlement_metadata(
                 usage_tag=usage_tag,
                 usage_tags=usage_tags,
-                reserved_credits_total=reserved_credits,
-                settled_credits=reserved_credits,
-                refunded_credits=0,
-                extra_charged_credits=0,
-                debt_applied_credits=0,
+                reserved_credit_units_total=reserved_credit_units,
+                settled_credit_units=reserved_credit_units,
+                refunded_credit_units=0,
+                extra_charged_credit_units=0,
+                debt_applied_credit_units=0,
                 reason=reason,
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
@@ -443,37 +453,37 @@ class AIMessageBilling:
                     "chat_id": self.chat_id,
                     "user_id": self.user_id,
                     "reason": reason,
-                    "reserved_credits": reserved_credits,
+                    "reserved_credit_units": reserved_credit_units,
                 },
             )
             return
         breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
         raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
-        refunded_credits = 0
-        extra_charged_credits = 0
-        debt_applied_credits = 0
+        refunded_credit_units = 0
+        extra_charged_credit_units = 0
+        debt_applied_credit_units = 0
         chat_scope_id = reservation_meta.get("chat_scope_id")
         source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
 
         if raw_usd_micros == 0:
-            actual_credits = reserved_credits
-        elif actual_credits < reserved_credits:
-            refunded_credits = reserved_credits - actual_credits
+            actual_credit_units = reserved_credit_units
+        elif actual_credit_units < reserved_credit_units:
+            refunded_credit_units = reserved_credit_units - actual_credit_units
             try:
                 self.credits_db_service.refund_ai_charge(
                     user_id=self.user_id,
                     chat_id=chat_scope_id,
-                    amount=refunded_credits,
+                    amount=refunded_credit_units,
                     source=source,
                     event_type="ai_refund",
                     metadata=self._build_charge_metadata(
                         usage_tag=usage_tag,
                         extra={
                             "reason": reason,
-                            "reserved_credits_total": reserved_credits,
-                            "settled_credits": actual_credits,
-                            "refunded_credits": refunded_credits,
+                            "reserved_credit_units_total": reserved_credit_units,
+                            "settled_credit_units": actual_credit_units,
+                            "refunded_credit_units": refunded_credit_units,
                         },
                     ),
                 )
@@ -484,27 +494,28 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                     },
                 )
-                refunded_credits = 0
+                refunded_credit_units = 0
 
-        elif actual_credits > reserved_credits:
+        elif actual_credit_units > reserved_credit_units:
+            extra_amount = actual_credit_units - reserved_credit_units
             try:
                 extra_charge = self.credits_db_service.charge_ai_credits(
                     user_id=self.user_id,
                     chat_id=chat_scope_id,
-                    amount=actual_credits - reserved_credits,
+                    amount=extra_amount,
                     event_type="ai_settlement_charge",
                     metadata=self._build_charge_metadata(
                         usage_tag=usage_tag,
                         extra={
                             "reason": reason,
-                            "reserved_credits_total": reserved_credits,
-                            "settled_credits": actual_credits,
-                            "extra_charged_credits": actual_credits - reserved_credits,
+                            "reserved_credit_units_total": reserved_credit_units,
+                            "settled_credit_units": actual_credit_units,
+                            "extra_charged_credit_units": extra_amount,
                         },
                     ),
                 )
@@ -515,8 +526,8 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                     },
                 )
@@ -529,8 +540,8 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                         "billing_segments": list(billing_segments or []),
                     },
@@ -539,20 +550,20 @@ class AIMessageBilling:
                     self.credits_db_service.apply_ai_debt(
                         user_id=self.user_id,
                         chat_id=chat_scope_id,
-                        amount=actual_credits - reserved_credits,
                         source=source,
+                        amount=extra_amount,
                         event_type="ai_settlement_debt",
                         metadata=self._build_charge_metadata(
                             usage_tag=usage_tag,
                             extra={
                                 "reason": reason,
-                                "reserved_credits_total": reserved_credits,
-                                "settled_credits": actual_credits,
-                                "debt_applied_credits": actual_credits - reserved_credits,
+                                "reserved_credit_units_total": reserved_credit_units,
+                                "settled_credit_units": actual_credit_units,
+                                "debt_applied_credit_units": extra_amount,
                             },
                         ),
                     )
-                    debt_applied_credits = actual_credits - reserved_credits
+                    debt_applied_credit_units = extra_amount
                 except Exception as error:
                     self.admin_reporter(
                         "falló registrar deuda de liquidación IA",
@@ -560,22 +571,22 @@ class AIMessageBilling:
                         {
                             "chat_id": self.chat_id,
                             "user_id": self.user_id,
-                            "reserved_credits": reserved_credits,
-                            "actual_credits": actual_credits,
+                            "reserved_credit_units": reserved_credit_units,
+                            "actual_credit_units": actual_credit_units,
                             "reason": reason,
                         },
                     )
             else:
-                extra_charged_credits = actual_credits - reserved_credits
+                extra_charged_credit_units = extra_amount
 
         settlement_metadata = self._build_settlement_metadata(
             usage_tag=usage_tag,
             usage_tags=usage_tags,
-            reserved_credits_total=reserved_credits,
-            settled_credits=actual_credits,
-            refunded_credits=refunded_credits,
-            extra_charged_credits=extra_charged_credits,
-            debt_applied_credits=debt_applied_credits,
+            reserved_credit_units_total=reserved_credit_units,
+            settled_credit_units=actual_credit_units,
+            refunded_credit_units=refunded_credit_units,
+            extra_charged_credit_units=extra_charged_credit_units,
+            debt_applied_credit_units=debt_applied_credit_units,
             reason=reason,
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
@@ -627,8 +638,8 @@ class AIMessageBilling:
             )
             return
 
-        reserved_credits_total = sum(
-            int(item.get("reserved_credits", 0) or 0) for item in reservations
+        reserved_credit_units_total = sum(
+            int(item.get("reserved_credit_units", 0) or 0) for item in reservations
         )
         usage_tags = [str(item.get("usage_tag") or "ai_usage") for item in reservations]
         usage_tag = usage_tags[0] if len(set(usage_tags)) == 1 else "ai_usage_batch"
@@ -647,11 +658,11 @@ class AIMessageBilling:
             settlement_metadata = self._build_settlement_metadata(
                 usage_tag=usage_tag,
                 usage_tags=usage_tags,
-                reserved_credits_total=reserved_credits_total,
-                settled_credits=reserved_credits_total,
-                refunded_credits=0,
-                extra_charged_credits=0,
-                debt_applied_credits=0,
+                reserved_credit_units_total=reserved_credit_units_total,
+                settled_credit_units=reserved_credit_units_total,
+                refunded_credit_units=0,
+                extra_charged_credit_units=0,
+                debt_applied_credit_units=0,
                 reason=reason,
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
@@ -669,36 +680,36 @@ class AIMessageBilling:
                     "chat_id": self.chat_id,
                     "user_id": self.user_id,
                     "reason": reason,
-                    "reserved_credits": reserved_credits_total,
+                    "reserved_credit_units": reserved_credit_units_total,
                 },
             )
             return
 
         breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
         raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
-        refunded_credits = 0
-        extra_charged_credits = 0
-        debt_applied_credits = 0
+        refunded_credit_units = 0
+        extra_charged_credit_units = 0
+        debt_applied_credit_units = 0
 
         if raw_usd_micros == 0:
-            actual_credits = reserved_credits_total
-        elif actual_credits < reserved_credits_total:
-            refunded_credits = reserved_credits_total - actual_credits
+            actual_credit_units = reserved_credit_units_total
+        elif actual_credit_units < reserved_credit_units_total:
+            refunded_credit_units = reserved_credit_units_total - actual_credit_units
             try:
                 self.credits_db_service.refund_ai_charge(
                     user_id=self.user_id,
                     chat_id=chat_scope_id,
-                    amount=refunded_credits,
+                    amount=refunded_credit_units,
                     source=source,
                     event_type="ai_refund",
                     metadata=self._build_charge_metadata(
                         usage_tag=usage_tag,
                         extra={
                             "reason": reason,
-                            "reserved_credits_total": reserved_credits_total,
-                            "settled_credits": actual_credits,
-                            "refunded_credits": refunded_credits,
+                            "reserved_credit_units_total": reserved_credit_units_total,
+                            "settled_credit_units": actual_credit_units,
+                            "refunded_credit_units": refunded_credit_units,
                             "usage_tags": list(usage_tags),
                         },
                     ),
@@ -710,15 +721,15 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits_total,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units_total,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                     },
                 )
-                refunded_credits = 0
+                refunded_credit_units = 0
 
-        elif actual_credits > reserved_credits_total:
-            extra_amount = actual_credits - reserved_credits_total
+        elif actual_credit_units > reserved_credit_units_total:
+            extra_amount = actual_credit_units - reserved_credit_units_total
             try:
                 extra_charge = self.credits_db_service.charge_ai_credits(
                     user_id=self.user_id,
@@ -729,9 +740,9 @@ class AIMessageBilling:
                         usage_tag=usage_tag,
                         extra={
                             "reason": reason,
-                            "reserved_credits_total": reserved_credits_total,
-                            "settled_credits": actual_credits,
-                            "extra_charged_credits": extra_amount,
+                            "reserved_credit_units_total": reserved_credit_units_total,
+                            "settled_credit_units": actual_credit_units,
+                            "extra_charged_credit_units": extra_amount,
                             "usage_tags": list(usage_tags),
                         },
                     ),
@@ -743,8 +754,8 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits_total,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units_total,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                     },
                 )
@@ -757,8 +768,8 @@ class AIMessageBilling:
                     {
                         "chat_id": self.chat_id,
                         "user_id": self.user_id,
-                        "reserved_credits": reserved_credits_total,
-                        "actual_credits": actual_credits,
+                        "reserved_credit_units": reserved_credit_units_total,
+                        "actual_credit_units": actual_credit_units,
                         "reason": reason,
                         "billing_segments": list(billing_segments or []),
                     },
@@ -774,14 +785,14 @@ class AIMessageBilling:
                             usage_tag=usage_tag,
                             extra={
                                 "reason": reason,
-                                "reserved_credits_total": reserved_credits_total,
-                                "settled_credits": actual_credits,
-                                "debt_applied_credits": extra_amount,
+                                "reserved_credit_units_total": reserved_credit_units_total,
+                                "settled_credit_units": actual_credit_units,
+                                "debt_applied_credit_units": extra_amount,
                                 "usage_tags": list(usage_tags),
                             },
                         ),
                     )
-                    debt_applied_credits = extra_amount
+                    debt_applied_credit_units = extra_amount
                 except Exception as error:
                     self.admin_reporter(
                         "falló registrar deuda batch de liquidación IA",
@@ -789,22 +800,22 @@ class AIMessageBilling:
                         {
                             "chat_id": self.chat_id,
                             "user_id": self.user_id,
-                            "reserved_credits": reserved_credits_total,
-                            "actual_credits": actual_credits,
+                            "reserved_credit_units": reserved_credit_units_total,
+                            "actual_credit_units": actual_credit_units,
                             "reason": reason,
                         },
                     )
             else:
-                extra_charged_credits = extra_amount
+                extra_charged_credit_units = extra_amount
 
         settlement_metadata = self._build_settlement_metadata(
             usage_tag=usage_tag,
             usage_tags=usage_tags,
-            reserved_credits_total=reserved_credits_total,
-            settled_credits=actual_credits,
-            refunded_credits=refunded_credits,
-            extra_charged_credits=extra_charged_credits,
-            debt_applied_credits=debt_applied_credits,
+            reserved_credit_units_total=reserved_credit_units_total,
+            settled_credit_units=actual_credit_units,
+            refunded_credit_units=refunded_credit_units,
+            extra_charged_credit_units=extra_charged_credit_units,
+            debt_applied_credit_units=debt_applied_credit_units,
             reason=reason,
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
@@ -828,16 +839,16 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credits = int(reservation_meta.get("reserved_credits", 0) or 0)
+        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
         source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         refund_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
             extra={
                 "reason": reason,
-                "reserved_credits": reserved_credits,
-                "settled_credits": 0,
-                "refunded_credits": reserved_credits,
+                "reserved_credit_units": reserved_credit_units,
+                "settled_credit_units": 0,
+                "refunded_credit_units": reserved_credit_units,
                 **dict(metadata or {}),
             },
         )
@@ -846,7 +857,7 @@ class AIMessageBilling:
             self.credits_db_service.refund_ai_charge(
                 user_id=self.user_id,
                 chat_id=reservation_meta.get("chat_scope_id"),
-                amount=reserved_credits,
+                amount=reserved_credit_units,
                 source=source,
                 event_type="ai_refund",
                 metadata=refund_metadata,
@@ -892,7 +903,12 @@ class AIMessageBilling:
         self.refund_reserved_ai_credits(
             {
                 **dict(charge_meta),
-                "reserved_credits": int(charge_meta.get("credits_cost", charge_meta.get("reserved_credits", 1))),
+                "reserved_credit_units": int(
+                    charge_meta.get(
+                        "credit_units_cost",
+                        charge_meta.get("reserved_credit_units", 10),
+                    )
+                ),
             },
             reason=reason,
         )

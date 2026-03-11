@@ -121,6 +121,7 @@ from api.chat_settings import (
     report_unauthorized_config_attempt as _chat_report_unauthorized_config_attempt,
     set_chat_config as _chat_set_chat_config,
 )
+from api.credit_units import format_credit_units
 from api.command_registry import (
     build_command_registry as _build_command_registry,
     parse_command as _command_parse_command,
@@ -2817,7 +2818,7 @@ esto es lo que sé hacer, boludo:
 
 - /balance: te muestro cuántos créditos ia te quedan
 
-- /transfer 100: le pasás 100 créditos tuyos al grupo
+- /transfer 1.5: le pasás 1.5 créditos tuyos al grupo
 
 - /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
@@ -4475,7 +4476,8 @@ def _log_groq_request_result(
                 "metadata": dict(result.metadata or {}),
                 "local_billing": {
                     "raw_usd_micros": billing.get("raw_usd_micros", 0),
-                    "charged_credits": billing.get("charged_credits", 0),
+                    "charged_credit_units": billing.get("charged_credit_units", 0),
+                    "charged_credits_display": billing.get("charged_credits_display", "0.0"),
                     "model_breakdown": billing.get("model_breakdown", []),
                     "tool_breakdown": billing.get("tool_breakdown", []),
                     "unsupported_notes": billing.get("unsupported_notes", []),
@@ -5439,14 +5441,15 @@ def _send_stars_invoice(
     pack: Mapping[str, int],
 ) -> bool:
     payload = f"topup:{pack['id']}:{user_id}"
+    pack_credits = format_credit_units(pack["credits"])
     request_payload: Dict[str, Any] = {
         "chat_id": chat_id,
-        "title": f"Pack IA {pack['credits']} créditos",
-        "description": f"Recarga de {pack['credits']} créditos para mensajes IA",
+        "title": f"Pack IA {pack_credits} créditos",
+        "description": f"Recarga de {pack_credits} créditos para mensajes IA",
         "payload": payload,
         "provider_token": "",
         "currency": "XTR",
-        "prices": [{"label": f"{pack['credits']} créditos IA", "amount": pack["xtr"]}],
+        "prices": [{"label": f"{pack_credits} créditos IA", "amount": pack["xtr"]}],
     }
     payload_response, error = _telegram_request(
         "sendInvoice",
@@ -6394,17 +6397,24 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
         return "ok"
 
     balance = int(payment_result.get("user_balance", 0))
+    pack_credits = format_credit_units(pack["credits"])
     if payment_result.get("inserted"):
         send_msg(
             chat_id,
             (
-                f"listo, te cargué {pack['credits']} créditos\n"
-                f"ahora te quedaron {balance}\n"
+                f"listo, te cargué {pack_credits} créditos\n"
+                f"ahora te quedaron {format_credit_units(balance)}\n"
                 "si querés mandarle al grupo: /transfer <monto>"
             ),
         )
     else:
-        send_msg(chat_id, f"ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}")
+        send_msg(
+            chat_id,
+            (
+                "ese pago ya estaba cargado, no rompas las bolas\n"
+                f"te quedaron {format_credit_units(balance)}"
+            ),
+        )
     return "ok"
 
 

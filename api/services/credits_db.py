@@ -9,6 +9,8 @@ from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import json
 
+from api.credit_units import CREDIT_SCALE
+
 ScopeType = Literal["user", "chat"]
 
 _SCHEMA_LOCK = Lock()
@@ -24,6 +26,8 @@ AI_LEDGER_EVENT_TYPES = (
     "ai_settlement_debt",
     "ai_settlement_result",
 )
+CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_002
+CREDIT_UNITS_MIGRATION_NAME = "credit_amounts_scaled_to_tenths_v1"
 
 
 class CreditsDBError(RuntimeError):
@@ -162,9 +166,48 @@ def ensure_schema() -> None:
                     )
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS credit_schema_migrations (
+                        name TEXT PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                _migrate_credit_amounts_to_units(cur)
             conn.commit()
 
         _SCHEMA_READY = True
+
+
+def _migrate_credit_amounts_to_units(cur: Any) -> bool:
+    """Scale legacy whole-credit rows into tenth-credit units once."""
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s)",
+        (CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY,),
+    )
+    cur.execute(
+        """
+        INSERT INTO credit_schema_migrations (name)
+        VALUES (%s)
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name
+        """,
+        (CREDIT_UNITS_MIGRATION_NAME,),
+    )
+    inserted = cur.fetchone() is not None
+    if not inserted:
+        return False
+
+    cur.execute("UPDATE credit_accounts SET balance = balance * %s", (CREDIT_SCALE,))
+    cur.execute("UPDATE onboarding_grants SET credits = credits * %s", (CREDIT_SCALE,))
+    cur.execute(
+        "UPDATE star_payments SET credits_awarded = credits_awarded * %s",
+        (CREDIT_SCALE,),
+    )
+    cur.execute("UPDATE credit_ledger SET amount = amount * %s", (CREDIT_SCALE,))
+    return True
 
 
 def _ensure_account(cur: Any, scope_type: ScopeType, scope_id: int) -> None:
@@ -410,6 +453,8 @@ def charge_ai_credits(
                     "source": "user",
                     "user_balance": user_balance,
                     "chat_balance": chat_balance,
+                    "user_balance_credit_units": user_balance,
+                    "chat_balance_credit_units": chat_balance,
                 }
 
             if chat_id is not None and chat_balance >= charge_amount:
@@ -442,6 +487,8 @@ def charge_ai_credits(
                     "source": "chat",
                     "user_balance": user_balance,
                     "chat_balance": chat_balance,
+                    "user_balance_credit_units": user_balance,
+                    "chat_balance_credit_units": chat_balance,
                 }
 
             conn.commit()
@@ -450,6 +497,8 @@ def charge_ai_credits(
                 "source": None,
                 "user_balance": user_balance,
                 "chat_balance": chat_balance,
+                "user_balance_credit_units": user_balance,
+                "chat_balance_credit_units": chat_balance,
             }
 
 
