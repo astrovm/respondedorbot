@@ -22,7 +22,7 @@ BROWSER_AUTOMATION_USD_MICROS_PER_HOUR = 80_000
 WEB_SEARCH_STANDARD_USD_MICROS = 5_000
 WEB_SEARCH_PREMIUM_USD_MICROS = 8_000
 GPT_OSS_120B_FALLBACK_MODEL = "openai/gpt-oss-120b"
-MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST = 60.0
+MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 60.0
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
@@ -309,24 +309,6 @@ def _extract_tool_count(tool: Mapping[str, Any]) -> int:
     return 1
 
 
-def _extract_tool_duration_seconds(tool: Mapping[str, Any]) -> float:
-    for key in ("duration_seconds", "runtime_seconds", "elapsed_seconds", "billed_seconds"):
-        value = tool.get(key)
-        if value is None:
-            continue
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            continue
-    duration_ms = tool.get("duration_ms")
-    try:
-        if duration_ms is not None:
-            return max(0.0, float(duration_ms) / 1000.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return 0.0
-
-
 def _normalize_usage_breakdown(value: Any) -> List[Dict[str, Any]]:
     usage_breakdown = ensure_mapping(value)
     if usage_breakdown and isinstance(usage_breakdown.get("models"), Sequence):
@@ -351,7 +333,6 @@ def _calculate_tool_cost(tool: Mapping[str, Any]) -> Dict[str, Any]:
     tool_name = _extract_tool_name(tool)
     normalized_name = _normalize_tool_kind(tool_name)
     count = _extract_tool_count(tool)
-    duration_seconds = _extract_tool_duration_seconds(tool)
     usd_micros = 0
     note = ""
 
@@ -372,15 +353,9 @@ def _calculate_tool_cost(tool: Mapping[str, Any]) -> Dict[str, Any]:
     elif normalized_name == "visit_website":
         usd_micros = VISIT_WEBSITE_USD_MICROS * count
     elif normalized_name == "code_execution":
-        if duration_seconds > 0:
-            usd_micros = int(duration_seconds * CODE_EXECUTION_USD_MICROS_PER_HOUR / 3600)
-        else:
-            note = "missing_duration"
+        note = "duration_not_documented_in_api_response"
     elif normalized_name == "browser_automation":
-        if duration_seconds > 0:
-            usd_micros = int(duration_seconds * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR / 3600)
-        else:
-            note = "missing_duration"
+        note = "duration_not_documented_in_api_response"
     else:
         note = "unsupported_tool"
 
@@ -389,16 +364,23 @@ def _calculate_tool_cost(tool: Mapping[str, Any]) -> Dict[str, Any]:
         "normalized_tool": normalized_name,
         "usd_micros": int(max(0, usd_micros)),
         "count": count,
-        "duration_seconds": duration_seconds,
         "note": note,
     }
 
 
-def _estimate_max_missing_duration_usd_micros(normalized_tool: str) -> int:
+def _estimate_max_time_based_tool_cost(normalized_tool: str) -> int:
     if normalized_tool == "code_execution":
-        return int(MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST * CODE_EXECUTION_USD_MICROS_PER_HOUR / 3600)
+        return int(
+            MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST
+            * CODE_EXECUTION_USD_MICROS_PER_HOUR
+            / 3600
+        )
     if normalized_tool == "browser_automation":
-        return int(MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR / 3600)
+        return int(
+            MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST
+            * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR
+            / 3600
+        )
     return 0
 
 
@@ -458,30 +440,32 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
             model_breakdown.append(model_cost)
 
         segment_tool_breakdown: List[Dict[str, Any]] = []
-        missing_duration_candidates: List[Tuple[int, int]] = []
+        estimated_time_based_candidates: List[Tuple[int, int]] = []
 
         for tool in executed_tools:
             tool_cost = _calculate_tool_cost(tool)
             normalized_tool = str(tool_cost.get("normalized_tool") or "")
+            note = str(tool_cost.get("note") or "")
             if (
-                tool_cost.get("note") == "missing_duration"
+                note == "duration_not_documented_in_api_response"
                 and normalized_tool in {"code_execution", "browser_automation"}
             ):
-                estimated_cap = _estimate_max_missing_duration_usd_micros(normalized_tool)
-                missing_duration_candidates.append((len(segment_tool_breakdown), estimated_cap))
+                estimated_time_based_candidates.append(
+                    (len(segment_tool_breakdown), _estimate_max_time_based_tool_cost(normalized_tool))
+                )
             segment_tool_breakdown.append(tool_cost)
 
-        if missing_duration_candidates:
-            selected_index, selected_usd_micros = max(
-                missing_duration_candidates, key=lambda item: item[1]
+        if estimated_time_based_candidates:
+            selected_index, selected_cost = max(
+                estimated_time_based_candidates, key=lambda item: item[1]
             )
-            for idx, _ in missing_duration_candidates:
+            for idx, _ in estimated_time_based_candidates:
                 if idx == selected_index:
-                    segment_tool_breakdown[idx]["usd_micros"] = selected_usd_micros
-                    segment_tool_breakdown[idx]["note"] = "estimated_max_request_duration"
+                    segment_tool_breakdown[idx]["usd_micros"] = selected_cost
+                    segment_tool_breakdown[idx]["note"] = "estimated_max_1_minute_request_cap"
                 else:
                     segment_tool_breakdown[idx]["usd_micros"] = 0
-                    segment_tool_breakdown[idx]["note"] = "estimated_request_cap_shared"
+                    segment_tool_breakdown[idx]["note"] = "estimated_shared_1_minute_request_cap"
 
         for tool_cost in segment_tool_breakdown:
             tool_cost.pop("normalized_tool", None)
