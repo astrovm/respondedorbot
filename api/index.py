@@ -200,6 +200,18 @@ FORCE_WEB_SEARCH_PREVIOUS_PATTERNS = [
     r"\bbusca\s+eso\b",
     r"\bbusca\s+esto\b",
 ]
+CURRENT_INFO_QUERY_PATTERNS = [
+    r"\bhoy\b",
+    r"\bactual(?:es|izada|izado)?\b",
+    r"\bultimo(?:s|as)?\b",
+    r"\bultima(?:s)?\b",
+    r"\bprecio(?:s)?\b",
+    r"\bcosto(?:s)?\b",
+    r"\bcuanto\s+sale\b",
+    r"\bpromedio\b",
+    r"\bcotizacion(?:es)?\b",
+]
+YEAR_TOKEN_PATTERN = re.compile(r"\b20\d{2}\b")
 
 
 def should_use_groq_compound_tools() -> bool:
@@ -339,6 +351,68 @@ def _find_previous_user_text(
     return ""
 
 
+def _extract_year_tokens(text: Optional[str]) -> Set[int]:
+    years: Set[int] = set()
+    if not text:
+        return years
+    for match in YEAR_TOKEN_PATTERN.findall(str(text)):
+        try:
+            years.add(int(match))
+        except ValueError:
+            continue
+    return years
+
+
+def _query_needs_current_info(text: Optional[str]) -> bool:
+    normalized = normalize_text_for_matching(str(text or ""))
+    if not normalized:
+        return False
+    return any(re.search(pattern, normalized) for pattern in CURRENT_INFO_QUERY_PATTERNS)
+
+
+def _normalize_web_search_query(
+    query: str,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    normalized_query = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not normalized_query:
+        return ""
+
+    current_year = int((now or datetime.now(BA_TZ)).year)
+    latest_user_text, latest_user_message, _ = _extract_latest_user_query_info(messages)
+    user_years = _extract_year_tokens(
+        " ".join(part for part in (latest_user_text, latest_user_message) if part)
+    )
+    query_years = _extract_year_tokens(normalized_query)
+    needs_current_info = _query_needs_current_info(normalized_query) or _query_needs_current_info(
+        latest_user_message
+    )
+
+    if user_years:
+        return normalized_query
+
+    if query_years and any(year < current_year for year in query_years) and needs_current_info:
+        rewritten_query = YEAR_TOKEN_PATTERN.sub(str(current_year), normalized_query)
+        if rewritten_query != normalized_query:
+            print(
+                "_normalize_web_search_query: replaced stale year "
+                f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
+            )
+        return rewritten_query
+
+    if not query_years and needs_current_info:
+        rewritten_query = f"{normalized_query} {current_year}"
+        print(
+            "_normalize_web_search_query: appended current year "
+            f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
+        )
+        return rewritten_query
+
+    return normalized_query
+
+
 def _run_forced_web_search(
     *,
     query: str,
@@ -351,8 +425,9 @@ def _run_forced_web_search(
         print("_run_forced_web_search: compound unavailable (no system message)")
         return "la búsqueda web no está disponible en este momento"
 
-    print(f"_run_forced_web_search: starting query='{query[:120]}'")
-    compound_messages = [{"role": "user", "content": query}]
+    normalized_query = _normalize_web_search_query(query, messages)
+    print(f"_run_forced_web_search: starting query='{normalized_query[:120]}'")
+    compound_messages = [{"role": "user", "content": normalized_query}]
     source_text: Optional[str] = None
 
     if response_meta is None:
@@ -391,13 +466,13 @@ def _run_forced_web_search(
     if final_response:
         print(
             "_run_forced_web_search: persona pass succeeded "
-            f"query='{query[:120]}' final_len={len(final_response)}"
+            f"query='{normalized_query[:120]}' final_len={len(final_response)}"
         )
         return final_response
 
     print(
         "_run_forced_web_search: persona pass returned empty; returning raw compound output "
-        f"for query='{query[:120]}' source_len={len(source_text)}"
+        f"for query='{normalized_query[:120]}' source_len={len(source_text)}"
     )
 
     return source_text
@@ -4606,6 +4681,8 @@ CONTEXTO POLITICO:
             '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
+            "Si la pregunta es sobre precios/actualidad y el usuario no pidió un año puntual, "
+            "usá el año actual de FECHA ACTUAL; no inventes 2024/2025.\n"
             "Tras usar web_search, respondé directo al usuario con síntesis breve; no devuelvas lista cruda ni arranques con 'Encontré esto sobre...'."
         )
 
