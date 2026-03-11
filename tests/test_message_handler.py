@@ -72,12 +72,12 @@ def test_handle_msg_balance_private_uses_personal_balance():
     ), patch(
         "api.index._maybe_grant_onboarding_credits"
     ), patch(
-        "api.index._fetch_balance", return_value=42
+        "api.index._fetch_balance", return_value=420
     ):
         result = handle_msg(message)
 
     assert result == "ok"
-    assert "42" in mock_send_msg.call_args[0][1]
+    assert "42.0" in mock_send_msg.call_args[0][1]
     assert "/topup" in mock_send_msg.call_args[0][1]
 
 
@@ -86,7 +86,7 @@ def test_handle_msg_transfer_group_moves_credits():
         "message_id": "12",
         "chat": {"id": "202", "type": "group"},
         "from": {"id": 55, "first_name": "Ana", "username": "ana"},
-        "text": "/transfer 20",
+        "text": "/transfer 1.5",
     }
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -97,13 +97,37 @@ def test_handle_msg_transfer_group_moves_credits():
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.credits_db_service.transfer_user_to_chat",
-        return_value={"ok": True, "user_balance": 30, "chat_balance": 120},
+        return_value={"ok": True, "user_balance": 285, "chat_balance": 1215},
     ) as mock_transfer:
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_transfer.assert_called_once_with(user_id=55, chat_id=202, amount=20)
-    assert "le pasé 20 créditos al grupo" in mock_send_msg.call_args[0][1]
+    mock_transfer.assert_called_once_with(user_id=55, chat_id=202, amount=15)
+    assert "le pasé 1.5 créditos al grupo" in mock_send_msg.call_args[0][1]
+
+
+def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
+    message = {
+        "message_id": "12",
+        "chat": {"id": "202", "type": "group"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/transfer 1.55",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.credits_db_service.transfer_user_to_chat"
+    ) as mock_transfer:
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_transfer.assert_not_called()
+    assert "mandalo bien: /transfer <monto>" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_printcredits_requires_admin():
@@ -111,7 +135,7 @@ def test_handle_msg_printcredits_requires_admin():
         "message_id": "12b",
         "chat": {"id": "202", "type": "group"},
         "from": {"id": 55, "first_name": "Ana", "username": "ana"},
-        "text": "/printcredits 100",
+        "text": "/printcredits 100.0",
     }
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -133,7 +157,7 @@ def test_handle_msg_printcredits_admin_mints_credits():
         "message_id": "12c",
         "chat": {"id": "202", "type": "private"},
         "from": {"id": 99, "first_name": "Admin", "username": "boss"},
-        "text": "/printcredits 100",
+        "text": "/printcredits 100.0",
     }
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -144,7 +168,7 @@ def test_handle_msg_printcredits_admin_mints_credits():
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.credits_db_service.mint_user_credits",
-        return_value={"user_balance": 120},
+        return_value={"user_balance": 1200},
     ) as mock_mint, patch(
         "os.environ.get",
         side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
@@ -152,10 +176,10 @@ def test_handle_msg_printcredits_admin_mints_credits():
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_mint.assert_called_once_with(user_id=99, amount=100, actor_user_id=99)
+    mock_mint.assert_called_once_with(user_id=99, amount=1000, actor_user_id=99)
     sent_text = mock_send_msg.call_args[0][1]
-    assert "te imprimí 100 créditos" in sent_text
-    assert "te quedaron 120" in sent_text
+    assert "te imprimí 100.0 créditos" in sent_text
+    assert "te quedaron 120.0" in sent_text
 
 
 def test_handle_msg_creditlog_requires_admin():
@@ -206,10 +230,10 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                 "created_at": "2026-03-11T17:35:10+00:00",
                 "metadata": {
                     "command": "/ask",
-                    "reserved_credits_total": 2,
-                    "settled_credits": 1,
-                    "refunded_credits": 1,
-                    "extra_charged_credits": 0,
+                    "reserved_credit_units_total": 20,
+                    "settled_credit_units": 10,
+                    "refunded_credit_units": 10,
+                    "extra_charged_credit_units": 0,
                     "raw_usd_micros": 2188,
                     "model_breakdown": [
                         {
@@ -252,7 +276,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     sent_text = mock_send_msg.call_args[0][1]
     assert "últimas liquidaciones IA" in sent_text
     assert "cmd=/ask" in sent_text
-    assert "reservado=2 cobrado=1 refund=1 extra=0" in sent_text
+    assert "reservado=2.0 cobrado=1.0 refund=1.0 extra=0.0 deuda=0.0" in sent_text
     assert "requests: chat=2, compound=1" in sent_text
     assert "cache_hits: compound=1" in sent_text
     assert "cacheados=900 ahorro_cache=450" in sent_text
@@ -287,10 +311,10 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback():
                 "created_at": "2026-03-11T17:35:10+00:00",
                 "metadata": {
                     "command": "/ask",
-                    "reserved_credits_total": 2,
-                    "settled_credits": 2,
-                    "refunded_credits": 0,
-                    "extra_charged_credits": 0,
+                    "reserved_credit_units_total": 20,
+                    "settled_credit_units": 20,
+                    "refunded_credit_units": 0,
+                    "extra_charged_credit_units": 0,
                     "raw_usd_micros": 0,
                     "billing_zero_usage_fallback": True,
                     "model_breakdown": [],
@@ -377,13 +401,13 @@ def test_handle_msg_successful_payment_credits_user():
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
         "api.index.credits_db_service.record_star_payment",
-        return_value={"inserted": True, "user_balance": 777},
+        return_value={"inserted": True, "user_balance": 7770},
     ) as mock_record, patch("api.index.send_msg") as mock_send_msg:
         result = handle_msg(message)
 
     assert result == "ok"
     mock_record.assert_called_once()
-    assert "777" in mock_send_msg.call_args[0][1]
+    assert "777.0" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
@@ -503,7 +527,11 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
         "api.index._maybe_grant_onboarding_credits"
     ), patch(
         "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": False, "user_balance": 0, "chat_balance": 0},
+        return_value={
+            "ok": False,
+            "user_balance_credit_units": 0,
+            "chat_balance_credit_units": 0,
+        },
     ), patch(
         "api.index.gen_random", return_value="no boludo"
     ), patch(
@@ -518,7 +546,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     assert result == "ok"
     assert (
         mock_send.call_args[0][1]
-        == "no boludo\n\nte quedaste seco de créditos ia, boludo.\nsaldo: 0\nmetele /topup si querés que siga laburando"
+        == "no boludo\n\nte quedaste seco de créditos ia, boludo.\nsaldo: 0.0\nmetele /topup si querés que siga laburando"
     )
 
 

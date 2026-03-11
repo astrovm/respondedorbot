@@ -223,7 +223,7 @@ def test_handle_callback_query_topup_sends_invoice():
 
     with patch(
         "api.index.get_ai_billing_pack",
-        return_value={"id": "p100", "credits": 100, "xtr": 50},
+        return_value={"id": "p100", "credits": 1000, "xtr": 50},
     ), patch(
         "api.index.credits_db_service.is_configured", return_value=True
     ), patch(
@@ -237,7 +237,7 @@ def test_handle_callback_query_topup_sends_invoice():
     mock_send_invoice.assert_called_once_with(
         chat_id="1",
         user_id=42,
-        pack={"id": "p100", "credits": 100, "xtr": 50},
+        pack={"id": "p100", "credits": 1000, "xtr": 50},
     )
     mock_answer.assert_called_once()
 

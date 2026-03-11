@@ -449,30 +449,30 @@ def test_select_random():
 def test_format_balance_command_private_includes_topup_hint():
     from api.index import _format_balance_command
 
-    with patch("api.index._fetch_balance", return_value=42):
+    with patch("api.index._fetch_balance", return_value=420):
         text = _format_balance_command("private", 1, 2)
 
-    assert "tenés 42 créditos ia" in text
+    assert "tenés 42.0 créditos ia" in text
     assert "mandale /topup" in text
 
 
 def test_format_balance_command_group_includes_topup_and_transfer_hints():
     from api.index import _format_balance_command
 
-    with patch("api.index._fetch_balance", side_effect=[30, 120]):
+    with patch("api.index._fetch_balance", side_effect=[300, 1200]):
         text = _format_balance_command("group", 1, 2)
 
-    assert "lo tuyo: 30" in text
-    assert "lo del grupo: 120" in text
+    assert "lo tuyo: 30.0" in text
+    assert "lo del grupo: 120.0" in text
     assert "/topup" in text
     assert "/transfer <monto>" in text
 
 
-def test_get_ai_onboarding_credits_default_is_3(monkeypatch):
+def test_get_ai_onboarding_credits_default_is_30_units(monkeypatch):
     from api.index import get_ai_onboarding_credits
 
     monkeypatch.delenv("AI_ONBOARDING_CREDITS", raising=False)
-    assert get_ai_onboarding_credits() == 3
+    assert get_ai_onboarding_credits() == 30
 
 
 def test_parse_command_edge_cases():

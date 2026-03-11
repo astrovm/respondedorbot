@@ -7,11 +7,14 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from api.credit_units import format_credit_units
+
 
 PRICING_VERSION = "2026-03-06"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.5
-CREDIT_CEIL_DIVISOR_USD_MICROS = 4_000
+CREDIT_CEIL_DIVISOR_USD_MICROS = int(CREDIT_USD_MICROS / BILLING_MARKUP_MULTIPLIER)
+CREDIT_UNIT_USD_MICROS = CREDIT_CEIL_DIVISOR_USD_MICROS // 10
 
 CHAT_OUTPUT_TOKEN_LIMIT = 256
 VISION_OUTPUT_TOKEN_LIMIT = 256
@@ -176,7 +179,7 @@ def estimate_chat_reserve_credits(
         input_tokens * pricing["input_per_million"]
         + max_output_tokens * pricing["output_per_million"]
     ) // 1_000_000
-    return credits_from_usd_micros(usd_micros)
+    return credit_units_from_usd_micros(usd_micros)
 
 
 def estimate_vision_reserve_credits(
@@ -204,7 +207,7 @@ def estimate_vision_reserve_credits(
         input_tokens * pricing["input_per_million"]
         + max_output_tokens * pricing["output_per_million"]
     ) // 1_000_000
-    return max(1, credits_from_usd_micros(usd_micros))
+    return max(1, credit_units_from_usd_micros(usd_micros))
 
 
 def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
@@ -213,7 +216,7 @@ def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
     if seconds <= 0:
         return 1
     usd_micros = math.ceil(seconds * hourly_rate / 3600)
-    return max(1, credits_from_usd_micros(usd_micros))
+    return max(1, credit_units_from_usd_micros(usd_micros))
 
 
 def estimate_compound_reserve_credits(
@@ -236,16 +239,16 @@ def estimate_compound_reserve_credits(
         usd_micros += WEB_SEARCH_PREMIUM_USD_MICROS
     if "visit_website" in normalized_tools:
         usd_micros += VISIT_WEBSITE_USD_MICROS
-    return credits_from_usd_micros(usd_micros)
+    return credit_units_from_usd_micros(usd_micros)
 
 
-def credits_from_usd_micros(usd_micros: int) -> int:
-    """Convert raw USD micros into whole credits with markup."""
+def credit_units_from_usd_micros(usd_micros: int) -> int:
+    """Convert raw USD micros into tenths of credits with markup."""
 
     micros = max(0, int(usd_micros or 0))
     if micros == 0:
         return 0
-    return (micros + CREDIT_CEIL_DIVISOR_USD_MICROS - 1) // CREDIT_CEIL_DIVISOR_USD_MICROS
+    return (micros + CREDIT_UNIT_USD_MICROS - 1) // CREDIT_UNIT_USD_MICROS
 
 
 def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
@@ -534,7 +537,10 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
         "pricing_version": PRICING_VERSION,
         "markup_multiplier": BILLING_MARKUP_MULTIPLIER,
         "raw_usd_micros": int(total_usd_micros),
-        "charged_credits": credits_from_usd_micros(int(total_usd_micros)),
+        "charged_credit_units": credit_units_from_usd_micros(int(total_usd_micros)),
+        "charged_credits_display": format_credit_units(
+            credit_units_from_usd_micros(int(total_usd_micros))
+        ),
         "model_breakdown": model_breakdown,
         "tool_breakdown": tool_breakdown,
         "unsupported_notes": unsupported_notes,
