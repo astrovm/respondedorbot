@@ -439,6 +439,42 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
+def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():
+    persisted_reservation = {
+        "reserved_credit_units": whole_credits_to_units(2),
+        "chat_scope_id": 1,
+        "source": "user",
+        "usage_tag": "ai_response_base",
+        "metadata": {"cached": True},
+    }
+    billing = AIMessageBilling(
+        credits_db_service=MagicMock(),
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda _: "random",
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
+        command="/ask",
+        chat_id="1",
+        chat_type="private",
+        user_id=1,
+        numeric_chat_id=1,
+        message={"from": {"first_name": "Ana"}},
+        load_persisted_reservation_fn=lambda usage_tag: (
+            persisted_reservation if usage_tag == "ai_response_base" else None
+        ),
+    )
+
+    reservation_meta, error = billing.reserve_ai_credits(
+        "ai_response_base",
+        whole_credits_to_units(3),
+    )
+
+    assert error is None
+    assert reservation_meta == persisted_reservation
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
+
+
 def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
     billing = _build_billing_helper()
     billing.credits_db_service.charge_ai_credits.return_value = {"ok": False}

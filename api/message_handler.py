@@ -73,6 +73,13 @@ class MessageHandlerDeps:
     measure_audio_duration_seconds: Callable[[bytes], Optional[float]]
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
+    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = (
+        lambda _usage_tag: None
+    )
+    persist_reservation: Callable[[str, Mapping[str, Any]], None] = (
+        lambda _usage_tag, _reservation: None
+    )
+    clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
 
 
 @dataclass
@@ -112,6 +119,9 @@ def _build_billing_helper(
         user_id=user_id,
         numeric_chat_id=numeric_chat_id,
         message=message,
+        load_persisted_reservation_fn=deps.load_persisted_reservation,
+        persist_reservation_fn=deps.persist_reservation,
+        clear_persisted_reservation_fn=deps.clear_persisted_reservation,
     )
 
 
