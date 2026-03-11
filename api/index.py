@@ -360,8 +360,10 @@ def _run_forced_web_search(
     response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not compound_system_message:
+        print("_run_forced_web_search: compound unavailable (no system message)")
         return "la búsqueda web no está disponible en este momento"
 
+    print(f"_run_forced_web_search: starting query='{query[:120]}'")
     compound_messages = [{"role": "user", "content": query}]
     source_text: Optional[str] = None
 
@@ -378,6 +380,7 @@ def _run_forced_web_search(
             source_text = compound_result.text
 
     if not source_text:
+        print("_run_forced_web_search: compound returned empty response")
         return "no pude completar la búsqueda web ahora"
 
     source_context = (
@@ -398,7 +401,16 @@ def _run_forced_web_search(
         )
 
     if final_response:
+        print(
+            "_run_forced_web_search: persona pass succeeded "
+            f"query='{query[:120]}' final_len={len(final_response)}"
+        )
         return final_response
+
+    print(
+        "_run_forced_web_search: persona pass returned empty; returning raw compound output "
+        f"for query='{query[:120]}' source_len={len(source_text)}"
+    )
 
     return source_text
 
