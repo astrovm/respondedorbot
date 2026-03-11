@@ -87,6 +87,42 @@ def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkey
     assert metadata["reserve_model"] == "groq/compound"
 
 
+def test_normalize_web_search_query_replaces_stale_year_for_current_pricing_query():
+    from api.index import _normalize_web_search_query
+
+    result = _normalize_web_search_query(
+        "costo pañales 3 años argentina 2024 promedio",
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
+        now=datetime(2026, 3, 11, tzinfo=timezone.utc),
+    )
+
+    assert result == "costo pañales 3 años argentina 2026 promedio"
+
+
+def test_normalize_web_search_query_appends_current_year_for_current_pricing_query():
+    from api.index import _normalize_web_search_query
+
+    result = _normalize_web_search_query(
+        "costo pañales 3 años argentina promedio",
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
+        now=datetime(2026, 3, 11, tzinfo=timezone.utc),
+    )
+
+    assert result == "costo pañales 3 años argentina promedio 2026"
+
+
+def test_normalize_web_search_query_preserves_explicit_user_year():
+    from api.index import _normalize_web_search_query
+
+    result = _normalize_web_search_query(
+        "costo pañales 3 años argentina 2024 promedio",
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto salia comprar pañales por 3 años en 2024?"}],
+        now=datetime(2026, 3, 11, tzinfo=timezone.utc),
+    )
+
+    assert result == "costo pañales 3 años argentina 2024 promedio"
+
+
 def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
