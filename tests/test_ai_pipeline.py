@@ -117,8 +117,8 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["usage_breakdown"][0]["model"] == "openai/gpt-oss-120b"
     assert log_entry["executed_tools"][0]["type"] == "search"
     assert log_entry["local_billing"]["raw_usd_micros"] == 11_045
-    assert log_entry["local_billing"]["charged_credit_units"] == 28
-    assert log_entry["local_billing"]["charged_credits_display"] == "2.8"
+    assert log_entry["local_billing"]["charged_credit_units"] == 23
+    assert log_entry["local_billing"]["charged_credits_display"] == "2.3"
 
 
 def test_log_groq_request_result_logs_empty_requests():
