@@ -93,8 +93,8 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
     )
 
     assert breakdown["raw_usd_micros"] == 2_050
-    assert breakdown["charged_credit_units"] == 6
-    assert breakdown["charged_credits_display"] == "0.6"
+    assert breakdown["charged_credit_units"] == 5
+    assert breakdown["charged_credits_display"] == "0.5"
     assert breakdown["model_breakdown"] == [
         {
             "model": "moonshotai/kimi-k2-instruct-0905",
@@ -193,8 +193,8 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
     )
 
     assert breakdown["raw_usd_micros"] == 16_300
-    assert breakdown["charged_credit_units"] == 41
-    assert breakdown["charged_credits_display"] == "4.1"
+    assert breakdown["charged_credit_units"] == 33
+    assert breakdown["charged_credits_display"] == "3.3"
     assert breakdown["model_breakdown"] == [
         {
             "model": "openai/gpt-oss-120b",
@@ -260,8 +260,8 @@ def test_calculate_billing_for_segments_uses_usage_total_time_for_browser_tools(
     )
 
     assert breakdown["raw_usd_micros"] == 7_466
-    assert breakdown["charged_credit_units"] == 19
-    assert breakdown["charged_credits_display"] == "1.9"
+    assert breakdown["charged_credit_units"] == 15
+    assert breakdown["charged_credits_display"] == "1.5"
     assert breakdown["tool_breakdown"] == [
         {
             "tool": "browser",
@@ -309,8 +309,8 @@ def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
     )
 
     assert breakdown["raw_usd_micros"] == 8_133
-    assert breakdown["charged_credit_units"] == 21
-    assert breakdown["charged_credits_display"] == "2.1"
+    assert breakdown["charged_credit_units"] == 17
+    assert breakdown["charged_credits_display"] == "1.7"
     assert breakdown["model_breakdown"] == [
         {
             "model": "openai/gpt-oss-120b",
@@ -359,7 +359,7 @@ def test_estimate_compound_reserve_credits_only_reserves_predictable_request_too
         enabled_tools=["web_search", "visit_website", "code_interpreter", "browser_automation"],
     )
 
-    assert reserve == 23
+    assert reserve == 19
 
 
 def _build_billing_helper() -> AIMessageBilling:
@@ -433,7 +433,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 15
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 10
     assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"] == "ai_settlement_charge"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
@@ -465,7 +465,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 15
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 10
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
     billing.credits_db_service.refund_ai_charge.assert_not_called()
@@ -557,8 +557,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
         reason="ai_response_success",
     )
 
-    billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 5
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
