@@ -136,7 +136,9 @@ def test_process_request_parameters_handles_pre_checkout_query():
     with app.test_request_context("/", json={"pre_checkout_query": {"id": "pcq_1"}}):
         with patch("api.index.is_secret_token_valid", return_value=True), patch(
             "api.index.handle_pre_checkout_query"
-        ) as mock_handle:
+        ) as mock_handle, patch(
+            "api.index._optional_redis_client", return_value=FakeWebhookRedis()
+        ):
             response, status = process_request_parameters(request)
 
     assert status == 200
@@ -205,7 +207,7 @@ def test_process_request_parameters_returns_retry_for_in_flight_duplicate():
     mock_handle.assert_not_called()
 
 
-def test_process_request_parameters_returns_retry_when_message_arrives_without_redis():
+def test_process_request_parameters_sends_random_when_message_arrives_without_redis():
     from api.index import process_request_parameters
 
     with app.test_request_context(
@@ -221,7 +223,45 @@ def test_process_request_parameters_returns_retry_when_message_arrives_without_r
     ):
         with patch("api.index.is_secret_token_valid", return_value=True), patch(
             "api.index._optional_redis_client", return_value=None
-        ), patch("api.index.handle_msg") as mock_handle:
+        ), patch("api.index.handle_msg") as mock_handle, patch(
+            "api.index.handle_rate_limit", return_value="no boludo"
+        ) as mock_rate_limit, patch("api.index.send_msg") as mock_send:
+            response, status = process_request_parameters(request)
+
+    assert (response, status) == ("ok", 200)
+    mock_rate_limit.assert_called_once()
+    mock_send.assert_called_once_with("123", "no boludo", "1")
+    mock_handle.assert_not_called()
+
+
+def test_process_request_parameters_returns_retry_when_callback_arrives_without_redis():
+    from api.index import process_request_parameters
+
+    with app.test_request_context(
+        "/",
+        method="POST",
+        json={"callback_query": {"id": "cbq_1", "data": "topup:p50"}},
+    ):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index._optional_redis_client", return_value=None
+        ), patch("api.index.handle_callback_query") as mock_handle:
+            response, status = process_request_parameters(request)
+
+    assert (response, status) == ("retry", 503)
+    mock_handle.assert_not_called()
+
+
+def test_process_request_parameters_returns_retry_when_pre_checkout_arrives_without_redis():
+    from api.index import process_request_parameters
+
+    with app.test_request_context(
+        "/",
+        method="POST",
+        json={"pre_checkout_query": {"id": "pcq_1"}},
+    ):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index._optional_redis_client", return_value=None
+        ), patch("api.index.handle_pre_checkout_query") as mock_handle:
             response, status = process_request_parameters(request)
 
     assert (response, status) == ("retry", 503)

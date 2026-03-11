@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from os import environ
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
 from api.chat_context import (
     extract_numeric_chat_id,
@@ -31,6 +31,16 @@ AI_BILLING_DEFAULT_PACKS = [
     {"id": "p1000", "credits": whole_credits_to_units(1000), "xtr": 500},
     {"id": "p2500", "credits": whole_credits_to_units(2500), "xtr": 1250},
 ]
+
+
+def _random_name_from_sender(sender: Mapping[str, Any]) -> str:
+    first_name = str(sender.get("first_name") or "").strip()
+    if first_name:
+        return first_name
+    username = str(sender.get("username") or "").strip()
+    if username:
+        return username
+    return ""
 
 
 def get_ai_credits_per_response() -> int:
@@ -244,7 +254,9 @@ class AIMessageBilling:
         )
 
     def _build_insufficient_credits_reply(self, charge_result: Mapping[str, Any]) -> str:
-        random_name = str(self.message.get("from", {}).get("first_name") or "boludo")
+        random_name = _random_name_from_sender(
+            cast(Mapping[str, Any], self.message.get("from") or {})
+        )
         random_response = self.gen_random_fn(random_name)
         credits_message = self.build_insufficient_credits_message_fn(
             chat_type=self.chat_type,
