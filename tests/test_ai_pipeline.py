@@ -206,6 +206,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
 def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkeypatch):
     from api.index import estimate_ai_base_reserve_credits
 
+    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "test prompt")
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
@@ -220,7 +221,7 @@ def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkey
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 3
+    assert reserve == 23
     assert metadata["reserve_mode"] == "compound"
     assert metadata["reserve_reason"] == "forced_web_search"
     assert metadata["reserve_model"] == "groq/compound"
