@@ -1038,11 +1038,32 @@ def test_run_forced_web_search_uses_compound_as_source_for_main_model():
     )
     mock_complete.assert_called_once()
     complete_args, complete_kwargs = mock_complete.call_args
-    assert complete_args[0] == {"role": "system", "content": "sys"}
+    assert complete_args[0]["role"] == "system"
     assert complete_kwargs == {}
     assert complete_args[1][0] == {"role": "user", "content": "algo"}
     assert "FUENTE WEB" in complete_args[1][-1]["content"]
     assert "compuesto" in complete_args[1][-1]["content"]
+
+
+def test_disable_tools_in_system_message_removes_tool_section():
+    from api.index import _disable_tools_in_system_message
+
+    system_message = {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": "base\n\nHERRAMIENTAS DISPONIBLES:\n- web_search\n\nCÓMO LLAMAR HERRAMIENTAS:\n[TOOL] ...",
+            }
+        ],
+    }
+
+    result = _disable_tools_in_system_message(system_message)
+
+    text = result["content"][0]["text"]
+    assert "HERRAMIENTAS DISPONIBLES" not in text
+    assert "[TOOL]" not in text
+    assert "No llames herramientas" in text
 
 
 

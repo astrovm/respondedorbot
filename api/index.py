@@ -421,6 +421,42 @@ def _format_text_for_log(text: Optional[str], limit: int = COMPOUND_SOURCE_LOG_L
     return raw[:limit] + "\n...[truncated]"
 
 
+def _disable_tools_in_system_message(system_message: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of the system message without tool instructions for follow-up passes."""
+
+    content = system_message.get("content")
+    if not isinstance(content, list):
+        return system_message
+
+    cleaned_blocks: List[Dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, Mapping):
+            cleaned_blocks.append(cast(Dict[str, Any], block))
+            continue
+        if block.get("type") != "text":
+            cleaned_blocks.append(dict(block))
+            continue
+
+        text = str(block.get("text") or "")
+        tools_marker = "\n\nHERRAMIENTAS DISPONIBLES:\n"
+        if tools_marker in text:
+            text = text.split(tools_marker, 1)[0].rstrip()
+        text = (
+            f"{text}\n\n"
+            "SEGUIMIENTO DE HERRAMIENTA:\n"
+            "Ya tenés la información necesaria para esta respuesta. "
+            "No llames herramientas ni escribas líneas [TOOL]; respondé directo al usuario."
+        ).strip()
+        cleaned_block = dict(block)
+        cleaned_block["text"] = text
+        cleaned_blocks.append(cleaned_block)
+
+    return {
+        **system_message,
+        "content": cleaned_blocks,
+    }
+
+
 def _run_forced_web_search(
     *,
     query: str,
@@ -471,12 +507,15 @@ def _run_forced_web_search(
         "y respondé al usuario con la personalidad configurada."
     )
     enriched_messages = list(messages) + [{"role": "system", "content": source_context}]
+    followup_system_message = _disable_tools_in_system_message(system_message)
 
     if response_meta is None:
-        final_response = complete_with_providers(system_message, enriched_messages)
+        final_response = complete_with_providers(
+            followup_system_message, enriched_messages
+        )
     else:
         final_response = complete_with_providers(
-            system_message,
+            followup_system_message,
             enriched_messages,
             response_meta=response_meta,
         )
