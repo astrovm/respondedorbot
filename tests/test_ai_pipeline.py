@@ -148,6 +148,60 @@ def test_log_groq_request_result_logs_empty_requests():
     }
 
 
+def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_large():
+    from api.index import GroqUsageResult, _execute_groq_request_with_fallback
+
+    class Fake413Error(Exception):
+        def __init__(self) -> None:
+            super().__init__("Error code: 413 - request_too_large")
+            self.status_code = 413
+            self.code = "request_too_large"
+
+    reservations = []
+
+    def fake_reserve(*args, **kwargs):
+        token = object()
+        reservations.append(token)
+        return token
+
+    def fake_attempt(account, _client):
+        if account == "free":
+            raise Fake413Error()
+        return GroqUsageResult(
+            kind="compound",
+            text="respuesta compound",
+            model="groq/compound",
+            metadata={"groq_account": account},
+        )
+
+    with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
+        "api.index._reserve_groq_rate_limit",
+        side_effect=fake_reserve,
+    ), patch(
+        "api.index._get_groq_client",
+        side_effect=lambda account, default_headers=None: object(),
+    ), patch(
+        "api.index._reconcile_groq_rate_limit"
+    ) as mock_reconcile, patch(
+        "api.index._log_groq_request_result"
+    ), patch(
+        "api.index.is_provider_backoff_active",
+        return_value=False,
+    ):
+        result = _execute_groq_request_with_fallback(
+            scope="compound",
+            label="Groq Compound",
+            token_count=123,
+            default_headers={"Groq-Model-Version": "latest"},
+            attempt=fake_attempt,
+        )
+
+    assert result is not None
+    assert result.text == "respuesta compound"
+    assert result.metadata["groq_account"] == "paid"
+    assert mock_reconcile.call_count == 2
+
+
 def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkeypatch):
     from api.index import estimate_ai_base_reserve_credits
 

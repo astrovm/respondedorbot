@@ -4298,6 +4298,26 @@ def _is_rate_limit_error(error: Exception) -> bool:
     return "429" in lowered
 
 
+def _should_try_next_groq_account_after_error(error: Exception) -> bool:
+    """Return True when a Groq request should fall through to the next account."""
+
+    status_code = getattr(error, "status_code", None)
+    if status_code == 413:
+        return True
+
+    status = getattr(error, "status", None)
+    if status == 413:
+        return True
+
+    code = str(getattr(error, "code", "") or "").strip().lower()
+    if code == "request_too_large":
+        return True
+
+    message = str(getattr(error, "message", "") or error)
+    lowered = message.lower()
+    return "request_too_large" in lowered or "payload too large" in lowered
+
+
 def _append_billing_segment(
     response_meta: Optional[Dict[str, Any]],
     result: Optional[GroqUsageResult],
@@ -5440,12 +5460,22 @@ def _execute_groq_request_with_fallback(
             )
             continue
 
+        last_error: Optional[Exception] = None
+
+        def _wrapped_attempt() -> Optional[GroqUsageResult]:
+            nonlocal last_error
+            try:
+                return attempt(account, groq_client)
+            except Exception as error:
+                last_error = error
+                raise
+
         request_started_at = time.monotonic()
         result = cast(
             Optional[GroqUsageResult],
             _invoke_provider(
                 "groq",
-                attempt=lambda: attempt(account, groq_client),
+                attempt=_wrapped_attempt,
                 rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
                 label=f"{label} ({account})",
                 backoff_key=_get_groq_backoff_key(account, scope),
@@ -5472,6 +5502,11 @@ def _execute_groq_request_with_fallback(
         if result:
             result.metadata.setdefault("groq_account", account)
             return result
+        if last_error and _should_try_next_groq_account_after_error(last_error):
+            print(
+                f"{label} retrying with next account after recoverable error on account={account}"
+            )
+            continue
         if is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
             continue
         break
