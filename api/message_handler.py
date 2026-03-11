@@ -659,11 +659,27 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         for item in items:
             if not isinstance(item, Mapping):
                 continue
+            if str(item.get("source") or "").strip().lower() == "cache":
+                continue
             kind = str(item.get("kind") or "unknown")
             totals[kind] = totals.get(kind, 0) + 1
         if not totals:
             return "sin segmentos"
         ordered = sorted(totals.items(), key=lambda entry: (entry[0]))
+        return ", ".join(f"{kind}={count}" for kind, count in ordered)
+
+    def _summarize_cache_hits(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
+        totals: Dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("source") or "").strip().lower() != "cache":
+                continue
+            kind = str(item.get("kind") or "unknown")
+            totals[kind] = totals.get(kind, 0) + 1
+        if not totals:
+            return None
+        ordered = sorted(totals.items(), key=lambda entry: entry[0])
         return ", ".join(f"{kind}={count}" for kind, count in ordered)
 
     def _summarize_cache(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
@@ -725,6 +741,7 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         model_summary = _summarize_models(model_breakdown)
         tool_summary = _summarize_tools(tool_breakdown)
         segment_summary = _summarize_segments(billing_segments)
+        cache_hit_summary = _summarize_cache_hits(billing_segments)
         cache_summary = _summarize_cache(model_breakdown)
         detail_lines = [
             f"{created_label} | cmd={command} | {status_label}",
@@ -732,6 +749,8 @@ def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             f"usd_micros={raw_usd_micros}",
             f"requests: {segment_summary}",
         ]
+        if cache_hit_summary:
+            detail_lines.append(f"cache_hits: {cache_hit_summary}")
         if cache_summary:
             detail_lines.append(cache_summary)
         detail_lines.extend(

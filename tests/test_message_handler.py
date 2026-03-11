@@ -236,6 +236,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                         {"kind": "chat"},
                         {"kind": "compound"},
                         {"kind": "chat"},
+                        {"kind": "compound", "source": "cache"},
                     ],
                 },
             }
@@ -253,6 +254,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     assert "cmd=/ask" in sent_text
     assert "reservado=2 cobrado=1 refund=1 extra=0" in sent_text
     assert "requests: chat=2, compound=1" in sent_text
+    assert "cache_hits: compound=1" in sent_text
     assert "cacheados=900 ahorro_cache=450" in sent_text
     assert "moonshotai/kimi-k2-instruct-0905=2188" in sent_text
     assert "search=8000 (2x)" in sent_text
