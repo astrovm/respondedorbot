@@ -180,8 +180,8 @@ def _prepare_message_content(
             audio_file_id, use_cache=False
         )
         if transcription:
-            billing_helper.settle_reserved_ai_credits(
-                media_charge_meta,
+            billing_helper.settle_reserved_ai_credits_batch(
+                [media_charge_meta] if media_charge_meta else [],
                 [billing_segment] if billing_segment else [],
                 reason="auto_audio_media_success",
             )
@@ -255,16 +255,6 @@ def _resolve_audio_duration_seconds(
     if measured_duration is None or measured_duration <= 0:
         return None
     return measured_duration
-
-
-def _select_main_billing_segments(
-    billing_segments: Sequence[Mapping[str, Any]],
-) -> List[Dict[str, Any]]:
-    return [
-        dict(segment)
-        for segment in billing_segments
-        if str(segment.get("kind") or "") != "vision"
-    ]
 
 
 def _handle_link_replacement(
@@ -463,21 +453,13 @@ def _run_ai_flow(
         )
         return response_msg, True
 
+    settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
     if media_charge_meta:
-        image_segments = [
-            dict(segment)
-            for segment in billing_segments
-            if str(segment.get("kind") or "") == "vision"
-        ]
-        billing_helper.settle_reserved_ai_credits(
-            media_charge_meta,
-            image_segments,
-            reason="image_context_media_success",
-        )
+        settlement_reservations.append(media_charge_meta)
 
-    billing_helper.settle_reserved_ai_credits(
-        base_charge_meta,
-        _select_main_billing_segments(billing_segments),
+    billing_helper.settle_reserved_ai_credits_batch(
+        settlement_reservations,
+        billing_segments,
         reason="ai_response_success",
     )
 
@@ -622,6 +604,105 @@ def _handle_admin_printcredits_command(
 
     return (
         f"listo, te imprimí {amount} créditos\nte quedaron {int(mint_result.get('user_balance', 0))}",
+        None,
+        False,
+        command,
+    )
+
+
+def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    lines: List[str] = ["últimas liquidaciones IA:"]
+    for entry in entries:
+        raw_metadata = entry.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        model_breakdown = metadata.get("model_breakdown") or []
+        tool_breakdown = metadata.get("tool_breakdown") or []
+        command = str(metadata.get("command") or metadata.get("usage_tag") or "sin comando")
+        created_at = str(entry.get("created_at") or "")
+        created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
+        reserved_total = int(
+            metadata.get("reserved_credits_total") or metadata.get("reserved_credits") or 0
+        )
+        settled_credits = int(metadata.get("settled_credits") or 0)
+        refunded_credits = int(metadata.get("refunded_credits") or 0)
+        extra_charged_credits = int(metadata.get("extra_charged_credits") or 0)
+        debt_applied_credits = int(metadata.get("debt_applied_credits") or 0)
+        raw_usd_micros = int(metadata.get("raw_usd_micros") or 0)
+        chat_value = metadata.get("chat_id", entry.get("chat_id"))
+        user_value = metadata.get("user_id", entry.get("user_id"))
+        model_summary = ", ".join(
+            f"{str(item.get('model') or '?')}={int(item.get('usd_micros') or 0)}"
+            for item in model_breakdown[:2]
+            if isinstance(item, Mapping)
+        ) or "sin modelos"
+        tool_summary = ", ".join(
+            f"{str(item.get('tool') or '?')}={int(item.get('usd_micros') or 0)}"
+            for item in tool_breakdown[:3]
+            if isinstance(item, Mapping)
+        ) or "sin tools"
+        lines.append(
+            "\n".join(
+                [
+                    f"{created_label} | cmd={command}",
+                    f"chat={chat_value} user={user_value} reservado={reserved_total} cobrado={settled_credits} refund={refunded_credits} extra={extra_charged_credits} deuda={debt_applied_credits}",
+                    f"usd_micros={raw_usd_micros}",
+                    f"modelos: {model_summary}",
+                    f"tools: {tool_summary}",
+                ]
+            )
+        )
+    return lines
+
+
+def _truncate_creditlog_message(text: str, max_length: int = 3500) -> str:
+    if len(text) <= max_length:
+        return text
+    suffix = "\n\n[truncado]"
+    return text[: max_length - len(suffix)].rstrip() + suffix
+
+
+def _handle_admin_creditlog_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    sanitized_message_text: str,
+    chat_id: str,
+    user_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/creditlog":
+        return None, None, False, None
+
+    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    if not admin_chat_id or str(user_id or "") != admin_chat_id:
+        return "este comando es solo para el admin", None, False, command
+
+    if not deps.credits_db_service.is_configured():
+        return "el cobro de ia no está andando, avisale al admin", None, False, command
+
+    raw_limit = str(sanitized_message_text or "").strip()
+    limit = 10
+    if raw_limit:
+        try:
+            limit = int(raw_limit.split(" ", 1)[0].strip())
+        except (TypeError, ValueError):
+            return "mandalo bien: /creditlog [limite]", None, False, command
+    limit = max(1, min(limit, 25))
+
+    try:
+        entries = deps.credits_db_service.list_recent_ai_settlement_results(limit=limit)
+    except Exception as error:
+        deps.admin_report(
+            "Error loading /creditlog",
+            error,
+            {"chat_id": chat_id, "user_id": user_id, "limit": limit},
+        )
+        return "se trabó leyendo el creditlog, probá de nuevo", None, False, command
+
+    if not entries:
+        return "no hay liquidaciones ia recientes", None, False, command
+
+    return (
+        _truncate_creditlog_message("\n\n".join(_build_creditlog_lines(entries))),
         None,
         False,
         command,
@@ -776,8 +857,8 @@ def _handle_non_ai_command(
                 media_charge_meta, reason="transcribe_command_unsuccessful"
             )
         else:
-            billing_helper.settle_reserved_ai_credits(
-                media_charge_meta,
+            billing_helper.settle_reserved_ai_credits_batch(
+                [media_charge_meta] if media_charge_meta else [],
                 billing_segments,
                 reason="transcribe_command_success",
             )
@@ -850,6 +931,16 @@ def _handle_known_command(
         return response
 
     response = _handle_admin_printcredits_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
+
+    response = _handle_admin_creditlog_command(
         deps,
         command=command,
         sanitized_message_text=sanitized_message_text,
