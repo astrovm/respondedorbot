@@ -467,6 +467,86 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
+def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage():
+    billing = _build_billing_helper()
+
+    billing.settle_reserved_ai_credits(
+        {
+            "reserved_credits": 3,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "ai_response_base",
+        },
+        [
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-instruct-0905",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                },
+            }
+        ],
+        reason="ok",
+    )
+
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
+    billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["billing_zero_usage_fallback"] is True
+    assert metadata["settled_credits"] == 3
+    assert metadata["refunded_credits"] == 0
+
+
+def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is_zero():
+    billing = _build_billing_helper()
+
+    billing.settle_reserved_ai_credits_batch(
+        [
+            {
+                "reserved_credits": 1,
+                "chat_scope_id": 1,
+                "source": "user",
+                "usage_tag": "ai_response_base",
+            },
+            {
+                "reserved_credits": 1,
+                "chat_scope_id": 1,
+                "source": "user",
+                "usage_tag": "image_context_media",
+            },
+        ],
+        [
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-instruct-0905",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                },
+            },
+            {
+                "kind": "vision",
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                },
+            },
+        ],
+        reason="ai_response_success",
+    )
+
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
+    billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["billing_zero_usage_fallback"] is True
+    assert metadata["settled_credits"] == 2
+    assert metadata["refunded_credits"] == 0
+
+
 def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
     billing = _build_billing_helper()
 

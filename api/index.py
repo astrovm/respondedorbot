@@ -5093,6 +5093,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "balance_command": _noop_command,
             "printcredits_command": _noop_param_command,
             "creditlog_command": _noop_param_command,
+            "purgeailog_command": _noop_command,
             "transfer_command": _noop_param_command,
         }
     )
