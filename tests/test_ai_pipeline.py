@@ -203,15 +203,22 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
     assert mock_reconcile.call_count == 2
 
 
-def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkeypatch):
+def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_search(monkeypatch):
     from api.index import estimate_ai_base_reserve_credits
 
-    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "test prompt")
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data, include_tools=True: {"role": "system", "content": "sys"},
+    )
     monkeypatch.setattr("api.index.should_use_groq_compound_tools", lambda: True)
+    monkeypatch.setattr(
+        "api.index.build_compound_system_message",
+        lambda: {"role": "system", "content": "compound"},
+    )
     monkeypatch.setattr(
         "api.index.get_groq_compound_enabled_tools",
         lambda: ["web_search", "visit_website", "code_interpreter", "browser_automation"],
@@ -221,16 +228,16 @@ def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkey
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 23
-    assert metadata["reserve_mode"] == "compound"
-    assert metadata["reserve_reason"] == "forced_web_search"
-    assert metadata["reserve_model"] == "groq/compound"
+    assert reserve == 2
+    assert metadata["reserve_mode"] == "chat"
+    assert metadata["reserve_reason"] == "standard_chat"
+    assert metadata["reserve_model"] == "moonshotai/kimi-k2-instruct-0905"
 
 
-def test_normalize_web_search_query_replaces_stale_year_for_current_pricing_query():
-    from api.index import _normalize_web_search_query
+def test_normalize_search_query_replaces_stale_year_for_current_pricing_query():
+    from api.index import _normalize_search_query
 
-    result = _normalize_web_search_query(
+    result = _normalize_search_query(
         "costo pañales 3 años argentina 2024 promedio",
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
@@ -239,10 +246,10 @@ def test_normalize_web_search_query_replaces_stale_year_for_current_pricing_quer
     assert result == "costo pañales 3 años argentina 2026 promedio"
 
 
-def test_normalize_web_search_query_appends_current_year_for_current_pricing_query():
-    from api.index import _normalize_web_search_query
+def test_normalize_search_query_appends_current_year_for_current_pricing_query():
+    from api.index import _normalize_search_query
 
-    result = _normalize_web_search_query(
+    result = _normalize_search_query(
         "costo pañales 3 años argentina promedio",
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
@@ -251,10 +258,10 @@ def test_normalize_web_search_query_appends_current_year_for_current_pricing_que
     assert result == "costo pañales 3 años argentina promedio 2026"
 
 
-def test_normalize_web_search_query_preserves_explicit_user_year():
-    from api.index import _normalize_web_search_query
+def test_normalize_search_query_preserves_explicit_user_year():
+    from api.index import _normalize_search_query
 
-    result = _normalize_web_search_query(
+    result = _normalize_search_query(
         "costo pañales 3 años argentina 2024 promedio",
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto salia comprar pañales por 3 años en 2024?"}],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
@@ -345,7 +352,7 @@ def test_ask_ai_with_image():
         assert len(result) > 0
 
 
-def test_ask_ai_forced_search_uses_message_section():
+def test_ask_ai_does_not_force_search_for_news_queries():
     from api.index import ask_ai
 
     message_block = "\n".join(
@@ -370,7 +377,9 @@ def test_ask_ai_forced_search_uses_message_section():
     ), patch("api.index.build_system_message",
         return_value={"role": "system", "content": "sys"},
     ), patch(
-        "api.index._run_forced_web_search", return_value="ok"
+        "api.index.complete_with_providers", return_value="ok"
+    ) as mock_complete, patch(
+        "api.index._run_compound_web_search", return_value="forced"
     ) as mock_run, patch(
         "api.index.environ.get"
     ) as mock_env:
@@ -381,7 +390,8 @@ def test_ask_ai_forced_search_uses_message_section():
         result = ask_ai([{"role": "user", "content": message_block}])
 
     assert result == "ok"
-    assert mock_run.call_args.kwargs["query"] == "Últimas noticias de economía"
+    mock_run.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 def test_ask_ai_sanitizes_tool_call_before_retry():
@@ -725,7 +735,7 @@ def test_resolve_tool_calls_web_search_uses_persona_pass():
     from api.index import resolve_tool_calls
 
     with patch(
-        "api.index._run_forced_web_search", return_value="respuesta final"
+        "api.index._run_compound_web_search", return_value="respuesta final"
     ) as mock_forced, patch("api.index.execute_tool") as mock_tool, patch(
         "api.index.should_use_groq_compound_tools", return_value=True
     ):
@@ -1240,15 +1250,15 @@ def test_get_groq_compound_response_result_caches_successful_response(monkeypatc
     assert stored["value"]["source"] == "groq"
 
 
-def test_run_forced_web_search_uses_compound_as_source_for_main_model():
-    from api.index import _run_forced_web_search
+def test_run_compound_web_search_uses_compound_as_source_for_main_model():
+    from api.index import _run_compound_web_search
 
     with patch(
         "api.index.get_groq_compound_response", return_value="compuesto"
     ) as mock_compound, patch(
         "api.index.complete_with_providers", return_value="respuesta final"
     ) as mock_complete:
-        result = _run_forced_web_search(
+        result = _run_compound_web_search(
             query="algo",
             messages=[{"role": "user", "content": "algo"}],
             system_message={"role": "system", "content": "sys"},
@@ -1291,15 +1301,15 @@ def test_disable_tools_in_system_message_removes_tool_section():
 
 
 
-def test_run_forced_web_search_logs_compound_source_text():
-    from api.index import _run_forced_web_search
+def test_run_compound_web_search_logs_compound_source_text():
+    from api.index import _run_compound_web_search
 
     with patch(
         "api.index.get_groq_compound_response", return_value="compuesto"
     ), patch(
         "api.index.complete_with_providers", return_value="respuesta final"
     ), patch("builtins.print") as mock_print:
-        result = _run_forced_web_search(
+        result = _run_compound_web_search(
             query="algo",
             messages=[{"role": "user", "content": "algo"}],
             system_message={"role": "system", "content": "sys"},
@@ -1308,20 +1318,20 @@ def test_run_forced_web_search_logs_compound_source_text():
 
     assert result == "respuesta final"
     printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
-    assert "_run_forced_web_search: compound source " in printed
-    assert "_run_forced_web_search: compound source text >>>" in printed
+    assert "_run_compound_web_search: compound source " in printed
+    assert "_run_compound_web_search: compound source text >>>" in printed
     assert "compuesto" in printed
 
 
-def test_run_forced_web_search_logs_when_persona_pass_returns_empty():
-    from api.index import _run_forced_web_search
+def test_run_compound_web_search_logs_when_persona_pass_returns_empty():
+    from api.index import _run_compound_web_search
 
     with patch(
         "api.index.get_groq_compound_response", return_value="compuesto"
     ), patch(
         "api.index.complete_with_providers", return_value=None
     ), patch("builtins.print") as mock_print:
-        result = _run_forced_web_search(
+        result = _run_compound_web_search(
             query="algo",
             messages=[{"role": "user", "content": "algo"}],
             system_message={"role": "system", "content": "sys"},

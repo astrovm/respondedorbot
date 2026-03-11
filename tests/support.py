@@ -66,7 +66,6 @@ ensure_callback_updates_enabled = index.ensure_callback_updates_enabled
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE
 get_rulo = index.get_rulo
 get_oil_price = index.get_oil_price
-should_force_web_search = index.should_force_web_search
 should_search_previous_query = index.should_search_previous_query
 should_use_groq_compound_tools = index.should_use_groq_compound_tools
 get_groq_compound_enabled_tools = index.get_groq_compound_enabled_tools
