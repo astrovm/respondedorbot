@@ -212,6 +212,7 @@ CURRENT_INFO_QUERY_PATTERNS = [
     r"\bcotizacion(?:es)?\b",
 ]
 YEAR_TOKEN_PATTERN = re.compile(r"\b20\d{2}\b")
+COMPOUND_SOURCE_LOG_LIMIT = 2000
 
 
 def should_use_groq_compound_tools() -> bool:
@@ -413,6 +414,13 @@ def _normalize_web_search_query(
     return normalized_query
 
 
+def _format_text_for_log(text: Optional[str], limit: int = COMPOUND_SOURCE_LOG_LIMIT) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "\n...[truncated]"
+
+
 def _run_forced_web_search(
     *,
     query: str,
@@ -445,6 +453,16 @@ def _run_forced_web_search(
     if not source_text:
         print("_run_forced_web_search: compound returned empty response")
         return "no pude completar la búsqueda web ahora"
+
+    print(
+        "_run_forced_web_search: compound source "
+        f"query='{normalized_query[:120]}' source_len={len(source_text)}"
+    )
+    print(
+        "_run_forced_web_search: compound source text >>>\n"
+        f"{_format_text_for_log(source_text)}\n"
+        "<<< compound source text"
+    )
 
     source_context = (
         "FUENTE WEB (resumen preliminar):\n"
