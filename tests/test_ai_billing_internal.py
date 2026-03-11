@@ -59,7 +59,7 @@ def test_ai_message_billing_transcribe_success_response_prefixes():
     assert not billing.is_transcribe_success_response("error")
 
 
-def test_calculate_billing_for_segments_ignores_cached_token_discount():
+def test_calculate_billing_for_segments_applies_cached_token_discount():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -75,14 +75,45 @@ def test_calculate_billing_for_segments_ignores_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 2_500
+    assert breakdown["raw_usd_micros"] == 2_050
     assert breakdown["charged_credits"] == 1
     assert breakdown["model_breakdown"] == [
         {
             "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 2_500,
+            "usd_micros": 2_050,
             "input_tokens": 1_000,
+            "input_cached_tokens": 900,
+            "input_non_cached_tokens": 100,
             "output_tokens": 500,
+        }
+    ]
+
+
+def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_details():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-instruct-0905",
+                "usage": {
+                    "prompt_tokens": 2_000,
+                    "completion_tokens": 100,
+                    "prompt_tokens_details": {"cached_tokens": 1_500},
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 1_550
+    assert breakdown["charged_credits"] == 1
+    assert breakdown["model_breakdown"] == [
+        {
+            "model": "moonshotai/kimi-k2-instruct-0905",
+            "usd_micros": 1_550,
+            "input_tokens": 2_000,
+            "input_cached_tokens": 1_500,
+            "input_non_cached_tokens": 500,
+            "output_tokens": 100,
         }
     ]
 
@@ -120,6 +151,8 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
             "model": "openai/gpt-oss-120b",
             "usd_micros": 1_800,
             "input_tokens": 10_000,
+            "input_cached_tokens": 0,
+            "input_non_cached_tokens": 10_000,
             "output_tokens": 500,
         }
     ]

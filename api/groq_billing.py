@@ -28,6 +28,7 @@ MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 60.0
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     "moonshotai/kimi-k2-instruct-0905": {
         "input_per_million": 1_000_000,
+        "cached_input_per_million": 500_000,
         "output_per_million": 3_000_000,
     },
     "meta-llama/llama-4-scout-17b-16e-instruct": {
@@ -39,6 +40,7 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     },
     "openai/gpt-oss-120b": {
         "input_per_million": 150_000,
+        "cached_input_per_million": 75_000,
         "output_per_million": 600_000,
     },
 }
@@ -248,9 +250,15 @@ def credits_from_usd_micros(usd_micros: int) -> int:
 
 def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
     usage_map = dict(usage or {})
+    prompt_tokens_details = ensure_mapping(usage_map.get("prompt_tokens_details")) or {}
     input_tokens = int(
         usage_map.get("input_tokens")
         or usage_map.get("prompt_tokens")
+        or 0
+    )
+    input_cached_tokens = int(
+        usage_map.get("input_cached_tokens")
+        or prompt_tokens_details.get("cached_tokens")
         or 0
     )
     output_tokens = int(
@@ -258,8 +266,12 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
         or usage_map.get("completion_tokens")
         or 0
     )
+    input_cached_tokens = max(0, min(input_tokens, input_cached_tokens))
+    input_non_cached_tokens = max(0, input_tokens - input_cached_tokens)
     return {
         "input_tokens": max(0, input_tokens),
+        "input_cached_tokens": input_cached_tokens,
+        "input_non_cached_tokens": input_non_cached_tokens,
         "output_tokens": max(0, output_tokens),
     }
 
@@ -271,12 +283,19 @@ def _calculate_model_token_cost(model: str, usage: Optional[Mapping[str, Any]]) 
             "model": model,
             "usd_micros": 0,
             "input_tokens": 0,
+            "input_cached_tokens": 0,
+            "input_non_cached_tokens": 0,
             "output_tokens": 0,
         }
 
     tokens = _extract_token_usage(usage)
+    cached_input_per_million = pricing.get(
+        "cached_input_per_million",
+        pricing.get("input_per_million", 0),
+    )
     usd_micros = (
-        tokens["input_tokens"] * pricing.get("input_per_million", 0)
+        tokens["input_non_cached_tokens"] * pricing.get("input_per_million", 0)
+        + tokens["input_cached_tokens"] * cached_input_per_million
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
     ) // 1_000_000
     return {
