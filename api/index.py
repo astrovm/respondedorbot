@@ -3019,22 +3019,13 @@ def resolve_tool_calls(
             return "query vacío"
         if not should_use_groq_compound_tools():
             return "la búsqueda web no está disponible en este momento"
-        if response_meta is None:
-            compound_response = get_groq_compound_response(
-                build_compound_system_message(),
-                [{"role": "user", "content": query}],
-            )
-            if compound_response:
-                return compound_response
-        else:
-            compound_result = _get_groq_compound_response_result(
-                build_compound_system_message(),
-                [{"role": "user", "content": query}],
-            )
-            if compound_result:
-                _append_billing_segment(response_meta, compound_result)
-                return compound_result.text
-        return "no pude completar la búsqueda web ahora"
+        return _run_forced_web_search(
+            query=query,
+            messages=messages,
+            system_message=system_message,
+            compound_system_message=build_compound_system_message(),
+            response_meta=response_meta,
+        )
 
     try:
         print(

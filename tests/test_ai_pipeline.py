@@ -545,12 +545,12 @@ def test_execute_tool_empty_query():
     assert result == "herramienta desconocida: web_search"
 
 
-def test_resolve_tool_calls_web_search_uses_compound_only():
+def test_resolve_tool_calls_web_search_uses_persona_pass():
     from api.index import resolve_tool_calls
 
     with patch(
-        "api.index.get_groq_compound_response", return_value="respuesta compound"
-    ) as mock_compound, patch("api.index.execute_tool") as mock_tool, patch(
+        "api.index._run_forced_web_search", return_value="respuesta final"
+    ) as mock_forced, patch("api.index.execute_tool") as mock_tool, patch(
         "api.index.should_use_groq_compound_tools", return_value=True
     ):
         result = resolve_tool_calls(
@@ -559,8 +559,14 @@ def test_resolve_tool_calls_web_search_uses_compound_only():
             '[TOOL] web_search {"query": "test"}',
         )
 
-    assert result == "respuesta compound"
-    mock_compound.assert_called_once()
+    assert result == "respuesta final"
+    mock_forced.assert_called_once_with(
+        query="test",
+        messages=[{"role": "user", "content": "hola"}],
+        system_message={"role": "system", "content": "sys"},
+        compound_system_message=ANY,
+        response_meta=None,
+    )
     mock_tool.assert_not_called()
 
 
