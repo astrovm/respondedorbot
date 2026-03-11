@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PRICING_VERSION = "2026-03-06"
@@ -22,6 +22,7 @@ BROWSER_AUTOMATION_USD_MICROS_PER_HOUR = 80_000
 WEB_SEARCH_STANDARD_USD_MICROS = 5_000
 WEB_SEARCH_PREMIUM_USD_MICROS = 8_000
 GPT_OSS_120B_FALLBACK_MODEL = "openai/gpt-oss-120b"
+MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST = 60.0
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
@@ -385,11 +386,20 @@ def _calculate_tool_cost(tool: Mapping[str, Any]) -> Dict[str, Any]:
 
     return {
         "tool": tool_name or "unknown",
+        "normalized_tool": normalized_name,
         "usd_micros": int(max(0, usd_micros)),
         "count": count,
         "duration_seconds": duration_seconds,
         "note": note,
     }
+
+
+def _estimate_max_missing_duration_usd_micros(normalized_tool: str) -> int:
+    if normalized_tool == "code_execution":
+        return int(MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST * CODE_EXECUTION_USD_MICROS_PER_HOUR / 3600)
+    if normalized_tool == "browser_automation":
+        return int(MAX_TOOL_RUNTIME_SECONDS_PER_REQUEST * BROWSER_AUTOMATION_USD_MICROS_PER_HOUR / 3600)
+    return 0
 
 
 def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -447,12 +457,39 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
             total_usd_micros += int(model_cost["usd_micros"])
             model_breakdown.append(model_cost)
 
+        segment_tool_breakdown: List[Dict[str, Any]] = []
+        missing_duration_candidates: List[Tuple[int, int]] = []
+
         for tool in executed_tools:
             tool_cost = _calculate_tool_cost(tool)
+            normalized_tool = str(tool_cost.get("normalized_tool") or "")
+            if (
+                tool_cost.get("note") == "missing_duration"
+                and normalized_tool in {"code_execution", "browser_automation"}
+            ):
+                estimated_cap = _estimate_max_missing_duration_usd_micros(normalized_tool)
+                missing_duration_candidates.append((len(segment_tool_breakdown), estimated_cap))
+            segment_tool_breakdown.append(tool_cost)
+
+        if missing_duration_candidates:
+            selected_index, selected_usd_micros = max(
+                missing_duration_candidates, key=lambda item: item[1]
+            )
+            for idx, _ in missing_duration_candidates:
+                if idx == selected_index:
+                    segment_tool_breakdown[idx]["usd_micros"] = selected_usd_micros
+                    segment_tool_breakdown[idx]["note"] = "estimated_max_request_duration"
+                else:
+                    segment_tool_breakdown[idx]["usd_micros"] = 0
+                    segment_tool_breakdown[idx]["note"] = "estimated_request_cap_shared"
+
+        for tool_cost in segment_tool_breakdown:
+            tool_cost.pop("normalized_tool", None)
             total_usd_micros += int(tool_cost["usd_micros"])
             tool_breakdown.append(tool_cost)
-            if tool_cost["note"]:
-                unsupported_notes.append(f"{tool_cost['tool']}:{tool_cost['note']}")
+            note = str(tool_cost.get("note") or "")
+            if note and not note.startswith("estimated_"):
+                unsupported_notes.append(f"{tool_cost['tool']}:{note}")
 
     return {
         "pricing_version": PRICING_VERSION,

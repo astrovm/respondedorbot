@@ -154,6 +154,66 @@ def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_an
     ]
 
 
+def test_calculate_billing_for_segments_uses_max_estimate_for_missing_duration_tools():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "compound",
+                "model": "groq/compound",
+                "usage_breakdown": {
+                    "models": [
+                        {
+                            "model": "openai/gpt-oss-120b",
+                            "input_tokens": 10_000,
+                            "output_tokens": 500,
+                        }
+                    ]
+                },
+                "executed_tools": [
+                    {"type": "browser_automation"},
+                    {"type": "browser_automation"},
+                    {"name": "python"},
+                    {"type": "search", "mode": "basic", "count": 1},
+                ],
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 9_800
+    assert breakdown["charged_credits"] == 3
+    assert breakdown["tool_breakdown"] == [
+        {
+            "tool": "browser_automation",
+            "usd_micros": 0,
+            "count": 1,
+            "duration_seconds": 0.0,
+            "note": "estimated_request_cap_shared",
+        },
+        {
+            "tool": "browser_automation",
+            "usd_micros": 0,
+            "count": 1,
+            "duration_seconds": 0.0,
+            "note": "estimated_request_cap_shared",
+        },
+        {
+            "tool": "python",
+            "usd_micros": 3_000,
+            "count": 1,
+            "duration_seconds": 0.0,
+            "note": "estimated_max_request_duration",
+        },
+        {
+            "tool": "search",
+            "usd_micros": 5_000,
+            "count": 1,
+            "duration_seconds": 0.0,
+            "note": "",
+        },
+    ]
+    assert breakdown["unsupported_notes"] == []
+
+
 def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
     small = estimate_vision_reserve_credits(
         prompt_text="Describe what you see in this image in detail.",
