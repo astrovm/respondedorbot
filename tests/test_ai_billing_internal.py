@@ -168,13 +168,14 @@ def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
     assert large > small
 
 
-def test_estimate_compound_reserve_credits_only_reserves_base_request():
+def test_estimate_compound_reserve_credits_only_reserves_predictable_request_tools():
     reserve = estimate_compound_reserve_credits(
         system_message={"role": "system", "content": "search the web"},
         messages=[{"role": "user", "content": "btc news"}],
+        enabled_tools=["web_search", "visit_website", "code_interpreter", "browser_automation"],
     )
 
-    assert reserve == 1
+    assert reserve == 3
 
 
 def _build_billing_helper() -> AIMessageBilling:

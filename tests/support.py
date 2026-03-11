@@ -69,6 +69,7 @@ get_oil_price = index.get_oil_price
 should_force_web_search = index.should_force_web_search
 should_search_previous_query = index.should_search_previous_query
 should_use_groq_compound_tools = index.should_use_groq_compound_tools
+get_groq_compound_enabled_tools = index.get_groq_compound_enabled_tools
 
 
 def parse_command(message_text: str, bot_name: str):

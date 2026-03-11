@@ -164,6 +164,12 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
 GROQ_COMPOUND_DEFAULT_MODEL = "groq/compound"
+GROQ_COMPOUND_DEFAULT_TOOLS = (
+    "web_search",
+    "code_interpreter",
+    "visit_website",
+    "browser_automation",
+)
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
@@ -219,6 +225,12 @@ def should_use_groq_compound_tools() -> bool:
     """Return True when Groq Compound built-in tools are enabled."""
 
     return bool(_get_configured_groq_accounts())
+
+
+def get_groq_compound_enabled_tools() -> List[str]:
+    """Return the enabled Groq Compound tool list, sanitized by allowlist."""
+
+    return list(GROQ_COMPOUND_DEFAULT_TOOLS)
 
 
 def normalize_text_for_matching(text: str) -> str:
@@ -4403,9 +4415,11 @@ def estimate_ai_base_reserve_credits(
             if compound_system_message:
                 estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
             estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
+            enabled_tools = get_groq_compound_enabled_tools()
             reserve = estimate_compound_reserve_credits(
                 system_message=compound_system_message,
                 messages=rate_limit_input_messages,
+                enabled_tools=enabled_tools,
             )
             return reserve, {
                 "reserve_mode": "compound",
@@ -4420,9 +4434,11 @@ def estimate_ai_base_reserve_credits(
         if compound_system_message:
             estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
         estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
+        enabled_tools = get_groq_compound_enabled_tools()
         reserve = estimate_compound_reserve_credits(
             system_message=compound_system_message,
             messages=[{"role": "user", "content": latest_user_message}],
+            enabled_tools=enabled_tools,
         )
         return reserve, {
             "reserve_mode": "compound",
@@ -4548,6 +4564,7 @@ def _get_groq_compound_response_result(
     """Use Groq Compound built-in tools for a single response."""
 
     model = GROQ_COMPOUND_DEFAULT_MODEL
+    enabled_tools = get_groq_compound_enabled_tools()
     estimated_token_count = estimate_message_tokens(messages) + CHAT_OUTPUT_TOKEN_LIMIT
     if system_msg:
         estimated_token_count += estimate_message_tokens([system_msg])
@@ -4564,6 +4581,11 @@ def _get_groq_compound_response_result(
             model=model,
             messages=cast(Any, payload_messages),
             max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+            extra_body={
+                "compound_custom": {
+                    "tools": {"enabled_tools": enabled_tools},
+                }
+            },
         )
 
         if response and hasattr(response, "choices") and response.choices:
