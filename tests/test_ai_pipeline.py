@@ -203,6 +203,131 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
     assert mock_reconcile.call_count == 2
 
 
+def test_execute_groq_request_with_fallback_aborts_for_paid_retry_when_time_is_low():
+    from api.index import (
+        ForceWebhookRetry,
+        _execute_groq_request_with_fallback,
+        _webhook_force_paid_retry,
+        _webhook_operation_key,
+        _webhook_redis_client,
+        _webhook_request_started_at,
+    )
+
+    class Fake413Error(Exception):
+        def __init__(self) -> None:
+            super().__init__("Error code: 413 - request_too_large")
+            self.status_code = 413
+            self.code = "request_too_large"
+
+    class FakeRedis:
+        def __init__(self):
+            self.data = {}
+
+        def get(self, key):
+            return self.data.get(key)
+
+        def set(self, key, value, ex=None, nx=False):
+            if nx and key in self.data:
+                return False
+            self.data[key] = value
+            return True
+
+        def setex(self, key, ttl, value):
+            self.data[key] = value
+            return True
+
+        def delete(self, key):
+            self.data.pop(key, None)
+            return 1
+
+    redis_client = FakeRedis()
+    started_token = _webhook_request_started_at.set(time.monotonic() - 58.0)
+    operation_token = _webhook_operation_key.set("message:1:2")
+    redis_token = _webhook_redis_client.set(redis_client)
+    force_paid_token = _webhook_force_paid_retry.set(False)
+
+    try:
+        with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
+            "api.index._reserve_groq_rate_limit", return_value=object()
+        ), patch(
+            "api.index._get_groq_client", return_value=object()
+        ), patch(
+            "api.index._reconcile_groq_rate_limit"
+        ), patch(
+            "api.index._log_groq_request_result"
+        ), patch(
+            "api.index.is_provider_backoff_active",
+            return_value=False,
+        ), patch(
+            "api.index._get_webhook_retry_safety_margin_seconds", return_value=5.0
+        ), patch(
+            "api.index._get_webhook_max_runtime_seconds", return_value=60.0
+        ):
+            with pytest.raises(ForceWebhookRetry):
+                _execute_groq_request_with_fallback(
+                    scope="compound",
+                    label="Groq Compound",
+                    token_count=123,
+                    default_headers={"Groq-Model-Version": "latest"},
+                    attempt=lambda account, _client: (_ for _ in ()).throw(Fake413Error())
+                    if account == "free"
+                    else None,
+                )
+    finally:
+        _webhook_request_started_at.reset(started_token)
+        _webhook_operation_key.reset(operation_token)
+        _webhook_redis_client.reset(redis_token)
+        _webhook_force_paid_retry.reset(force_paid_token)
+
+    assert "webhook:idempotency:message:1:2:force_paid_retry" in redis_client.data
+
+
+def test_execute_groq_request_with_fallback_skips_free_when_paid_retry_marker_is_active():
+    from api.index import (
+        GroqUsageResult,
+        _execute_groq_request_with_fallback,
+        _webhook_force_paid_retry,
+    )
+
+    attempted_accounts = []
+    force_paid_token = _webhook_force_paid_retry.set(True)
+
+    try:
+        with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
+            "api.index._reserve_groq_rate_limit", return_value=object()
+        ), patch(
+            "api.index._get_groq_client", return_value=object()
+        ), patch(
+            "api.index._reconcile_groq_rate_limit"
+        ), patch(
+            "api.index._log_groq_request_result"
+        ), patch(
+            "api.index.is_provider_backoff_active",
+            return_value=False,
+        ):
+            result = _execute_groq_request_with_fallback(
+                scope="compound",
+                label="Groq Compound",
+                token_count=123,
+                default_headers={"Groq-Model-Version": "latest"},
+                attempt=lambda account, _client: (
+                    attempted_accounts.append(account)
+                    or GroqUsageResult(
+                        kind="compound",
+                        text="respuesta compound",
+                        model="groq/compound",
+                        metadata={"groq_account": account},
+                    )
+                ),
+            )
+    finally:
+        _webhook_force_paid_retry.reset(force_paid_token)
+
+    assert attempted_accounts == ["paid"]
+    assert result is not None
+    assert result.metadata["groq_account"] == "paid"
+
+
 def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_search(monkeypatch):
     from api.index import estimate_ai_base_reserve_credits
 
