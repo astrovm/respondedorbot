@@ -22,6 +22,9 @@ class FakeWebhookRedis:
         self.data.pop(key, None)
         return 1
 
+    def expire(self, key, ttl):
+        return key in self.data
+
 
 def test_responder_no_args():
     with app.test_request_context("/?"):
@@ -195,6 +198,29 @@ def test_process_request_parameters_returns_retry_for_in_flight_duplicate():
     ):
         with patch("api.index.is_secret_token_valid", return_value=True), patch(
             "api.index._optional_redis_client", return_value=redis_client
+        ), patch("api.index.handle_msg") as mock_handle:
+            response, status = process_request_parameters(request)
+
+    assert (response, status) == ("retry", 503)
+    mock_handle.assert_not_called()
+
+
+def test_process_request_parameters_returns_retry_when_message_arrives_without_redis():
+    from api.index import process_request_parameters
+
+    with app.test_request_context(
+        "/",
+        method="POST",
+        json={
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 123, "type": "private"},
+                "text": "hola",
+            }
+        },
+    ):
+        with patch("api.index.is_secret_token_valid", return_value=True), patch(
+            "api.index._optional_redis_client", return_value=None
         ), patch("api.index.handle_msg") as mock_handle:
             response, status = process_request_parameters(request)
 
