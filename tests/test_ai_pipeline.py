@@ -1016,6 +1016,27 @@ def test_run_forced_web_search_uses_compound_as_source_for_main_model():
     assert "compuesto" in complete_args[1][-1]["content"]
 
 
+
+def test_run_forced_web_search_logs_when_persona_pass_returns_empty():
+    from api.index import _run_forced_web_search
+
+    with patch(
+        "api.index.get_groq_compound_response", return_value="compuesto"
+    ), patch(
+        "api.index.complete_with_providers", return_value=None
+    ), patch("builtins.print") as mock_print:
+        result = _run_forced_web_search(
+            query="algo",
+            messages=[{"role": "user", "content": "algo"}],
+            system_message={"role": "system", "content": "sys"},
+            compound_system_message={"role": "system", "content": "sys"},
+        )
+
+    assert result == "compuesto"
+    printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+    assert "persona pass returned empty" in printed
+
+
 def test_web_search_uses_ttl_constant(monkeypatch):
     from api.index import web_search, TTL_WEB_SEARCH
 
