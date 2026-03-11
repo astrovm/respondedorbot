@@ -217,6 +217,7 @@ def estimate_compound_reserve_credits(
     *,
     system_message: Optional[Mapping[str, Any]],
     messages: Sequence[Mapping[str, Any]],
+    enabled_tools: Optional[Sequence[str]] = None,
     max_output_tokens: int = CHAT_OUTPUT_TOKEN_LIMIT,
 ) -> int:
     pricing = MODEL_PRICING_USD_MICROS[GPT_OSS_120B_FALLBACK_MODEL]
@@ -227,6 +228,11 @@ def estimate_compound_reserve_credits(
         input_tokens * pricing["input_per_million"]
         + max_output_tokens * pricing["output_per_million"]
     ) // 1_000_000
+    normalized_tools = {str(tool).strip().lower() for tool in enabled_tools or [] if str(tool).strip()}
+    if "web_search" in normalized_tools:
+        usd_micros += WEB_SEARCH_PREMIUM_USD_MICROS
+    if "visit_website" in normalized_tools:
+        usd_micros += VISIT_WEBSITE_USD_MICROS
     return credits_from_usd_micros(usd_micros)
 
 
