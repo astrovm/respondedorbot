@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from os import environ
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from api.chat_context import (
     extract_numeric_chat_id,
@@ -320,13 +320,119 @@ class AIMessageBilling:
     ) -> None:
         """Settle a reservation using actual Groq usage, charging extra only if needed."""
 
+        self.settle_reserved_ai_credits_batch(
+            [reservation_meta] if reservation_meta else [],
+            billing_segments,
+            reason=reason,
+        )
+
+    def _build_settlement_metadata(
+        self,
+        *,
+        usage_tag: str,
+        usage_tags: Sequence[str],
+        reserved_credits_total: int,
+        settled_credits: int,
+        refunded_credits: int,
+        extra_charged_credits: int,
+        debt_applied_credits: int,
+        reason: str,
+        breakdown: Mapping[str, Any],
+        billing_segments: Sequence[Mapping[str, Any]],
+        missing_usage_billing: bool,
+    ) -> Dict[str, Any]:
+        return self._build_charge_metadata(
+            usage_tag=usage_tag,
+            extra={
+                "reason": reason,
+                "message_id": self.message.get("message_id"),
+                "chat_id": self.chat_id,
+                "user_id": self.user_id,
+                "command": self.command,
+                "usage_tags": list(usage_tags),
+                "reserved_credits_total": reserved_credits_total,
+                "settled_credits": settled_credits,
+                "refunded_credits": refunded_credits,
+                "extra_charged_credits": extra_charged_credits,
+                "debt_applied_credits": debt_applied_credits,
+                "pricing_version": breakdown.get("pricing_version"),
+                "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
+                "markup_multiplier": breakdown.get("markup_multiplier"),
+                "model_breakdown": breakdown.get("model_breakdown", []),
+                "tool_breakdown": breakdown.get("tool_breakdown", []),
+                "unsupported_notes": breakdown.get("unsupported_notes", []),
+                "billing_segments": list(billing_segments or []),
+                "missing_usage_billing": bool(missing_usage_billing),
+            },
+        )
+
+    def _record_ai_settlement_result(
+        self,
+        *,
+        chat_scope_id: Optional[int],
+        settlement_metadata: Mapping[str, Any],
+    ) -> None:
+        if self.user_id is None:
+            return
+        try:
+            self.credits_db_service.record_ai_settlement_result(
+                user_id=self.user_id,
+                chat_id=chat_scope_id,
+                actor_user_id=self.user_id,
+                metadata=settlement_metadata,
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló registrar resultado de liquidación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "command": self.command,
+                },
+            )
+
+    def _settle_single_reservation(
+        self,
+        reservation_meta: Mapping[str, Any],
+        billing_segments: Optional[List[Mapping[str, Any]]],
+        *,
+        reason: str,
+    ) -> None:
+        """Settle one reservation preserving legacy behavior where needed."""
+
         if not reservation_meta or self.user_id is None:
             return
 
         reserved_credits = int(reservation_meta.get("reserved_credits", 0) or 0)
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
-        breakdown = calculate_billing_for_segments(billing_segments or [])
+        usage_tags = [usage_tag]
         if not billing_segments:
+            breakdown = {
+                "pricing_version": None,
+                "markup_multiplier": None,
+                "raw_usd_micros": 0,
+                "model_breakdown": [],
+                "tool_breakdown": [],
+                "unsupported_notes": ["missing_billing_segments_reserve_retained"],
+            }
+            settlement_metadata = self._build_settlement_metadata(
+                usage_tag=usage_tag,
+                usage_tags=usage_tags,
+                reserved_credits_total=reserved_credits,
+                settled_credits=reserved_credits,
+                refunded_credits=0,
+                extra_charged_credits=0,
+                debt_applied_credits=0,
+                reason=reason,
+                breakdown=breakdown,
+                billing_segments=list(billing_segments or []),
+                missing_usage_billing=True,
+            )
+            self._record_ai_settlement_result(
+                chat_scope_id=reservation_meta.get("chat_scope_id"),
+                settlement_metadata=settlement_metadata,
+            )
             self.admin_reporter(
                 "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
                 None,
@@ -338,32 +444,63 @@ class AIMessageBilling:
                 },
             )
             return
+        breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credits = int(breakdown.get("charged_credits", 0) or 0)
-        settlement_metadata = self._build_charge_metadata(
-            usage_tag=usage_tag,
-            extra={
-                "reason": reason,
-                "reserved_credits": reserved_credits,
-                "settled_credits": actual_credits,
-                "refunded_credits": 0,
-                "pricing_version": breakdown.get("pricing_version"),
-                "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
-                "markup_multiplier": breakdown.get("markup_multiplier"),
-                "model_breakdown": breakdown.get("model_breakdown", []),
-                "tool_breakdown": breakdown.get("tool_breakdown", []),
-                "unsupported_notes": breakdown.get("unsupported_notes", []),
-                "billing_segments": list(billing_segments or []),
-            },
-        )
+        refunded_credits = 0
+        extra_charged_credits = 0
+        debt_applied_credits = 0
+        chat_scope_id = reservation_meta.get("chat_scope_id")
+        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
 
-        if actual_credits > reserved_credits:
+        if actual_credits < reserved_credits:
+            refunded_credits = reserved_credits - actual_credits
+            try:
+                self.credits_db_service.refund_ai_charge(
+                    user_id=self.user_id,
+                    chat_id=chat_scope_id,
+                    amount=refunded_credits,
+                    source=source,
+                    event_type="ai_refund",
+                    metadata=self._build_charge_metadata(
+                        usage_tag=usage_tag,
+                        extra={
+                            "reason": reason,
+                            "reserved_credits_total": reserved_credits,
+                            "settled_credits": actual_credits,
+                            "refunded_credits": refunded_credits,
+                        },
+                    ),
+                )
+            except Exception as error:
+                self.admin_reporter(
+                    "falló el reintegro de liquidación IA",
+                    error,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                    },
+                )
+                refunded_credits = 0
+
+        elif actual_credits > reserved_credits:
             try:
                 extra_charge = self.credits_db_service.charge_ai_credits(
                     user_id=self.user_id,
-                    chat_id=reservation_meta.get("chat_scope_id"),
+                    chat_id=chat_scope_id,
                     amount=actual_credits - reserved_credits,
                     event_type="ai_settlement_charge",
-                    metadata=settlement_metadata,
+                    metadata=self._build_charge_metadata(
+                        usage_tag=usage_tag,
+                        extra={
+                            "reason": reason,
+                            "reserved_credits_total": reserved_credits,
+                            "settled_credits": actual_credits,
+                            "extra_charged_credits": actual_credits - reserved_credits,
+                        },
+                    ),
                 )
             except Exception as error:
                 self.admin_reporter(
@@ -395,14 +532,21 @@ class AIMessageBilling:
                 try:
                     self.credits_db_service.apply_ai_debt(
                         user_id=self.user_id,
-                        chat_id=reservation_meta.get("chat_scope_id"),
+                        chat_id=chat_scope_id,
                         amount=actual_credits - reserved_credits,
-                        source="chat"
-                        if str(reservation_meta.get("source") or "user") == "chat"
-                        else "user",
+                        source=source,
                         event_type="ai_settlement_debt",
-                        metadata=settlement_metadata,
+                        metadata=self._build_charge_metadata(
+                            usage_tag=usage_tag,
+                            extra={
+                                "reason": reason,
+                                "reserved_credits_total": reserved_credits,
+                                "settled_credits": actual_credits,
+                                "debt_applied_credits": actual_credits - reserved_credits,
+                            },
+                        ),
                     )
+                    debt_applied_credits = actual_credits - reserved_credits
                 except Exception as error:
                     self.admin_reporter(
                         "falló registrar deuda de liquidación IA",
@@ -415,6 +559,250 @@ class AIMessageBilling:
                             "reason": reason,
                         },
                     )
+            else:
+                extra_charged_credits = actual_credits - reserved_credits
+
+        settlement_metadata = self._build_settlement_metadata(
+            usage_tag=usage_tag,
+            usage_tags=usage_tags,
+            reserved_credits_total=reserved_credits,
+            settled_credits=actual_credits,
+            refunded_credits=refunded_credits,
+            extra_charged_credits=extra_charged_credits,
+            debt_applied_credits=debt_applied_credits,
+            reason=reason,
+            breakdown=breakdown,
+            billing_segments=list(billing_segments or []),
+            missing_usage_billing=False,
+        )
+        self._record_ai_settlement_result(
+            chat_scope_id=chat_scope_id,
+            settlement_metadata=settlement_metadata,
+        )
+
+    def settle_reserved_ai_credits_batch(
+        self,
+        reservation_metas: Iterable[Optional[Mapping[str, Any]]],
+        billing_segments: Optional[List[Mapping[str, Any]]],
+        *,
+        reason: str,
+    ) -> None:
+        reservations = [dict(item) for item in reservation_metas if item]
+        if not reservations or self.user_id is None:
+            return
+
+        source_values = {str(item.get("source") or "user") for item in reservations}
+        chat_scope_values = {item.get("chat_scope_id") for item in reservations}
+        if len(source_values) > 1 or len(chat_scope_values) > 1:
+            self.admin_reporter(
+                "liquidación IA batch con reservas incompatibles; vuelvo a liquidación individual",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reservation_count": len(reservations),
+                },
+            )
+            for index, reservation in enumerate(reservations):
+                self._settle_single_reservation(
+                    reservation,
+                    billing_segments if index == 0 else [],
+                    reason=reason,
+                )
+            return
+
+        if len(reservations) == 1:
+            self._settle_single_reservation(
+                reservations[0],
+                billing_segments,
+                reason=reason,
+            )
+            return
+
+        reserved_credits_total = sum(
+            int(item.get("reserved_credits", 0) or 0) for item in reservations
+        )
+        usage_tags = [str(item.get("usage_tag") or "ai_usage") for item in reservations]
+        usage_tag = usage_tags[0] if len(set(usage_tags)) == 1 else "ai_usage_batch"
+        chat_scope_id = reservations[0].get("chat_scope_id")
+        source = "chat" if str(reservations[0].get("source") or "user") == "chat" else "user"
+
+        if not billing_segments:
+            breakdown = {
+                "pricing_version": None,
+                "markup_multiplier": None,
+                "raw_usd_micros": 0,
+                "model_breakdown": [],
+                "tool_breakdown": [],
+                "unsupported_notes": ["missing_billing_segments_reserve_retained"],
+            }
+            settlement_metadata = self._build_settlement_metadata(
+                usage_tag=usage_tag,
+                usage_tags=usage_tags,
+                reserved_credits_total=reserved_credits_total,
+                settled_credits=reserved_credits_total,
+                refunded_credits=0,
+                extra_charged_credits=0,
+                debt_applied_credits=0,
+                reason=reason,
+                breakdown=breakdown,
+                billing_segments=list(billing_segments or []),
+                missing_usage_billing=True,
+            )
+            self._record_ai_settlement_result(
+                chat_scope_id=chat_scope_id,
+                settlement_metadata=settlement_metadata,
+            )
+            self.admin_reporter(
+                "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credits": reserved_credits_total,
+                },
+            )
+            return
+
+        breakdown = calculate_billing_for_segments(billing_segments or [])
+        actual_credits = int(breakdown.get("charged_credits", 0) or 0)
+        refunded_credits = 0
+        extra_charged_credits = 0
+        debt_applied_credits = 0
+
+        if actual_credits < reserved_credits_total:
+            refunded_credits = reserved_credits_total - actual_credits
+            try:
+                self.credits_db_service.refund_ai_charge(
+                    user_id=self.user_id,
+                    chat_id=chat_scope_id,
+                    amount=refunded_credits,
+                    source=source,
+                    event_type="ai_refund",
+                    metadata=self._build_charge_metadata(
+                        usage_tag=usage_tag,
+                        extra={
+                            "reason": reason,
+                            "reserved_credits_total": reserved_credits_total,
+                            "settled_credits": actual_credits,
+                            "refunded_credits": refunded_credits,
+                            "usage_tags": list(usage_tags),
+                        },
+                    ),
+                )
+            except Exception as error:
+                self.admin_reporter(
+                    "falló el reintegro batch de liquidación IA",
+                    error,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits_total,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                    },
+                )
+                refunded_credits = 0
+
+        elif actual_credits > reserved_credits_total:
+            extra_amount = actual_credits - reserved_credits_total
+            try:
+                extra_charge = self.credits_db_service.charge_ai_credits(
+                    user_id=self.user_id,
+                    chat_id=chat_scope_id,
+                    amount=extra_amount,
+                    event_type="ai_settlement_charge",
+                    metadata=self._build_charge_metadata(
+                        usage_tag=usage_tag,
+                        extra={
+                            "reason": reason,
+                            "reserved_credits_total": reserved_credits_total,
+                            "settled_credits": actual_credits,
+                            "extra_charged_credits": extra_amount,
+                            "usage_tags": list(usage_tags),
+                        },
+                    ),
+                )
+            except Exception as error:
+                self.admin_reporter(
+                    "falló el ajuste batch de liquidación IA",
+                    error,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits_total,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                    },
+                )
+                extra_charge = {"ok": False}
+
+            if not extra_charge.get("ok"):
+                self.admin_reporter(
+                    "la liquidación IA batch superó la reserva y no pudo cobrar ajuste",
+                    None,
+                    {
+                        "chat_id": self.chat_id,
+                        "user_id": self.user_id,
+                        "reserved_credits": reserved_credits_total,
+                        "actual_credits": actual_credits,
+                        "reason": reason,
+                        "billing_segments": list(billing_segments or []),
+                    },
+                )
+                try:
+                    self.credits_db_service.apply_ai_debt(
+                        user_id=self.user_id,
+                        chat_id=chat_scope_id,
+                        amount=extra_amount,
+                        source=source,
+                        event_type="ai_settlement_debt",
+                        metadata=self._build_charge_metadata(
+                            usage_tag=usage_tag,
+                            extra={
+                                "reason": reason,
+                                "reserved_credits_total": reserved_credits_total,
+                                "settled_credits": actual_credits,
+                                "debt_applied_credits": extra_amount,
+                                "usage_tags": list(usage_tags),
+                            },
+                        ),
+                    )
+                    debt_applied_credits = extra_amount
+                except Exception as error:
+                    self.admin_reporter(
+                        "falló registrar deuda batch de liquidación IA",
+                        error,
+                        {
+                            "chat_id": self.chat_id,
+                            "user_id": self.user_id,
+                            "reserved_credits": reserved_credits_total,
+                            "actual_credits": actual_credits,
+                            "reason": reason,
+                        },
+                    )
+            else:
+                extra_charged_credits = extra_amount
+
+        settlement_metadata = self._build_settlement_metadata(
+            usage_tag=usage_tag,
+            usage_tags=usage_tags,
+            reserved_credits_total=reserved_credits_total,
+            settled_credits=actual_credits,
+            refunded_credits=refunded_credits,
+            extra_charged_credits=extra_charged_credits,
+            debt_applied_credits=debt_applied_credits,
+            reason=reason,
+            breakdown=breakdown,
+            billing_segments=list(billing_segments or []),
+            missing_usage_billing=False,
+        )
+        self._record_ai_settlement_result(
+            chat_scope_id=chat_scope_id,
+            settlement_metadata=settlement_metadata,
+        )
 
     def refund_reserved_ai_credits(
         self,

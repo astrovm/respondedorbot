@@ -5092,6 +5092,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "topup_command": _noop_command,
             "balance_command": _noop_command,
             "printcredits_command": _noop_param_command,
+            "creditlog_command": _noop_param_command,
             "transfer_command": _noop_param_command,
         }
     )
@@ -5438,6 +5439,7 @@ def _execute_groq_request_with_fallback(
             )
             continue
 
+        request_started_at = time.monotonic()
         result = cast(
             Optional[GroqUsageResult],
             _invoke_provider(
@@ -5448,6 +5450,9 @@ def _execute_groq_request_with_fallback(
                 backoff_key=_get_groq_backoff_key(account, scope),
             ),
         )
+        request_elapsed_seconds = max(0.0, time.monotonic() - request_started_at)
+        if result is not None:
+            result.metadata.setdefault("request_elapsed_seconds", request_elapsed_seconds)
         _reconcile_groq_rate_limit(
             reservation,
             actual_request_count=1 if result else 0,

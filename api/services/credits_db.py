@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from os import environ
 from threading import Lock
-from typing import Any, Dict, Iterator, Literal, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import json
 
@@ -713,6 +713,99 @@ def mint_user_credits(user_id: int, amount: int, actor_user_id: Optional[int] = 
         conn.commit()
 
     return {"user_balance": int(user_balance)}
+
+
+def record_ai_settlement_result(
+    user_id: int,
+    chat_id: Optional[int],
+    *,
+    actor_user_id: Optional[int] = None,
+    event_type: str = "ai_settlement_result",
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Persist a non-monetary AI settlement audit event."""
+
+    ensure_schema()
+    actor_id = int(actor_user_id) if actor_user_id is not None else int(user_id)
+    metadata_dict = dict(metadata or {})
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    str(event_type or "ai_settlement_result"),
+                    actor_id,
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    0,
+                    json.dumps(metadata_dict),
+                ),
+            )
+        conn.commit()
+
+
+def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
+    """Return recent AI settlement audit events ordered newest first."""
+
+    ensure_schema()
+    normalized_limit = max(1, min(int(limit or 10), 50))
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata,
+                    created_at
+                FROM credit_ledger
+                WHERE event_type = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                ("ai_settlement_result", normalized_limit),
+            )
+            rows = cur.fetchall() or []
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        metadata = row[6]
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        elif not isinstance(metadata, Mapping):
+            metadata = {}
+        results.append(
+            {
+                "id": int(row[0]),
+                "event_type": str(row[1]),
+                "actor_user_id": int(row[2]) if row[2] is not None else None,
+                "user_id": int(row[3]) if row[3] is not None else None,
+                "chat_id": int(row[4]) if row[4] is not None else None,
+                "amount": int(row[5]),
+                "metadata": dict(metadata),
+                "created_at": row[7],
+            }
+        )
+    return results
 
 def record_star_payment(
     telegram_payment_charge_id: str,
