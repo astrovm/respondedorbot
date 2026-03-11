@@ -445,7 +445,8 @@ def _disable_tools_in_system_message(system_message: Dict[str, Any]) -> Dict[str
             f"{text}\n\n"
             "SEGUIMIENTO DE HERRAMIENTA:\n"
             "Ya tenés la información necesaria para esta respuesta. "
-            "No llames herramientas ni escribas líneas [TOOL]; respondé directo al usuario."
+            "No llames herramientas ni escribas líneas de llamada a herramientas; "
+            "respondé directo al usuario."
         ).strip()
         cleaned_block = dict(block)
         cleaned_block["text"] = text
