@@ -155,6 +155,7 @@ TTL_DOLLAR = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
 TTL_WEB_SEARCH = 300  # 5 minutes
 TTL_WEB_FETCH = 300  # 5 minutes
+TTL_GROQ_COMPOUND_CACHE = 300  # 5 minutes
 TTL_POLYMARKET = 5  # 5 seconds
 TTL_POLYMARKET_STREAM = 5  # 5 seconds for live price lookups
 WEB_FETCH_MAX_BYTES = 250_000
@@ -574,6 +575,117 @@ def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
     serialized = json.dumps(payload, sort_keys=True, default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
+
+
+def _build_groq_compound_cache_key(
+    *,
+    model: str,
+    system_msg: Optional[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
+    enabled_tools: Sequence[str],
+    default_headers: Optional[Mapping[str, str]],
+) -> str:
+    return _hash_cache_key(
+        "groq_compound",
+        {
+            "model": model,
+            "system_msg": system_msg,
+            "messages": list(messages),
+            "enabled_tools": list(enabled_tools),
+            "default_headers": dict(default_headers or {}),
+        },
+    )
+
+
+def _deserialize_cached_groq_usage_result(payload: Any) -> Optional[GroqUsageResult]:
+    payload_map = ensure_mapping(payload)
+    if not payload_map:
+        return None
+
+    text = str(payload_map.get("text") or "")
+    if not text:
+        return None
+
+    metadata = ensure_mapping(payload_map.get("metadata")) or {}
+    metadata["compound_cache_hit"] = True
+
+    audio_seconds_raw = payload_map.get("audio_seconds")
+    try:
+        audio_seconds = (
+            None if audio_seconds_raw is None else float(audio_seconds_raw)
+        )
+    except (TypeError, ValueError):
+        audio_seconds = None
+
+    return GroqUsageResult(
+        kind=str(payload_map.get("kind") or "compound"),
+        text=text,
+        model=str(payload_map.get("model") or GROQ_COMPOUND_DEFAULT_MODEL),
+        usage=ensure_mapping(payload_map.get("usage")),
+        usage_breakdown=ensure_mapping_list(payload_map.get("usage_breakdown")),
+        executed_tools=ensure_mapping_list(payload_map.get("executed_tools")),
+        audio_seconds=audio_seconds,
+        cached=True,
+        source="cache",
+        metadata=metadata,
+    )
+
+
+def _get_cached_groq_compound_result(
+    *,
+    model: str,
+    system_msg: Optional[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
+    enabled_tools: Sequence[str],
+    default_headers: Optional[Mapping[str, str]],
+) -> Optional[GroqUsageResult]:
+    redis_client = _optional_redis_client()
+    if redis_client is None:
+        return None
+
+    cache_key = _build_groq_compound_cache_key(
+        model=model,
+        system_msg=system_msg,
+        messages=messages,
+        enabled_tools=enabled_tools,
+        default_headers=default_headers,
+    )
+    cached_payload = redis_get_json(redis_client, cache_key)
+    result = _deserialize_cached_groq_usage_result(cached_payload)
+    if result is not None:
+        print(f"_get_groq_compound_response_result: cache hit key='{cache_key[:48]}'")
+    return result
+
+
+def _cache_groq_compound_result(
+    *,
+    model: str,
+    system_msg: Optional[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
+    enabled_tools: Sequence[str],
+    default_headers: Optional[Mapping[str, str]],
+    result: GroqUsageResult,
+) -> None:
+    if not result.text:
+        return
+
+    redis_client = _optional_redis_client()
+    if redis_client is None:
+        return
+
+    cache_key = _build_groq_compound_cache_key(
+        model=model,
+        system_msg=system_msg,
+        messages=messages,
+        enabled_tools=enabled_tools,
+        default_headers=default_headers,
+    )
+    redis_setex_json(
+        redis_client,
+        cache_key,
+        TTL_GROQ_COMPOUND_CACHE,
+        result.billing_segment(),
+    )
 
 
 _T = TypeVar("_T")
@@ -4633,9 +4745,29 @@ def _get_groq_compound_response_result(
 
     model = GROQ_COMPOUND_DEFAULT_MODEL
     enabled_tools = get_groq_compound_enabled_tools()
+    default_headers = {"Groq-Model-Version": "latest"}
     estimated_token_count = estimate_message_tokens(messages) + CHAT_OUTPUT_TOKEN_LIMIT
     if system_msg:
         estimated_token_count += estimate_message_tokens([system_msg])
+
+    cached_result = _get_cached_groq_compound_result(
+        model=model,
+        system_msg=system_msg,
+        messages=messages,
+        enabled_tools=enabled_tools,
+        default_headers=default_headers,
+    )
+    if cached_result is not None:
+        _log_groq_request_result(
+            label="Groq Compound",
+            scope="compound",
+            account="cache",
+            token_count=estimated_token_count,
+            audio_seconds=0.0,
+            default_headers=default_headers,
+            result=cached_result,
+        )
+        return cached_result
 
     def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
         print(f"Trying Groq Compound tools with account={account}...")
@@ -4672,13 +4804,23 @@ def _get_groq_compound_response_result(
                 )
         return None
 
-    return _execute_groq_request_with_fallback(
+    result = _execute_groq_request_with_fallback(
         attempt=_attempt,
         scope="compound",
         label="Groq Compound",
         token_count=estimated_token_count,
-        default_headers={"Groq-Model-Version": "latest"},
+        default_headers=default_headers,
     )
+    if result is not None:
+        _cache_groq_compound_result(
+            model=model,
+            system_msg=system_msg,
+            messages=messages,
+            enabled_tools=enabled_tools,
+            default_headers=default_headers,
+            result=result,
+        )
+    return result
 
 
 def get_groq_compound_response(
