@@ -42,33 +42,6 @@ def test_convert_to_command():
     assert convert_to_command(msg_text8) == expected8
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Cuándo sale la nueva temporada?",
-        "fecha de estreno de la peli",
-        "Últimas noticias de economía",
-        "ultima novedad hoy",
-        "sale en 2024 o 2025?",
-    ],
-)
-def test_should_force_web_search_matches_date_and_news_queries(text):
-    assert should_force_web_search(text) is True
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",
-        "hola, cómo estás?",
-        "explicame que es la inflación",
-        "necesito ayuda con python",
-    ],
-)
-def test_should_force_web_search_skips_regular_queries(text):
-    assert should_force_web_search(text) is False
-
-
 def test_should_use_groq_compound_tools_truthy(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
     assert should_use_groq_compound_tools() is True

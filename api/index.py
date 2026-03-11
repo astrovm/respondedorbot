@@ -191,20 +191,7 @@ POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
 
-FORCE_WEB_SEARCH_PATTERNS = [
-    r"\bcuando\s+sale\b",
-    r"\bfecha\b",
-    r"\bestreno\b",
-    r"\blanzamiento\b",
-    r"\bultima(s)?\b",
-    r"\bultimo(s)?\b",
-    r"\bnoticia(s)?\b",
-    r"\bnovedad(es)?\b",
-    r"\bhoy\b",
-    r"\b20(24|25|26)\b",
-]
-
-FORCE_WEB_SEARCH_PREVIOUS_PATTERNS = [
+SEARCH_PREVIOUS_QUERY_PATTERNS = [
     r"\bbuscalo\b",
     r"\bbusca\s+eso\b",
     r"\bbusca\s+esto\b",
@@ -246,17 +233,6 @@ def normalize_text_for_matching(text: str) -> str:
     return normalized
 
 
-def should_force_web_search(text: str) -> bool:
-    """Return True when queries look like date/release/latest-news requests."""
-
-    if not text:
-        return False
-
-    normalized = normalize_text_for_matching(text)
-
-    return any(re.search(pattern, normalized) for pattern in FORCE_WEB_SEARCH_PATTERNS)
-
-
 def should_search_previous_query(text: str) -> bool:
     """Return True when the user asks to search the previous topic."""
 
@@ -266,7 +242,7 @@ def should_search_previous_query(text: str) -> bool:
     normalized = normalize_text_for_matching(text)
     return any(
         re.search(pattern, normalized)
-        for pattern in FORCE_WEB_SEARCH_PREVIOUS_PATTERNS
+        for pattern in SEARCH_PREVIOUS_QUERY_PATTERNS
     )
 
 
@@ -386,7 +362,7 @@ def _query_needs_current_info(text: Optional[str]) -> bool:
     return any(re.search(pattern, normalized) for pattern in CURRENT_INFO_QUERY_PATTERNS)
 
 
-def _normalize_web_search_query(
+def _normalize_search_query(
     query: str,
     messages: Sequence[Mapping[str, Any]],
     *,
@@ -413,7 +389,7 @@ def _normalize_web_search_query(
         rewritten_query = YEAR_TOKEN_PATTERN.sub(str(current_year), normalized_query)
         if rewritten_query != normalized_query:
             print(
-                "_normalize_web_search_query: replaced stale year "
+                "_normalize_search_query: replaced stale year "
                 f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
             )
         return rewritten_query
@@ -421,7 +397,7 @@ def _normalize_web_search_query(
     if not query_years and needs_current_info:
         rewritten_query = f"{normalized_query} {current_year}"
         print(
-            "_normalize_web_search_query: appended current year "
+            "_normalize_search_query: appended current year "
             f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
         )
         return rewritten_query
@@ -473,7 +449,7 @@ def _disable_tools_in_system_message(system_message: Dict[str, Any]) -> Dict[str
     }
 
 
-def _run_forced_web_search(
+def _run_compound_web_search(
     *,
     query: str,
     messages: List[Dict[str, Any]],
@@ -482,11 +458,11 @@ def _run_forced_web_search(
     response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not compound_system_message:
-        print("_run_forced_web_search: compound unavailable (no system message)")
+        print("_run_compound_web_search: compound unavailable (no system message)")
         return "la búsqueda web no está disponible en este momento"
 
-    normalized_query = _normalize_web_search_query(query, messages)
-    print(f"_run_forced_web_search: starting query='{normalized_query[:120]}'")
+    normalized_query = _normalize_search_query(query, messages)
+    print(f"_run_compound_web_search: starting query='{normalized_query[:120]}'")
     compound_messages = [{"role": "user", "content": normalized_query}]
     source_text: Optional[str] = None
 
@@ -503,15 +479,15 @@ def _run_forced_web_search(
             source_text = compound_result.text
 
     if not source_text:
-        print("_run_forced_web_search: compound returned empty response")
+        print("_run_compound_web_search: compound returned empty response")
         return "no pude completar la búsqueda web ahora"
 
     print(
-        "_run_forced_web_search: compound source "
+        "_run_compound_web_search: compound source "
         f"query='{normalized_query[:120]}' source_len={len(source_text)}"
     )
     print(
-        "_run_forced_web_search: compound source text >>>\n"
+        "_run_compound_web_search: compound source text >>>\n"
         f"{_format_text_for_log(source_text)}\n"
         "<<< compound source text"
     )
@@ -538,13 +514,13 @@ def _run_forced_web_search(
 
     if final_response:
         print(
-            "_run_forced_web_search: persona pass succeeded "
+            "_run_compound_web_search: persona pass succeeded "
             f"query='{normalized_query[:120]}' final_len={len(final_response)}"
         )
         return final_response
 
     print(
-        "_run_forced_web_search: persona pass returned empty; returning raw compound output "
+        "_run_compound_web_search: persona pass returned empty; returning raw compound output "
         f"for query='{normalized_query[:120]}' source_len={len(source_text)}"
     )
 
@@ -3278,7 +3254,7 @@ def resolve_tool_calls(
             return "query vacío"
         if not should_use_groq_compound_tools():
             return "la búsqueda web no está disponible en este momento"
-        return _run_forced_web_search(
+        return _run_compound_web_search(
             query=query,
             messages=messages,
             system_message=system_message,
@@ -3480,18 +3456,8 @@ def ask_ai(
             if not previous_message:
                 return "Decime qué querés buscar o usá /buscar <tema>."
             print("ask_ai: previous query web_search triggered")
-            return _run_forced_web_search(
+            return _run_compound_web_search(
                 query=previous_message,
-                messages=messages,
-                system_message=system_message,
-                compound_system_message=compound_system_message,
-                response_meta=response_meta,
-            )
-
-        if should_force_web_search(latest_user_message):
-            print("ask_ai: forced web_search heuristic triggered")
-            return _run_forced_web_search(
-                query=latest_user_message,
                 messages=messages,
                 system_message=system_message,
                 compound_system_message=compound_system_message,
@@ -4610,25 +4576,6 @@ def estimate_ai_base_reserve_credits(
                 "rate_limit_scope": "compound",
                 "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
             }
-
-    if compound_system_message and should_force_web_search(latest_user_message):
-        estimated_rate_limit_tokens = estimate_message_tokens(messages)
-        if compound_system_message:
-            estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
-        estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
-        enabled_tools = get_groq_compound_enabled_tools()
-        reserve = estimate_compound_reserve_credits(
-            system_message=compound_system_message,
-            messages=[{"role": "user", "content": latest_user_message}],
-            enabled_tools=enabled_tools,
-        )
-        return reserve, {
-            "reserve_mode": "compound",
-            "reserve_reason": "forced_web_search",
-            "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
-            "rate_limit_scope": "compound",
-            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
-        }
 
     estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
