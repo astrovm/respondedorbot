@@ -1159,6 +1159,85 @@ def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
     ]
 
 
+def test_get_groq_compound_response_result_uses_cache(monkeypatch):
+    from api.index import _get_groq_compound_response_result
+
+    cached_segment = {
+        "kind": "compound",
+        "text": "respuesta cacheada",
+        "model": "groq/compound",
+        "usage": None,
+        "usage_breakdown": [
+            {
+                "model": "openai/gpt-oss-120b",
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+            }
+        ],
+        "executed_tools": [{"type": "search", "count": 1}],
+        "audio_seconds": None,
+        "cached": False,
+        "source": "groq",
+        "metadata": {"groq_account": "free"},
+    }
+
+    monkeypatch.setattr("api.index._optional_redis_client", lambda **kwargs: object())
+    monkeypatch.setattr("api.index.redis_get_json", lambda client, key: cached_segment)
+
+    with patch("api.index._execute_groq_request_with_fallback") as mock_execute:
+        result = _get_groq_compound_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is not None
+    assert result.text == "respuesta cacheada"
+    assert result.cached is True
+    assert result.source == "cache"
+    assert result.metadata["compound_cache_hit"] is True
+    mock_execute.assert_not_called()
+
+
+def test_get_groq_compound_response_result_caches_successful_response(monkeypatch):
+    from api.index import (
+        GroqUsageResult,
+        TTL_GROQ_COMPOUND_CACHE,
+        _get_groq_compound_response_result,
+    )
+
+    monkeypatch.setattr("api.index._optional_redis_client", lambda **kwargs: object())
+    monkeypatch.setattr("api.index.redis_get_json", lambda client, key: None)
+
+    stored = {}
+
+    def _fake_setex_json(client, key, ttl, value):
+        stored["key"] = key
+        stored["ttl"] = ttl
+        stored["value"] = value
+        return True
+
+    monkeypatch.setattr("api.index.redis_setex_json", _fake_setex_json)
+
+    with patch("api.index._execute_groq_request_with_fallback") as mock_execute:
+        mock_execute.return_value = GroqUsageResult(
+            kind="compound",
+            text="compound ok",
+            model="groq/compound",
+            usage=None,
+            usage_breakdown=[],
+            executed_tools=[],
+            metadata={"groq_account": "paid"},
+        )
+        result = _get_groq_compound_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is not None
+    assert stored["ttl"] == TTL_GROQ_COMPOUND_CACHE
+    assert stored["value"]["text"] == "compound ok"
+    assert stored["value"]["source"] == "groq"
+
+
 def test_run_forced_web_search_uses_compound_as_source_for_main_model():
     from api.index import _run_forced_web_search
 

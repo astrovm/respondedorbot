@@ -118,6 +118,34 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
     ]
 
 
+def test_calculate_billing_for_segments_skips_cached_source_segments():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "compound",
+                "source": "cache",
+                "model": "groq/compound",
+                "usage_breakdown": {
+                    "models": [
+                        {
+                            "model": "openai/gpt-oss-120b",
+                            "input_tokens": 10_000,
+                            "output_tokens": 500,
+                        }
+                    ]
+                },
+                "executed_tools": [{"type": "search", "mode": "basic", "count": 1}],
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 0
+    assert breakdown["charged_credits"] == 0
+    assert breakdown["model_breakdown"] == []
+    assert breakdown["tool_breakdown"] == []
+    assert breakdown["unsupported_notes"] == []
+
+
 def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_and_tools():
     breakdown = calculate_billing_for_segments(
         [

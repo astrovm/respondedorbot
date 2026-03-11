@@ -438,6 +438,8 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
 
     for raw_segment in segments:
         segment = dict(raw_segment or {})
+        if str(segment.get("source") or "").strip().lower() == "cache":
+            continue
         kind = str(segment.get("kind") or "")
         model = str(segment.get("model") or "")
         usage = ensure_mapping(segment.get("usage")) or {}
