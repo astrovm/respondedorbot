@@ -1,13 +1,5 @@
 from tests.support import *  # noqa: F401,F403
 
-def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
-    assert get_groq_compound_enabled_tools() == [
-        "web_search",
-        "code_interpreter",
-        "visit_website",
-        "browser_automation",
-    ]
-
 
 def test_build_ai_messages():
     from api.index import build_ai_messages
@@ -84,16 +76,12 @@ def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkey
     monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr("api.index.should_use_groq_compound_tools", lambda: True)
-    monkeypatch.setattr(
-        "api.index.get_groq_compound_enabled_tools",
-        lambda: ["web_search", "visit_website", "code_interpreter", "browser_automation"],
-    )
 
     reserve, metadata = estimate_ai_base_reserve_credits(
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 3
+    assert reserve == 1
     assert metadata["reserve_mode"] == "compound"
     assert metadata["reserve_reason"] == "forced_web_search"
     assert metadata["reserve_model"] == "groq/compound"
@@ -957,7 +945,7 @@ def test_get_groq_compound_response_falls_back_to_paid_after_free_429(monkeypatc
     assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
 
 
-def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
+def test_get_groq_compound_response_omits_compound_custom(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
 
     fake_choice = MagicMock()
@@ -979,12 +967,7 @@ def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
     assert result == "ok"
     call_kwargs = fake_client.chat.completions.create.call_args.kwargs
     assert call_kwargs["model"] == "groq/compound"
-    assert call_kwargs["extra_body"]["compound_custom"]["tools"]["enabled_tools"] == [
-        "web_search",
-        "code_interpreter",
-        "visit_website",
-        "browser_automation",
-    ]
+    assert "extra_body" not in call_kwargs
 
 
 def test_run_forced_web_search_uses_compound_as_source_for_main_model():
