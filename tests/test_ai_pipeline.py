@@ -259,9 +259,9 @@ def test_execute_groq_request_with_fallback_aborts_for_paid_retry_when_time_is_l
             "api.index.is_provider_backoff_active",
             return_value=False,
         ), patch(
-            "api.index._get_webhook_retry_safety_margin_seconds", return_value=5.0
+            "api.webhook_state._get_webhook_retry_safety_margin_seconds", return_value=5.0
         ), patch(
-            "api.index._get_webhook_max_runtime_seconds", return_value=60.0
+            "api.webhook_state._get_webhook_max_runtime_seconds", return_value=60.0
         ):
             with pytest.raises(ForceWebhookRetry):
                 _execute_groq_request_with_fallback(
@@ -385,9 +385,9 @@ def test_execute_groq_request_with_fallback_marks_paid_preference_when_escalatin
             "api.index.is_provider_backoff_active",
             return_value=False,
         ), patch(
-            "api.index._get_webhook_retry_safety_margin_seconds", return_value=5.0
+            "api.webhook_state._get_webhook_retry_safety_margin_seconds", return_value=5.0
         ), patch(
-            "api.index._get_webhook_max_runtime_seconds", return_value=60.0
+            "api.webhook_state._get_webhook_max_runtime_seconds", return_value=60.0
         ):
             result = _execute_groq_request_with_fallback(
                 scope="compound",
