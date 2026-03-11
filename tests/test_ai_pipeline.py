@@ -76,6 +76,78 @@ def test_extract_groq_executed_tools_reads_choice_message():
     ]
 
 
+def test_log_groq_request_result_logs_local_billing_details():
+    from api.index import GroqUsageResult, _log_groq_request_result
+
+    result = GroqUsageResult(
+        kind="compound",
+        text="respuesta",
+        model="groq/compound",
+        usage=None,
+        usage_breakdown=[
+            {
+                "model": "openai/gpt-oss-120b",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            }
+        ],
+        executed_tools=[
+            {"type": "search", "mode": "basic", "count": 2},
+            {"type": "visit", "count": 1},
+        ],
+        metadata={"groq_account": "primary"},
+    )
+
+    with patch("builtins.print") as mock_print:
+        _log_groq_request_result(
+            label="Groq Compound",
+            scope="compound",
+            account="primary",
+            token_count=321,
+            audio_seconds=0.0,
+            default_headers={"Groq-Model-Version": "latest"},
+            result=result,
+        )
+
+    assert mock_print.call_count == 1
+    log_entry = json.loads(mock_print.call_args.args[0])
+    assert log_entry["scope"] == "groq_request"
+    assert log_entry["status"] == "success"
+    assert log_entry["request_scope"] == "compound"
+    assert log_entry["default_headers"]["Groq-Model-Version"] == "latest"
+    assert log_entry["usage_breakdown"][0]["model"] == "openai/gpt-oss-120b"
+    assert log_entry["executed_tools"][0]["type"] == "search"
+    assert log_entry["local_billing"]["raw_usd_micros"] == 11_045
+    assert log_entry["local_billing"]["charged_credits"] == 3
+
+
+def test_log_groq_request_result_logs_empty_requests():
+    from api.index import _log_groq_request_result
+
+    with patch("builtins.print") as mock_print:
+        _log_groq_request_result(
+            label="Groq Compound",
+            scope="compound",
+            account="primary",
+            token_count=123,
+            audio_seconds=0.0,
+            default_headers={"Groq-Model-Version": "latest"},
+            result=None,
+        )
+
+    assert mock_print.call_count == 1
+    log_entry = json.loads(mock_print.call_args.args[0])
+    assert log_entry == {
+        "scope": "groq_request",
+        "label": "Groq Compound",
+        "request_scope": "compound",
+        "account": "primary",
+        "estimated_token_count": 123,
+        "estimated_audio_seconds": 0.0,
+        "default_headers": {"Groq-Model-Version": "latest"},
+        "status": "empty",
+    }
+
+
 def test_estimate_ai_base_reserve_credits_uses_compound_for_forced_search(monkeypatch):
     from api.index import estimate_ai_base_reserve_credits
 
