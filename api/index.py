@@ -85,7 +85,6 @@ from api.ai_billing import (
     format_balance_command as _billing_format_balance_command,
     get_ai_billing_pack as _billing_get_ai_billing_pack,
     get_ai_billing_packs as _billing_get_ai_billing_packs,
-    get_ai_credits_per_response as _billing_get_ai_credits_per_response,
     get_ai_onboarding_credits as _billing_get_ai_onboarding_credits,
     maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
     parse_topup_payload as _billing_parse_topup_payload,
@@ -5340,10 +5339,6 @@ def check_global_rate_limit(
     return False
 
 
-def get_ai_credits_per_response() -> int:
-    return _billing_get_ai_credits_per_response()
-
-
 def get_ai_onboarding_credits() -> int:
     return _billing_get_ai_onboarding_credits()
 
@@ -6635,7 +6630,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         ask_ai=ask_ai,
         gen_random=gen_random,
         build_insufficient_credits_message=build_insufficient_credits_message,
-        get_ai_credits_per_response=get_ai_credits_per_response,
         build_topup_keyboard=build_topup_keyboard,
         credits_db_service=credits_db_service,
         is_group_chat_type=_is_group_chat_type,
