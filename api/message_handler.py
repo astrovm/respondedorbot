@@ -47,7 +47,6 @@ class MessageHandlerDeps:
     ask_ai: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
-    get_ai_credits_per_response: Callable[[], int]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
     credits_db_service: Any
     is_group_chat_type: Callable[[Optional[str]], bool]
@@ -206,7 +205,6 @@ def _build_billing_helper(
             deps.admin_report,
             target_user_id,
         ),
-        get_ai_credits_per_response_fn=deps.get_ai_credits_per_response,
         command=command,
         chat_id=chat_id,
         chat_type=chat_type,

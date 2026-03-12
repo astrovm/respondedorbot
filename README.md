@@ -66,7 +66,6 @@ WEBHOOK_IDEMPOTENCY_TTL_SECONDS=180
 WEBHOOK_FORCE_PAID_RETRY_TTL_SECONDS=300
 
 # AI Credits Billing (always enabled; defaults shown)
-AI_CREDITS_PER_RESPONSE=1.0
 AI_ONBOARDING_CREDITS=3.0
 AI_STARS_PACKS_JSON='[{"id":"p50","credits":50.0,"xtr":25},{"id":"p100","credits":100.0,"xtr":50},{"id":"p250","credits":250.0,"xtr":125},{"id":"p500","credits":500.0,"xtr":250},{"id":"p1000","credits":1000.0,"xtr":500},{"id":"p2500","credits":2500.0,"xtr":1250}]'
 
@@ -88,7 +87,6 @@ Use `.env.example` for the full list, including billing defaults.
 ## Billing
 
 - AI replies are billed with credits.
-- Default reserve is controlled by `AI_CREDITS_PER_RESPONSE`.
 - Actual settlement uses model/tool usage data when available.
 - Internal fallback responses are refunded.
 - In groups, spending priority is personal balance first, then group balance.
