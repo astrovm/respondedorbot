@@ -4,7 +4,6 @@ from api.ai_billing import (
     AIMessageBilling,
     build_insufficient_credits_message,
     get_ai_billing_packs,
-    get_ai_credits_per_response,
     parse_topup_payload,
 )
 from api.credit_units import whole_credits_to_units
@@ -29,11 +28,6 @@ def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("topup:p250") == ("p250", None)
     assert parse_topup_payload("other") == (None, None)
 
-
-def test_get_ai_credits_per_response_accepts_one_decimal(monkeypatch):
-    monkeypatch.setenv("AI_CREDITS_PER_RESPONSE", "1.5")
-
-    assert get_ai_credits_per_response() == 15
 
 
 def test_get_ai_billing_packs_accept_decimal_credits(monkeypatch):
@@ -62,7 +56,6 @@ def test_ai_message_billing_transcribe_success_response_prefixes():
         gen_random_fn=lambda _: "random",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/transcribe",
         chat_id="1",
         chat_type="private",
@@ -369,7 +362,6 @@ def _build_billing_helper() -> AIMessageBilling:
         gen_random_fn=lambda _: "random",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/ask",
         chat_id="1",
         chat_type="private",
@@ -453,7 +445,6 @@ def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():
         gen_random_fn=lambda _: "random",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/ask",
         chat_id="1",
         chat_type="private",
@@ -482,7 +473,6 @@ def test_build_insufficient_credits_reply_uses_username_when_first_name_is_missi
         gen_random_fn=lambda name: f"random:{name}",
         build_insufficient_credits_message_fn=build_insufficient_credits_message,
         maybe_grant_onboarding_credits_fn=lambda _user_id: None,
-        get_ai_credits_per_response_fn=lambda: whole_credits_to_units(1),
         command="/ask",
         chat_id="1",
         chat_type="private",

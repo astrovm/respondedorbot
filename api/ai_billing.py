@@ -33,16 +33,6 @@ AI_BILLING_DEFAULT_PACKS = [
     {"id": "p2500", "credits": whole_credits_to_units(2500), "xtr": 1250},
 ]
 
-def get_ai_credits_per_response() -> int:
-    """Return credit units charged per AI response."""
-
-    raw_value = str(environ.get("AI_CREDITS_PER_RESPONSE") or "1").strip()
-    parsed = parse_credit_units(raw_value)
-    if parsed is None:
-        return whole_credits_to_units(1)
-    return max(1, parsed)
-
-
 def get_ai_onboarding_credits() -> int:
     """Return onboarding credit units granted once per user."""
 
@@ -213,7 +203,6 @@ class AIMessageBilling:
     gen_random_fn: Callable[[str], str]
     build_insufficient_credits_message_fn: Callable[..., str]
     maybe_grant_onboarding_credits_fn: Callable[[Optional[int]], None]
-    get_ai_credits_per_response_fn: Callable[[], int]
     command: str
     chat_id: str
     chat_type: str
@@ -910,22 +899,6 @@ class AIMessageBilling:
 
         self.clear_persisted_reservation_fn(usage_tag)
 
-    def charge_one_ai_request(
-        self, usage_tag: str
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        """Charge one AI request, returning charge metadata or a user-facing error."""
-
-        chat_scope_id, context_error = self._resolve_ai_charge_context()
-        if context_error:
-            return None, context_error
-        if self.user_id is None:
-            return None, self.billing_missing_scope_message
-
-        return self.reserve_ai_credits(
-            usage_tag,
-            self.get_ai_credits_per_response_fn(),
-        )
-
     def refund_ai_charge_meta(
         self,
         charge_meta: Optional[Mapping[str, Any]],
@@ -972,7 +945,6 @@ __all__ = [
     "format_balance_command",
     "get_ai_billing_pack",
     "get_ai_billing_packs",
-    "get_ai_credits_per_response",
     "get_ai_onboarding_credits",
     "maybe_grant_onboarding_credits",
     "parse_topup_payload",
