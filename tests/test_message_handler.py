@@ -1518,15 +1518,37 @@ def test_handle_msg_image_conversation_settles_in_single_batch():
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_search_command_does_not_charge():
+def test_handle_msg_search_command_uses_ai_billing():
     from api.index import handle_msg
+
+    def fake_handle_ai_response(*args, **kwargs):
+        response_meta = kwargs.get("response_meta")
+        if isinstance(response_meta, dict):
+            response_meta["billing_segments"] = [
+                {
+                    "kind": "compound",
+                    "model": "groq/compound",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ]
+        return "resultado compound"
 
     with patch("api.index.config_redis") as mock_config_redis, patch(
         "api.index.send_msg"
     ) as mock_send_msg, patch(
         "api.index.credits_db_service.charge_ai_credits"
     ) as mock_charge, patch(
-        "api.index.search_command", return_value="resultado web"
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "btc news"}]
+    ), patch(
+        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1543,9 +1565,9 @@ def test_handle_msg_search_command_does_not_charge():
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_charge.assert_not_called()
+    mock_charge.assert_called_once()
     mock_send_msg.assert_called_once()
-    assert mock_send_msg.call_args[0][1] == "resultado web"
+    assert mock_send_msg.call_args[0][1] == "resultado compound"
 
 
 def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny():

@@ -53,34 +53,6 @@ def test_should_use_groq_compound_tools_truthy(monkeypatch):
     monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
     assert should_use_groq_compound_tools() is False
 
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "buscalo",
-        "BÚSCALO",
-        "busca eso",
-        "busca esto",
-        "che, buscalo porfa",
-    ],
-)
-def test_should_search_previous_query_detects_shortcuts(text):
-    assert should_search_previous_query(text) is True
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",
-        "busca mañana",
-        "buscar esto",
-        "necesito ayuda",
-    ],
-)
-def test_should_search_previous_query_ignores_other_text(text):
-    assert should_search_previous_query(text) is False
-
-
 def test_optional_redis_client_success():
     from api.index import _optional_redis_client
 
@@ -764,6 +736,8 @@ def test_initialize_commands():
 
     assert commands["/buscar"][0] == _search_command
     assert commands["/search"][0] == _search_command
+    assert commands["/buscar"][1] is True
+    assert commands["/search"][1] is True
 
 
 def test_price_alias_command_dispatches_to_get_prices():
