@@ -131,16 +131,21 @@ def should_gordo_respond(
     bot_username = environ.get("TELEGRAM_USERNAME")
     bot_name = f"@{bot_username}"
 
+    is_command = command in commands
     reply = message.get("reply_to_message") or {}
-    if isinstance(reply, Mapping) and reply.get("from", {}).get("username") == bot_username:
+    is_reply = isinstance(reply, Mapping) and reply.get("from", {}).get("username", "") == bot_username
+    ignore_link_fix_followups = bool(chat_config.get("ignore_link_fix_followups", True))
+    if (
+        not is_command
+        and is_reply
+        and ignore_link_fix_followups
+    ):
         reply_text = str(reply.get("text") or "")
         if any(domain in reply_text for domain in LINK_REPLACEMENT_DOMAINS):
             return False
 
-    is_command = command in commands
     is_private = chat_type == "private"
     is_mention = bot_name in message_lower
-    is_reply = isinstance(reply, Mapping) and reply.get("from", {}).get("username", "") == bot_username
 
     if (
         is_reply

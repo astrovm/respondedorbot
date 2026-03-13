@@ -16,9 +16,10 @@ ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 
 
 CHAT_CONFIG_DEFAULTS = {
-    "link_mode": "off",
+    "link_mode": "reply",
     "ai_random_replies": True,
     "ai_command_followups": True,
+    "ignore_link_fix_followups": True,
 }
 CHAT_ADMIN_STATUS_TTL = 300
 
@@ -178,9 +179,12 @@ def coerce_bool(value: Any, *, default: bool) -> bool:
 def build_config_text(config: Mapping[str, Any]) -> str:
     """Build the user-facing config summary text."""
 
-    link_mode = str(config.get("link_mode", "off"))
+    link_mode = str(config.get("link_mode", "reply"))
     random_enabled = coerce_bool(config.get("ai_random_replies"), default=True)
     followups_enabled = coerce_bool(config.get("ai_command_followups"), default=True)
+    ignore_link_fix_followups = coerce_bool(
+        config.get("ignore_link_fix_followups"), default=True
+    )
 
     link_labels = {
         "delete": "borra el mensaje original y repostea el link arreglado",
@@ -202,6 +206,10 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         "si está activado, me contestás después de un comando y sigo el hilo como si nada",
         f"{'✅ activado' if followups_enabled else '▫️ desactivado'}",
         "",
+        "4. ignorar replies a links arreglados",
+        "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares",
+        f"{'✅ activado' if ignore_link_fix_followups else '▫️ desactivado'}",
+        "",
         "tocá los botones de abajo y dejalo como se te cante",
     ]
     return "\n".join(lines)
@@ -210,9 +218,12 @@ def build_config_text(config: Mapping[str, Any]) -> str:
 def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     """Build the inline keyboard to toggle chat config values."""
 
-    link_mode = str(config.get("link_mode", "off"))
+    link_mode = str(config.get("link_mode", "reply"))
     random_enabled = coerce_bool(config.get("ai_random_replies"), default=True)
     followups_enabled = coerce_bool(config.get("ai_command_followups"), default=True)
+    ignore_link_fix_followups = coerce_bool(
+        config.get("ignore_link_fix_followups"), default=True
+    )
 
     def choice_button(label: str, value: str, current: str, *, action: str) -> Dict[str, str]:
         prefix = "✅" if current == value else "▫️"
@@ -235,6 +246,13 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
                     "seguir charla en comandos",
                     followups_enabled,
                     action="followups",
+                )
+            ],
+            [
+                toggle_button(
+                    "ignorar replies a links arreglados",
+                    ignore_link_fix_followups,
+                    action="linkfixfollowups",
                 )
             ],
         ]

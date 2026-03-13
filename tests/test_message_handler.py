@@ -1570,6 +1570,68 @@ def test_handle_msg_search_command_uses_ai_billing():
     assert mock_send_msg.call_args[0][1] == "resultado compound"
 
 
+def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch):
+    from api import config as config_module
+    from api.index import handle_msg
+
+    config_module.reset_cache()
+    chat_config = {
+        **CHAT_CONFIG_DEFAULTS,
+        "ai_command_followups": False,
+        "ignore_link_fix_followups": True,
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(chat_config)
+    redis_client.lrange.return_value = []
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "You are a test bot")
+    monkeypatch.setenv("BOT_TRIGGER_WORDS", "gordo,test,bot")
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.get_bot_message_metadata", return_value=None
+    ), patch("api.index.send_msg") as mock_send_msg, patch(
+        "api.index.credits_db_service.is_configured", return_value=True
+    ), patch(
+        "api.index.check_global_rate_limit", return_value=True
+    ), patch(
+        "api.index._maybe_grant_onboarding_credits"
+    ), patch(
+        "api.index.credits_db_service.charge_ai_credits",
+        return_value={"ok": True, "source": "user"},
+    ) as mock_charge, patch(
+        "api.index.get_chat_history", return_value=[]
+    ), patch(
+        "api.index.build_ai_messages",
+        return_value=[{"role": "user", "content": "investigá eso"}],
+    ), patch(
+        "api.index.handle_ai_response", return_value="respuesta ok"
+    ) as mock_handle_ai_response, patch(
+        "api.index.save_message_to_redis"
+    ), patch(
+        "api.index.save_bot_message_metadata"
+    ):
+        message = {
+            "message_id": 201,
+            "chat": {"id": 555, "type": "group"},
+            "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+            "text": "/ask investigá eso",
+            "reply_to_message": {
+                "message_id": 200,
+                "from": {"username": "testbot"},
+                "text": "https://fixupx.com/status/2032173338240467235",
+            },
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_charge.assert_called_once()
+    mock_handle_ai_response.assert_called_once()
+    mock_send_msg.assert_called_once()
+    assert mock_send_msg.call_args[0][1] == "respuesta ok"
+
+
 def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny():
     from api.index import handle_msg
 
