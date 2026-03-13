@@ -6394,6 +6394,13 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             chat_id_str,
             ai_command_followups=not current,
         )
+    elif action == "linkfixfollowups":
+        current = _coerce_bool(config.get("ignore_link_fix_followups"), default=True)
+        config = set_chat_config(
+            redis_client,
+            chat_id_str,
+            ignore_link_fix_followups=not current,
+        )
 
     text = build_config_text(config)
     keyboard = build_config_keyboard(config)

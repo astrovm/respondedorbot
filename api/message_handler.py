@@ -370,7 +370,7 @@ def _handle_link_replacement(
     chat_id: str,
     message_id: str,
 ) -> bool:
-    link_mode = str(chat_config.get("link_mode", "off"))
+    link_mode = str(chat_config.get("link_mode", "reply"))
     if link_mode == "off" or not message_text or message_text.startswith("/"):
         return False
 

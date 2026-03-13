@@ -154,6 +154,7 @@ def test_should_gordo_respond():
         "link_mode": "off",
         "ai_random_replies": True,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
 
     with patch("os.environ.get") as mock_env:
@@ -214,7 +215,7 @@ def test_should_gordo_respond():
             )
 
 
-def test_should_gordo_respond_ignores_link_fix_reply():
+def test_should_gordo_respond_ignores_link_fix_reply_when_toggle_enabled():
     import api.index
 
     config_module.reset_cache()
@@ -223,6 +224,7 @@ def test_should_gordo_respond_ignores_link_fix_reply():
         "link_mode": "off",
         "ai_random_replies": True,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
 
     with patch("os.environ.get") as mock_env:
@@ -248,9 +250,91 @@ def test_should_gordo_respond_ignores_link_fix_reply():
 
         assert (
             should_gordo_respond(
-                commands, "/test", "hello", msg, chat_config, None
+                commands, "", "hello", msg, chat_config, None
             )
             is False
+        )
+
+
+def test_should_gordo_respond_allows_link_fix_reply_when_toggle_disabled():
+    import api.index
+
+    config_module.reset_cache()
+    commands = {"/test": (lambda x: x, False, False)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+        "ignore_link_fix_followups": False,
+    }
+
+    with patch("os.environ.get") as mock_env:
+
+        def env_side_effect(key):
+            env_vars = {
+                "TELEGRAM_USERNAME": "testbot",
+                "BOT_SYSTEM_PROMPT": "You are a test bot",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
+            }
+            return env_vars.get(key)
+
+        mock_env.side_effect = env_side_effect
+
+        msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+            "reply_to_message": {
+                "from": {"username": "testbot"},
+                "text": "https://fixupx.com/foo",
+            },
+        }
+
+        assert (
+            should_gordo_respond(
+                commands, "", "investiga eso", msg, chat_config, None
+            )
+            is True
+        )
+
+
+def test_should_gordo_respond_allows_commands_on_link_fix_replies():
+    import api.index
+
+    config_module.reset_cache()
+    commands = {"/ask": (lambda x: x, True, True)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": False,
+        "ignore_link_fix_followups": True,
+    }
+
+    with patch("os.environ.get") as mock_env:
+
+        def env_side_effect(key):
+            env_vars = {
+                "TELEGRAM_USERNAME": "testbot",
+                "BOT_SYSTEM_PROMPT": "You are a test bot",
+                "BOT_TRIGGER_WORDS": "gordo,test,bot",
+            }
+            return env_vars.get(key)
+
+        mock_env.side_effect = env_side_effect
+
+        msg = {
+            "chat": {"type": "group"},
+            "from": {"username": "user"},
+            "reply_to_message": {
+                "from": {"username": "testbot"},
+                "text": "https://fxtwitter.com/foo",
+            },
+        }
+
+        assert (
+            should_gordo_respond(
+                commands, "/ask", "investiga eso", msg, chat_config, None
+            )
+            is True
         )
 
 
@@ -260,6 +344,7 @@ def test_should_gordo_respond_respects_random_toggle():
         "link_mode": "off",
         "ai_random_replies": False,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
     msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
 
@@ -282,6 +367,7 @@ def test_should_gordo_respond_blocks_followups_when_disabled():
         "link_mode": "off",
         "ai_random_replies": True,
         "ai_command_followups": False,
+        "ignore_link_fix_followups": True,
     }
     msg = {
         "chat": {"type": "group"},
@@ -842,6 +928,7 @@ def test_should_gordo_respond_complex_cases():
         "link_mode": "off",
         "ai_random_replies": True,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
 
     with patch("os.environ.get") as mock_env:
