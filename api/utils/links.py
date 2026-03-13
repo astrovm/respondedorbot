@@ -180,11 +180,28 @@ def can_embed_url(url: str) -> bool:
         host = host[4:]
     is_eeinstagram_host = host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
 
-    has_title = "og:title" in meta_tags
-    has_image = "og:image" in meta_tags
-    has_video = "og:video" in meta_tags
+    has_title = "og:title" in meta_tags or "twitter:title" in meta_tags
+    has_description = (
+        "og:description" in meta_tags or "twitter:description" in meta_tags
+    )
+    has_og_image = "og:image" in meta_tags
+    has_og_video = "og:video" in meta_tags
+    has_twitter_image = "twitter:image" in meta_tags
+    has_twitter_video = any(
+        key in meta_tags for key in ("twitter:player", "twitter:player:stream")
+    )
+    has_image = has_og_image or has_twitter_image
+    has_video = has_og_video or has_twitter_video
+    has_card = "twitter:card" in meta_tags
 
-    if (has_title or (is_eeinstagram_host and (has_image or has_video))) and (has_image or has_video):
+    has_preview_text = has_title or has_description
+    has_preview_media = has_image or has_video
+    has_eeinstagram_media = has_og_image or has_og_video
+
+    if (
+        (has_preview_text and (has_preview_media or has_card))
+        or (is_eeinstagram_host and has_eeinstagram_media)
+    ):
         detail = ", ".join(
             f"{key}={value[:80]}" for key, value in meta_tags.items()
         )
@@ -192,9 +209,15 @@ def can_embed_url(url: str) -> bool:
         return True
 
     missing_fields: List[str] = []
-    if not has_title and not (is_eeinstagram_host and (has_image or has_video)):
-        missing_fields.append("og:title")
-    if not (has_image or has_video):
+    if not has_preview_text and not (is_eeinstagram_host and has_eeinstagram_media):
+        missing_fields.append(
+            "og:title/twitter:title or og:description/twitter:description"
+        )
+    if not (has_preview_media or has_card) and not is_eeinstagram_host:
+        missing_fields.append(
+            "og:image/twitter:image or og:video/twitter:player or twitter:card"
+        )
+    if not has_eeinstagram_media and is_eeinstagram_host:
         missing_fields.append("og:image or og:video")
     missing_detail = ", ".join(missing_fields)
     print(f"[EMBED] {url} missing required metadata: {missing_detail}")

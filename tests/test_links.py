@@ -371,17 +371,17 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     assert result is False
     captured = capsys.readouterr().out
     assert "missing required metadata" in captured
-    assert "og:title" in captured
-    assert "og:image or og:video" in captured
+    assert "og:title/twitter:title or og:description/twitter:description" in captured
+    assert "og:image/twitter:image or og:video/twitter:player or twitter:card" in captured
 
 
-def test_can_embed_url_requires_image_with_title(monkeypatch):
+def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
     from api.index import can_embed_url
 
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
-    mock_response.text = "<meta property='og:site_name' content='site'>"
+    mock_response.text = "<meta property='og:title' content='Title'>"
     monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
 
     assert can_embed_url("http://example.com") is False
@@ -400,6 +400,22 @@ def test_can_embed_url_allows_title_and_image(monkeypatch):
     monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
 
     assert can_embed_url("http://example.com") is True
+
+
+def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
+    from api.index import can_embed_url
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = (
+        "<meta name='twitter:card' content='tweet'>"
+        "<meta name='twitter:title' content='Agustin Cortes (@agucortes)'>"
+        "<meta property='og:description' content='Texto del post'>"
+    )
+    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+
+    assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
 
 
 def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
