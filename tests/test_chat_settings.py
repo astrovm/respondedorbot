@@ -8,7 +8,7 @@ def test_decode_redis_value_variants():
 
 def test_get_chat_config_migrates_bytes_from_redis_when_postgres_misses():
     redis_client = MagicMock(spec=redis.Redis)
-    stored_config = {"link_mode": "reply"}
+    stored_config = {"link_mode": "off"}
     redis_client.get.return_value = json.dumps(stored_config).encode("utf-8")
 
     with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
@@ -16,13 +16,13 @@ def test_get_chat_config_migrates_bytes_from_redis_when_postgres_misses():
     ), patch("api.index.chat_config_db_service.set_chat_config") as mock_set:
         config = get_chat_config(redis_client, "chat-1")
 
-    assert config["link_mode"] == "reply"
+    assert config["link_mode"] == "off"
     mock_set.assert_called_once_with("chat-1", config)
 
 
 def test_get_chat_config_migrates_string_from_redis_when_postgres_misses():
     redis_client = MagicMock(spec=redis.Redis)
-    stored_config = {"link_mode": "reply"}
+    stored_config = {"link_mode": "off"}
     redis_client.get.return_value = json.dumps(stored_config)
 
     with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
@@ -30,7 +30,7 @@ def test_get_chat_config_migrates_string_from_redis_when_postgres_misses():
     ), patch("api.index.chat_config_db_service.set_chat_config") as mock_set:
         config = get_chat_config(redis_client, "chat-2")
 
-    assert config["link_mode"] == "reply"
+    assert config["link_mode"] == "off"
     mock_set.assert_called_once_with("chat-2", config)
 
 
@@ -69,7 +69,7 @@ def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
 
 def test_get_chat_config_migration_error_returns_redis_config_and_reports():
     redis_client = MagicMock(spec=redis.Redis)
-    redis_client.get.return_value = json.dumps({"link_mode": "reply"})
+    redis_client.get.return_value = json.dumps({"link_mode": "off"})
 
     with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
         "api.index.chat_config_db_service.get_chat_config", return_value=None
@@ -79,7 +79,7 @@ def test_get_chat_config_migration_error_returns_redis_config_and_reports():
     ), patch("api.index.admin_report") as mock_admin:
         config = get_chat_config(redis_client, "chat-6")
 
-    assert config["link_mode"] == "reply"
+    assert config["link_mode"] == "off"
     mock_admin.assert_called_once()
 
 

@@ -35,6 +35,7 @@ class MessageHandlerDeps:
     get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
     save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
     build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
+    build_message_links_context: Callable[[Mapping[str, Any]], str]
     should_gordo_respond: Callable[
         [Mapping[str, CommandTuple], str, str, Mapping[str, Any], Mapping[str, Any], Optional[Mapping[str, Any]]],
         bool,
@@ -369,6 +370,7 @@ def _handle_link_replacement(
     message_text: str,
     chat_id: str,
     message_id: str,
+    redis_client: Any,
 ) -> bool:
     link_mode = str(chat_config.get("link_mode", "reply"))
     if link_mode == "off" or not message_text or message_text.startswith("/"):
@@ -393,18 +395,37 @@ def _handle_link_replacement(
     if shared_by:
         fixed_text += f"\n\ncompartido por {shared_by}"
 
+    link_context = deps.build_message_links_context(message)
+    stored_bot_message = fixed_text
+    if link_context:
+        stored_bot_message = f"{stored_bot_message}\n\n{link_context}"
+
     reply_id = message.get("reply_to_message", {}).get("message_id")
     reply_id = str(reply_id) if reply_id is not None else None
 
     if link_mode == "delete":
         deps.delete_msg(chat_id, message_id)
         if reply_id:
-            deps.send_msg(chat_id, fixed_text, reply_id, original_links)
+            sent_message_id = deps.send_msg(chat_id, fixed_text, reply_id, original_links)
         else:
-            deps.send_msg(chat_id, fixed_text, buttons=original_links)
+            sent_message_id = deps.send_msg(chat_id, fixed_text, buttons=original_links)
+        if sent_message_id is not None:
+            deps.save_message_to_redis(
+                chat_id,
+                f"bot_{sent_message_id}",
+                stored_bot_message,
+                redis_client,
+            )
         return True
 
-    deps.send_msg(chat_id, fixed_text, reply_id or message_id, original_links)
+    sent_message_id = deps.send_msg(chat_id, fixed_text, reply_id or message_id, original_links)
+    if sent_message_id is not None:
+        deps.save_message_to_redis(
+            chat_id,
+            f"bot_{sent_message_id}",
+            stored_bot_message,
+            redis_client,
+        )
     return True
 
 
@@ -1362,6 +1383,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             message_text=prepared_message.message_text,
             chat_id=chat_id,
             message_id=message_id,
+            redis_client=redis_client,
         ):
             return "ok"
 
