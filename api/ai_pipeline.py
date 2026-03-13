@@ -145,8 +145,11 @@ def handle_ai_response(
                 response_meta=response_meta,
             )
         else:
-            if is_ask_ai_handler:
-                response = handler_func(messages, response_meta=response_meta)
+            if response_meta is not None:
+                try:
+                    response = handler_func(messages, response_meta=response_meta)
+                except TypeError:
+                    response = handler_func(messages)
             else:
                 response = handler_func(messages)
     finally:
