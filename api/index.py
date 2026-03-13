@@ -3883,8 +3883,9 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (compatible; RespondedorBot/1.0;"
-            " +https://github.com/gusgusf/RespondedorBot)"
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",

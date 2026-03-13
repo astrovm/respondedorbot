@@ -511,6 +511,7 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
 @patch("api.index.requests.get")
 def test_can_embed_url_allows_direct_media(mock_get):
     from api.index import can_embed_url
+    from api.utils.links import TELEGRAM_PREVIEW_USER_AGENT
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -522,7 +523,7 @@ def test_can_embed_url_allows_direct_media(mock_get):
     assert result is True
 
     _, kwargs = mock_get.call_args
-    assert kwargs["headers"]["User-Agent"] == "TelegramBot (like TwitterBot)"
+    assert kwargs["headers"]["User-Agent"] == TELEGRAM_PREVIEW_USER_AGENT
 
 
 def test_handle_msg_link_already_fixed():
