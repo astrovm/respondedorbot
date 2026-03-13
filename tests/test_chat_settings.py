@@ -40,6 +40,7 @@ def test_get_chat_config_uses_postgres_when_available():
         "link_mode": "reply",
         "ai_random_replies": False,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
 
     with patch("api.index.chat_config_db_service.is_configured", return_value=True), patch(
@@ -410,9 +411,10 @@ def test_get_chat_config_uses_defaults_when_missing():
     ):
         config = get_chat_config(redis_client, "123")
 
-    assert config["link_mode"] == "off"
+    assert config["link_mode"] == "reply"
     assert config["ai_random_replies"] is True
     assert config["ai_command_followups"] is True
+    assert config["ignore_link_fix_followups"] is True
 
 
 def test_build_config_text_and_keyboard_reflect_values():
@@ -420,6 +422,7 @@ def test_build_config_text_and_keyboard_reflect_values():
         "link_mode": "delete",
         "ai_random_replies": False,
         "ai_command_followups": False,
+        "ignore_link_fix_followups": True,
     }
 
     text = build_config_text(config)
@@ -428,6 +431,7 @@ def test_build_config_text_and_keyboard_reflect_values():
     assert "borra el mensaje original y repostea el link arreglado" in text
     assert "si está activado, a veces me meto solo en la charla aunque nadie me llame" in text
     assert "si está activado, me contestás después de un comando y sigo el hilo como si nada" in text
+    assert "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares" in text
     assert "▫️ desactivado" in text
     assert "tocá los botones de abajo y dejalo como se te cante" in text
 
@@ -436,6 +440,7 @@ def test_build_config_text_and_keyboard_reflect_values():
     assert keyboard["inline_keyboard"][0][2]["text"] == "▫️ apagado"
     assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ me meto en la charla"
     assert keyboard["inline_keyboard"][2][0]["text"] == "▫️ seguir charla en comandos"
+    assert keyboard["inline_keyboard"][3][0]["text"] == "✅ ignorar replies a links arreglados"
     assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
 
 
@@ -462,6 +467,7 @@ def test_handle_callback_query_updates_random_toggle():
             "link_mode": "off",
             "ai_random_replies": True,
             "ai_command_followups": True,
+            "ignore_link_fix_followups": True,
         },
     ) as mock_get, patch(
         "api.index.set_chat_config",
@@ -469,6 +475,7 @@ def test_handle_callback_query_updates_random_toggle():
             "link_mode": "off",
             "ai_random_replies": False,
             "ai_command_followups": True,
+            "ignore_link_fix_followups": True,
         },
     ) as mock_set, patch("api.index.build_config_text", return_value="text") as mock_text, patch(
         "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
@@ -499,6 +506,7 @@ def test_handle_callback_query_falls_back_when_edit_fails():
         "link_mode": "reply",
         "ai_random_replies": True,
         "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
     }
 
     with patch("api.index.config_redis", return_value=redis_client), patch(
@@ -525,6 +533,46 @@ def test_handle_callback_query_falls_back_when_edit_fails():
     mock_send_msg.assert_called_once_with(
         "9", "new text", reply_markup={"inline_keyboard": ["btn"]}
     )
+    mock_answer.assert_called_once_with("cbq")
+
+
+def test_handle_callback_query_updates_link_fix_followups_toggle():
+    redis_client = MagicMock()
+    callback = {
+        "id": "cbq",
+        "data": "cfg:linkfixfollowups:toggle",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.get_chat_config", return_value={
+            "link_mode": "off",
+            "ai_random_replies": True,
+            "ai_command_followups": True,
+            "ignore_link_fix_followups": True,
+        },
+    ) as mock_get, patch(
+        "api.index.set_chat_config",
+        return_value={
+            "link_mode": "off",
+            "ai_random_replies": True,
+            "ai_command_followups": True,
+            "ignore_link_fix_followups": False,
+        },
+    ) as mock_set, patch("api.index.build_config_text", return_value="text") as mock_text, patch(
+        "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
+    ) as mock_keyboard, patch("api.index.edit_message", return_value=True) as mock_edit, patch(
+        "api.index.send_msg"
+    ) as mock_send_msg, patch("api.index._answer_callback_query") as mock_answer:
+        handle_callback_query(callback)
+
+    mock_get.assert_called_once_with(redis_client, "1")
+    mock_set.assert_called_once_with(
+        redis_client, "1", ignore_link_fix_followups=False
+    )
+    mock_text.assert_called_once()
+    mock_keyboard.assert_called_once()
+    mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
+    mock_send_msg.assert_not_called()
     mock_answer.assert_called_once_with("cbq")
 
 
