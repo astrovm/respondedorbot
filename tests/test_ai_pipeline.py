@@ -54,6 +54,32 @@ def test_build_ai_messages_includes_reply_context():
     assert "respuesta" in content
 
 
+def test_build_ai_messages_includes_links_context():
+    from api.index import build_ai_messages
+
+    message = {
+        "from": {"first_name": "Ana", "username": "ana"},
+        "chat": {"type": "private", "title": None},
+        "text": "mirá fixupx.com/status/2032173338240467235",
+    }
+
+    with patch(
+        "api.index.fetch_link_metadata",
+        return_value={
+            "url": "https://fixupx.com/status/2032173338240467235",
+            "title": "tweet",
+            "description": "contenido",
+        },
+    ):
+        messages = build_ai_messages(message, [], message["text"])
+
+    content = messages[0]["content"]
+    assert "LINKS DEL MENSAJE:" in content
+    assert "https://fixupx.com/status/2032173338240467235" in content
+    assert "titulo: tweet" in content
+    assert "descripcion: contenido" in content
+
+
 def test_extract_groq_executed_tools_reads_choice_message():
     from api.index import _extract_groq_executed_tools
 
@@ -756,6 +782,17 @@ def test_extract_message_urls_prefers_entities_and_limits_to_three():
         "https://uno.com",
         "https://dos.com",
         "https://tres.com",
+    ]
+
+
+def test_extract_message_urls_detects_bare_domains_without_scheme():
+    message = {
+        "text": "mirá fixupx.com/status/2032173338240467235, después vemos",
+        "entities": [],
+    }
+
+    assert extract_message_urls(message) == [
+        "https://fixupx.com/status/2032173338240467235"
     ]
 
 
