@@ -148,7 +148,8 @@ def should_gordo_respond(
     is_mention = bot_name in message_lower
 
     if (
-        is_reply
+        not is_command
+        and is_reply
         and reply_metadata
         and reply_metadata.get("type") == "command"
         and not bool(reply_metadata.get("uses_ai", False))

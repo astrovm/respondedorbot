@@ -386,6 +386,31 @@ def test_should_gordo_respond_blocks_followups_when_disabled():
         )
 
 
+def test_should_gordo_respond_allows_commands_even_when_followups_disabled():
+    commands = {"/test": (lambda x: x, False, False)}
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": False,
+        "ignore_link_fix_followups": True,
+    }
+    msg = {
+        "chat": {"type": "group"},
+        "from": {"username": "user"},
+        "reply_to_message": {"from": {"username": "testbot"}},
+    }
+    reply_metadata = {"type": "command", "uses_ai": False}
+
+    with patch("os.environ.get") as mock_env:
+        mock_env.return_value = "testbot"
+        assert (
+            should_gordo_respond(
+                commands, "/test", "hola", msg, chat_config, reply_metadata
+            )
+            is True
+        )
+
+
 def test_should_auto_process_media_requires_direct_invocation_in_groups():
     commands = {"/ask": (lambda x: x, True, True)}
 
