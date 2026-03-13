@@ -230,7 +230,13 @@ COMPOUND_SOURCE_LOG_LIMIT = 2000
 MESSAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
 )
-MESSAGE_URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>()]+)")
+MESSAGE_URL_PATTERN = re.compile(
+    r"(?i)\b("
+    r"(?:https?://|www\.)[^\s<>()]+"
+    r"|"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()]*)?"
+    r")"
+)
 
 
 def should_use_groq_compound_tools() -> bool:
@@ -3806,6 +3812,13 @@ def _utf16_slice(text: str, offset: int, length: int) -> str:
         return ""
 
 
+def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
+    candidate = str(raw_url or "").strip().rstrip(".,;:!?)\"]}'")
+    if not candidate:
+        return None
+    return _normalize_http_url(candidate)
+
+
 def _extract_urls_from_entity_list(
     source_text: str,
     entities: Any,
@@ -3830,7 +3843,7 @@ def _extract_urls_from_entity_list(
         else:
             continue
 
-        normalized = _normalize_http_url(candidate)
+        normalized = _normalize_detected_message_url(candidate)
         if normalized:
             urls.append(normalized)
     return urls
@@ -3848,7 +3861,7 @@ def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
         if source_text:
             candidates.extend(_extract_urls_from_entity_list(source_text, message.get(entities_key)))
             for match in MESSAGE_URL_PATTERN.finditer(source_text):
-                normalized = _normalize_http_url(match.group(1))
+                normalized = _normalize_detected_message_url(match.group(1))
                 if normalized:
                     candidates.append(normalized)
 
@@ -3972,6 +3985,8 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     urls = extract_message_urls(message)
     if not urls:
         return ""
+
+    print(f"build_message_links_context: extracted {len(urls)} url(s) urls={urls}")
 
     lines = ["LINKS DEL MENSAJE:"]
     for index, url in enumerate(urls, 1):
