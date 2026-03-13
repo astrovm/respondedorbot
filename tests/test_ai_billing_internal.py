@@ -8,6 +8,7 @@ from api.ai_billing import (
 )
 from api.credit_units import whole_credits_to_units
 from api.groq_billing import (
+    MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST,
     calculate_billing_for_segments,
     estimate_compound_reserve_credits,
     estimate_vision_reserve_credits,
@@ -278,7 +279,7 @@ def test_calculate_billing_for_segments_uses_usage_total_time_for_browser_tools(
     assert breakdown["unsupported_notes"] == []
 
 
-def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
+def test_calculate_billing_for_segments_falls_back_to_120_second_time_cap():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -301,9 +302,9 @@ def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 8_133
-    assert breakdown["charged_credit_units"] == 17
-    assert breakdown["charged_credits_display"] == "1.7"
+    assert breakdown["raw_usd_micros"] == 9_466
+    assert breakdown["charged_credit_units"] == 19
+    assert breakdown["charged_credits_display"] == "1.9"
     assert breakdown["model_breakdown"] == [
         {
             "model": "openai/gpt-oss-120b",
@@ -317,9 +318,9 @@ def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
     assert breakdown["tool_breakdown"] == [
         {
             "tool": "browser",
-            "usd_micros": 1_333,
+            "usd_micros": 2_666,
             "count": 1,
-            "note": "estimated_max_60_second_request_cap",
+            "note": "estimated_max_120_second_request_cap",
         },
         {
             "tool": "search",
@@ -329,6 +330,38 @@ def test_calculate_billing_for_segments_falls_back_to_60_second_time_cap():
         },
     ]
     assert breakdown["unsupported_notes"] == []
+
+
+def test_calculate_billing_for_segments_clamps_measured_time_to_120_seconds():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "compound",
+                "model": "groq/compound",
+                "metadata": {"request_elapsed_seconds": 180},
+                "usage_breakdown": {
+                    "models": [
+                        {
+                            "model": "openai/gpt-oss-120b",
+                            "input_tokens": 10_000,
+                            "output_tokens": 500,
+                        }
+                    ]
+                },
+                "executed_tools": [{"name": "python"}],
+            }
+        ]
+    )
+
+    assert MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST == 120.0
+    assert breakdown["tool_breakdown"] == [
+        {
+            "tool": "python",
+            "usd_micros": 6_000,
+            "count": 1,
+            "note": "estimated_from_request_elapsed_seconds",
+        }
+    ]
 
 
 def test_estimate_vision_reserve_credits_uses_real_image_payload_size():

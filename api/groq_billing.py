@@ -25,7 +25,7 @@ BROWSER_AUTOMATION_USD_MICROS_PER_HOUR = 80_000
 WEB_SEARCH_STANDARD_USD_MICROS = 5_000
 WEB_SEARCH_PREMIUM_USD_MICROS = 8_000
 GPT_OSS_120B_FALLBACK_MODEL = "openai/gpt-oss-120b"
-MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 60.0
+MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 120.0
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
@@ -419,7 +419,7 @@ def _extract_time_based_tool_seconds(
 
     return (
         MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST,
-        "estimated_max_60_second_request_cap",
+        "estimated_max_120_second_request_cap",
     )
 
 
