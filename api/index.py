@@ -784,6 +784,7 @@ _provider_backoff_until: Dict[str, float] = {}
 _ai_provider_request_count: ContextVar[int] = ContextVar(
     "ai_provider_request_count", default=0
 )
+_link_metadata_local_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def _reset_ai_provider_request_count() -> Token:
@@ -3833,16 +3834,13 @@ def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
         "title": _truncate_link_metadata_text(metadata.get("title"), limit=160),
         "description": _truncate_link_metadata_text(metadata.get("description"), limit=280),
     }
-
-    redis_client = _optional_redis_client()
-    if redis_client is None:
-        return
-
-    cache_key = _hash_cache_key("link_metadata", {"url": normalized})
-    try:
-        redis_setex_json(redis_client, cache_key, TTL_LINK_METADATA, cache_payload)
-    except Exception:
-        pass
+    cache_store = _link_metadata_local_cache.setdefault(normalized, {})
+    update_local_cache(
+        cache_store,
+        cache_payload,
+        TTL_LINK_METADATA,
+        0,
+    )
 
 
 def _extract_urls_from_entity_list(
@@ -3910,12 +3908,20 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
     if not normalized:
         return {"url": str(raw_url or "").strip(), "error": "url inválida"}
 
+    local_cached, is_fresh, _ = local_cache_get(
+        _link_metadata_local_cache.setdefault(normalized, {}),
+        allow_stale=False,
+    )
+    if is_fresh and isinstance(local_cached, dict):
+        return local_cached
+
     redis_client = _optional_redis_client()
     cache_key = _hash_cache_key("link_metadata", {"url": normalized})
     if redis_client is not None:
         try:
             cached = redis_get_json(redis_client, cache_key)
             if isinstance(cached, dict):
+                _cache_link_metadata(normalized, cached)
                 return cached
         except Exception:
             redis_client = None
@@ -4001,6 +4007,8 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
             redis_setex_json(redis_client, cache_key, TTL_LINK_METADATA, result)
         except Exception:
             pass
+
+    _cache_link_metadata(normalized, result)
 
     return result
 
