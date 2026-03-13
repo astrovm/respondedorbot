@@ -9,7 +9,7 @@ def test_is_social_frontend():
     assert not is_social_frontend("example.com")
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_replace_links(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -47,7 +47,7 @@ def test_replace_links(mock_get):
     assert all("?" not in url and "#" not in url for url in originals)
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_replace_links_skips_when_embed_fails(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 404
@@ -60,7 +60,7 @@ def test_replace_links_skips_when_embed_fails(mock_get):
     assert originals == []
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_replace_links_skips_when_no_metadata(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -74,7 +74,7 @@ def test_replace_links_skips_when_no_metadata(mock_get):
     assert originals == []
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_replace_links_skips_when_only_twitter_metadata(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -136,11 +136,11 @@ def test_handle_msg_link_reply():
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://twitter.com/foo/status/1\ntitulo: foo",
+        return_value="LINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
     ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -188,11 +188,11 @@ def test_handle_msg_link_reply_instagram():
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://www.instagram.com/qux\ntitulo: foo",
+        return_value="LINKS DEL MENSAJE:\n1. https://kkinstagram.com/qux\ntitulo: foo",
     ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -240,11 +240,11 @@ def test_handle_msg_link_delete():
         "api.index.initialize_commands", return_value={}
     ), patch(
         "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://x.com/bar/status/1\ntitulo: foo",
+        return_value="LINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
     ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -341,7 +341,7 @@ def test_replace_links_skips_twitter_user_profiles(monkeypatch):
     mock_can.assert_not_called()
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_xcom_link_replacement_with_metadata(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -363,7 +363,7 @@ def test_xcom_link_replacement_with_metadata(mock_get):
     )
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_xcancel_link_replacement(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -392,7 +392,7 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<html></html>"
-    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
 
     result = can_embed_url("http://example.com")
     assert result is False
@@ -409,7 +409,7 @@ def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<meta property='og:title' content='Title'>"
-    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
 
     assert can_embed_url("http://example.com") is False
 
@@ -424,7 +424,7 @@ def test_can_embed_url_allows_title_and_image(monkeypatch):
         "<meta property='og:title' content='Title'>"
         "<meta property='og:image' content='https://example.com/img.png'>"
     )
-    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
 
     assert can_embed_url("http://example.com") is True
 
@@ -440,7 +440,7 @@ def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
         "<meta name='twitter:title' content='Agustin Cortes (@agucortes)'>"
         "<meta property='og:description' content='Texto del post'>"
     )
-    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
 
     assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
 
@@ -455,7 +455,7 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
         "<meta name='twitter:card' content='summary'>"
         "<meta name='twitter:image' content='https://example.com/img.png'>"
     )
-    monkeypatch.setattr("api.index.requests.get", lambda *a, **kw: mock_response)
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
 
     assert can_embed_url("http://example.com") is False
 
@@ -551,7 +551,7 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
     assert can_embed_url("https://eeinstagram.com/p/DQ5RaKnjE8J/") is True
 
 
-@patch("api.index.requests.get")
+@patch("api.utils.links.request_with_ssl_fallback")
 def test_can_embed_url_allows_direct_media(mock_get):
     from api.index import can_embed_url
     from api.utils.links import TELEGRAM_PREVIEW_USER_AGENT
@@ -586,7 +586,7 @@ def test_handle_msg_link_already_fixed():
     ), patch(
         "api.index.should_gordo_respond"
     ) as mock_should, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -618,7 +618,7 @@ def test_handle_msg_original_link_no_check():
     ) as mock_should, patch(
         "api.index.replace_links"
     ) as mock_replace, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -649,7 +649,7 @@ def test_handle_msg_link_already_fixed_subdomain():
     ), patch(
         "api.index.should_gordo_respond"
     ) as mock_should, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -679,7 +679,7 @@ def test_handle_msg_replaced_link_adds_button():
     ), patch(
         "api.index.should_gordo_respond"
     ) as mock_should, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -722,7 +722,7 @@ def test_handle_msg_replaced_link_replies_to_original_message():
     ), patch(
         "api.index.should_gordo_respond"
     ) as mock_should, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -767,7 +767,7 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
     ), patch(
         "api.index.should_gordo_respond"
     ) as mock_should, patch(
-        "api.index.requests.get"
+        "api.utils.links.request_with_ssl_fallback"
     ) as mock_get:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
