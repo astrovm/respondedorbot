@@ -13,6 +13,7 @@ from requests.exceptions import RequestException
 from api.utils.http import request_with_ssl_fallback
 
 EMBED_REQUEST_TIMEOUT = 10
+TELEGRAM_PREVIEW_USER_AGENT = "TelegramBot (like TwitterBot)"
 
 ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
@@ -36,6 +37,7 @@ ORIGINAL_FRONTENDS: Set[str] = {
 __all__ = [
     "ALTERNATIVE_FRONTENDS",
     "ORIGINAL_FRONTENDS",
+    "TELEGRAM_PREVIEW_USER_AGENT",
     "is_social_frontend",
     "can_embed_url",
     "url_is_embedable",
@@ -126,7 +128,7 @@ def can_embed_url(url: str) -> bool:
         return False
     if eeinstagram_preview is True:
         return True
-    headers = {"User-Agent": "TelegramBot (like TwitterBot)"}
+    headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     try:
         response = request_with_ssl_fallback(
             url,
@@ -214,7 +216,7 @@ def _eeinstagram_preview_check(
     if not path_segments or path_segments[0] not in {"p", "reel", "reels"}:
         return None
 
-    headers = {"User-Agent": "TelegramBot 1.0"}
+    headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     try:
         response = request_with_ssl_fallback(
             url,
