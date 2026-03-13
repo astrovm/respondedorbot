@@ -161,11 +161,11 @@ def test_handle_msg_link_reply():
             "123", expected, "1", ["https://twitter.com/foo/status/1"]
         )
         mock_delete.assert_not_called()
-        mock_links_context.assert_called_once_with(message)
+        mock_links_context.assert_called_once_with({"text": expected})
         mock_save.assert_called_once_with(
             "123",
             "bot_901",
-            "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john\n\nLINKS DEL MENSAJE:\n1. https://twitter.com/foo/status/1\ntitulo: foo",
+            "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john\n\nLINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
             redis_client,
         )
 
@@ -213,11 +213,11 @@ def test_handle_msg_link_reply_instagram():
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
         mock_delete.assert_not_called()
-        mock_links_context.assert_called_once_with(message)
+        mock_links_context.assert_called_once_with({"text": expected})
         mock_save.assert_called_once_with(
             "789",
             "bot_903",
-            "mirá https://kkinstagram.com/qux\n\ncompartido por @lu\n\nLINKS DEL MENSAJE:\n1. https://www.instagram.com/qux\ntitulo: foo",
+            "mirá https://kkinstagram.com/qux\n\ncompartido por @lu\n\nLINKS DEL MENSAJE:\n1. https://kkinstagram.com/qux\ntitulo: foo",
             redis_client,
         )
 
@@ -265,11 +265,11 @@ def test_handle_msg_link_delete():
         mock_send.assert_called_once_with(
             "456", expected, buttons=["https://x.com/bar/status/1"]
         )
-        mock_links_context.assert_called_once_with(message)
+        mock_links_context.assert_called_once_with({"text": expected})
         mock_save.assert_called_once_with(
             "456",
             "bot_902",
-            "look https://fixupx.com/bar/status/1\n\ncompartido por @ana\n\nLINKS DEL MENSAJE:\n1. https://x.com/bar/status/1\ntitulo: foo",
+            "look https://fixupx.com/bar/status/1\n\ncompartido por @ana\n\nLINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
             redis_client,
         )
 

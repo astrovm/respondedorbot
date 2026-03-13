@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import requests
@@ -38,6 +38,7 @@ __all__ = [
     "ALTERNATIVE_FRONTENDS",
     "ORIGINAL_FRONTENDS",
     "TELEGRAM_PREVIEW_USER_AGENT",
+    "inspect_embed_url",
     "is_social_frontend",
     "can_embed_url",
     "url_is_embedable",
@@ -120,14 +121,29 @@ def is_social_frontend(host: str) -> bool:
     return any(host == domain or host.endswith(f".{domain}") for domain in frontends)
 
 
-def can_embed_url(url: str) -> bool:
-    """Return True when the target page exposes Telegram-compatible OpenGraph metadata."""
+def inspect_embed_url(url: str) -> Dict[str, Any]:
+    """Inspect whether the target page exposes Telegram-compatible preview metadata."""
+
     parsed = urlparse(url)
     eeinstagram_preview = _eeinstagram_preview_check(parsed, url)
     if eeinstagram_preview is False:
-        return False
+        return {
+            "embeddable": False,
+            "url": url,
+            "status": None,
+            "content_type": "",
+            "title": None,
+            "description": None,
+        }
     if eeinstagram_preview is True:
-        return True
+        return {
+            "embeddable": True,
+            "url": url,
+            "status": None,
+            "content_type": "",
+            "title": None,
+            "description": None,
+        }
     headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     try:
         response = request_with_ssl_fallback(
@@ -138,19 +154,49 @@ def can_embed_url(url: str) -> bool:
         )
     except RequestException as exc:
         print(f"[EMBED] {url} request failed: {exc}")
-        return False
+        return {
+            "embeddable": False,
+            "url": url,
+            "status": None,
+            "content_type": "",
+            "title": None,
+            "description": None,
+            "error": exc.__class__.__name__,
+        }
 
     if response.status_code >= 400:
         print(f"[EMBED] {url} returned status {response.status_code}")
-        return False
+        return {
+            "embeddable": False,
+            "url": str(getattr(response, "url", "") or url),
+            "status": response.status_code,
+            "content_type": str(response.headers.get("Content-Type", "")).lower(),
+            "title": None,
+            "description": None,
+        }
 
     content_type = response.headers.get("Content-Type", "").lower()
+    normalized_url = str(getattr(response, "url", "") or url).strip() or url
     if content_type.startswith(("image/", "video/", "audio/")):
         print(f"[EMBED] {url} served direct media type {content_type}")
-        return True
+        return {
+            "embeddable": True,
+            "url": normalized_url,
+            "status": response.status_code,
+            "content_type": content_type,
+            "title": None,
+            "description": None,
+        }
     if "text/html" not in content_type:
         print(f"[EMBED] {url} content-type {content_type} not embeddable")
-        return False
+        return {
+            "embeddable": False,
+            "url": normalized_url,
+            "status": response.status_code,
+            "content_type": content_type,
+            "title": None,
+            "description": None,
+        }
 
     html = response.text[:20000]
 
@@ -175,6 +221,8 @@ def can_embed_url(url: str) -> bool:
     parser = MetaParser()
     parser.feed(html)
     meta_tags = parser.tags
+    title = meta_tags.get("og:title") or meta_tags.get("twitter:title")
+    description = meta_tags.get("og:description") or meta_tags.get("twitter:description")
     host = parsed.netloc.lower().split(":", 1)[0]
     if host.startswith("www."):
         host = host[4:]
@@ -206,7 +254,14 @@ def can_embed_url(url: str) -> bool:
             f"{key}={value[:80]}" for key, value in meta_tags.items()
         )
         print(f"[EMBED] {url} has embed metadata: {detail}")
-        return True
+        return {
+            "embeddable": True,
+            "url": normalized_url,
+            "status": response.status_code,
+            "content_type": content_type,
+            "title": title,
+            "description": description,
+        }
 
     missing_fields: List[str] = []
     if not has_preview_text and not (is_eeinstagram_host and has_eeinstagram_media):
@@ -221,7 +276,27 @@ def can_embed_url(url: str) -> bool:
         missing_fields.append("og:image or og:video")
     missing_detail = ", ".join(missing_fields)
     print(f"[EMBED] {url} missing required metadata: {missing_detail}")
-    return False
+    return {
+        "embeddable": False,
+        "url": normalized_url,
+        "status": response.status_code,
+        "content_type": content_type,
+        "title": title,
+        "description": description,
+    }
+
+
+def can_embed_url(
+    url: str,
+    *,
+    metadata_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> bool:
+    """Return True when the target page exposes Telegram-compatible OpenGraph metadata."""
+
+    metadata = inspect_embed_url(url)
+    if metadata_sink is not None:
+        metadata_sink(metadata)
+    return bool(metadata.get("embeddable"))
 
 
 def _eeinstagram_preview_check(

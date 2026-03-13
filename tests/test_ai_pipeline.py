@@ -1525,3 +1525,47 @@ def test_fetch_link_metadata_uses_ttl_constant():
 
     assert result["title"] == "A"
     assert any(ttl == index.TTL_LINK_METADATA for (_k, ttl) in redis_client.calls)
+
+
+def test_can_embed_url_primes_link_metadata_cache():
+    from api.index import can_embed_url, fetch_link_metadata
+
+    html_body = (
+        '<html><head>'
+        '<meta property="og:title" content="Agustin Cortes (@agucortes)" />'
+        '<meta property="og:description" content="Texto del post" />'
+        '<meta name="twitter:card" content="tweet" />'
+        "</head></html>"
+    )
+    embed_response = MagicMock()
+    embed_response.status_code = 200
+    embed_response.headers = {"Content-Type": "text/html; charset=utf-8"}
+    embed_response.text = html_body
+    embed_response.url = "https://fixupx.com/status/2032173338240467235"
+
+    class R:
+        def __init__(self):
+            self.data = {}
+
+        def get(self, key):
+            return self.data.get(key)
+
+        def setex(self, key, ttl, value):
+            self.data[key] = value
+            return True
+
+    redis_client = R()
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.utils.links.request_with_ssl_fallback", return_value=embed_response
+    ):
+        assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
+
+    with patch("api.index.config_redis", return_value=redis_client), patch(
+        "api.index.request_with_ssl_fallback"
+    ) as mock_fetch_request:
+        result = fetch_link_metadata("https://fixupx.com/status/2032173338240467235")
+
+    assert result["title"] == "Agustin Cortes (@agucortes)"
+    assert result["description"] == "Texto del post"
+    mock_fetch_request.assert_not_called()
