@@ -756,8 +756,10 @@ def get_cached_tcrm_100(
 
 def can_embed_url(url: str) -> bool:
     """Wrapper to allow tests to monkeypatch embed detection."""
+    def _metadata_sink(metadata: Dict[str, Any]) -> None:
+        _cache_link_metadata(url, metadata)
 
-    return _links_can_embed_url(url)
+    return _links_can_embed_url(url, metadata_sink=_metadata_sink)
 
 
 def is_social_frontend(host: str) -> bool:
@@ -3817,6 +3819,30 @@ def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
     if not candidate:
         return None
     return _normalize_http_url(candidate)
+
+
+def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
+    normalized = _normalize_http_url(raw_url)
+    if not normalized:
+        return
+
+    cache_payload = {
+        "url": str(metadata.get("url") or normalized).strip() or normalized,
+        "status": metadata.get("status"),
+        "content_type": str(metadata.get("content_type") or ""),
+        "title": _truncate_link_metadata_text(metadata.get("title"), limit=160),
+        "description": _truncate_link_metadata_text(metadata.get("description"), limit=280),
+    }
+
+    redis_client = _optional_redis_client()
+    if redis_client is None:
+        return
+
+    cache_key = _hash_cache_key("link_metadata", {"url": normalized})
+    try:
+        redis_setex_json(redis_client, cache_key, TTL_LINK_METADATA, cache_payload)
+    except Exception:
+        pass
 
 
 def _extract_urls_from_entity_list(

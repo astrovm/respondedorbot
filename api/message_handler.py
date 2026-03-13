@@ -395,7 +395,7 @@ def _handle_link_replacement(
     if shared_by:
         fixed_text += f"\n\ncompartido por {shared_by}"
 
-    link_context = deps.build_message_links_context(message)
+    link_context = deps.build_message_links_context({"text": fixed_text})
     stored_bot_message = fixed_text
     if link_context:
         stored_bot_message = f"{stored_bot_message}\n\n{link_context}"
