@@ -60,8 +60,8 @@ DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
 
 COINMARKETCAP_KEY=your_coinmarketcap_key
 GROQ_API_KEY=your_paid_groq_api_key
-WEBHOOK_MAX_RUNTIME_SECONDS=60
-WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS=30
+WEBHOOK_MAX_RUNTIME_SECONDS=120
+WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS=45
 WEBHOOK_IDEMPOTENCY_TTL_SECONDS=180
 WEBHOOK_FORCE_PAID_RETRY_TTL_SECONDS=300
 
@@ -81,7 +81,7 @@ Use `.env.example` for the full list, including billing defaults.
 - `GROQ_FREE_API_KEY` is optional.
 - If both Groq keys are set, the bot tries the free account first for chat, compound, vision, and transcription.
 - If the free account is locally out of budget or Groq returns `429`, the same request is retried with `GROQ_API_KEY`.
-- Webhook retries are deduped per Telegram update. If a Compound request fails on `free` and the webhook is too close to the runtime limit, the bot aborts on purpose so Telegram retries and the next attempt can start directly on `paid`.
+- Webhook retries are deduped per Telegram update. If a Compound request fails on `free` and the webhook is inside the retry safety margin (`45s` by default on a `120s` runtime), the bot aborts on purpose so Telegram retries and the next attempt can start directly on `paid`.
 - Users are still billed normally; key selection only changes which Groq account serves the request.
 
 ## Billing

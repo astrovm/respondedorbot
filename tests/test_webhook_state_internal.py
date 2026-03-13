@@ -1,9 +1,12 @@
+from os import environ
 from unittest.mock import patch
 
 from api.webhook_state import (
     _acquire_webhook_processing_lock,
     _clear_persisted_webhook_reservation,
     _extract_webhook_operation_key,
+    _get_webhook_max_runtime_seconds,
+    _get_webhook_retry_safety_margin_seconds,
     _load_persisted_webhook_reservation,
     _mark_webhook_completed,
     _persist_webhook_reservation,
@@ -57,6 +60,24 @@ def test_webhook_processing_lock_returns_completed_when_completed_marker_exists(
         )
         == "completed"
     )
+
+
+def test_webhook_runtime_defaults_to_120_seconds():
+    with patch.dict(
+        environ,
+        {"WEBHOOK_MAX_RUNTIME_SECONDS": "", "WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS": ""},
+        clear=False,
+    ):
+        assert _get_webhook_max_runtime_seconds() == 120.0
+
+
+def test_webhook_retry_safety_margin_defaults_to_45_seconds():
+    with patch.dict(
+        environ,
+        {"WEBHOOK_MAX_RUNTIME_SECONDS": "", "WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS": ""},
+        clear=False,
+    ):
+        assert _get_webhook_retry_safety_margin_seconds() == 45.0
 
 
 def test_persisted_webhook_reservation_round_trip_uses_request_context():

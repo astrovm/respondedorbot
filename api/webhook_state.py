@@ -40,19 +40,19 @@ WebhookLockHeartbeat = Tuple[threading.Event, Optional[threading.Thread]]
 
 
 def _get_webhook_max_runtime_seconds() -> float:
-    raw_value = str(environ.get("WEBHOOK_MAX_RUNTIME_SECONDS") or "60").strip()
+    raw_value = str(environ.get("WEBHOOK_MAX_RUNTIME_SECONDS") or "120").strip()
     try:
         return max(1.0, float(raw_value))
     except (TypeError, ValueError):
-        return 60.0
+        return 120.0
 
 
 def _get_webhook_retry_safety_margin_seconds() -> float:
-    raw_value = str(environ.get("WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS") or "30").strip()
+    raw_value = str(environ.get("WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS") or "45").strip()
     try:
         return max(1.0, float(raw_value))
     except (TypeError, ValueError):
-        return 30.0
+        return 45.0
 
 
 def _get_webhook_idempotency_ttl_seconds() -> int:
