@@ -37,9 +37,9 @@ flask --app api/index run --host 0.0.0.0 --port 8080
 
 ### Web Search and Tools
 
-- `/buscar <consulta>` or `/search <query>`: quick web searches using DuckDuckGo. No API keys required. Returns up to 10 results with titles and links.
-- In AI conversations, the bot may do a web lookup on its own when it needs up-to-date information.
-- It can also request to read a specific page with the `fetch_url` tool, which downloads any http/https URL and returns the plain text so the bot can quote passages in its responses.
+- `/buscar <consulta>` or `/search <query>`: run Groq Compound directly and return its response. This path uses AI billing.
+- In AI conversations, the bot still answers with the main chat model first; if it needs tools, it can call the internal `compound` bridge and then finish the answer in persona.
+- When incoming messages contain links, the bot enriches the AI prompt with fetched link metadata (URL, title, description) for up to 3 links.
 
 ## Required Config
 

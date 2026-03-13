@@ -493,6 +493,7 @@ def _run_ai_flow(
             if prepared_message.resized_image_data and prepared_message.photo_file_id
             else 0
         ),
+        reserve_mode="compound" if getattr(handler_func, "__name__", "") == "search_command" else "chat",
     )
     if not deps.check_global_rate_limit(
         redis_client,
@@ -1253,12 +1254,6 @@ def _handle_known_command(
     )
     if response[0] is not None or response[3] is not None:
         return response
-
-    if command in {"/buscar", "/search"}:
-        response_command = command
-        handler_func, uses_ai, takes_params = commands[command]
-        response_msg = handler_func(sanitized_message_text) if takes_params else handler_func()
-        return response_msg, response_markup, uses_ai, response_command
 
     if command in commands:
         handler_func, uses_ai, takes_params = commands[command]

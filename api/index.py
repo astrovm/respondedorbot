@@ -180,15 +180,12 @@ from api.webhook_state import (
 TTL_PRICE = 300  # 5 minutes
 TTL_DOLLAR = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
-TTL_WEB_SEARCH = 300  # 5 minutes
-TTL_WEB_FETCH = 300  # 5 minutes
 TTL_GROQ_COMPOUND_CACHE = 300  # 5 minutes
+TTL_LINK_METADATA = 300  # 5 minutes
 TTL_POLYMARKET = 5  # 5 seconds
 TTL_POLYMARKET_STREAM = 5  # 5 seconds for live price lookups
-WEB_FETCH_MAX_BYTES = 250_000
-WEB_FETCH_MIN_CHARS = 500
-WEB_FETCH_MAX_CHARS = 8000
-WEB_FETCH_DEFAULT_CHARS = 4000
+LINK_METADATA_MAX_BYTES = 64_000
+MAX_LINKS_IN_MESSAGE = 3
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
 BA_TZ = timezone(timedelta(hours=-3))
@@ -217,11 +214,6 @@ POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
 
-SEARCH_PREVIOUS_QUERY_PATTERNS = [
-    r"\bbuscalo\b",
-    r"\bbusca\s+eso\b",
-    r"\bbusca\s+esto\b",
-]
 CURRENT_INFO_QUERY_PATTERNS = [
     r"\bhoy\b",
     r"\bactual(?:es|izada|izado)?\b",
@@ -235,6 +227,10 @@ CURRENT_INFO_QUERY_PATTERNS = [
 ]
 YEAR_TOKEN_PATTERN = re.compile(r"\b20\d{2}\b")
 COMPOUND_SOURCE_LOG_LIMIT = 2000
+MESSAGE_BLOCK_PATTERN = re.compile(
+    r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
+)
+MESSAGE_URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>()]+)")
 
 
 def should_use_groq_compound_tools() -> bool:
@@ -259,36 +255,18 @@ def normalize_text_for_matching(text: str) -> str:
     return normalized
 
 
-def should_search_previous_query(text: str) -> bool:
-    """Return True when the user asks to search the previous topic."""
+def _extract_message_block_from_prompt(text: str) -> str:
+    """Extract the message block from the AI prompt wrapper."""
 
-    if not text:
-        return False
-
-    normalized = normalize_text_for_matching(text)
-    return any(
-        re.search(pattern, normalized)
-        for pattern in SEARCH_PREVIOUS_QUERY_PATTERNS
-    )
-
-
-def extract_user_message_from_context(text: str) -> str:
-    """Extract the user-provided message from a context block."""
-
-    if not text:
+    raw_text = str(text or "")
+    if not raw_text:
         return ""
 
-    marker = "MENSAJE:"
-    start_index = text.find(marker)
-    if start_index == -1:
-        return text.strip()
+    match = MESSAGE_BLOCK_PATTERN.search(raw_text)
+    if not match:
+        return raw_text.strip()
 
-    message_block = text[start_index + len(marker) :]
-    end_marker = "INSTRUCCIONES:"
-    end_index = message_block.find(end_marker)
-    if end_index != -1:
-        message_block = message_block[:end_index]
-    return message_block.strip()
+    return str(match.group("message") or "").strip()
 
 
 def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
@@ -355,18 +333,6 @@ def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[s
         TTL_DOLLAR,
         hourly_cache,
     )
-
-
-def _find_previous_user_text(
-    messages: List[Dict[str, Any]], latest_user_index: int
-) -> str:
-    for msg in reversed(messages[:latest_user_index]):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-    return ""
 
 
 def _extract_year_tokens(text: Optional[str]) -> Set[int]:
@@ -475,21 +441,22 @@ def _disable_tools_in_system_message(system_message: Dict[str, Any]) -> Dict[str
     }
 
 
-def _run_compound_web_search(
+def _run_compound_task(
     *,
-    query: str,
-    messages: List[Dict[str, Any]],
-    system_message: Dict[str, Any],
+    task: str,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    system_message: Optional[Dict[str, Any]] = None,
     compound_system_message: Optional[Dict[str, Any]] = None,
     response_meta: Optional[Dict[str, Any]] = None,
+    persona_pass: bool = True,
 ) -> str:
     if not compound_system_message:
-        print("_run_compound_web_search: compound unavailable (no system message)")
-        return "la búsqueda web no está disponible en este momento"
+        print("_run_compound_task: compound unavailable (no system message)")
+        return "compound no está disponible en este momento"
 
-    normalized_query = _normalize_search_query(query, messages)
-    print(f"_run_compound_web_search: starting query='{normalized_query[:120]}'")
-    compound_messages = [{"role": "user", "content": normalized_query}]
+    normalized_task = _normalize_search_query(task, messages or [])
+    print(f"_run_compound_task: starting task='{normalized_task[:120]}'")
+    compound_messages = [{"role": "user", "content": normalized_task}]
     source_text: Optional[str] = None
 
     if response_meta is None:
@@ -505,26 +472,32 @@ def _run_compound_web_search(
             source_text = compound_result.text
 
     if not source_text:
-        print("_run_compound_web_search: compound returned empty response")
-        return "no pude completar la búsqueda web ahora"
+        print("_run_compound_task: compound returned empty response")
+        return "no pude completar la consulta con compound ahora"
 
     print(
-        "_run_compound_web_search: compound source "
-        f"query='{normalized_query[:120]}' source_len={len(source_text)}"
+        "_run_compound_task: compound source "
+        f"task='{normalized_task[:120]}' source_len={len(source_text)} persona_pass={persona_pass}"
     )
     print(
-        "_run_compound_web_search: compound source text >>>\n"
+        "_run_compound_task: compound source text >>>\n"
         f"{_format_text_for_log(source_text)}\n"
         "<<< compound source text"
     )
 
+    if not persona_pass:
+        return source_text
+
+    if system_message is None:
+        return source_text
+
     source_context = (
-        "FUENTE WEB (resumen preliminar):\n"
+        "FUENTE COMPOUND (resultado preliminar):\n"
         f"{source_text}\n\n"
         "Instrucciones: usá la fuente solo como referencia, verificá consistencia "
         "y respondé al usuario con la personalidad configurada."
     )
-    enriched_messages = list(messages) + [{"role": "system", "content": source_context}]
+    enriched_messages = list(messages or []) + [{"role": "system", "content": source_context}]
     followup_system_message = _disable_tools_in_system_message(system_message)
 
     if response_meta is None:
@@ -540,14 +513,14 @@ def _run_compound_web_search(
 
     if final_response:
         print(
-            "_run_compound_web_search: persona pass succeeded "
-            f"query='{normalized_query[:120]}' final_len={len(final_response)}"
+            "_run_compound_task: persona pass succeeded "
+            f"task='{normalized_task[:120]}' final_len={len(final_response)}"
         )
         return final_response
 
     print(
-        "_run_compound_web_search: persona pass returned empty; returning raw compound output "
-        f"for query='{normalized_query[:120]}' source_len={len(source_text)}"
+        "_run_compound_task: persona pass returned empty; returning raw compound output "
+        f"for task='{normalized_task[:120]}' source_len={len(source_text)}"
     )
 
     return source_text
@@ -3252,29 +3225,6 @@ def get_weather() -> dict:
         print(f"Error getting weather: {str(e)}")
         return {}
 
-
-def normalize_web_search_output(
-    tool_output: Any,
-) -> Tuple[str, List[Mapping[str, Any]]]:
-    """Extract query/results from web_search output into a normalized shape."""
-    try:
-        data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
-    except Exception:
-        return "", []
-
-    if not isinstance(data, Mapping):
-        return "", []
-
-    query = data.get("query", "")
-    raw_results = data.get("results", [])
-    normalized_results: List[Mapping[str, Any]] = []
-    if isinstance(raw_results, Sequence):
-        for item in raw_results:
-            if isinstance(item, Mapping):
-                normalized_results.append(cast(Mapping[str, Any], item))
-    return query, normalized_results
-
-
 def resolve_tool_calls(
     system_message: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -3290,19 +3240,6 @@ def resolve_tool_calls(
         return None
 
     tool_name, tool_args = tool_call
-    if tool_name.lower() == "web_search":
-        query = str(tool_args.get("query", "")).strip()
-        if not query:
-            return "query vacío"
-        if not should_use_groq_compound_tools():
-            return "la búsqueda web no está disponible en este momento"
-        return _run_compound_web_search(
-            query=query,
-            messages=messages,
-            system_message=system_message,
-            compound_system_message=build_compound_system_message(),
-            response_meta=response_meta,
-        )
 
     try:
         print(
@@ -3387,44 +3324,8 @@ def resolve_tool_calls(
 
     # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
     try:
-        if last_tool_name == "web_search":
-            query, normalized_results = normalize_web_search_output(last_tool_output)
-            return summarize_search_results(query, normalized_results)
-        if last_tool_name == "fetch_url":
-            data: Any = last_tool_output
-            if isinstance(data, str):
-                try:
-                    data = json.loads(data)
-                except Exception:
-                    return str(last_tool_output)[:1500]
-            if not isinstance(data, dict):
-                return str(last_tool_output)[:1500]
-            url = str(data.get("url") or "").strip()
-            error_msg = str(data.get("error") or "").strip()
-            if error_msg:
-                if url:
-                    return f"no pude leer {url}: {error_msg}"
-                return f"no pude leer la URL: {error_msg}"
-            title = str(data.get("title") or "").strip()
-            content = str(data.get("content") or "").strip()
-            truncated_flag = bool(data.get("truncated"))
-            lines: List[str] = []
-            if title:
-                lines.append(f"📄 {title}")
-            if url:
-                lines.append(url)
-            if content:
-                lines.append("")
-                lines.append(content)
-            if truncated_flag and content:
-                lines.append("")
-                lines.append("(texto recortado)")
-            formatted = "\n".join(line for line in lines if line).strip()
-            if formatted:
-                return formatted
-            if url:
-                return f"leí {url} pero no encontré texto para mostrar"
-            return "no había texto legible en la página"
+        if last_tool_name == "compound":
+            return str(last_tool_output).strip()[:4000]
         # Generic fallback for other tools
         return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
     except Exception:
@@ -3486,26 +3387,6 @@ def ask_ai(
                 print("Failed to describe image, continuing without description...")
 
         # Continue with normal AI flow (for both image and text).
-        latest_user_text, latest_user_message, latest_user_index = _extract_latest_user_query_info(
-            messages
-        )
-
-        if should_search_previous_query(latest_user_message):
-            previous_query = ""
-            if latest_user_index is not None:
-                previous_query = _find_previous_user_text(messages, latest_user_index)
-            previous_message = extract_user_message_from_context(previous_query)
-            if not previous_message:
-                return "Decime qué querés buscar o usá /buscar <tema>."
-            print("ask_ai: previous query web_search triggered")
-            return _run_compound_web_search(
-                query=previous_message,
-                messages=messages,
-                system_message=system_message,
-                compound_system_message=compound_system_message,
-                response_meta=response_meta,
-            )
-
         # First pass: get an initial response that might include a tool call.
         if response_meta is None:
             initial = complete_with_providers(system_message, messages)
@@ -3603,7 +3484,7 @@ def _prepare_tool_lines(text: str) -> List[_ToolLine]:
 
 
 def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Detect a tool call line like: [TOOL] web_search {"query": "..."}"""
+    """Detect a tool call line like: [TOOL] compound {"task": "..."}"""
     if not text:
         return None
     try:
@@ -3841,27 +3722,157 @@ def _extract_text_from_html(html_text: str) -> Tuple[Optional[str], str]:
     return parser.get_title(), parser.get_text()
 
 
-def fetch_url_content(
-    raw_url: str, max_chars: Optional[Union[int, str]] = None
-) -> Dict[str, Any]:
-    """Fetch arbitrary HTTP/HTTPS URLs and return sanitized textual content."""
+class _HtmlMetadataExtractor(HTMLParser):
+    """Extract preview metadata from HTML documents."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._title_parts: List[str] = []
+        self._in_title = False
+        self.title: Optional[str] = None
+        self.description: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag_lower = tag.lower()
+        attrs_map = {str(key).lower(): value for key, value in attrs}
+        if tag_lower == "title":
+            self._in_title = True
+            return
+        if tag_lower != "meta":
+            return
+
+        property_name = str(attrs_map.get("property") or "").strip().lower()
+        meta_name = str(attrs_map.get("name") or "").strip().lower()
+        content = str(attrs_map.get("content") or "").strip()
+        if not content:
+            return
+
+        normalized_content = re.sub(r"\s+", " ", unescape(content)).strip()
+        if not normalized_content:
+            return
+
+        if property_name in {"og:title", "twitter:title"} and not self.title:
+            self.title = normalized_content
+        elif property_name in {"og:description", "twitter:description"} and not self.description:
+            self.description = normalized_content
+        elif meta_name == "description" and not self.description:
+            self.description = normalized_content
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if not self._in_title:
+            return
+        text = re.sub(r"\s+", " ", unescape(data)).strip()
+        if text:
+            self._title_parts.append(text)
+
+    def finalize(self) -> Tuple[Optional[str], Optional[str]]:
+        title = self.title or re.sub(r"\s+", " ", " ".join(self._title_parts)).strip()
+        return title or None, self.description or None
+
+
+def _extract_html_metadata(html_text: str) -> Tuple[Optional[str], Optional[str]]:
+    parser = _HtmlMetadataExtractor()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:
+        pass
+    return parser.finalize()
+
+
+def _truncate_link_metadata_text(text: Optional[str], limit: int = 280) -> Optional[str]:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return None
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _utf16_slice(text: str, offset: int, length: int) -> str:
+    if not text or length <= 0:
+        return ""
+
+    utf16 = text.encode("utf-16-le")
+    start = max(0, int(offset)) * 2
+    end = max(start, start + max(0, int(length)) * 2)
+    try:
+        return utf16[start:end].decode("utf-16-le", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _extract_urls_from_entity_list(
+    source_text: str,
+    entities: Any,
+) -> List[str]:
+    urls: List[str] = []
+    if not source_text or not isinstance(entities, Sequence):
+        return urls
+
+    for entity in entities:
+        if not isinstance(entity, Mapping):
+            continue
+        entity_type = str(entity.get("type") or "").strip().lower()
+        if entity_type == "text_link":
+            candidate = str(entity.get("url") or "").strip()
+        elif entity_type == "url":
+            try:
+                offset = int(entity.get("offset") or 0)
+                length = int(entity.get("length") or 0)
+            except (TypeError, ValueError):
+                continue
+            candidate = _utf16_slice(source_text, offset, length).strip()
+        else:
+            continue
+
+        normalized = _normalize_http_url(candidate)
+        if normalized:
+            urls.append(normalized)
+    return urls
+
+
+def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
+    """Extract normalized URLs from Telegram message text/caption and entities."""
+
+    candidates: List[str] = []
+    for text_key, entities_key in (
+        ("text", "entities"),
+        ("caption", "caption_entities"),
+    ):
+        source_text = str(message.get(text_key) or "")
+        if source_text:
+            candidates.extend(_extract_urls_from_entity_list(source_text, message.get(entities_key)))
+            for match in MESSAGE_URL_PATTERN.finditer(source_text):
+                normalized = _normalize_http_url(match.group(1))
+                if normalized:
+                    candidates.append(normalized)
+
+    unique_urls: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_urls.append(candidate)
+        if len(unique_urls) >= MAX_LINKS_IN_MESSAGE:
+            break
+    return unique_urls
+
+
+def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
+    """Fetch preview metadata for a URL and cache the result."""
 
     normalized = _normalize_http_url(raw_url)
     if not normalized:
-        return {"error": "url inválida"}
+        return {"url": str(raw_url or "").strip(), "error": "url inválida"}
 
-    try:
-        requested_max = (
-            int(max_chars) if max_chars is not None else WEB_FETCH_DEFAULT_CHARS
-        )
-    except (TypeError, ValueError):
-        requested_max = WEB_FETCH_DEFAULT_CHARS
-
-    requested_max = max(WEB_FETCH_MIN_CHARS, min(requested_max, WEB_FETCH_MAX_CHARS))
-
-    cache_payload = {"url": normalized, "max": requested_max}
-    cache_key = _hash_cache_key("fetch_url", cache_payload)
     redis_client = _optional_redis_client()
+    cache_key = _hash_cache_key("link_metadata", {"url": normalized})
     if redis_client is not None:
         try:
             cached = redis_get_json(redis_client, cache_key)
@@ -3875,304 +3886,121 @@ def fetch_url_content(
             "Mozilla/5.0 (compatible; RespondedorBot/1.0;"
             " +https://github.com/gusgusf/RespondedorBot)"
         ),
-        "Accept": "text/html,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
     }
 
     response = None
     try:
-        response = requests.get(
+        response = request_with_ssl_fallback(
             normalized,
             headers=headers,
-            timeout=10,
+            timeout=8,
             allow_redirects=True,
             stream=True,
         )
         response.raise_for_status()
-    except SSLError:
-        return {"error": "no pude establecer conexión segura", "url": normalized}
-    except RequestException as req_error:
-        error_name = req_error.__class__.__name__
+    except RequestException as error:
         return {
-            "error": f"error de red ({error_name})",
             "url": normalized,
+            "error": error.__class__.__name__,
         }
 
     final_url = normalized
     content_type = ""
+    status_code = getattr(response, "status_code", None)
     encoding: Optional[str] = None
     apparent_encoding: Optional[str] = None
-    status_code = None
+    content_bytes = b""
     try:
-        if isinstance(getattr(response, "url", None), str):
-            maybe_url = _normalize_http_url(response.url)
-            if maybe_url:
-                final_url = maybe_url
+        maybe_url = _normalize_http_url(str(getattr(response, "url", "") or ""))
+        if maybe_url:
+            final_url = maybe_url
         content_type = str(response.headers.get("Content-Type", "")).lower()
         encoding = response.encoding
         apparent_encoding = getattr(response, "apparent_encoding", None)
-        status_code = getattr(response, "status_code", None)
-
-        max_bytes = min(WEB_FETCH_MAX_BYTES, max(requested_max * 6, 20000))
-        total = 0
         chunks: List[bytes] = []
+        total = 0
         for chunk in response.iter_content(chunk_size=4096):
             if not chunk:
                 continue
             chunks.append(chunk)
             total += len(chunk)
-            if total >= max_bytes:
+            if total >= LINK_METADATA_MAX_BYTES:
                 break
         content_bytes = b"".join(chunks)
     finally:
         try:
-            if response is not None:
-                response.close()
+            response.close()
         except Exception:
             pass
 
-    if not content_bytes:
-        result: Dict[str, Any] = {
-            "url": final_url,
-            "status": status_code,
-            "content_type": content_type or "",
-            "title": None,
-            "content": "",
-            "truncated": False,
-            "char_count": 0,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "max_chars": requested_max,
-        }
-        if redis_client:
-            try:
-                redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
-            except Exception:
-                pass
-        return result
-
-    if not encoding:
-        encoding = apparent_encoding or "utf-8"
-
-    try:
-        text_body = content_bytes.decode(encoding or "utf-8", errors="replace")
-    except Exception:
-        text_body = content_bytes.decode("utf-8", errors="replace")
-
-    textual_tokens = (
-        "text",
-        "json",
-        "xml",
-        "javascript",
-        "markdown",
-        "yaml",
-        "csv",
-        "x-www-form-urlencoded",
-    )
-    is_textual = not content_type or any(
-        token in content_type for token in textual_tokens
-    )
-    sample_lower = content_bytes[:400].lower()
-    if not is_textual:
-        if b"<html" in sample_lower or b"<!doctype" in sample_lower:
-            is_textual = True
-
-    if not is_textual:
-        return {
-            "error": (
-                f"el contenido ({content_type or 'desconocido'}) no es texto legible"
-            ),
-            "url": final_url,
-            "status": status_code,
-        }
-
-    html_detected = "html" in content_type or "<html" in text_body[:400].lower()
-    title: Optional[str] = None
-    cleaned_text = text_body
-
-    if html_detected:
-        title, cleaned_text = _extract_text_from_html(text_body)
-    elif "json" in content_type:
-        try:
-            parsed_json = json.loads(text_body)
-            cleaned_text = json.dumps(parsed_json, ensure_ascii=False, indent=2)
-        except Exception:
-            cleaned_text = text_body
-    else:
-        cleaned_text = text_body
-
-    cleaned_text = cleaned_text.replace("\r\n", "\n").replace("\r", "\n").strip()
-
-    truncated_text = truncate_text(cleaned_text, requested_max)
-    truncated_flag = len(cleaned_text) > requested_max
-
-    result = {
+    result: Dict[str, Any] = {
         "url": final_url,
         "status": status_code,
         "content_type": content_type or "",
-        "title": title,
-        "content": truncated_text,
-        "truncated": truncated_flag,
-        "char_count": len(cleaned_text),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "max_chars": requested_max,
+        "title": None,
+        "description": None,
     }
 
-    if redis_client:
+    if content_bytes:
+        sample_lower = content_bytes[:400].lower()
+        if "html" in content_type or b"<html" in sample_lower or b"<!doctype" in sample_lower:
+            try:
+                text_body = content_bytes.decode(
+                    encoding or apparent_encoding or "utf-8", errors="replace"
+                )
+            except Exception:
+                text_body = content_bytes.decode("utf-8", errors="replace")
+            title, description = _extract_html_metadata(text_body)
+            result["title"] = _truncate_link_metadata_text(title, limit=160)
+            result["description"] = _truncate_link_metadata_text(description, limit=280)
+
+    if redis_client is not None:
         try:
-            redis_setex_json(redis_client, cache_key, TTL_WEB_FETCH, result)
+            redis_setex_json(redis_client, cache_key, TTL_LINK_METADATA, result)
         except Exception:
             pass
 
     return result
 
 
+def build_message_links_context(message: Mapping[str, Any]) -> str:
+    """Build an AI-only context block with link metadata from the message."""
+
+    urls = extract_message_urls(message)
+    if not urls:
+        return ""
+
+    lines = ["LINKS DEL MENSAJE:"]
+    for index, url in enumerate(urls, 1):
+        metadata = fetch_link_metadata(url)
+        final_url = str(metadata.get("url") or url).strip() or url
+        lines.append(f"{index}. {final_url}")
+        title = _truncate_link_metadata_text(metadata.get("title"), limit=160)
+        description = _truncate_link_metadata_text(metadata.get("description"), limit=280)
+        if title:
+            lines.append(f"titulo: {title}")
+        if description:
+            lines.append(f"descripcion: {description}")
+    return "\n".join(lines)
+
+
 def execute_tool(name: str, args: Dict[str, Any]) -> str:
     """Execute a named tool and return a plain-text result string."""
     name = name.lower()
-    if name == "fetch_url":
-        raw_url = args.get("url") or args.get("link") or args.get("href") or ""
-        url = str(raw_url).strip()
-        max_chars_arg = args.get("max_chars") or args.get("chars")
-        result = fetch_url_content(url, max_chars=max_chars_arg)
-        try:
-            status = result.get("status") if isinstance(result, dict) else None
-            err = result.get("error") if isinstance(result, dict) else None
-            log_url = url or (result.get("url") if isinstance(result, dict) else "")
-            print(
-                "execute_tool:fetch_url: url='%s' status=%s error=%s"
-                % (str(log_url)[:200], status, err)
-            )
-        except Exception:
-            pass
-        return json.dumps(result)
+    if name == "compound":
+        task = str(args.get("task") or args.get("query") or "").strip()
+        if not task:
+            return "task vacío"
+        if not should_use_groq_compound_tools():
+            return "compound no está disponible en este momento"
+        return _run_compound_task(
+            task=task,
+            compound_system_message=build_compound_system_message(),
+            persona_pass=False,
+        )
     return f"herramienta desconocida: {name}"
-
-
-def web_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
-    """Simple web search using DDGS library."""
-    query = query.strip()
-    limit = max(1, min(int(limit), 15))
-
-    cache_payload = {"q": query, "limit": limit}
-    cache_key = _hash_cache_key("web_search", cache_payload)
-    redis_client = _optional_redis_client()
-    if redis_client is not None:
-        try:
-            cached = redis_get_json(redis_client, cache_key)
-            if isinstance(cached, list):
-                return cached
-        except Exception:
-            redis_client = None
-
-    try:
-        from ddgs import DDGS
-
-        # Use DDGS for robust DuckDuckGo search
-        ddgs = DDGS(timeout=8)
-        # Light retry on transient errors
-        raw_results: List[Dict[str, Any]] = []
-        last_err: Optional[Exception] = None
-        for attempt in range(2):
-            try:
-                raw_results = ddgs.text(
-                    query=query, region="ar-es", safesearch="off", max_results=limit
-                )
-                break
-            except Exception as e:
-                last_err = e
-                if attempt == 0:
-                    time.sleep(0.5)
-                    continue
-                raw_results = []
-
-        # Convert to our expected format
-        results = []
-        for result in raw_results:
-            results.append(
-                {
-                    "title": result.get("title", ""),
-                    "url": result.get("href", ""),
-                    "snippet": result.get("body", "")[:500],
-                }
-            )
-
-        # Store in cache for 5 minutes
-        if redis_client is not None:
-            try:
-                redis_setex_json(redis_client, cache_key, TTL_WEB_SEARCH, results)
-            except Exception:
-                pass
-
-        return results
-    except Exception:
-        return []
-
-
-def format_search_results(
-    query: str,
-    results: Optional[Sequence[Mapping[str, Any]]],
-    limit: int = 5,
-) -> str:
-    """Format DuckDuckGo search results with consistent truncation and fallbacks."""
-
-    normalized_query = (query or "").strip()
-    if not results:
-        return "no encontré resultados ahora con duckduckgo"
-
-    try:
-        normalized_limit = int(limit)
-    except (TypeError, ValueError):
-        normalized_limit = 5
-    if normalized_limit < 1:
-        normalized_limit = 1
-
-    limited_results = list(results)[:normalized_limit]
-    if not limited_results:
-        return "no encontré resultados ahora con duckduckgo"
-
-    lines = [f"🔎 Resultados para: {normalized_query}"]
-    for index, result in enumerate(limited_results, 1):
-        title = str(result.get("title") or result.get("url") or "(sin título)")
-        url = str(result.get("url") or "").strip()
-        snippet = str(result.get("snippet") or "").strip()
-        if snippet:
-            lines.append(f"{index}. {title}\n{url}\n{snippet[:300]}")
-        else:
-            lines.append(f"{index}. {title}\n{url}")
-
-    return "\n\n".join(lines)
-
-
-def summarize_search_results(
-    query: str,
-    results: Optional[Sequence[Mapping[str, Any]]],
-) -> str:
-    """Summarize the top DuckDuckGo search result into 1-3 short sentences."""
-    if not results:
-        return "no encontré resultados ahora con duckduckgo"
-
-    top_result = next((item for item in results if isinstance(item, Mapping)), None)
-    if not top_result:
-        return "no encontré resultados ahora con duckduckgo"
-
-    title = str(top_result.get("title") or top_result.get("url") or "").strip()
-    snippet = str(top_result.get("snippet") or "").strip()
-
-    if not title and not snippet:
-        return "no encontré resultados ahora con duckduckgo"
-
-    parts: List[str] = []
-    if snippet:
-        trimmed_snippet = snippet[:280].rstrip()
-        if trimmed_snippet and not trimmed_snippet.endswith((".", "!", "?")):
-            trimmed_snippet += "."
-        if trimmed_snippet:
-            parts.append(trimmed_snippet)
-
-    if not parts and title:
-        parts.append(f"{title}.")
-
-    return " ".join(parts).strip()
 
 
 def sanitize_tool_artifacts(text: Optional[str]) -> str:
@@ -4215,13 +4043,25 @@ def sanitize_tool_artifacts(text: Optional[str]) -> str:
     return "\n".join(out_lines).strip()
 
 
-def search_command(msg_text: Optional[str]) -> str:
-    """/buscar command: perform a web search and return concise results"""
-    q = (msg_text or "").strip()
+def search_command(
+    messages: List[Dict[str, Any]],
+    response_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """/buscar command: run Groq Compound directly and return its raw response."""
+
+    _, query_text, _ = _extract_latest_user_query_info(messages)
+    q = query_text.strip()
     if not q:
         return "decime qué querés buscar capo"
-    results = web_search(q, limit=10)
-    return format_search_results(q, results, limit=10)
+    if not should_use_groq_compound_tools():
+        return "compound no está disponible en este momento"
+    return _run_compound_task(
+        task=q,
+        messages=messages,
+        compound_system_message=build_compound_system_message(),
+        response_meta=response_meta,
+        persona_pass=False,
+    )
 
 
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
@@ -4561,7 +4401,7 @@ def _extract_latest_user_query_info(
         if not isinstance(content, str):
             continue
         latest_user_text = content
-        latest_user_message = extract_user_message_from_context(content)
+        latest_user_message = _extract_message_block_from_prompt(content)
         latest_user_index = idx
         break
 
@@ -4572,6 +4412,7 @@ def estimate_ai_base_reserve_credits(
     messages: List[Dict[str, Any]],
     *,
     extra_input_tokens: int = 0,
+    reserve_mode: str = "chat",
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
     compound_system_message: Optional[Dict[str, Any]] = None
@@ -4592,32 +4433,23 @@ def estimate_ai_base_reserve_credits(
     except Exception as error:
         print(f"estimate_ai_base_reserve_credits: failed to build compound system message: {error}")
 
-    _, latest_user_message, latest_user_index = _extract_latest_user_query_info(messages)
-
-    if compound_system_message and should_search_previous_query(latest_user_message):
-        previous_query = ""
-        if latest_user_index is not None:
-            previous_query = _find_previous_user_text(messages, latest_user_index)
-        previous_message = extract_user_message_from_context(previous_query)
-        if previous_message:
-            rate_limit_input_messages = [{"role": "user", "content": previous_message}]
-            estimated_rate_limit_tokens = estimate_message_tokens(rate_limit_input_messages)
-            if compound_system_message:
-                estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
-            estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
-            enabled_tools = get_groq_compound_enabled_tools()
-            reserve = estimate_compound_reserve_credits(
-                system_message=compound_system_message,
-                messages=rate_limit_input_messages,
-                enabled_tools=enabled_tools,
-            )
-            return reserve, {
-                "reserve_mode": "compound",
-                "reserve_reason": "search_previous_query",
-                "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
-                "rate_limit_scope": "compound",
-                "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
-            }
+    if reserve_mode == "compound" and compound_system_message:
+        estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
+        estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
+        estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
+        enabled_tools = get_groq_compound_enabled_tools()
+        reserve = estimate_compound_reserve_credits(
+            system_message=compound_system_message,
+            messages=messages,
+            enabled_tools=enabled_tools,
+        )
+        return reserve, {
+            "reserve_mode": "compound",
+            "reserve_reason": "explicit_compound",
+            "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
+            "rate_limit_scope": "compound",
+            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
+        }
 
     estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
@@ -4953,18 +4785,16 @@ CONTEXTO POLITICO:
     if include_tools:
         tools_section = (
             "\n\nHERRAMIENTAS DISPONIBLES:\n"
-            "- web_search: buscador web actual (devuelve hasta 10 resultados).\n"
-            "- fetch_url: trae el texto plano de una URL http/https para citar fragmentos.\n"
+            "- compound: puente a Groq Compound con web_search, visit_website, code_interpreter y browser_automation.\n"
             "\nCÓMO LLAMAR HERRAMIENTAS:\n"
             "Escribe exactamente una línea con el formato:\n"
             "[TOOL] <nombre> {JSON}\n"
-            'Ejemplos:\n  [TOOL] web_search {"query": "inflación argentina hoy"}\n'
-            '  [TOOL] fetch_url {"url": "https://example.com/noticia"}\n'
+            'Ejemplo:\n  [TOOL] compound {"task": "buscá inflación argentina hoy y resumí los puntos clave"}\n'
             "Luego espera la respuesta y continúa con tu contestación final.\n"
             "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
             "Si la pregunta es sobre precios/actualidad y el usuario no pidió un año puntual, "
             "usá el año actual de FECHA ACTUAL; no inventes 2024/2025.\n"
-            "Tras usar web_search, respondé directo al usuario con síntesis breve; no devuelvas lista cruda ni arranques con 'Encontré esto sobre...'."
+            "Después de usar compound, respondé directo al usuario con síntesis breve y sin mostrar la llamada a herramienta."
         )
 
     print(f"build_system_message: include_tools={include_tools}")
@@ -5186,6 +5016,10 @@ def build_ai_messages(
                 truncate_text(reply_context),
             ]
         )
+
+    link_context = build_message_links_context(message)
+    if link_context:
+        context_parts.extend(["", link_context])
 
     context_parts.extend(
         [
