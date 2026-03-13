@@ -127,7 +127,7 @@ def test_handle_msg_link_reply():
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+    ) as mock_redis, patch("api.index.send_msg", return_value=901) as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
         "api.index.get_chat_config",
@@ -135,6 +135,9 @@ def test_handle_msg_link_reply():
     ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
+        "api.index.build_message_links_context",
+        return_value="LINKS DEL MENSAJE:\n1. https://twitter.com/foo/status/1\ntitulo: foo",
+    ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
         "api.index.requests.get"
@@ -158,7 +161,13 @@ def test_handle_msg_link_reply():
             "123", expected, "1", ["https://twitter.com/foo/status/1"]
         )
         mock_delete.assert_not_called()
-        mock_save.assert_not_called()
+        mock_links_context.assert_called_once_with(message)
+        mock_save.assert_called_once_with(
+            "123",
+            "bot_901",
+            "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john\n\nLINKS DEL MENSAJE:\n1. https://twitter.com/foo/status/1\ntitulo: foo",
+            redis_client,
+        )
 
 
 def test_handle_msg_link_reply_instagram():
@@ -170,7 +179,7 @@ def test_handle_msg_link_reply_instagram():
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+    ) as mock_redis, patch("api.index.send_msg", return_value=903) as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
         "api.index.get_chat_config",
@@ -178,6 +187,9 @@ def test_handle_msg_link_reply_instagram():
     ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
+        "api.index.build_message_links_context",
+        return_value="LINKS DEL MENSAJE:\n1. https://www.instagram.com/qux\ntitulo: foo",
+    ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
         "api.index.requests.get"
@@ -201,7 +213,13 @@ def test_handle_msg_link_reply_instagram():
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
         mock_delete.assert_not_called()
-        mock_save.assert_not_called()
+        mock_links_context.assert_called_once_with(message)
+        mock_save.assert_called_once_with(
+            "789",
+            "bot_903",
+            "mirá https://kkinstagram.com/qux\n\ncompartido por @lu\n\nLINKS DEL MENSAJE:\n1. https://www.instagram.com/qux\ntitulo: foo",
+            redis_client,
+        )
 
 
 def test_handle_msg_link_delete():
@@ -213,7 +231,7 @@ def test_handle_msg_link_delete():
     }
     with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
         "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
+    ) as mock_redis, patch("api.index.send_msg", return_value=902) as mock_send, patch(
         "api.index.delete_msg"
     ) as mock_delete, patch(
         "api.index.get_chat_config",
@@ -221,6 +239,9 @@ def test_handle_msg_link_delete():
     ), patch(
         "api.index.initialize_commands", return_value={}
     ), patch(
+        "api.index.build_message_links_context",
+        return_value="LINKS DEL MENSAJE:\n1. https://x.com/bar/status/1\ntitulo: foo",
+    ) as mock_links_context, patch(
         "api.index.save_message_to_redis"
     ) as mock_save, patch(
         "api.index.requests.get"
@@ -244,7 +265,13 @@ def test_handle_msg_link_delete():
         mock_send.assert_called_once_with(
             "456", expected, buttons=["https://x.com/bar/status/1"]
         )
-        mock_save.assert_not_called()
+        mock_links_context.assert_called_once_with(message)
+        mock_save.assert_called_once_with(
+            "456",
+            "bot_902",
+            "look https://fixupx.com/bar/status/1\n\ncompartido por @ana\n\nLINKS DEL MENSAJE:\n1. https://x.com/bar/status/1\ntitulo: foo",
+            redis_client,
+        )
 
 
 @patch("api.index.config_redis")

@@ -6478,6 +6478,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         get_bot_message_metadata=get_bot_message_metadata,
         save_bot_message_metadata=save_bot_message_metadata,
         build_reply_context_text=build_reply_context_text,
+        build_message_links_context=build_message_links_context,
         should_gordo_respond=should_gordo_respond,
         format_user_message=format_user_message,
         save_message_to_redis=save_message_to_redis,
