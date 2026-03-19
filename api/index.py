@@ -3113,9 +3113,21 @@ def admin_report(
 
     # Add extra context if provided
     if extra_context:
+        def _format_context_value(key: str, value: Any) -> Any:
+            key_name = str(key or "").lower()
+            if "credit_units" not in key_name:
+                return value
+            if isinstance(value, bool):
+                return value
+            try:
+                units = int(value)
+            except (TypeError, ValueError):
+                return value
+            return f"{format_credit_units(units)} créditos ({units} unidades)"
+
         context_details = "\n\ncontexto adicional:"
         for key, value in extra_context.items():
-            context_details += f"\n{key}: {value}"
+            context_details += f"\n{key}: {_format_context_value(key, value)}"
         formatted_message += context_details
 
     # Add error details if provided
