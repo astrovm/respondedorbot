@@ -521,3 +521,37 @@ def test_admin_report_basic():
         mock_send_msg.assert_called_once_with(
             "12345", "reporte admin desde test_instance: test message"
         )
+
+
+def test_admin_report_formats_credit_units_in_context():
+    from api.index import admin_report
+
+    with patch("api.index.send_msg") as mock_send_msg, patch(
+        "os.environ.get"
+    ) as mock_env:
+        mock_env.side_effect = lambda key, default=None: {
+            "ADMIN_CHAT_ID": "12345",
+            "FRIENDLY_INSTANCE_NAME": "test_instance",
+        }.get(key, default)
+
+        admin_report(
+            "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
+            extra_context={
+                "chat_id": "7588757994",
+                "user_id": "7588757994",
+                "reason": "ai_response_success",
+                "reserved_credit_units": 19,
+            },
+        )
+        mock_send_msg.assert_called_once_with(
+            "12345",
+            (
+                "reporte admin desde test_instance: respuesta IA exitosa sin usage billing; "
+                "se mantiene cobro por reserva (sin reintegro)\n\n"
+                "contexto adicional:\n"
+                "chat_id: 7588757994\n"
+                "user_id: 7588757994\n"
+                "reason: ai_response_success\n"
+                "reserved_credit_units: 1.9 créditos (19 unidades)"
+            ),
+        )
