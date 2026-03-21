@@ -64,6 +64,8 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/creditlog",), "creditlog_command", False, True),
     (("/purgeailog",), "purgeailog_command", False, False),
     (("/transfer",), "transfer_command", False, True),
+    (("/gm",), "get_good_morning", False, False),
+    (("/gn",), "get_good_night", False, False),
 )
 
 LINK_REPLACEMENT_DOMAINS = (
@@ -133,13 +135,12 @@ def should_gordo_respond(
 
     is_command = command in commands
     reply = message.get("reply_to_message") or {}
-    is_reply = isinstance(reply, Mapping) and reply.get("from", {}).get("username", "") == bot_username
+    is_reply = (
+        isinstance(reply, Mapping)
+        and reply.get("from", {}).get("username", "") == bot_username
+    )
     ignore_link_fix_followups = bool(chat_config.get("ignore_link_fix_followups", True))
-    if (
-        not is_command
-        and is_reply
-        and ignore_link_fix_followups
-    ):
+    if not is_command and is_reply and ignore_link_fix_followups:
         reply_text = str(reply.get("text") or "")
         if any(domain in reply_text for domain in LINK_REPLACEMENT_DOMAINS):
             return False
