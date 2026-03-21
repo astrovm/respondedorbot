@@ -2875,8 +2875,8 @@ esto es lo que sé hacer, boludo:
 
 - /transcribe: te transcribo audio o describo imagen (responde a un mensaje)
 
-- /gm: te mando un GIF de buenos días random
-- /gn: te mando un GIF de buenas noches random
+- /gm: te mando un gif de buenos días random
+- /gn: te mando un gif de buenas noches random
 """
 
 
@@ -5384,6 +5384,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
+            "update_commands_command": _noop_command,
         }
     )
 
@@ -6957,8 +6958,8 @@ def update_telegram_bot_commands() -> bool:
         "topup": "cargás créditos IA con Telegram Stars por privado",
         "balance": "te muestro tu saldo IA",
         "transfer": "le pasás créditos tuyos al grupo",
-        "gm": "GIF de buenos días",
-        "gn": "GIF de buenas noches",
+        "gm": "gif de buenos días",
+        "gn": "gif de buenas noches",
     }
 
     # Build commands list from COMMAND_GROUPS
