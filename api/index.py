@@ -122,6 +122,7 @@ from api.chat_settings import (
 )
 from api.credit_units import format_credit_units
 from api.command_registry import (
+    COMMAND_GROUPS,
     build_command_registry as _build_command_registry,
     parse_command as _command_parse_command,
     should_auto_process_media as _command_should_auto_process_media,
@@ -275,7 +276,9 @@ def _extract_message_block_from_prompt(text: str) -> str:
     return str(match.group("message") or "").strip()
 
 
-def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optional[int]]]:
+def _fetch_polymarket_live_price(
+    token_id: str,
+) -> Optional[Tuple[float, Optional[int]]]:
     """Return the latest price and timestamp for a Polymarket CLOB token."""
 
     if not token_id:
@@ -329,7 +332,9 @@ def _fetch_polymarket_live_price(token_id: str) -> Optional[Tuple[float, Optiona
     return price_value, entry_timestamp
 
 
-def _fetch_criptoya_dollar_data(*, hourly_cache: bool = True) -> Optional[Dict[str, Any]]:
+def _fetch_criptoya_dollar_data(
+    *, hourly_cache: bool = True
+) -> Optional[Dict[str, Any]]:
     """Retrieve dollar rates from CriptoYa with shared cache semantics."""
 
     return cached_requests(
@@ -357,7 +362,9 @@ def _query_needs_current_info(text: Optional[str]) -> bool:
     normalized = normalize_text_for_matching(str(text or ""))
     if not normalized:
         return False
-    return any(re.search(pattern, normalized) for pattern in CURRENT_INFO_QUERY_PATTERNS)
+    return any(
+        re.search(pattern, normalized) for pattern in CURRENT_INFO_QUERY_PATTERNS
+    )
 
 
 def _normalize_search_query(
@@ -376,14 +383,18 @@ def _normalize_search_query(
         " ".join(part for part in (latest_user_text, latest_user_message) if part)
     )
     query_years = _extract_year_tokens(normalized_query)
-    needs_current_info = _query_needs_current_info(normalized_query) or _query_needs_current_info(
-        latest_user_message
-    )
+    needs_current_info = _query_needs_current_info(
+        normalized_query
+    ) or _query_needs_current_info(latest_user_message)
 
     if user_years:
         return normalized_query
 
-    if query_years and any(year < current_year for year in query_years) and needs_current_info:
+    if (
+        query_years
+        and any(year < current_year for year in query_years)
+        and needs_current_info
+    ):
         rewritten_query = YEAR_TOKEN_PATTERN.sub(str(current_year), normalized_query)
         if rewritten_query != normalized_query:
             print(
@@ -403,7 +414,9 @@ def _normalize_search_query(
     return normalized_query
 
 
-def _format_text_for_log(text: Optional[str], limit: int = COMPOUND_SOURCE_LOG_LIMIT) -> str:
+def _format_text_for_log(
+    text: Optional[str], limit: int = COMPOUND_SOURCE_LOG_LIMIT
+) -> str:
     raw = str(text or "").strip()
     if len(raw) <= limit:
         return raw
@@ -503,7 +516,9 @@ def _run_compound_task(
         "Instrucciones: usá la fuente solo como referencia, verificá consistencia "
         "y respondé al usuario con la personalidad configurada."
     )
-    enriched_messages = list(messages or []) + [{"role": "system", "content": source_context}]
+    enriched_messages = list(messages or []) + [
+        {"role": "system", "content": source_context}
+    ]
     followup_system_message = _disable_tools_in_system_message(system_message)
 
     if response_meta is None:
@@ -593,9 +608,7 @@ def _deserialize_cached_groq_usage_result(payload: Any) -> Optional[GroqUsageRes
 
     audio_seconds_raw = payload_map.get("audio_seconds")
     try:
-        audio_seconds = (
-            None if audio_seconds_raw is None else float(audio_seconds_raw)
-        )
+        audio_seconds = None if audio_seconds_raw is None else float(audio_seconds_raw)
     except (TypeError, ValueError):
         audio_seconds = None
 
@@ -671,8 +684,6 @@ def _cache_groq_compound_result(
 
 
 _T = TypeVar("_T")
-
-
 
 
 bcra_api_get = bcra_service.bcra_api_get
@@ -756,6 +767,7 @@ def get_cached_tcrm_100(
 
 def can_embed_url(url: str) -> bool:
     """Wrapper to allow tests to monkeypatch embed detection."""
+
     def _metadata_sink(metadata: Dict[str, Any]) -> None:
         _cache_link_metadata(url, metadata)
 
@@ -773,8 +785,11 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
 
     return _links_replace_links(text, embed_checker=can_embed_url)
 
+
 # Provider backoff windows (seconds)
-GROQ_RATE_LIMIT_BACKOFF_SECONDS = 600  # fallback when Groq does not expose reset headers
+GROQ_RATE_LIMIT_BACKOFF_SECONDS = (
+    600  # fallback when Groq does not expose reset headers
+)
 
 GROQ_FREE_ACCOUNT = "free"
 GROQ_PAID_ACCOUNT = "paid"
@@ -803,7 +818,9 @@ def _get_ai_provider_request_count() -> int:
     return int(_ai_provider_request_count.get() or 0)
 
 
-def _send_random_degraded_reply(message: Mapping[str, Any], *, reason: str) -> Tuple[str, int]:
+def _send_random_degraded_reply(
+    message: Mapping[str, Any], *, reason: str
+) -> Tuple[str, int]:
     chat = cast(Mapping[str, Any], message.get("chat") or {})
     chat_id = chat.get("id")
     if chat_id is None:
@@ -850,6 +867,7 @@ def is_provider_backoff_active(provider: str) -> bool:
     """Check whether calls should be skipped for the provider due to rate limiting."""
 
     return get_provider_backoff_remaining(provider) > 0
+
 
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
@@ -1008,7 +1026,9 @@ def _get_groq_rate_limit_config(account: str, scope: str) -> Dict[str, Any]:
 
 
 def _is_groq_scope_backoff_active(account: str, scope: str) -> bool:
-    return bool(scope) and is_provider_backoff_active(_get_groq_backoff_key(account, scope))
+    return bool(scope) and is_provider_backoff_active(
+        _get_groq_backoff_key(account, scope)
+    )
 
 
 def _peek_groq_rate_limit(
@@ -1054,17 +1074,13 @@ def _peek_groq_rate_limit(
         if "ash" in config and audio_seconds > 0:
             audio_hour_count = _decode_rate_counter(
                 redis_client.get(
-                    _groq_rate_limit_metric_hour_key(
-                        account, scope, "audio_seconds"
-                    )
+                    _groq_rate_limit_metric_hour_key(account, scope, "audio_seconds")
                 )
             )
         if "asd" in config and audio_seconds > 0:
             audio_day_count = _decode_rate_counter(
                 redis_client.get(
-                    _groq_rate_limit_metric_day_key(
-                        account, scope, "audio_seconds"
-                    )
+                    _groq_rate_limit_metric_day_key(account, scope, "audio_seconds")
                 )
             )
     except redis.RedisError:
@@ -1074,13 +1090,21 @@ def _peek_groq_rate_limit(
         return False
     if day_count + max(0, int(request_count)) > int(config["rpd"]):
         return False
-    if "tpm" in config and token_minute_count + max(0, int(token_count)) > int(config["tpm"]):
+    if "tpm" in config and token_minute_count + max(0, int(token_count)) > int(
+        config["tpm"]
+    ):
         return False
-    if "tpd" in config and token_day_count + max(0, int(token_count)) > int(config["tpd"]):
+    if "tpd" in config and token_day_count + max(0, int(token_count)) > int(
+        config["tpd"]
+    ):
         return False
-    if "ash" in config and audio_hour_count + max(0, int(round(audio_seconds))) > int(config["ash"]):
+    if "ash" in config and audio_hour_count + max(0, int(round(audio_seconds))) > int(
+        config["ash"]
+    ):
         return False
-    if "asd" in config and audio_day_count + max(0, int(round(audio_seconds))) > int(config["asd"]):
+    if "asd" in config and audio_day_count + max(0, int(round(audio_seconds))) > int(
+        config["asd"]
+    ):
         return False
     return True
 
@@ -1307,17 +1331,13 @@ def _extract_groq_usage_token_count(usage: Optional[Mapping[str, Any]]) -> int:
     usage_map = ensure_mapping(usage) or {}
     try:
         input_tokens = int(
-            usage_map.get("input_tokens")
-            or usage_map.get("prompt_tokens")
-            or 0
+            usage_map.get("input_tokens") or usage_map.get("prompt_tokens") or 0
         )
     except (TypeError, ValueError):
         input_tokens = 0
     try:
         output_tokens = int(
-            usage_map.get("output_tokens")
-            or usage_map.get("completion_tokens")
-            or 0
+            usage_map.get("output_tokens") or usage_map.get("completion_tokens") or 0
         )
     except (TypeError, ValueError):
         output_tokens = 0
@@ -1404,6 +1424,7 @@ def _extract_rate_limit_backoff_seconds(
         if parsed is not None:
             return parsed
     return fallback_seconds
+
 
 def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
     """Retrieve a cached media payload stored under the given prefix."""
@@ -1718,9 +1739,7 @@ def _format_polymarket_event_section(
 
         probability = max(0.0, min(yes_price, 1.0)) * 100
         title = (
-            market.get("groupItemTitle")
-            or market.get("question")
-            or market.get("slug")
+            market.get("groupItemTitle") or market.get("question") or market.get("slug")
         )
 
         if not title:
@@ -1736,7 +1755,9 @@ def _format_polymarket_event_section(
     filtered_odds: List[Tuple[str, float]] = []
     for title, probability in odds:
         normalized_title = title.strip().upper()
-        if any(normalized_title.startswith(prefix.upper()) for prefix in filter_prefixes):
+        if any(
+            normalized_title.startswith(prefix.upper()) for prefix in filter_prefixes
+        ):
             filtered_odds.append((title, probability))
 
     odds_to_display = filtered_odds or odds
@@ -1918,7 +1939,9 @@ def get_prices(msg_text: str) -> Optional[str]:
             if source_symbol == "SATS":
                 source_amount = source_amount / 100000000
 
-            asset_price_in_source = requested_target_asset["quote"][source_parameter]["price"]
+            asset_price_in_source = requested_target_asset["quote"][source_parameter][
+                "price"
+            ]
             converted_value = source_amount / asset_price_in_source
             return (
                 f"{fmt_num(amount, 8)} {source_symbol} = "
@@ -2059,7 +2082,7 @@ def get_prices(msg_text: str) -> Optional[str]:
         zeros = len(decimals) - len(decimals.lstrip("0"))
 
         ticker = coin["symbol"]
-        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros+4}f}".rstrip(
+        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros + 4}f}".rstrip(
             "0"
         ).rstrip(".")
         percentage = (
@@ -2291,7 +2314,9 @@ def get_rulo() -> str:
     cache_expiration_time = TTL_DOLLAR
     usd_amount = 1000.0
     amount_param = (
-        f"{int(usd_amount)}" if isinstance(usd_amount, float) and usd_amount.is_integer() else str(usd_amount)
+        f"{int(usd_amount)}"
+        if isinstance(usd_amount, float) and usd_amount.is_integer()
+        else str(usd_amount)
     )
 
     dollars = _fetch_criptoya_dollar_data()
@@ -2333,7 +2358,9 @@ def get_rulo() -> str:
 
     # Oficial -> Blue
     blue_data = data.get("blue", {})
-    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(blue_data.get("price"))
+    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(
+        blue_data.get("price")
+    )
     if blue_price:
         blue_final_ars = blue_price * usd_amount
         blue_profit_ars = blue_final_ars - oficial_cost_ars
@@ -2341,9 +2368,7 @@ def get_rulo() -> str:
             f"Resultado: {base_usd} USD → {_format_local_currency(blue_final_ars)} ARS",
             f"Ganancia: {_format_local_signed(blue_profit_ars)} ARS",
         ]
-        lines.append(
-            _format_spread_line("Blue", blue_price, oficial_price, blue_extra)
-        )
+        lines.append(_format_spread_line("Blue", blue_price, oficial_price, blue_extra))
 
     # Oficial -> USDT -> ARS
     usd_usdt = cached_requests(
@@ -2531,7 +2556,10 @@ def handle_transcribe_with_message_result(
     try:
         # Check if this is a reply to another message
         if "reply_to_message" not in message:
-            return "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí", []
+            return (
+                "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí",
+                [],
+            )
 
         replied_msg = message["reply_to_message"]
 
@@ -2552,6 +2580,7 @@ def handle_transcribe_with_message_result(
             return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"], []
 
         if photo_file_id:
+
             def _find_media_message(
                 container: Mapping[str, Any], key: str
             ) -> Optional[Mapping[str, Any]]:
@@ -2580,11 +2609,13 @@ def handle_transcribe_with_message_result(
                 photo_response, billing_segment = _describe_replied_media(
                     photo_source,
                     media_key="photo",
-                    extract_file_id=lambda media: media[-1]["file_id"]
-                    if isinstance(media, Sequence)
-                    and not isinstance(media, (str, bytes))
-                    and media
-                    else None,
+                    extract_file_id=lambda media: (
+                        media[-1]["file_id"]
+                        if isinstance(media, Sequence)
+                        and not isinstance(media, (str, bytes))
+                        and media
+                        else None
+                    ),
                     prompt="Describe what you see in this image in detail.",
                     success_prefix="🖼️ en la imagen veo: ",
                     download_error="no pude bajar la imagen, mandala de nuevo",
@@ -2598,16 +2629,18 @@ def handle_transcribe_with_message_result(
                 sticker_response, billing_segment = _describe_replied_media(
                     sticker_source,
                     media_key="sticker",
-                    extract_file_id=lambda media: media.get("file_id")
-                    if isinstance(media, Mapping)
-                    else None,
+                    extract_file_id=lambda media: (
+                        media.get("file_id") if isinstance(media, Mapping) else None
+                    ),
                     prompt="Describe what you see in this sticker in detail.",
                     success_prefix="🎨 en el sticker veo: ",
                     download_error="no pude bajar el sticker, mandalo de nuevo",
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
                 if sticker_response:
-                    return sticker_response, [billing_segment] if billing_segment else []
+                    return sticker_response, [
+                        billing_segment
+                    ] if billing_segment else []
 
         return "ese mensaje no tiene audio, imagen ni sticker para laburar", []
 
@@ -2723,7 +2756,9 @@ JAPANESE_TEXT_RE = re.compile(
 def romanize_japanese(text: str) -> str:
     """Convert Japanese kana/kanji text to romaji when possible."""
     segments = kakasi().convert(text)
-    return "".join(str(segment.get("hepburn") or segment.get("orig") or "") for segment in segments)
+    return "".join(
+        str(segment.get("hepburn") or segment.get("orig") or "") for segment in segments
+    )
 
 
 def is_japanese_text(text: str) -> bool:
@@ -2839,6 +2874,9 @@ esto es lo que sé hacer, boludo:
 - /time: timestamp unix actual
 
 - /transcribe: te transcribo audio o describo imagen (responde a un mensaje)
+
+- /gm: te mando un GIF de buenos días random
+- /gn: te mando un GIF de buenas noches random
 """
 
 
@@ -2906,7 +2944,11 @@ def get_oil_price() -> str:
                 f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5
             )
             daily_response.raise_for_status()
-            rows = [line.strip() for line in daily_response.text.splitlines() if line.strip()]
+            rows = [
+                line.strip()
+                for line in daily_response.text.splitlines()
+                if line.strip()
+            ]
             parsed = parse_daily_rows(rows)
 
             if not parsed:
@@ -2998,17 +3040,13 @@ def _telegram_request(
 
     if not isinstance(payload, dict):
         if log_errors:
-            print(
-                f"Telegram request to {endpoint} returned unexpected payload type"
-            )
+            print(f"Telegram request to {endpoint} returned unexpected payload type")
         return None, "unexpected response"
 
     if not payload.get("ok"):
         description = str(payload.get("description") or "telegram request failed")
         if log_errors:
-            print(
-                f"Telegram request to {endpoint} returned ok=false: {description}"
-            )
+            print(f"Telegram request to {endpoint} returned ok=false: {description}")
         return payload, description
 
     return payload, None
@@ -3099,6 +3137,144 @@ def delete_msg(chat_id: str, msg_id: str) -> None:
     )
 
 
+def send_animation(
+    chat_id: str,
+    animation_url: str,
+    msg_id: str = "",
+    caption: str = "",
+) -> Optional[int]:
+    """Send an animation (GIF) to a Telegram chat"""
+    payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "animation": animation_url,
+    }
+    if msg_id:
+        payload["reply_to_message_id"] = msg_id
+    if caption:
+        payload["caption"] = caption
+
+    payload_response, error = _telegram_request(
+        "sendAnimation", method="POST", json_payload=payload
+    )
+    if error or not payload_response:
+        return None
+
+    result = payload_response.get("result")
+    if isinstance(result, dict):
+        message_id = result.get("message_id")
+        if isinstance(message_id, int):
+            return message_id
+
+    return None
+
+
+# Giphy API constants
+GIPHY_API_URL = "https://api.giphy.com/v1/gifs"
+TTL_GIPHY_GIF = 300  # 5 minutes cache
+
+
+def _fetch_giphy_random_gif(search_term: str) -> Optional[str]:
+    """Fetch a random GIF URL from Giphy API for a search term."""
+    api_key = environ.get("GIPHY_API_KEY")
+    if not api_key:
+        print(f"GIPHY_API_KEY not configured, cannot fetch GIF for: {search_term}")
+        return None
+
+    # List of varied search terms for randomness
+    gm_terms = [
+        "good morning",
+        "buenos dias",
+        "morning coffee",
+        "sunrise",
+        "wake up",
+        "fresh morning",
+        "morning vibes",
+        "sunny morning",
+    ]
+    gn_terms = [
+        "good night",
+        "buenas noches",
+        "sleep tight",
+        "sweet dreams",
+        "night time",
+        "moonlight",
+        "bedtime",
+        "nighty night",
+    ]
+
+    # Pick a random variation of the search term
+    if search_term == "good morning":
+        query = random.choice(gm_terms)
+    elif search_term == "good night":
+        query = random.choice(gn_terms)
+    else:
+        query = search_term
+
+    cache_key = f"giphy:{query.replace(' ', '_')}"
+
+    # Check cache first
+    redis_client = _optional_redis_client()
+    try:
+        if redis_client:
+            cached_url = redis_client.get(cache_key)
+            if cached_url:
+                return str(cached_url)
+    except Exception as e:
+        print(f"Error checking Giphy cache: {e}")
+
+    # Fetch from Giphy API
+    try:
+        url = f"{GIPHY_API_URL}/search"
+        params = {
+            "api_key": api_key,
+            "q": query,
+            "limit": 25,  # Get multiple results for randomness
+            "offset": random.randint(0, 50),  # Random offset for variety
+            "rating": "g",  # General audience
+        }
+
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("data") and len(data["data"]) > 0:
+            # Pick a random GIF from results
+            gif_data = random.choice(data["data"])
+            gif_url = gif_data.get("images", {}).get("original", {}).get("url")
+
+            if gif_url:
+                # Cache the result
+                try:
+                    if redis_client:
+                        redis_client.setex(cache_key, TTL_GIPHY_GIF, gif_url)
+                except Exception as e:
+                    print(f"Error caching Giphy result: {e}")
+                return gif_url
+
+    except Exception as e:
+        print(f"Error fetching from Giphy: {e}")
+
+    return None
+
+
+def get_good_morning() -> str:
+    """Get a random good morning GIF URL."""
+    gif_url = _fetch_giphy_random_gif("good morning")
+    if gif_url:
+        return gif_url
+    # Fallback message if API fails
+    return "buen día boludo"
+
+
+def get_good_night() -> str:
+    """Get a random good night GIF URL."""
+    gif_url = _fetch_giphy_random_gif("good night")
+    if gif_url:
+        return gif_url
+    # Fallback message if API fails
+    return "buenas noches boludo"
+
+
 def admin_report(
     message: str,
     error: Optional[Exception] = None,
@@ -3113,6 +3289,7 @@ def admin_report(
 
     # Add extra context if provided
     if extra_context:
+
         def _format_context_value(key: str, value: Any) -> Any:
             key_name = str(key or "").lower()
             if "credit_units" not in key_name:
@@ -3246,6 +3423,7 @@ def get_weather() -> dict:
         print(f"Error getting weather: {str(e)}")
         return {}
 
+
 def resolve_tool_calls(
     system_message: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -3308,7 +3486,7 @@ def resolve_tool_calls(
             )
             break
         print(
-            f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n',' ')}'"
+            f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n', ' ')}'"
         )
         next_tool_call = parse_tool_call(final)
         if not next_tool_call:
@@ -3374,7 +3552,9 @@ def ask_ai(
         # Build system message with personality, context and tool instructions
         system_message = build_system_message(context_data, include_tools=True)
         compound_system_message = (
-            build_compound_system_message() if should_use_groq_compound_tools() else None
+            build_compound_system_message()
+            if should_use_groq_compound_tools()
+            else None
         )
 
         # If we have an image, first describe it with the vision model then continue normal flow
@@ -3419,7 +3599,7 @@ def ask_ai(
             )
         if initial:
             print(
-                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n',' ')}'"
+                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n', ' ')}'"
             )
 
         if response_meta is None:
@@ -3567,7 +3747,9 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
                     j += 1
                     continue
                 if addition_line.normalized:
-                    json_candidate = (json_candidate + " " + addition_line.normalized).strip()
+                    json_candidate = (
+                        json_candidate + " " + addition_line.normalized
+                    ).strip()
                 j += 1
 
             if "{" not in json_candidate:
@@ -3581,8 +3763,12 @@ def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]
                     j += 1
                     continue
                 if addition_line.normalized:
-                    json_candidate = (json_candidate + " " + addition_line.normalized).strip()
-                    open_count += addition_line.normalized.count("{") - addition_line.normalized.count("}")
+                    json_candidate = (
+                        json_candidate + " " + addition_line.normalized
+                    ).strip()
+                    open_count += addition_line.normalized.count(
+                        "{"
+                    ) - addition_line.normalized.count("}")
                 j += 1
 
             closing_index = json_candidate.rfind("}")
@@ -3774,7 +3960,10 @@ class _HtmlMetadataExtractor(HTMLParser):
 
         if property_name in {"og:title", "twitter:title"} and not self.title:
             self.title = normalized_content
-        elif property_name in {"og:description", "twitter:description"} and not self.description:
+        elif (
+            property_name in {"og:description", "twitter:description"}
+            and not self.description
+        ):
             self.description = normalized_content
         elif meta_name == "description" and not self.description:
             self.description = normalized_content
@@ -3805,7 +3994,9 @@ def _extract_html_metadata(html_text: str) -> Tuple[Optional[str], Optional[str]
     return parser.finalize()
 
 
-def _truncate_link_metadata_text(text: Optional[str], limit: int = 280) -> Optional[str]:
+def _truncate_link_metadata_text(
+    text: Optional[str], limit: int = 280
+) -> Optional[str]:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     if not normalized:
         return None
@@ -3844,7 +4035,9 @@ def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
         "status": metadata.get("status"),
         "content_type": str(metadata.get("content_type") or ""),
         "title": _truncate_link_metadata_text(metadata.get("title"), limit=160),
-        "description": _truncate_link_metadata_text(metadata.get("description"), limit=280),
+        "description": _truncate_link_metadata_text(
+            metadata.get("description"), limit=280
+        ),
     }
     cache_store = _link_metadata_local_cache.setdefault(normalized, {})
     update_local_cache(
@@ -3895,7 +4088,9 @@ def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
     ):
         source_text = str(message.get(text_key) or "")
         if source_text:
-            candidates.extend(_extract_urls_from_entity_list(source_text, message.get(entities_key)))
+            candidates.extend(
+                _extract_urls_from_entity_list(source_text, message.get(entities_key))
+            )
             for match in MESSAGE_URL_PATTERN.finditer(source_text):
                 normalized = _normalize_detected_message_url(match.group(1))
                 if normalized:
@@ -4003,7 +4198,11 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
 
     if content_bytes:
         sample_lower = content_bytes[:400].lower()
-        if "html" in content_type or b"<html" in sample_lower or b"<!doctype" in sample_lower:
+        if (
+            "html" in content_type
+            or b"<html" in sample_lower
+            or b"<!doctype" in sample_lower
+        ):
             try:
                 text_body = content_bytes.decode(
                     encoding or apparent_encoding or "utf-8", errors="replace"
@@ -4040,7 +4239,9 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
         final_url = str(metadata.get("url") or url).strip() or url
         lines.append(f"{index}. {final_url}")
         title = _truncate_link_metadata_text(metadata.get("title"), limit=160)
-        description = _truncate_link_metadata_text(metadata.get("description"), limit=280)
+        description = _truncate_link_metadata_text(
+            metadata.get("description"), limit=280
+        )
         if title:
             lines.append(f"titulo: {title}")
         if description:
@@ -4296,9 +4497,7 @@ def _invoke_provider(
             remaining = int(
                 get_provider_backoff_remaining(normalized_backoff_key or provider_name)
             )
-            print(
-                f"{display_name} rate limit detected; backing off for {remaining}s"
-            )
+            print(f"{display_name} rate limit detected; backing off for {remaining}s")
         return None
 
 
@@ -4387,7 +4586,9 @@ def _log_groq_request_result(
                 "local_billing": {
                     "raw_usd_micros": billing.get("raw_usd_micros", 0),
                     "charged_credit_units": billing.get("charged_credit_units", 0),
-                    "charged_credits_display": billing.get("charged_credits_display", "0.0"),
+                    "charged_credits_display": billing.get(
+                        "charged_credits_display", "0.0"
+                    ),
                     "model_breakdown": billing.get("model_breakdown", []),
                     "tool_breakdown": billing.get("tool_breakdown", []),
                     "unsupported_notes": billing.get("unsupported_notes", []),
@@ -4414,7 +4615,9 @@ def _extract_groq_usage_breakdown(response: Any) -> List[Dict[str, Any]]:
     if isinstance(response, dict):
         usage_breakdown = response.get("usage_breakdown")
         if usage_breakdown is None and isinstance(response.get("usage"), Mapping):
-            usage_breakdown = cast(Mapping[str, Any], response["usage"]).get("usage_breakdown")
+            usage_breakdown = cast(Mapping[str, Any], response["usage"]).get(
+                "usage_breakdown"
+            )
         return _normalize(usage_breakdown)
     usage_breakdown = getattr(response, "usage_breakdown", None)
     if usage_breakdown is None:
@@ -4487,17 +4690,25 @@ def estimate_ai_base_reserve_credits(
         }
         system_message = build_system_message(context_data, include_tools=True)
     except Exception as error:
-        print(f"estimate_ai_base_reserve_credits: failed to build system message: {error}")
+        print(
+            f"estimate_ai_base_reserve_credits: failed to build system message: {error}"
+        )
 
     try:
         if should_use_groq_compound_tools():
             compound_system_message = build_compound_system_message()
     except Exception as error:
-        print(f"estimate_ai_base_reserve_credits: failed to build compound system message: {error}")
+        print(
+            f"estimate_ai_base_reserve_credits: failed to build compound system message: {error}"
+        )
 
     if reserve_mode == "compound" and compound_system_message:
-        estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
-        estimated_rate_limit_tokens += estimate_message_tokens([compound_system_message])
+        estimated_rate_limit_tokens = (
+            estimate_message_tokens(messages) + extra_input_tokens
+        )
+        estimated_rate_limit_tokens += estimate_message_tokens(
+            [compound_system_message]
+        )
         estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
         enabled_tools = get_groq_compound_enabled_tools()
         reserve = estimate_compound_reserve_credits(
@@ -4540,7 +4751,9 @@ def estimate_image_context_reserve_credits(image_data: bytes, prompt_text: str) 
     )
 
 
-def estimate_image_context_rate_limit_tokens(image_data: bytes, prompt_text: str) -> int:
+def estimate_image_context_rate_limit_tokens(
+    image_data: bytes, prompt_text: str
+) -> int:
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
     input_payload = [
@@ -4583,7 +4796,10 @@ def _get_groq_ai_response_result(
 ) -> Optional[GroqUsageResult]:
     """First option using Groq AI"""
 
-    estimated_token_count = estimate_message_tokens([system_msg] + messages) + CHAT_OUTPUT_TOKEN_LIMIT
+    estimated_token_count = (
+        estimate_message_tokens([system_msg] + messages) + CHAT_OUTPUT_TOKEN_LIMIT
+    )
+
     def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
         print(f"Trying Groq AI as first option with account={account}...")
         _increment_ai_provider_request_count()
@@ -4936,14 +5152,23 @@ def format_market_info(market: Dict) -> str:
     info: List[str] = []
 
     crypto_rows = market.get("crypto")
-    if isinstance(crypto_rows, Sequence) and not isinstance(crypto_rows, (str, bytes, bytearray)):
+    if isinstance(crypto_rows, Sequence) and not isinstance(
+        crypto_rows, (str, bytes, bytearray)
+    ):
         crypto_lines: List[str] = []
         for crypto in list(crypto_rows)[:3]:
             if not isinstance(crypto, Mapping):
                 continue
-            symbol = str(crypto.get("symbol") or crypto.get("name") or "").strip().upper()
-            usd_quote = ensure_mapping((ensure_mapping(crypto.get("quote")) or {}).get("USD")) or {}
-            price = _safe_float(usd_quote.get("price") if usd_quote else crypto.get("price"))
+            symbol = (
+                str(crypto.get("symbol") or crypto.get("name") or "").strip().upper()
+            )
+            usd_quote = (
+                ensure_mapping((ensure_mapping(crypto.get("quote")) or {}).get("USD"))
+                or {}
+            )
+            price = _safe_float(
+                usd_quote.get("price") if usd_quote else crypto.get("price")
+            )
             change_24h = _safe_float(
                 (ensure_mapping(usd_quote.get("changes")) or {}).get("24h")
                 if usd_quote
@@ -4964,8 +5189,10 @@ def format_market_info(market: Dict) -> str:
 
     dollar_value = market.get("dollar")
     dollar_data = ensure_mapping(dollar_value)
-    if not dollar_data and isinstance(dollar_value, Sequence) and not isinstance(
-        dollar_value, (str, bytes, bytearray)
+    if (
+        not dollar_data
+        and isinstance(dollar_value, Sequence)
+        and not isinstance(dollar_value, (str, bytes, bytearray))
     ):
         sequence_lines: List[str] = []
         for item in dollar_value:
@@ -4981,7 +5208,9 @@ def format_market_info(market: Dict) -> str:
     elif dollar_data:
         dollar_lines: List[str] = []
 
-        oficial_price = _safe_float((ensure_mapping(dollar_data.get("oficial")) or {}).get("price"))
+        oficial_price = _safe_float(
+            (ensure_mapping(dollar_data.get("oficial")) or {}).get("price")
+        )
         if oficial_price is not None:
             dollar_lines.append(f"- oficial: {fmt_num(oficial_price, 2)}")
 
@@ -4994,17 +5223,26 @@ def format_market_info(market: Dict) -> str:
                 blue_line += f" (bid {fmt_num(blue_bid, 2)})"
             dollar_lines.append(blue_line)
 
-        mep_ci = ensure_mapping((ensure_mapping(dollar_data.get("mep")) or {}).get("al30"))
+        mep_ci = ensure_mapping(
+            (ensure_mapping(dollar_data.get("mep")) or {}).get("al30")
+        )
         mep_ci = ensure_mapping((mep_ci or {}).get("ci")) or {}
         mep_price = _safe_float(mep_ci.get("price"))
         if mep_price is not None:
             dollar_lines.append(f"- mep al30 ci: {fmt_num(mep_price, 2)}")
 
-        tarjeta_price = _safe_float((ensure_mapping(dollar_data.get("tarjeta")) or {}).get("price"))
+        tarjeta_price = _safe_float(
+            (ensure_mapping(dollar_data.get("tarjeta")) or {}).get("price")
+        )
         if tarjeta_price is not None:
             dollar_lines.append(f"- tarjeta: {fmt_num(tarjeta_price, 2)}")
 
-        usdt_data = ensure_mapping((ensure_mapping(dollar_data.get("cripto")) or {}).get("usdt")) or {}
+        usdt_data = (
+            ensure_mapping(
+                (ensure_mapping(dollar_data.get("cripto")) or {}).get("usdt")
+            )
+            or {}
+        )
         usdt_ask = _safe_float(usdt_data.get("ask"))
         usdt_bid = _safe_float(usdt_data.get("bid"))
         if usdt_ask is not None:
@@ -5023,11 +5261,11 @@ def format_market_info(market: Dict) -> str:
 def format_weather_info(weather: Dict) -> str:
     """Format weather data for context"""
     return f"""
-- Temperatura aparente: {weather['apparent_temperature']}°C
-- Probabilidad de lluvia: {weather['precipitation_probability']}%
-- Estado: {weather['description']}
-- Nubosidad: {weather['cloud_cover']}%
-- Visibilidad: {weather['visibility']/1000:.1f}km
+- Temperatura aparente: {weather["apparent_temperature"]}°C
+- Probabilidad de lluvia: {weather["precipitation_probability"]}%
+- Estado: {weather["description"]}
+- Nubosidad: {weather["cloud_cover"]}%
+- Visibilidad: {weather["visibility"] / 1000:.1f}km
 """
 
 
@@ -5144,6 +5382,8 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "creditlog_command": _noop_param_command,
             "purgeailog_command": _noop_command,
             "transfer_command": _noop_param_command,
+            "get_good_morning": get_good_morning,
+            "get_good_night": get_good_night,
         }
     )
 
@@ -5530,12 +5770,16 @@ def _execute_groq_request_with_fallback(
         )
         request_elapsed_seconds = max(0.0, time.monotonic() - request_started_at)
         if result is not None:
-            result.metadata.setdefault("request_elapsed_seconds", request_elapsed_seconds)
+            result.metadata.setdefault(
+                "request_elapsed_seconds", request_elapsed_seconds
+            )
         _reconcile_groq_rate_limit(
             reservation,
             actual_request_count=1 if result else 0,
             actual_token_count=_extract_result_token_count(result),
-            actual_audio_seconds=result.audio_seconds if result and result.audio_seconds else 0.0,
+            actual_audio_seconds=result.audio_seconds
+            if result and result.audio_seconds
+            else 0.0,
         )
         _log_groq_request_result(
             label=label,
@@ -5695,17 +5939,20 @@ def _describe_image_groq_result(
 
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
-    estimated_token_count = estimate_message_tokens(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": user_text},
-                    {"type": "input_image", "image_url": image_url},
-                ],
-            }
-        ]
-    ) + VISION_OUTPUT_TOKEN_LIMIT
+    estimated_token_count = (
+        estimate_message_tokens(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_text},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                }
+            ]
+        )
+        + VISION_OUTPUT_TOKEN_LIMIT
+    )
 
     def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
         print(f"Describing image with Groq vision model using account={account}...")
@@ -5772,6 +6019,7 @@ def describe_image_groq(
     if result:
         return result.text
     return None
+
 
 def _transcribe_audio_groq_result(
     audio_data: bytes,
@@ -5932,6 +6180,7 @@ def describe_media_by_id(
     - If download failed: (None, "download")
     - If description failed: (None, "describe")
     """
+
     def _processor(media: bytes) -> Optional[GroqUsageResult]:
         resized = resize_image_if_needed(media)
         return _describe_image_groq_result(resized, prompt, file_id)
@@ -5954,7 +6203,6 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
 
         # Check if resize is needed
         if max(original_size) > max_size:
-
             # Calculate new size maintaining aspect ratio
             ratio = min(max_size / original_size[0], max_size / original_size[1])
             new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
@@ -6337,7 +6585,9 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
             error,
             {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
         )
-        send_msg(chat_id, "me entró la guita pero se trabó la acreditación, avisale al admin")
+        send_msg(
+            chat_id, "me entró la guita pero se trabó la acreditación, avisale al admin"
+        )
         return "ok"
 
     balance = int(payment_result.get("user_balance", 0))
@@ -6451,9 +6701,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     text = build_config_text(config)
     keyboard = build_config_keyboard(config)
     try:
-        edit_succeeded = edit_message(
-            chat_id_str, int(message_id), text, keyboard
-        )
+        edit_succeeded = edit_message(chat_id_str, int(message_id), text, keyboard)
         if not edit_succeeded:
             _log_config_event(
                 "Falling back to new config message",
@@ -6620,9 +6868,7 @@ def handle_ai_response(
 
 
 def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
-    payload, error = _telegram_request(
-        "getWebhookInfo", token=token, log_errors=False
-    )
+    payload, error = _telegram_request("getWebhookInfo", token=token, log_errors=False)
     if not payload:
         return {"error": error or "request failed"}
 
@@ -6649,7 +6895,105 @@ def set_telegram_webhook(webhook_url: str) -> bool:
         return False
     redis_client = config_redis()
     redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
+    # Also update bot commands when webhook is updated
+    if redis_response:
+        update_telegram_bot_commands()
     return bool(redis_response)
+
+
+def update_telegram_bot_commands() -> bool:
+    """Update the bot's command menu in Telegram automatically.
+
+    Builds command list from COMMAND_GROUPS and calls setMyCommands.
+    """
+    token = environ.get("TELEGRAM_TOKEN")
+    if not token:
+        print("TELEGRAM_TOKEN not set, cannot update bot commands")
+        return False
+
+    # Command descriptions mapping
+    command_descriptions = {
+        "ask": "te contesto cualquier gilada",
+        "pregunta": "te contesto cualquier gilada",
+        "che": "te contesto cualquier gilada",
+        "gordo": "te contesto cualquier gilada",
+        "config": "tocás la config del gordo y de los links",
+        "convertbase": "te paso números entre bases",
+        "random": "elijo por vos entre opciones o números",
+        "prices": "precios crypto y conversiones en la moneda que pidas",
+        "price": "precios crypto y conversiones en la moneda que pidas",
+        "precios": "precios crypto y conversiones en la moneda que pidas",
+        "precio": "precios crypto y conversiones en la moneda que pidas",
+        "presios": "precios crypto y conversiones en la moneda que pidas",
+        "presio": "precios crypto y conversiones en la moneda que pidas",
+        "bresio": "precios crypto y conversiones en la moneda que pidas",
+        "bresios": "precios crypto y conversiones en la moneda que pidas",
+        "brecio": "precios crypto y conversiones en la moneda que pidas",
+        "brecios": "precios crypto y conversiones en la moneda que pidas",
+        "dolar": "te tiro la posta del blue y todos los dólares",
+        "dollar": "te tiro la posta del blue y todos los dólares",
+        "usd": "te tiro la posta del blue y todos los dólares",
+        "petroleo": "te paso el precio del Brent y del WTI",
+        "oil": "te paso el precio del Brent y del WTI",
+        "eleccion": "odds actuales de Polymarket para Diputados 2025",
+        "rulo": "te armo los rulos desde el oficial",
+        "devo": "te calculo el arbitraje entre tarjeta y crypto",
+        "powerlaw": "te tiro el precio justo de btc según power law",
+        "rainbow": "te tiro el precio justo de btc según rainbow chart",
+        "satoshi": "te digo cuánto vale un satoshi",
+        "sat": "te digo cuánto vale un satoshi",
+        "sats": "te digo cuánto vale un satoshi",
+        "time": "timestamp unix actual",
+        "comando": "te lo convierto en comando de telegram",
+        "command": "te lo convierto en comando de telegram",
+        "buscar": "te busco en la web",
+        "search": "te busco en la web",
+        "instance": "te digo dónde estoy corriendo",
+        "help": "te muestro todos los comandos",
+        "transcribe": "te transcribo audio o describo imagen",
+        "bcra": "te tiro las variables económicas del bcra",
+        "variables": "te tiro las variables económicas del bcra",
+        "topup": "cargás créditos IA con Telegram Stars por privado",
+        "balance": "te muestro tu saldo IA",
+        "transfer": "le pasás créditos tuyos al grupo",
+        "gm": "GIF de buenos días",
+        "gn": "GIF de buenas noches",
+    }
+
+    # Build commands list from COMMAND_GROUPS
+    commands_list = []
+    seen_commands = set()
+
+    for aliases, handler_name, uses_ai, takes_params in COMMAND_GROUPS:
+        for alias in aliases:
+            command = alias.lstrip("/")  # Remove leading slash
+            if command not in seen_commands:
+                seen_commands.add(command)
+                description = command_descriptions.get(command, f"Comando /{command}")
+                commands_list.append({"command": command, "description": description})
+
+    # Sort commands alphabetically
+    commands_list.sort(key=lambda x: x["command"])
+
+    # Call setMyCommands
+    payload = {"commands": json.dumps(commands_list)}
+
+    try:
+        response, error = _telegram_request(
+            "setMyCommands",
+            method="POST",
+            json_payload=payload,
+            token=token,
+            expect_json=False,
+        )
+        if error:
+            print(f"Error updating bot commands: {error}")
+            return False
+        print(f"Bot commands updated successfully: {len(commands_list)} commands")
+        return True
+    except Exception as e:
+        print(f"Exception updating bot commands: {e}")
+        return False
 
 
 def verify_webhook() -> bool:
@@ -6701,7 +7045,11 @@ def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]
         if not function_url:
             return "no pude acomodar el webhook", 400
         updated = set_telegram_webhook(function_url)
-        return ("webhook acomodado", 200) if updated else ("no pude acomodar el webhook", 400)
+        return (
+            ("webhook acomodado", 200)
+            if updated
+            else ("no pude acomodar el webhook", 400)
+        )
 
     return None
 
@@ -6775,9 +7123,7 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
                 )
                 return "ok", 200
             if lock_status == "in_flight":
-                print(
-                    f"webhook duplicate in-flight skipped operation={operation_key}"
-                )
+                print(f"webhook duplicate in-flight skipped operation={operation_key}")
                 return "retry", 503
             if lock_status == "acquired":
                 lock_heartbeat = _start_webhook_processing_lock_heartbeat(
@@ -6818,7 +7164,9 @@ def process_request_parameters(request: Request) -> Tuple[str, int]:
             if redis_client is not None and operation_key:
                 _mark_webhook_completed(redis_client, operation_key)
                 _clear_webhook_force_paid_retry_pending(redis_client, operation_key)
-                _release_webhook_processing_lock(redis_client, operation_key, owner_token)
+                _release_webhook_processing_lock(
+                    redis_client, operation_key, owner_token
+                )
             return "ok", 200
         finally:
             _stop_webhook_processing_lock_heartbeat(lock_heartbeat)
