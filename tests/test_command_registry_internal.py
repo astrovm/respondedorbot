@@ -33,6 +33,8 @@ def test_build_command_registry_reuses_alias_metadata():
             "creditlog_command": lambda x: "creditlog",
             "purgeailog_command": lambda: "purgeailog",
             "transfer_command": prices,
+            "get_good_morning": lambda: "gm",
+            "get_good_night": lambda: "gn",
         }
     )
 
