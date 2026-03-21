@@ -6767,6 +6767,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         extract_message_content=extract_message_content,
         replace_links=replace_links,
         send_msg=send_msg,
+        send_animation=send_animation,
         delete_msg=delete_msg,
         admin_report=admin_report,
         get_bot_message_metadata=get_bot_message_metadata,
@@ -7190,6 +7191,10 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET", "POST"])
 def responder() -> Tuple[str, int]:
+    # Modo mantenimiento - activar durante migraciones
+    if environ.get("MAINTENANCE_MODE", "").lower() in ("true", "1", "yes"):
+        return "estoy en mantenimiento, vuelvo en un rato", 503
+
     try:
         webhook_key = request.args.get("key")
         if not webhook_key:
