@@ -1151,6 +1151,42 @@ def _handle_transfer_command(
     return response_msg, None, False, command
 
 
+def _handle_update_commands_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    user_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    if command != "/updatecommands":
+        return None, None, False, None
+
+    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    if not admin_chat_id or str(user_id or "") != admin_chat_id:
+        return "este comando es solo para el admin", None, False, command
+
+    try:
+        # Import here to avoid circular dependency
+        from api.index import update_telegram_bot_commands
+
+        result = update_telegram_bot_commands()
+        if result:
+            return "comandos actualizados en el menú de telegram", None, False, command
+        else:
+            return (
+                "no pude actualizar los comandos, revisá los logs",
+                None,
+                False,
+                command,
+            )
+    except Exception as error:
+        deps.admin_report(
+            "Error updating commands /updatecommands",
+            error,
+            {"user_id": user_id},
+        )
+        return "error al actualizar comandos", None, False, command
+
+
 def _handle_non_ai_command(
     deps: MessageHandlerDeps,
     *,
@@ -1358,6 +1394,14 @@ def _handle_known_command(
         deps,
         command=command,
         chat_id=chat_id,
+        user_id=user_id,
+    )
+    if response[0] is not None or response[3] is not None:
+        return response
+
+    response = _handle_update_commands_command(
+        deps,
+        command=command,
         user_id=user_id,
     )
     if response[0] is not None or response[3] is not None:
