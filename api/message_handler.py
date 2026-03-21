@@ -1057,7 +1057,7 @@ def _handle_admin_purge_ai_log_command(
 
     try:
         purge_result = deps.credits_db_service.purge_expired_ai_ledger_events(
-            retention_days=30
+            retention_days=7
         )
     except Exception as error:
         deps.admin_report(

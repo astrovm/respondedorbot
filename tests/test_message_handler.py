@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_handle_msg_topup_private_returns_keyboard():
     message = {
         "message_id": "10",
@@ -10,13 +11,17 @@ def test_handle_msg_topup_private_returns_keyboard():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("api.index.ensure_callback_updates_enabled"), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.build_topup_keyboard",
-        return_value={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.ensure_callback_updates_enabled"),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.build_topup_keyboard",
+            return_value={
+                "inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]
+            },
+        ),
     ):
         result = handle_msg(message)
 
@@ -25,7 +30,9 @@ def test_handle_msg_topup_private_returns_keyboard():
         "100",
         "elegí cuánto querés cargar:",
         "10",
-        reply_markup={"inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]},
+        reply_markup={
+            "inline_keyboard": [[{"text": "pack", "callback_data": "topup:p100"}]]
+        },
     )
 
 
@@ -39,14 +46,15 @@ def test_handle_msg_topup_group_redirects_private():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(
-            key, default
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(
+                key, default
+            ),
         ),
     ):
         result = handle_msg(message)
@@ -65,14 +73,12 @@ def test_handle_msg_balance_private_uses_personal_balance():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index._fetch_balance", return_value=420
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index._fetch_balance", return_value=420),
     ):
         result = handle_msg(message)
 
@@ -91,14 +97,15 @@ def test_handle_msg_transfer_group_moves_credits():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.transfer_user_to_chat",
-        return_value={"ok": True, "user_balance": 285, "chat_balance": 1215},
-    ) as mock_transfer:
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.transfer_user_to_chat",
+            return_value={"ok": True, "user_balance": 285, "chat_balance": 1215},
+        ) as mock_transfer,
+    ):
         result = handle_msg(message)
 
     assert result == "ok"
@@ -116,13 +123,12 @@ def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.transfer_user_to_chat"
-    ) as mock_transfer:
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.credits_db_service.transfer_user_to_chat") as mock_transfer,
+    ):
         result = handle_msg(message)
 
     assert result == "ok"
@@ -140,11 +146,15 @@ def test_handle_msg_printcredits_requires_admin():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -162,16 +172,20 @@ def test_handle_msg_printcredits_admin_mints_credits():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.mint_user_credits",
-        return_value={"user_balance": 1200},
-    ) as mock_mint, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.mint_user_credits",
+            return_value={"user_balance": 1200},
+        ) as mock_mint,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -192,11 +206,15 @@ def test_handle_msg_creditlog_requires_admin():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -214,60 +232,64 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.list_recent_ai_settlement_results",
-        return_value=[
-            {
-                "id": 1,
-                "event_type": "ai_settlement_result",
-                "user_id": 99,
-                "chat_id": 202,
-                "amount": 0,
-                "created_at": "2026-03-11T17:35:10+00:00",
-                "metadata": {
-                    "command": "/ask",
-                    "reserved_credit_units_total": 20,
-                    "settled_credit_units": 10,
-                    "refunded_credit_units": 10,
-                    "extra_charged_credit_units": 0,
-                    "raw_usd_micros": 2188,
-                    "model_breakdown": [
-                        {
-                            "model": "moonshotai/kimi-k2-instruct-0905",
-                            "usd_micros": 2000,
-                            "input_tokens": 1000,
-                            "input_cached_tokens": 800,
-                            "input_non_cached_tokens": 200,
-                        },
-                        {
-                            "model": "moonshotai/kimi-k2-instruct-0905",
-                            "usd_micros": 188,
-                            "input_tokens": 200,
-                            "input_cached_tokens": 100,
-                            "input_non_cached_tokens": 100,
-                        },
-                    ],
-                    "tool_breakdown": [
-                        {"tool": "search", "usd_micros": 8000, "count": 1},
-                        {"tool": "search", "usd_micros": 0, "count": 1},
-                        {"tool": "python", "usd_micros": 500, "count": 1},
-                    ],
-                    "billing_segments": [
-                        {"kind": "chat"},
-                        {"kind": "compound"},
-                        {"kind": "chat"},
-                        {"kind": "compound", "source": "cache"},
-                    ],
-                },
-            }
-        ],
-    ) as mock_creditlog, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.list_recent_ai_settlement_results",
+            return_value=[
+                {
+                    "id": 1,
+                    "event_type": "ai_settlement_result",
+                    "user_id": 99,
+                    "chat_id": 202,
+                    "amount": 0,
+                    "created_at": "2026-03-11T17:35:10+00:00",
+                    "metadata": {
+                        "command": "/ask",
+                        "reserved_credit_units_total": 20,
+                        "settled_credit_units": 10,
+                        "refunded_credit_units": 10,
+                        "extra_charged_credit_units": 0,
+                        "raw_usd_micros": 2188,
+                        "model_breakdown": [
+                            {
+                                "model": "moonshotai/kimi-k2-instruct-0905",
+                                "usd_micros": 2000,
+                                "input_tokens": 1000,
+                                "input_cached_tokens": 800,
+                                "input_non_cached_tokens": 200,
+                            },
+                            {
+                                "model": "moonshotai/kimi-k2-instruct-0905",
+                                "usd_micros": 188,
+                                "input_tokens": 200,
+                                "input_cached_tokens": 100,
+                                "input_non_cached_tokens": 100,
+                            },
+                        ],
+                        "tool_breakdown": [
+                            {"tool": "search", "usd_micros": 8000, "count": 1},
+                            {"tool": "search", "usd_micros": 0, "count": 1},
+                            {"tool": "python", "usd_micros": 500, "count": 1},
+                        ],
+                        "billing_segments": [
+                            {"kind": "chat"},
+                            {"kind": "compound"},
+                            {"kind": "chat"},
+                            {"kind": "compound", "source": "cache"},
+                        ],
+                    },
+                }
+            ],
+        ) as mock_creditlog,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -295,36 +317,40 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.list_recent_ai_settlement_results",
-        return_value=[
-            {
-                "id": 2,
-                "event_type": "ai_settlement_result",
-                "user_id": 99,
-                "chat_id": 202,
-                "amount": 0,
-                "created_at": "2026-03-11T17:35:10+00:00",
-                "metadata": {
-                    "command": "/ask",
-                    "reserved_credit_units_total": 20,
-                    "settled_credit_units": 20,
-                    "refunded_credit_units": 0,
-                    "extra_charged_credit_units": 0,
-                    "raw_usd_micros": 0,
-                    "billing_zero_usage_fallback": True,
-                    "model_breakdown": [],
-                    "tool_breakdown": [],
-                },
-            }
-        ],
-    ), patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.list_recent_ai_settlement_results",
+            return_value=[
+                {
+                    "id": 2,
+                    "event_type": "ai_settlement_result",
+                    "user_id": 99,
+                    "chat_id": 202,
+                    "amount": 0,
+                    "created_at": "2026-03-11T17:35:10+00:00",
+                    "metadata": {
+                        "command": "/ask",
+                        "reserved_credit_units_total": 20,
+                        "settled_credit_units": 20,
+                        "refunded_credit_units": 0,
+                        "extra_charged_credit_units": 0,
+                        "raw_usd_micros": 0,
+                        "billing_zero_usage_fallback": True,
+                        "model_breakdown": [],
+                        "tool_breakdown": [],
+                    },
+                }
+            ],
+        ),
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -343,11 +369,15 @@ def test_handle_msg_purgeailog_requires_admin():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
@@ -365,23 +395,27 @@ def test_handle_msg_purgeailog_admin_purges_expired_ai_events():
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.purge_expired_ai_ledger_events",
-        return_value={"deleted_rows": 7, "retention_days": 30},
-    ) as mock_purge, patch(
-        "os.environ.get",
-        side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(key, default),
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.purge_expired_ai_ledger_events",
+            return_value={"deleted_rows": 7, "retention_days": 7},
+        ) as mock_purge,
+        patch(
+            "os.environ.get",
+            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
+                key, default
+            ),
+        ),
     ):
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_purge.assert_called_once_with(retention_days=30)
+    mock_purge.assert_called_once_with(retention_days=7)
     sent_text = mock_send_msg.call_args[0][1]
-    assert "purgué 7 eventos ai del ledger con más de 30 días" in sent_text
+    assert "purgué 7 eventos ai del ledger con más de 7 días" in sent_text
 
 
 def test_handle_msg_successful_payment_credits_user():
@@ -397,12 +431,14 @@ def test_handle_msg_successful_payment_credits_user():
         },
     }
 
-    with patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.record_star_payment",
-        return_value={"inserted": True, "user_balance": 7770},
-    ) as mock_record, patch("api.index.send_msg") as mock_send_msg:
+    with (
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.record_star_payment",
+            return_value={"inserted": True, "user_balance": 7770},
+        ) as mock_record,
+        patch("api.index.send_msg") as mock_send_msg,
+    ):
         result = handle_msg(message)
 
     assert result == "ok"
@@ -423,29 +459,25 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index.credits_db_service.refund_ai_charge"
-    ) as mock_refund, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.ask_ai", return_value="[[AI_FALLBACK]]no boludo"
-    ), patch(
-        "api.index.send_msg", return_value=999
-    ) as mock_send, patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index.credits_db_service.refund_ai_charge") as mock_refund,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.ask_ai", return_value="[[AI_FALLBACK]]no boludo"),
+        patch("api.index.send_msg", return_value=999) as mock_send,
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         result = handle_msg(message)
 
@@ -476,29 +508,25 @@ def test_handle_msg_refunds_all_charges_when_fallback_after_multiple_provider_re
             response_meta["ai_fallback"] = True
         return "no boludo"
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index.credits_db_service.refund_ai_charge"
-    ) as mock_refund, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
-    ), patch(
-        "api.index.send_msg", return_value=999
-    ), patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index.credits_db_service.refund_ai_charge") as mock_refund,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
+        patch("api.index.send_msg", return_value=999),
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         result = handle_msg(message)
 
@@ -519,27 +547,23 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={
-            "ok": False,
-            "user_balance_credit_units": 0,
-            "chat_balance_credit_units": 0,
-        },
-    ), patch(
-        "api.index.gen_random", return_value="no boludo"
-    ), patch(
-        "api.index.send_msg", return_value=1001
-    ) as mock_send, patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={
+                "ok": False,
+                "user_balance_credit_units": 0,
+                "chat_balance_credit_units": 0,
+            },
+        ),
+        patch("api.index.gen_random", return_value="no boludo"),
+        patch("api.index.send_msg", return_value=1001) as mock_send,
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         result = handle_msg(message)
 
@@ -562,24 +586,22 @@ def test_handle_msg_returns_random_when_ai_billing_backend_is_down(monkeypatch):
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.credits_db_service.is_configured", return_value=False
-    ), patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_rate_limit", return_value="no boludo"
-    ) as mock_rate_limit, patch(
-        "api.index.ask_ai"
-    ) as mock_ask_ai, patch(
-        "api.index.credits_db_service.charge_ai_credits"
-    ) as mock_charge, patch(
-        "api.index.send_msg", return_value=1002
-    ) as mock_send, patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.credits_db_service.is_configured", return_value=False),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch(
+            "api.index.handle_rate_limit", return_value="no boludo"
+        ) as mock_rate_limit,
+        patch("api.index.ask_ai") as mock_ask_ai,
+        patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
+        patch("api.index.send_msg", return_value=1002) as mock_send,
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         result = handle_msg(message)
 
@@ -593,12 +615,12 @@ def test_handle_msg_returns_random_when_ai_billing_backend_is_down(monkeypatch):
 def test_handle_rate_limit():
     from api.index import handle_rate_limit
 
-    with patch("api.index.send_typing") as mock_send_typing, patch(
-        "time.sleep"
-    ) as mock_sleep, patch("api.index.gen_random") as mock_gen_random, patch(
-        "os.environ.get"
-    ) as mock_env:
-
+    with (
+        patch("api.index.send_typing") as mock_send_typing,
+        patch("time.sleep") as mock_sleep,
+        patch("api.index.gen_random") as mock_gen_random,
+        patch("os.environ.get") as mock_env,
+    ):
         chat_id = "123"
         message = {"from": {"first_name": "John"}}
         mock_gen_random.return_value = "no boludo"
@@ -614,9 +636,12 @@ def test_handle_rate_limit():
 def test_handle_rate_limit_uses_username_when_first_name_is_missing():
     from api.index import handle_rate_limit
 
-    with patch("api.index.send_typing"), patch("time.sleep"), patch(
-        "api.index.gen_random", return_value="no ana_user"
-    ) as mock_gen_random, patch("os.environ.get", return_value="fake_token"):
+    with (
+        patch("api.index.send_typing"),
+        patch("time.sleep"),
+        patch("api.index.gen_random", return_value="no ana_user") as mock_gen_random,
+        patch("os.environ.get", return_value="fake_token"),
+    ):
         response = handle_rate_limit("123", {"from": {"username": "ana_user"}})
 
     mock_gen_random.assert_called_once_with("ana_user")
@@ -637,24 +662,20 @@ def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=False
-    ), patch(
-        "api.index.handle_rate_limit", return_value="tranqui"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits"
-    ) as mock_charge, patch(
-        "api.index.send_msg", return_value=999
-    ) as mock_send, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=False),
+        patch("api.index.handle_rate_limit", return_value="tranqui"),
+        patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
+        patch("api.index.send_msg", return_value=999) as mock_send,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         result = handle_msg(message)
 
@@ -666,27 +687,24 @@ def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
 def test_handle_msg():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.ask_ai"
-    ) as mock_ask_ai, patch(
-        "api.index.send_typing"
-    ) as mock_send_typing, patch(
-        "api.index.check_global_rate_limit", side_effect=[True, False]
-    ) as mock_global_rate_limit, patch(
-        "api.index.admin_report"
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "time.sleep"
-    ) as _mock_sleep:  # Add sleep mock to avoid delays  # noqa: F841
-
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.ask_ai") as mock_ask_ai,
+        patch("api.index.send_typing") as mock_send_typing,
+        patch(
+            "api.index.check_global_rate_limit", side_effect=[True, False]
+        ) as mock_global_rate_limit,
+        patch("api.index.admin_report"),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("time.sleep") as _mock_sleep,
+    ):  # Add sleep mock to avoid delays  # noqa: F841
         mock_env.side_effect = lambda key, default=None: "testbot"
         mock_ask_ai.return_value = "test response"  # Mock ai response
 
@@ -737,14 +755,13 @@ def test_handle_msg():
 def test_handle_msg_with_crypto_command():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_global_rate_limit"
-    ) as mock_rate_limit, patch(
-        "api.index.get_prices"
-    ) as mock_get_prices:
-
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch("api.index.get_prices") as mock_get_prices,
+    ):
         mock_env.return_value = "testbot"
         mock_rate_limit.return_value = True
         mock_get_prices.return_value = "BTC: 50000"
@@ -776,31 +793,24 @@ def test_handle_msg_with_crypto_command():
 def test_handle_msg_with_image():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.describe_image_groq"
-    ) as mock_describe, patch(
-        "api.index.download_telegram_file"
-    ) as mock_download, patch(
-        "api.index.resize_image_if_needed"
-    ) as mock_resize, patch(
-        "api.index.encode_image_to_base64"
-    ) as mock_encode, patch(
-        "api.index.cached_requests"
-    ) as mock_requests, patch(
-        "api.index.send_typing"
-    ) as mock_send_typing, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.describe_image_groq") as mock_describe,
+        patch("api.index.download_telegram_file") as mock_download,
+        patch("api.index.resize_image_if_needed") as mock_resize,
+        patch("api.index.encode_image_to_base64") as mock_encode,
+        patch("api.index.cached_requests") as mock_requests,
+        patch("api.index.send_typing") as mock_send_typing,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index._maybe_grant_onboarding_credits"),
     ):
-
         mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
             "TELEGRAM_TOKEN": "test_token",
@@ -833,21 +843,19 @@ def test_handle_msg_with_image():
 def test_handle_msg_with_audio():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file"
-    ) as mock_transcribe, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index._transcribe_audio_file") as mock_transcribe,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index._maybe_grant_onboarding_credits"),
     ):
-
         mock_env.side_effect = lambda key, default=None: {
             "TELEGRAM_USERNAME": "testbot",
             "GROQ_API_KEY": "test_key",
@@ -882,11 +890,12 @@ def test_handle_msg_with_audio():
 def test_handle_msg_group_audio_without_invocation_skips_auto_transcription():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file"
-    ) as mock_transcribe:
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index._transcribe_audio_file") as mock_transcribe,
+    ):
 
         def env_side_effect(key, default=None):
             env_vars = {
@@ -927,23 +936,32 @@ def test_handle_msg_group_audio_without_invocation_skips_auto_transcription():
 def test_handle_msg_with_transcribe_command():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.handle_transcribe_with_message_result"
-    ) as mock_handle_transcribe, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index.handle_transcribe_with_message_result"
+        ) as mock_handle_transcribe,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index._maybe_grant_onboarding_credits"),
     ):
-
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
         mock_handle_transcribe.return_value = (
             "Transcription result",
-            [{"kind": "transcribe", "model": "whisper-large-v3-turbo", "audio_seconds": 1}],
+            [
+                {
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3-turbo",
+                    "audio_seconds": 1,
+                }
+            ],
         )
 
         # Mock Redis instance
@@ -955,7 +973,10 @@ def test_handle_msg_with_transcribe_command():
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 13, "first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123", "duration": 10}},
+            "reply_to_message": {
+                "message_id": 2,
+                "voice": {"file_id": "voice_123", "duration": 10},
+            },
         }
 
         result = handle_msg(message)
@@ -967,28 +988,35 @@ def test_handle_msg_with_transcribe_command():
 def test_handle_msg_with_transcribe_command_charges_media_credits():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_global_rate_limit"
-    ) as mock_rate_limit, patch(
-        "api.index.handle_transcribe_with_message_result"
-    ) as mock_handle_transcribe, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.credits_db_service.refund_ai_charge"
-    ) as mock_refund:
-
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch(
+            "api.index.handle_transcribe_with_message_result"
+        ) as mock_handle_transcribe,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.credits_db_service.refund_ai_charge") as mock_refund,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
         mock_rate_limit.return_value = True
         mock_handle_transcribe.return_value = (
             "🎵 te saqué esto del audio: todo piola",
-            [{"kind": "transcribe", "model": "whisper-large-v3-turbo", "audio_seconds": 1}],
+            [
+                {
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3-turbo",
+                    "audio_seconds": 1,
+                }
+            ],
         )
 
         mock_redis = MagicMock()
@@ -1001,7 +1029,10 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 77, "first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {"message_id": 2, "voice": {"file_id": "voice_123", "duration": 10}},
+            "reply_to_message": {
+                "message_id": 2,
+                "voice": {"file_id": "voice_123", "duration": 10},
+            },
         }
 
         result = handle_msg(message)
@@ -1015,22 +1046,25 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
 def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.handle_transcribe_with_message_result",
-        return_value=("no pude sacar nada de ese audio, probá más tarde", []),
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.credits_db_service.refund_ai_charge"
-    ) as mock_refund:
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index.handle_transcribe_with_message_result",
+            return_value=("no pude sacar nada de ese audio, probá más tarde", []),
+        ),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.credits_db_service.refund_ai_charge") as mock_refund,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1042,7 +1076,10 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
             "chat": {"id": 123, "type": "private"},
             "from": {"id": 177, "first_name": "John", "username": "john"},
             "text": "/transcribe",
-            "reply_to_message": {"message_id": 3, "voice": {"file_id": "voice_123", "duration": 10}},
+            "reply_to_message": {
+                "message_id": 3,
+                "voice": {"file_id": "voice_123", "duration": 10},
+            },
         }
 
         result = handle_msg(message)
@@ -1057,22 +1094,22 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response():
 def test_handle_msg_with_transcribe_command_rejects_audio_without_duration():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.handle_transcribe_with_message_result"
-    ) as mock_handle_transcribe, patch(
-        "api.index.download_telegram_file", return_value=b"audio-bytes"
-    ), patch(
-        "api.index.measure_audio_duration_seconds", return_value=None
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits"
-    ) as mock_charge:
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index.handle_transcribe_with_message_result"
+        ) as mock_handle_transcribe,
+        patch("api.index.download_telegram_file", return_value=b"audio-bytes"),
+        patch("api.index.measure_audio_duration_seconds", return_value=None),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1098,32 +1135,34 @@ def test_handle_msg_with_transcribe_command_rejects_audio_without_duration():
 def test_handle_msg_auto_audio_charges_media_credits():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file",
-        return_value=(
-            "audio transcripto",
-            None,
-            {
-                "kind": "transcribe",
-                "model": "whisper-large-v3-turbo",
-                "audio_seconds": 1,
-            },
-        ),
-    ) as mock_transcribe, patch(
-        "api.index.should_gordo_respond", return_value=False
-    ), patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge:
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index._transcribe_audio_file",
+            return_value=(
+                "audio transcripto",
+                None,
+                {
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3-turbo",
+                    "audio_seconds": 1,
+                },
+            ),
+        ) as mock_transcribe,
+        patch("api.index.should_gordo_respond", return_value=False),
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1148,22 +1187,20 @@ def test_handle_msg_auto_audio_charges_media_credits():
 def test_handle_msg_auto_audio_rejects_missing_duration():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file"
-    ) as mock_transcribe, patch(
-        "api.index.download_telegram_file", return_value=b"audio-bytes"
-    ), patch(
-        "api.index.measure_audio_duration_seconds", return_value=None
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits"
-    ) as mock_charge:
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index._transcribe_audio_file") as mock_transcribe,
+        patch("api.index.download_telegram_file", return_value=b"audio-bytes"),
+        patch("api.index.measure_audio_duration_seconds", return_value=None),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1188,36 +1225,40 @@ def test_handle_msg_auto_audio_rejects_missing_duration():
 def test_handle_msg_auto_audio_measures_duration_when_missing_in_message():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file",
-        return_value=(
-            "audio transcripto",
-            None,
-            {
-                "kind": "transcribe",
-                "model": "whisper-large-v3-turbo",
-                "audio_seconds": 12,
-            },
-        ),
-    ) as mock_transcribe, patch(
-        "api.index.download_telegram_file", return_value=b"audio-bytes"
-    ) as mock_download, patch(
-        "api.index.measure_audio_duration_seconds", return_value=12.0
-    ) as mock_measure, patch(
-        "api.index.should_gordo_respond", return_value=False
-    ), patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge:
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index._transcribe_audio_file",
+            return_value=(
+                "audio transcripto",
+                None,
+                {
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3-turbo",
+                    "audio_seconds": 12,
+                },
+            ),
+        ) as mock_transcribe,
+        patch(
+            "api.index.download_telegram_file", return_value=b"audio-bytes"
+        ) as mock_download,
+        patch(
+            "api.index.measure_audio_duration_seconds", return_value=12.0
+        ) as mock_measure,
+        patch("api.index.should_gordo_respond", return_value=False),
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+    ):
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1260,40 +1301,41 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
             ]
         return "respuesta final"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index._transcribe_audio_file",
-        return_value=(
-            "audio transcripto",
-            None,
-            {
-                "kind": "transcribe",
-                "model": "whisper-large-v3-turbo",
-                "audio_seconds": 1,
-            },
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch(
+            "api.index._transcribe_audio_file",
+            return_value=(
+                "audio transcripto",
+                None,
+                {
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3-turbo",
+                    "audio_seconds": 1,
+                },
+            ),
         ),
-    ), patch(
-        "api.index.should_gordo_respond", return_value=True
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
-    ), patch(
-        "api.index.save_message_to_redis"
+        patch("api.index.should_gordo_respond", return_value=True),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
+        patch("api.index.save_message_to_redis"),
     ):
-        mock_env.side_effect = lambda key, default=None: {"TELEGRAM_USERNAME": "testbot"}.get(key, default)
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot"
+        }.get(key, default)
 
         mock_redis = MagicMock()
         mock_config_redis.return_value = mock_redis
@@ -1317,31 +1359,28 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
 def test_handle_msg_image_conversation_charges_media_and_response_credits():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.download_telegram_file", return_value=b"img-bytes"
-    ) as mock_download, patch(
-        "api.index.resize_image_if_needed", return_value=b"img-resized"
-    ), patch(
-        "api.index.encode_image_to_base64", return_value="abc"
-    ), patch(
-        "api.index.should_gordo_respond", return_value=True
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", return_value="todo piola"
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch(
+            "api.index.download_telegram_file", return_value=b"img-bytes"
+        ) as mock_download,
+        patch("api.index.resize_image_if_needed", return_value=b"img-resized"),
+        patch("api.index.encode_image_to_base64", return_value="abc"),
+        patch("api.index.should_gordo_respond", return_value=True),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", return_value="todo piola"),
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1397,31 +1436,28 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
             ]
         return "todo piola x2"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.download_telegram_file", return_value=b"img-bytes"
-    ) as mock_download, patch(
-        "api.index.resize_image_if_needed", return_value=b"img-resized"
-    ), patch(
-        "api.index.encode_image_to_base64", return_value="abc"
-    ), patch(
-        "api.index.should_gordo_respond", return_value=True
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch(
+            "api.index.download_telegram_file", return_value=b"img-bytes"
+        ) as mock_download,
+        patch("api.index.resize_image_if_needed", return_value=b"img-resized"),
+        patch("api.index.encode_image_to_base64", return_value="abc"),
+        patch("api.index.should_gordo_respond", return_value=True),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1464,38 +1500,35 @@ def test_handle_msg_image_conversation_settles_in_single_batch():
             ]
         return "todo piola"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.download_telegram_file", return_value=b"img-bytes"
-    ), patch(
-        "api.index.resize_image_if_needed", return_value=b"img-resized"
-    ), patch(
-        "api.index.encode_image_to_base64", return_value="abc"
-    ), patch(
-        "api.index.should_gordo_respond", return_value=True
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
-    ), patch(
-        "api.message_handler.AIMessageBilling.settle_reserved_ai_credits_batch",
-        autospec=True,
-    ) as mock_settle_batch, patch(
-        "api.message_handler.AIMessageBilling.settle_reserved_ai_credits",
-        autospec=True,
-    ) as mock_settle_single:
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.download_telegram_file", return_value=b"img-bytes"),
+        patch("api.index.resize_image_if_needed", return_value=b"img-resized"),
+        patch("api.index.encode_image_to_base64", return_value="abc"),
+        patch("api.index.should_gordo_respond", return_value=True),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
+        patch(
+            "api.message_handler.AIMessageBilling.settle_reserved_ai_credits_batch",
+            autospec=True,
+        ) as mock_settle_batch,
+        patch(
+            "api.message_handler.AIMessageBilling.settle_reserved_ai_credits",
+            autospec=True,
+        ) as mock_settle_single,
+    ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
         redis_client.lrange.return_value = []
@@ -1533,22 +1566,19 @@ def test_handle_msg_search_command_uses_ai_billing():
             ]
         return "resultado compound"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.charge_ai_credits"
-    ) as mock_charge, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "btc news"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "btc news"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1588,28 +1618,27 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
     monkeypatch.setenv("BOT_SYSTEM_PROMPT", "You are a test bot")
     monkeypatch.setenv("BOT_TRIGGER_WORDS", "gordo,test,bot")
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.get_bot_message_metadata", return_value=None
-    ), patch("api.index.send_msg") as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages",
-        return_value=[{"role": "user", "content": "investigá eso"}],
-    ), patch(
-        "api.index.handle_ai_response", return_value="respuesta ok"
-    ) as mock_handle_ai_response, patch(
-        "api.index.save_message_to_redis"
-    ), patch(
-        "api.index.save_bot_message_metadata"
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.get_bot_message_metadata", return_value=None),
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "investigá eso"}],
+        ),
+        patch(
+            "api.index.handle_ai_response", return_value="respuesta ok"
+        ) as mock_handle_ai_response,
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
     ):
         message = {
             "message_id": 201,
@@ -1660,23 +1689,22 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
             ]
         return "respuesta ok"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1734,23 +1762,22 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
             ]
         return "respuesta ok x3"
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge, patch(
-        "api.index.get_chat_history", return_value=[]
-    ), patch(
-        "api.index.build_ai_messages", return_value=[{"role": "user", "content": "hola"}]
-    ), patch(
-        "api.index.handle_ai_response", side_effect=fake_handle_ai_response
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch("api.index.handle_ai_response", side_effect=fake_handle_ai_response),
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1774,30 +1801,30 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
 def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch(
-        "api.index.download_telegram_file"
-    ) as mock_download, patch(
-        "api.index.handle_transcribe_with_message_result",
-        return_value=(
-            "🖼️ en la imagen veo: todo piola",
-            [
-                {
-                    "kind": "vision",
-                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                }
-            ],
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.download_telegram_file") as mock_download,
+        patch(
+            "api.index.handle_transcribe_with_message_result",
+            return_value=(
+                "🖼️ en la imagen veo: todo piola",
+                [
+                    {
+                        "kind": "vision",
+                        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    }
+                ],
+            ),
         ),
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ) as mock_charge:
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ) as mock_charge,
+    ):
         redis_client = MagicMock()
         redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
         redis_client.lrange.return_value = []
@@ -1825,14 +1852,13 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
 def test_handle_msg_with_unknown_command():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.check_global_rate_limit"
-    ) as mock_rate_limit, patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should_respond:
-
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch("api.index.should_gordo_respond") as mock_should_respond,
+    ):
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_rate_limit.return_value = True
         mock_should_respond.return_value = False
@@ -1856,10 +1882,11 @@ def test_handle_msg_with_unknown_command():
 def test_handle_msg_with_exception():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.admin_report"
-    ) as mock_admin_report, patch("os.environ.get") as mock_env:
-
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.admin_report") as mock_admin_report,
+        patch("os.environ.get") as mock_env,
+    ):
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
         mock_config_redis.side_effect = Exception("Redis error")
 
@@ -1878,33 +1905,25 @@ def test_handle_msg_with_exception():
 def test_handle_msg_edge_cases():
     from api.index import handle_msg
 
-    with patch("api.index.config_redis") as mock_config_redis, patch(
-        "api.index.send_msg"
-    ) as mock_send_msg, patch("os.environ.get") as mock_env, patch(
-        "api.index.send_typing"
-    ) as mock_send_typing, patch(
-        "api.index.gen_random"
-    ) as mock_gen_random, patch(
-        "api.index.cached_requests"
-    ) as mock_cached_requests, patch(
-        "api.index.admin_report"
-    ) as mock_admin_report, patch(
-        "api.index.ask_ai"
-    ) as mock_ask_ai, patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should_respond, patch(
-        "api.index.check_global_rate_limit", return_value=True
-    ), patch(
-        "api.index.credits_db_service.is_configured", return_value=True
-    ), patch(
-        "api.index.credits_db_service.charge_ai_credits",
-        return_value={"ok": True, "source": "user"},
-    ), patch(
-        "api.index._maybe_grant_onboarding_credits"
-    ), patch(
-        "time.sleep"
-    ) as _mock_sleep:  # noqa: F841
-
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.send_typing") as mock_send_typing,
+        patch("api.index.gen_random") as mock_gen_random,
+        patch("api.index.cached_requests") as mock_cached_requests,
+        patch("api.index.admin_report") as mock_admin_report,
+        patch("api.index.ask_ai") as mock_ask_ai,
+        patch("api.index.should_gordo_respond") as mock_should_respond,
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("time.sleep") as _mock_sleep,
+    ):  # noqa: F841
         # Set up mocks
         mock_env.return_value = "testbot"
         mock_redis = MagicMock()
@@ -1912,7 +1931,7 @@ def test_handle_msg_edge_cases():
         mock_gen_random.return_value = "no boludo"
         mock_cached_requests.return_value = None  # Prevent API calls
         mock_ask_ai.return_value = "test response"
-        
+
         def redis_get(key):
             if key == "chat_config:456":
                 return json.dumps(CHAT_CONFIG_DEFAULTS)
