@@ -45,31 +45,11 @@ def _append_sslmode_if_missing(url: str) -> str:
 def get_database_url() -> Optional[str]:
     """Return the Postgres connection URL from env vars."""
 
-    direct_keys = (
-        "DATABASE_URL",
-        "POSTGRES_URL",
-        "POSTGRES_PRISMA_URL",
-        "POSTGRES_URL_NON_POOLING",
-        "NEON_DATABASE_URL",
-    )
+    value = str(environ.get("SUPABASE_POSTGRES_URL") or "").strip()
+    if value and value.lower().startswith(("postgres://", "postgresql://")):
+        return _append_sslmode_if_missing(value)
 
-    for key in direct_keys:
-        value = str(environ.get(key) or "").strip()
-        if value and value.lower().startswith(("postgres://", "postgresql://")):
-            return _append_sslmode_if_missing(value)
-
-    host = str(environ.get("PGHOST") or "").strip()
-    database = str(environ.get("PGDATABASE") or "").strip()
-    user = str(environ.get("PGUSER") or "").strip()
-    password = str(environ.get("PGPASSWORD") or "").strip()
-    port = str(environ.get("PGPORT") or "5432").strip() or "5432"
-
-    if not host or not database or not user:
-        return None
-
-    return _append_sslmode_if_missing(
-        f"postgresql://{user}:{password}@{host}:{port}/{database}"
-    )
+    return None
 
 
 def is_configured() -> bool:
@@ -312,7 +292,6 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
     return int(row[0])
 
 
-
 def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     """Grant onboarding credits once and return (granted, user_balance)."""
 
@@ -520,7 +499,9 @@ def refund_ai_charge(
     with connect() as conn:
         with conn.cursor() as cur:
             if source == "chat" and chat_id is not None:
-                chat_balance = _get_balance_for_update(cur, "chat", chat_id) + refund_amount
+                chat_balance = (
+                    _get_balance_for_update(cur, "chat", chat_id) + refund_amount
+                )
                 _set_balance(cur, "chat", chat_id, chat_balance)
                 user_balance = _get_balance_for_update(cur, "user", user_id)
                 cur.execute(
@@ -545,7 +526,10 @@ def refund_ai_charge(
                     ),
                 )
                 conn.commit()
-                return {"user_balance": int(user_balance), "chat_balance": int(chat_balance)}
+                return {
+                    "user_balance": int(user_balance),
+                    "chat_balance": int(chat_balance),
+                }
 
             user_balance = _get_balance_for_update(cur, "user", user_id) + refund_amount
             _set_balance(cur, "user", user_id, user_balance)
@@ -576,7 +560,10 @@ def refund_ai_charge(
             )
             conn.commit()
 
-            return {"user_balance": int(user_balance), "chat_balance": int(chat_balance)}
+            return {
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
 
 def apply_ai_debt(
@@ -597,7 +584,9 @@ def apply_ai_debt(
     with connect() as conn:
         with conn.cursor() as cur:
             if source == "chat" and chat_id is not None:
-                chat_balance = _get_balance_for_update(cur, "chat", chat_id) - debt_amount
+                chat_balance = (
+                    _get_balance_for_update(cur, "chat", chat_id) - debt_amount
+                )
                 _set_balance(cur, "chat", chat_id, chat_balance)
                 user_balance = _get_balance_for_update(cur, "user", user_id)
                 cur.execute(
@@ -622,7 +611,10 @@ def apply_ai_debt(
                     ),
                 )
                 conn.commit()
-                return {"user_balance": int(user_balance), "chat_balance": int(chat_balance)}
+                return {
+                    "user_balance": int(user_balance),
+                    "chat_balance": int(chat_balance),
+                }
 
             user_balance = _get_balance_for_update(cur, "user", user_id) - debt_amount
             _set_balance(cur, "user", user_id, user_balance)
@@ -653,7 +645,10 @@ def apply_ai_debt(
             )
             conn.commit()
 
-            return {"user_balance": int(user_balance), "chat_balance": int(chat_balance)}
+            return {
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
 
 def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, Any]:
@@ -733,8 +728,9 @@ def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, 
             }
 
 
-
-def mint_user_credits(user_id: int, amount: int, actor_user_id: Optional[int] = None) -> Dict[str, int]:
+def mint_user_credits(
+    user_id: int, amount: int, actor_user_id: Optional[int] = None
+) -> Dict[str, int]:
     """Mint credits to a user account and return the updated balance."""
 
     ensure_schema()
@@ -887,6 +883,7 @@ def purge_expired_ai_ledger_events(retention_days: int = 30) -> Dict[str, Any]:
         "deleted_rows": deleted_rows,
         "retention_days": normalized_retention_days,
     }
+
 
 def record_star_payment(
     telegram_payment_charge_id: str,
