@@ -37,8 +37,15 @@ class CreditsDBError(RuntimeError):
 def _append_sslmode_if_missing(url: str) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+    # Remove any non-standard parameters that psycopg doesn't recognize
+    # Keep only known postgres connection parameters
+    allowed_params = {"sslmode", "connect_timeout", "options", "application_name"}
+    query = {k: v for k, v in query.items() if k in allowed_params}
+
     if "sslmode" not in query:
         query["sslmode"] = "require"
+
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
