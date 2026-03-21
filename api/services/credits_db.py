@@ -867,11 +867,11 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
     return results
 
 
-def purge_expired_ai_ledger_events(retention_days: int = 30) -> Dict[str, Any]:
+def purge_expired_ai_ledger_events(retention_days: int = 7) -> Dict[str, Any]:
     """Delete AI ledger events older than the retention window."""
 
     ensure_schema()
-    normalized_retention_days = max(1, int(retention_days or 30))
+    normalized_retention_days = max(1, int(retention_days or 7))
 
     with connect() as conn:
         with conn.cursor() as cur:
