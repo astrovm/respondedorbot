@@ -1,6 +1,21 @@
-# Telegram Bot Framework
+# respondedorbot
 
-Configurable Telegram bot built with Flask. It handles chat replies, media transcription/vision, market commands, web lookups, and AI credit billing.
+An AI-powered Telegram bot that plays the role of "el gordo", a politically incorrect Argentine character inspired by the classic "atendedor de boludos" and "viejo inimputable" memes. He's blunt, unfiltered, and answers everything in a single lowercase phrase using Argentine slang. Think of him as the guy at the ciber who spent too long on Taringa and the deep web.
+
+Beyond the attitude, he actually knows his stuff: crypto, hacking, Linux, gaming, psychiatry, economics, and internet culture from the golden age of forums and Flash games. If the question is real, the answer is real.
+
+**[t.me/respondedorbot](https://t.me/respondedorbot)**
+
+## Features
+
+- **AI chat**: configurable personality powered by Groq, responds to trigger words in groups
+- **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
+- **BCRA economic data**: `/bcra`, `/variables` (base monetaria, inflation, dollar rates, reserves, etc.)
+- **Media handling**: audio transcription (Whisper) and image description (vision) via `/transcribe`
+- **Web search**: `/buscar` / `/search` using Groq Compound for real-time info
+- **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
+- **AI credits billing**: Telegram Stars integration (`/topup`, `/balance`, `/transfer`)
+- **Link enrichment**: URLs in messages get fetched metadata injected into AI context
 
 ## Quick Start
 
@@ -9,97 +24,65 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+# Edit .env with your keys
 flask --app api/index run --host 0.0.0.0 --port 8080
 ```
 
-## Main Files
+## Project Structure
 
-- `api/index.py`: Flask entrypoint and most bot logic.
-- `api/message_handler.py`: message flow, billing, and rate-limit gating.
-- `tests/`: pytest suite.
-
-## Features
-
-- AI chat replies with configurable personality and trigger words.
-- Market and utility commands such as `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/random`, `/convertbase`, and `/time`.
-- Media handling for image description and audio transcription.
-- Built-in web lookup support through `/buscar` / `/search` and provider-triggered search when the bot needs fresh information.
-- AI credit billing with `/topup`, `/balance`, and `/transfer`.
-
-### AI Credits Billing (Telegram Stars)
-
-- AI responses are billed with credits (default: `1.0` credit per AI response).
-- New users receive onboarding credits once (default: `3.0`).
-- In groups, spending priority is: personal balance first, then group balance.
-- `/topup`: recharge credits with Telegram Stars (private chat).
-- `/balance`: in private shows personal balance; in groups shows personal + group balance.
-- `/transfer <amount>`: transfer credits from personal balance to group balance.
-
-### Web Search and Tools
-
-- `/buscar <consulta>` or `/search <query>`: run Groq Compound directly and return its response. This path uses AI billing.
-- In AI conversations, the bot still answers with the main chat model first; if it needs tools, it can call the internal `compound` bridge and then finish the answer in persona.
-- When incoming messages contain links, the bot enriches the AI prompt with fetched link metadata (URL, title, description) for up to 3 links.
-
-## Required Config
-
-```bash
-BOT_SYSTEM_PROMPT="your bot personality"
-BOT_TRIGGER_WORDS=bot,assistant,help
-
-TELEGRAM_TOKEN=your_telegram_bot_token
-TELEGRAM_USERNAME=your_bot_username
-WEBHOOK_AUTH_KEY=your_webhook_authentication_key
-
-REDIS_HOST=your_redis_host
-REDIS_PORT=6379
-REDIS_PASSWORD=your_redis_password
-FUNCTION_URL=https://your-app.vercel.app
-
-DATABASE_URL=postgresql://user:password@your-neon-host/neondb?sslmode=require
-
-COINMARKETCAP_KEY=your_coinmarketcap_key
-GROQ_API_KEY=your_paid_groq_api_key
-WEBHOOK_MAX_RUNTIME_SECONDS=120
-WEBHOOK_RETRY_SAFETY_MARGIN_SECONDS=45
-WEBHOOK_IDEMPOTENCY_TTL_SECONDS=180
-WEBHOOK_FORCE_PAID_RETRY_TTL_SECONDS=300
-
-# AI Credits Billing (always enabled; defaults shown)
-AI_ONBOARDING_CREDITS=3.0
-AI_STARS_PACKS_JSON='[{"id":"p50","credits":50.0,"xtr":25},{"id":"p100","credits":100.0,"xtr":50},{"id":"p250","credits":250.0,"xtr":125},{"id":"p500","credits":500.0,"xtr":250},{"id":"p1000","credits":1000.0,"xtr":500},{"id":"p2500","credits":2500.0,"xtr":1250}]'
-
-# Monitoring (Required)
-ADMIN_CHAT_ID=your_telegram_chat_id
-FRIENDLY_INSTANCE_NAME=My_Bot_Instance
+```text
+api/index.py            # Flask entrypoint, command handlers, AI logic
+api/message_handler.py  # Message flow, billing, rate-limit gating
+tests/                  # pytest suite
 ```
 
-Use `.env.example` for the full list, including billing defaults.
+## Configuration
+
+Copy `.env.example` and fill in the values. Key variables:
+
+| Variable | Description |
+| --- | --- |
+| `BOT_SYSTEM_PROMPT` | Complete AI personality prompt |
+| `BOT_TRIGGER_WORDS` | Comma-separated keywords that trigger responses in groups |
+| `TELEGRAM_TOKEN` | Bot token from @BotFather |
+| `TELEGRAM_USERNAME` | Bot username |
+| `WEBHOOK_AUTH_KEY` | Webhook authentication key |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache |
+| `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
+| `COINMARKETCAP_KEY` | CoinMarketCap API key |
+| `GROQ_API_KEY` | Paid Groq API key |
+| `GROQ_FREE_API_KEY` | Optional free-tier Groq key (tried first, falls back to paid) |
+| `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` GIFs |
+| `FUNCTION_URL` | Deployment URL |
+| `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
+| `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
+
+## AI Credits Billing
+
+AI responses cost credits. Users get onboarding credits on first interaction, then recharge with Telegram Stars.
+
+- `/topup` - buy credits with Stars (private chat only)
+- `/balance` - check credits (personal in DM, personal + group in groups)
+- `/transfer <amount>` - move credits from personal to group balance
+
+In groups, personal balance is spent first, then group balance.
 
 ## Groq Routing
 
-- `GROQ_FREE_API_KEY` is optional.
-- If both Groq keys are set, the bot tries the free account first for chat, compound, vision, and transcription.
-- If the free account is locally out of budget or Groq returns `429`, the same request is retried with `GROQ_API_KEY`.
-- Webhook retries are deduped per Telegram update. If a Compound request fails on `free` and the webhook is inside the retry safety margin (`45s` by default on a `120s` runtime), the bot aborts on purpose so Telegram retries and the next attempt can start directly on `paid`.
-- Users are still billed normally; key selection only changes which Groq account serves the request.
+If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key. Webhook retries are deduped per Telegram update to avoid double-billing.
 
-## Billing
+## Webhook Setup
 
-- AI replies are billed with credits.
-- Actual settlement uses model/tool usage data when available.
-- Internal fallback responses are refunded.
-- In groups, spending priority is personal balance first, then group balance.
+```text
+# Set webhook
+{FUNCTION_URL}/?update_webhook=true&key={WEBHOOK_AUTH_KEY}
+
+# Check webhook
+{FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}
+```
 
 ## Tests
 
 ```bash
 pytest -q
 ```
-
-## Webhook
-
-- Set webhook:
-  `{FUNCTION_URL}/?update_webhook=true&key={WEBHOOK_AUTH_KEY}`
-- Check webhook:
-  `{FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}`
