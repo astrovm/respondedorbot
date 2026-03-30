@@ -9,8 +9,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
-from api.groq_billing import (
-    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+from api.ai_usage_billing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
@@ -550,11 +549,7 @@ def _run_ai_flow(
 
     main_reserve_credits, reserve_meta = deps.estimate_ai_base_reserve_credits(
         ai_messages,
-        extra_input_tokens=(
-            IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-            if prepared_message.resized_image_data and prepared_message.photo_file_id
-            else 0
-        ),
+        extra_input_tokens=0,
         reserve_mode="compound"
         if getattr(handler_func, "__name__", "") == "search_command"
         else "chat",

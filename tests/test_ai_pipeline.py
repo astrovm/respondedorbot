@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
     assert get_groq_compound_enabled_tools() == [
         "web_search",
@@ -201,19 +202,22 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
             metadata={"groq_account": account},
         )
 
-    with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
-        "api.index._reserve_groq_rate_limit",
-        side_effect=fake_reserve,
-    ), patch(
-        "api.index._get_groq_client",
-        side_effect=lambda account, default_headers=None: object(),
-    ), patch(
-        "api.index._reconcile_groq_rate_limit"
-    ) as mock_reconcile, patch(
-        "api.index._log_groq_request_result"
-    ), patch(
-        "api.index.is_provider_backoff_active",
-        return_value=False,
+    with (
+        patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]),
+        patch(
+            "api.index._reserve_groq_rate_limit",
+            side_effect=fake_reserve,
+        ),
+        patch(
+            "api.index._get_groq_client",
+            side_effect=lambda account, default_headers=None: object(),
+        ),
+        patch("api.index._reconcile_groq_rate_limit") as mock_reconcile,
+        patch("api.index._log_groq_request_result"),
+        patch(
+            "api.index.is_provider_backoff_active",
+            return_value=False,
+        ),
     ):
         result = _execute_groq_request_with_fallback(
             scope="compound",
@@ -273,21 +277,25 @@ def test_execute_groq_request_with_fallback_aborts_for_paid_retry_when_time_is_l
     force_paid_token = _webhook_force_paid_retry.set(False)
 
     try:
-        with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
-            "api.index._reserve_groq_rate_limit", return_value=object()
-        ), patch(
-            "api.index._get_groq_client", return_value=object()
-        ), patch(
-            "api.index._reconcile_groq_rate_limit"
-        ), patch(
-            "api.index._log_groq_request_result"
-        ), patch(
-            "api.index.is_provider_backoff_active",
-            return_value=False,
-        ), patch(
-            "api.webhook_state._get_webhook_retry_safety_margin_seconds", return_value=45.0
-        ), patch(
-            "api.webhook_state._get_webhook_max_runtime_seconds", return_value=120.0
+        with (
+            patch(
+                "api.index._get_configured_groq_accounts", return_value=["free", "paid"]
+            ),
+            patch("api.index._reserve_groq_rate_limit", return_value=object()),
+            patch("api.index._get_groq_client", return_value=object()),
+            patch("api.index._reconcile_groq_rate_limit"),
+            patch("api.index._log_groq_request_result"),
+            patch(
+                "api.index.is_provider_backoff_active",
+                return_value=False,
+            ),
+            patch(
+                "api.webhook_state._get_webhook_retry_safety_margin_seconds",
+                return_value=45.0,
+            ),
+            patch(
+                "api.webhook_state._get_webhook_max_runtime_seconds", return_value=120.0
+            ),
         ):
             with pytest.raises(ForceWebhookRetry):
                 _execute_groq_request_with_fallback(
@@ -295,9 +303,11 @@ def test_execute_groq_request_with_fallback_aborts_for_paid_retry_when_time_is_l
                     label="Groq Compound",
                     token_count=123,
                     default_headers={"Groq-Model-Version": "latest"},
-                    attempt=lambda account, _client: (_ for _ in ()).throw(Fake413Error())
-                    if account == "free"
-                    else None,
+                    attempt=lambda account, _client: (
+                        (_ for _ in ()).throw(Fake413Error())
+                        if account == "free"
+                        else None
+                    ),
                 )
     finally:
         _webhook_request_started_at.reset(started_token)
@@ -319,17 +329,18 @@ def test_execute_groq_request_with_fallback_skips_free_when_paid_retry_marker_is
     force_paid_token = _webhook_force_paid_retry.set(True)
 
     try:
-        with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
-            "api.index._reserve_groq_rate_limit", return_value=object()
-        ), patch(
-            "api.index._get_groq_client", return_value=object()
-        ), patch(
-            "api.index._reconcile_groq_rate_limit"
-        ), patch(
-            "api.index._log_groq_request_result"
-        ), patch(
-            "api.index.is_provider_backoff_active",
-            return_value=False,
+        with (
+            patch(
+                "api.index._get_configured_groq_accounts", return_value=["free", "paid"]
+            ),
+            patch("api.index._reserve_groq_rate_limit", return_value=object()),
+            patch("api.index._get_groq_client", return_value=object()),
+            patch("api.index._reconcile_groq_rate_limit"),
+            patch("api.index._log_groq_request_result"),
+            patch(
+                "api.index.is_provider_backoff_active",
+                return_value=False,
+            ),
         ):
             result = _execute_groq_request_with_fallback(
                 scope="compound",
@@ -399,21 +410,25 @@ def test_execute_groq_request_with_fallback_marks_paid_preference_when_escalatin
     force_paid_token = _webhook_force_paid_retry.set(False)
 
     try:
-        with patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]), patch(
-            "api.index._reserve_groq_rate_limit", return_value=object()
-        ), patch(
-            "api.index._get_groq_client", return_value=object()
-        ), patch(
-            "api.index._reconcile_groq_rate_limit"
-        ), patch(
-            "api.index._log_groq_request_result"
-        ), patch(
-            "api.index.is_provider_backoff_active",
-            return_value=False,
-        ), patch(
-            "api.webhook_state._get_webhook_retry_safety_margin_seconds", return_value=45.0
-        ), patch(
-            "api.webhook_state._get_webhook_max_runtime_seconds", return_value=120.0
+        with (
+            patch(
+                "api.index._get_configured_groq_accounts", return_value=["free", "paid"]
+            ),
+            patch("api.index._reserve_groq_rate_limit", return_value=object()),
+            patch("api.index._get_groq_client", return_value=object()),
+            patch("api.index._reconcile_groq_rate_limit"),
+            patch("api.index._log_groq_request_result"),
+            patch(
+                "api.index.is_provider_backoff_active",
+                return_value=False,
+            ),
+            patch(
+                "api.webhook_state._get_webhook_retry_safety_margin_seconds",
+                return_value=45.0,
+            ),
+            patch(
+                "api.webhook_state._get_webhook_max_runtime_seconds", return_value=120.0
+            ),
         ):
             result = _execute_groq_request_with_fallback(
                 scope="compound",
@@ -442,12 +457,12 @@ def test_execute_groq_request_with_fallback_marks_paid_preference_when_escalatin
 
     assert result is not None
     assert attempted_accounts == ["free", "paid"]
-    assert (
-        "webhook:idempotency:message:1:3:force_paid_retry" in redis_client.data
-    )
+    assert "webhook:idempotency:message:1:3:force_paid_retry" in redis_client.data
 
 
-def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_search(monkeypatch):
+def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_search(
+    monkeypatch,
+):
     from api.index import estimate_ai_base_reserve_credits
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
@@ -465,7 +480,12 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     )
     monkeypatch.setattr(
         "api.index.get_groq_compound_enabled_tools",
-        lambda: ["web_search", "visit_website", "code_interpreter", "browser_automation"],
+        lambda: [
+            "web_search",
+            "visit_website",
+            "code_interpreter",
+            "browser_automation",
+        ],
     )
 
     reserve, metadata = estimate_ai_base_reserve_credits(
@@ -475,7 +495,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     assert reserve == 2
     assert metadata["reserve_mode"] == "chat"
     assert metadata["reserve_reason"] == "standard_chat"
-    assert metadata["reserve_model"] == "moonshotai/kimi-k2-instruct-0905"
+    assert metadata["reserve_model"] == "@cf/moonshotai/kimi-k2.5"
 
 
 def test_normalize_search_query_replaces_stale_year_for_current_pricing_query():
@@ -483,7 +503,12 @@ def test_normalize_search_query_replaces_stale_year_for_current_pricing_query():
 
     result = _normalize_search_query(
         "costo pañales 3 años argentina 2024 promedio",
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
+        [
+            {
+                "role": "user",
+                "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?",
+            }
+        ],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
     )
 
@@ -495,7 +520,12 @@ def test_normalize_search_query_appends_current_year_for_current_pricing_query()
 
     result = _normalize_search_query(
         "costo pañales 3 años argentina promedio",
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?"}],
+        [
+            {
+                "role": "user",
+                "content": "CONTEXTO:\nMENSAJE:\ncuanto sale comprar pañales por 3 años en promedio?",
+            }
+        ],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
     )
 
@@ -507,7 +537,12 @@ def test_normalize_search_query_preserves_explicit_user_year():
 
     result = _normalize_search_query(
         "costo pañales 3 años argentina 2024 promedio",
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\ncuanto salia comprar pañales por 3 años en 2024?"}],
+        [
+            {
+                "role": "user",
+                "content": "CONTEXTO:\nMENSAJE:\ncuanto salia comprar pañales por 3 años en 2024?",
+            }
+        ],
         now=datetime(2026, 3, 11, tzinfo=timezone.utc),
     )
 
@@ -518,14 +553,13 @@ def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
     # Simplified test - just verify the function runs without crashing
-    with patch("api.index.get_market_context") as mock_get_market_context, patch(
-        "api.index.get_weather_context"
-    ) as mock_get_weather_context, patch(
-        "api.index.get_hacker_news_context"
-    ) as mock_get_hn_context, patch(
-        "api.index.get_time_context"
-    ) as mock_get_time_context, patch("os.environ.get") as mock_env:
-
+    with (
+        patch("api.index.get_market_context") as mock_get_market_context,
+        patch("api.index.get_weather_context") as mock_get_weather_context,
+        patch("api.index.get_hacker_news_context") as mock_get_hn_context,
+        patch("api.index.get_time_context") as mock_get_time_context,
+        patch("os.environ.get") as mock_env,
+    ):
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
@@ -545,14 +579,13 @@ def test_ask_ai_with_all_failures():
     from api.index import ask_ai
 
     # Simplified test - just verify the function runs without crashing
-    with patch("api.index.get_market_context") as mock_get_market_context, patch(
-        "api.index.get_weather_context"
-    ) as mock_get_weather_context, patch(
-        "api.index.get_hacker_news_context"
-    ) as mock_get_hn_context, patch(
-        "api.index.get_time_context"
-    ) as mock_get_time_context, patch("os.environ.get") as mock_env:
-
+    with (
+        patch("api.index.get_market_context") as mock_get_market_context,
+        patch("api.index.get_weather_context") as mock_get_weather_context,
+        patch("api.index.get_hacker_news_context") as mock_get_hn_context,
+        patch("api.index.get_time_context") as mock_get_time_context,
+        patch("os.environ.get") as mock_env,
+    ):
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
@@ -571,29 +604,44 @@ def test_ask_ai_with_all_failures():
 def test_ask_ai_with_image():
     from api.index import ask_ai
 
-    # Simplified test - just verify the function runs without crashing when given an image
-    with patch("api.index.get_market_context") as mock_get_market_context, patch(
-        "api.index.get_weather_context"
-    ) as mock_get_weather_context, patch(
-        "api.index.get_time_context"
-    ) as mock_get_time_context, patch("api.index.describe_image_groq") as mock_describe_image, patch(
-        "os.environ.get"
-    ) as mock_env:
-
+    with (
+        patch("api.index.get_market_context") as mock_get_market_context,
+        patch("api.index.get_weather_context") as mock_get_weather_context,
+        patch("api.index.get_time_context") as mock_get_time_context,
+        patch(
+            "api.index.build_system_message",
+            return_value={"role": "system", "content": "sys"},
+        ),
+        patch(
+            "api.index.complete_with_providers", return_value="AI response"
+        ) as mock_complete,
+        patch("api.index._describe_image_groq_result") as mock_describe,
+        patch("os.environ.get") as mock_env,
+    ):
         # Setup basic mocks
         mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
         mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
-        mock_describe_image.return_value = "A beautiful landscape"
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
+        mock_describe.return_value = MagicMock(
+            text="an image of a cat",
+            kind="vision",
+        )
 
         messages = [{"role": "user", "content": "what do you see in this image?"}]
         image_data = b"fake_image_data"
         result = ask_ai(messages, image_data=image_data, image_file_id="img123")
 
-        # Just verify it returns a string (could be fallback response)
-        assert isinstance(result, str)
-        assert len(result) > 0
+        assert result == "AI response"
+        mock_describe.assert_called_once_with(
+            image_data,
+            "Describe what you see in this image in detail.",
+            "img123",
+            use_cache=True,
+        )
+        mock_complete.assert_called_once()
+        assert mock_complete.call_args.kwargs.get("image_data") is None
+        assert "an image of a cat" in messages[0]["content"]
 
 
 def test_ask_ai_does_not_force_search_for_news_queries():
@@ -614,19 +662,19 @@ def test_ask_ai_does_not_force_search_for_news_queries():
         ]
     )
 
-    with patch("api.index.get_market_context", return_value={}), patch(
-        "api.index.get_weather_context", return_value={}
-    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
-        "api.index.get_time_context", return_value={}
-    ), patch("api.index.build_system_message",
-        return_value={"role": "system", "content": "sys"},
-    ), patch(
-        "api.index.complete_with_providers", return_value="ok"
-    ) as mock_complete, patch(
-        "api.index._run_compound_task", return_value="forced"
-    ) as mock_run, patch(
-        "api.index.environ.get"
-    ) as mock_env:
+    with (
+        patch("api.index.get_market_context", return_value={}),
+        patch("api.index.get_weather_context", return_value={}),
+        patch("api.index.get_hacker_news_context", return_value=[]),
+        patch("api.index.get_time_context", return_value={}),
+        patch(
+            "api.index.build_system_message",
+            return_value={"role": "system", "content": "sys"},
+        ),
+        patch("api.index.complete_with_providers", return_value="ok") as mock_complete,
+        patch("api.index._run_compound_task", return_value="forced") as mock_run,
+        patch("api.index.environ.get") as mock_env,
+    ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_key"
         }.get(key, default)
@@ -642,22 +690,23 @@ def test_ask_ai_sanitizes_tool_call_before_retry():
     """ask_ai should sanitize tool responses before retrying provider"""
     from api.index import ask_ai
 
-    with patch("api.index.get_market_context", return_value={}), patch(
-        "api.index.get_weather_context", return_value={}
-    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
-        "api.index.get_time_context", return_value={}
-    ), patch("api.index.build_system_message",
-        return_value={"role": "system", "content": "sys"},
-    ), patch(
-        "api.index.OpenAI"
-    ) as mock_openai, patch(
-        "api.index.execute_tool", return_value="{}"
+    with (
+        patch("api.index.get_market_context", return_value={}),
+        patch("api.index.get_weather_context", return_value={}),
+        patch("api.index.get_hacker_news_context", return_value=[]),
+        patch("api.index.get_time_context", return_value={}),
+        patch(
+            "api.index.build_system_message",
+            return_value={"role": "system", "content": "sys"},
+        ),
+        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index.execute_tool", return_value="{}"),
     ):
         mock_openai.return_value = MagicMock()
 
         calls = []
 
-        def fake_complete(system_message, msgs):
+        def fake_complete(system_message, msgs, **kwargs):
             calls.append(msgs)
             if len(calls) == 1:
                 return '[TOOL] compound {"task": "trae contexto"}'
@@ -676,23 +725,24 @@ def test_ask_ai_handles_repeated_tool_calls():
     """ask_ai should execute tools repeatedly if providers return new tool calls"""
     from api.index import ask_ai
 
-    with patch("api.index.get_market_context", return_value={}), patch(
-        "api.index.get_weather_context", return_value={}
-    ), patch("api.index.get_hacker_news_context", return_value=[]), patch(
-        "api.index.get_time_context", return_value={}
-    ), patch("api.index.build_system_message",
-        return_value={"role": "system", "content": "sys"},
-    ), patch(
-        "api.index.OpenAI"
-    ) as mock_openai, patch(
-        "api.index.execute_tool"
-    ) as mock_tool:
+    with (
+        patch("api.index.get_market_context", return_value={}),
+        patch("api.index.get_weather_context", return_value={}),
+        patch("api.index.get_hacker_news_context", return_value=[]),
+        patch("api.index.get_time_context", return_value={}),
+        patch(
+            "api.index.build_system_message",
+            return_value={"role": "system", "content": "sys"},
+        ),
+        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index.execute_tool") as mock_tool,
+    ):
         mock_openai.return_value = MagicMock()
         mock_tool.side_effect = ["res1", "res2"]
 
         call_count = {"n": 0}
 
-        def fake_complete(system_message, msgs):
+        def fake_complete(system_message, msgs, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return "[TOOL] tool1 {}"
@@ -709,11 +759,19 @@ def test_ask_ai_handles_repeated_tool_calls():
 
 
 def test_search_command_success():
-    with patch("api.index.should_use_groq_compound_tools", return_value=True), patch(
-        "api.index._run_compound_task", return_value="respuesta compound"
-    ) as mock_run:
+    with (
+        patch("api.index.should_use_groq_compound_tools", return_value=True),
+        patch(
+            "api.index._run_compound_task", return_value="respuesta compound"
+        ) as mock_run,
+    ):
         result = search_command(
-            [{"role": "user", "content": "CONTEXTO:\n\nMENSAJE:\npython programming\n\nINSTRUCCIONES:"}],
+            [
+                {
+                    "role": "user",
+                    "content": "CONTEXTO:\n\nMENSAJE:\npython programming\n\nINSTRUCCIONES:",
+                }
+            ],
             response_meta={},
         )
 
@@ -750,8 +808,9 @@ def test_fetch_link_metadata_success():
     mock_response.url = "https://example.com/articulo"
     mock_response.close = MagicMock()
 
-    with patch("api.index.config_redis", side_effect=Exception("redis down")), patch(
-        "api.index.request_with_ssl_fallback", return_value=mock_response
+    with (
+        patch("api.index.config_redis", side_effect=Exception("redis down")),
+        patch("api.index.request_with_ssl_fallback", return_value=mock_response),
     ):
         result = fetch_link_metadata("https://example.com/articulo")
 
@@ -797,9 +856,12 @@ def test_extract_message_urls_detects_bare_domains_without_scheme():
 
 
 def test_build_message_links_context_includes_url_when_metadata_fails():
-    with patch("api.index.extract_message_urls", return_value=["https://example.com"]), patch(
-        "api.index.fetch_link_metadata",
-        return_value={"url": "https://example.com", "error": "boom"},
+    with (
+        patch("api.index.extract_message_urls", return_value=["https://example.com"]),
+        patch(
+            "api.index.fetch_link_metadata",
+            return_value={"url": "https://example.com", "error": "boom"},
+        ),
     ):
         context = build_message_links_context({"text": "https://example.com"})
 
@@ -873,9 +935,12 @@ def test_parse_tool_call_invalid():
 
 
 def test_execute_tool_compound():
-    with patch("api.index.should_use_groq_compound_tools", return_value=True), patch(
-        "api.index._run_compound_task", return_value="resultado compound"
-    ) as mock_run:
+    with (
+        patch("api.index.should_use_groq_compound_tools", return_value=True),
+        patch(
+            "api.index._run_compound_task", return_value="resultado compound"
+        ) as mock_run,
+    ):
         result = execute_tool("compound", {"task": "btc hoy"})
 
     assert result == "resultado compound"
@@ -890,11 +955,12 @@ def test_execute_tool_empty_task():
 def test_resolve_tool_calls_compound_reinjects_for_persona_pass():
     from api.index import resolve_tool_calls
 
-    with patch(
-        "api.index.execute_tool", return_value="resultado compound"
-    ) as mock_tool, patch(
-        "api.index.complete_with_providers", return_value="respuesta final"
-    ) as mock_complete:
+    with (
+        patch("api.index.execute_tool", return_value="resultado compound") as mock_tool,
+        patch(
+            "api.index.complete_with_providers", return_value="respuesta final"
+        ) as mock_complete,
+    ):
         result = resolve_tool_calls(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
@@ -956,7 +1022,10 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
 
     assert result == "me quedé reculando y no te pude responder, probá de nuevo"
     assert mock_print.call_count == 2
-    assert "cleaned response empty after normalization" in mock_print.call_args_list[0].args[0]
+    assert (
+        "cleaned response empty after normalization"
+        in mock_print.call_args_list[0].args[0]
+    )
     assert "previews raw='[TOOL] web_search" in mock_print.call_args_list[1].args[0]
 
 
@@ -996,262 +1065,96 @@ def test_handle_ai_response_strips_user_identity_prefix(monkeypatch):
 # Tests for complete_with_providers function
 
 
-def test_complete_with_providers_groq_success():
-    """Test complete_with_providers when Groq succeeds"""
+def test_complete_with_providers_success():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq:
-        mock_groq.return_value = "Groq response"
+    with patch("api.index.get_chat_ai_response") as mock_ai:
+        mock_ai.return_value = "AI response"
 
         result = complete_with_providers(system_message, messages)
 
-        assert result == "Groq response"
-        mock_groq.assert_called_once()
+        assert result == "AI response"
+        mock_ai.assert_called_once()
 
 
-def test_complete_with_providers_returns_none_when_groq_fails():
-    """Test complete_with_providers returns None when Groq fails"""
+def test_complete_with_providers_with_image_data_forwards_payload():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
+    image_data = b"fake-image-bytes"
 
-    with patch("api.index.get_groq_ai_response") as mock_groq:
-        mock_groq.return_value = None
+    with patch("api.index.get_chat_ai_response") as mock_ai:
+        mock_ai.return_value = "AI response"
 
-        result = complete_with_providers(system_message, messages)
-
-        assert result is None
-        assert mock_groq.call_count == 1
-
-
-def test_complete_with_providers_all_fail():
-    """Test complete_with_providers when all providers fail"""
-    system_message = {"role": "system", "content": "test"}
-    messages = [{"role": "user", "content": "hello"}]
-
-    with patch("api.index.get_groq_ai_response") as mock_groq:
-        mock_groq.return_value = None
-
-        result = complete_with_providers(system_message, messages)
-
-        assert result is None
-        assert mock_groq.call_count == 1
-
-
-def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
-    """When Groq backoff is active we should skip provider API calls entirely."""
-
-    from api import index as index_module
-
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    index_module._provider_backoff_until[
-        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
-    ] = time.time() + 30
-
-    with patch("api.index.OpenAI") as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
+        result = complete_with_providers(
+            system_message,
+            messages,
+            image_data=image_data,
         )
 
-    assert result is None
-    mock_openai.assert_not_called()
+        assert result == "AI response"
+        mock_ai.assert_called_once()
+        assert mock_ai.call_args.kwargs["image_data"] == image_data
 
 
-def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+def test_get_cloudflare_ai_response_result_uses_multimodal_payload(monkeypatch):
+    from api.index import _get_cloudflare_ai_response_result
 
-    with patch("api.index._reserve_groq_rate_limit", return_value=None), patch(
-        "api.index.OpenAI"
-    ) as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
 
-    assert result is None
-    mock_openai.assert_not_called()
+    captured_payload = {}
 
-
-def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
-    """Rate limit errors should trigger a backoff window and skip subsequent calls."""
-
-    from api import index as index_module
-
-    index_module._provider_backoff_until.clear()
-
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
-
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = Exception(
-        "Error code: 429 - rate limit reached"
-    )
-
-    with patch("api.index.OpenAI", return_value=fake_client) as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-        assert result is None
-        remaining = index_module.get_provider_backoff_remaining(
-            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
-        )
-        assert remaining > 0
-        assert mock_openai.call_count == 1
-
-        # Second call should be skipped without hitting the API client again
-        second_result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-        assert second_result is None
-        assert mock_openai.call_count == 1
-
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-
-
-def test_get_groq_ai_response_uses_retry_after_header_for_scope_backoff(monkeypatch):
-    from api import index as index_module
-
-    class RateLimitError(Exception):
-        def __init__(self):
-            super().__init__("Error code: 429 - rate limit reached")
-            self.status_code = 429
-            self.response = MagicMock(headers={"retry-after": "30"})
-
-    index_module._provider_backoff_until.clear()
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
-
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = RateLimitError()
-
-    with patch("api.index.OpenAI", return_value=fake_client):
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-    assert result is None
-    remaining = index_module.get_provider_backoff_remaining(
-        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
-    )
-    assert 0 < remaining <= 30
-
-
-def test_get_groq_ai_response_prefers_free_account(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
-
-    free_choice = MagicMock()
-    free_choice.message.content = "free wins"
-    free_choice.finish_reason = "stop"
-
-    free_response = MagicMock()
-    free_response.choices = [free_choice]
-
-    free_client = MagicMock()
-    free_client.chat.completions.create.return_value = free_response
-
-    with patch("api.index.OpenAI", return_value=free_client) as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-    assert result == "free wins"
-    assert mock_openai.call_count == 1
-    assert mock_openai.call_args.kwargs["api_key"] == "free_key"
-
-
-def test_get_groq_ai_response_falls_back_to_paid_when_free_local_limit_hits(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
-
-    paid_choice = MagicMock()
-    paid_choice.message.content = "paid fallback"
-    paid_choice.finish_reason = "stop"
-
-    paid_response = MagicMock()
-    paid_response.choices = [paid_choice]
-
-    paid_client = MagicMock()
-    paid_client.chat.completions.create.return_value = paid_response
-
-    def reserve_side_effect(account, scope, **kwargs):
-        if account == "free" and scope == "chat":
+    class FakeResponse:
+        def raise_for_status(self):
             return None
-        return {
-            "account": account,
-            "scope": scope,
-            "request_count": 1,
-            "token_count": 100,
-            "audio_seconds": 0,
-        }
 
-    with patch("api.index._reserve_groq_rate_limit", side_effect=reserve_side_effect), patch(
-        "api.index.OpenAI", return_value=paid_client
-    ) as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
+        def json(self):
+            return {"success": True, "result": {"response": "ok"}}
+
+    def fake_post(*args, **kwargs):
+        captured_payload.update(kwargs.get("json") or {})
+        return FakeResponse()
+
+    with patch("api.index.requests.post", side_effect=fake_post):
+        result = _get_cloudflare_ai_response_result(
+            {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
+            image_data=b"image-bytes",
         )
 
-    assert result == "paid fallback"
-    assert mock_openai.call_count == 1
-    assert mock_openai.call_args.kwargs["api_key"] == "paid_key"
-
-
-def test_get_groq_ai_response_falls_back_to_paid_after_free_429(monkeypatch):
-    from api import index as index_module
-
-    index_module._provider_backoff_until.clear()
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
-
-    free_client = MagicMock()
-    free_client.chat.completions.create.side_effect = Exception(
-        "Error code: 429 - rate limit reached"
+    assert result is not None
+    assert result.text == "ok"
+    user_message = captured_payload["messages"][1]
+    assert user_message["role"] == "user"
+    assert isinstance(user_message["content"], list)
+    assert user_message["content"][0] == {"type": "text", "text": "hola"}
+    assert user_message["content"][1]["type"] == "image_url"
+    assert user_message["content"][1]["image_url"]["url"].startswith(
+        "data:image/webp;base64,"
     )
 
-    paid_choice = MagicMock()
-    paid_choice.message.content = "paid fallback"
-    paid_choice.finish_reason = "stop"
 
-    paid_response = MagicMock()
-    paid_response.choices = [paid_choice]
+def test_complete_with_providers_returns_none_when_all_fail():
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
 
-    paid_client = MagicMock()
-    paid_client.chat.completions.create.return_value = paid_response
+    with patch("api.index.get_chat_ai_response") as mock_ai:
+        mock_ai.return_value = None
 
-    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
+        result = complete_with_providers(system_message, messages)
 
-    assert result == "paid fallback"
-    assert mock_openai.call_count == 2
-    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
-    assert index_module.get_provider_backoff_remaining(
-        index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
-    ) > 0
-    assert (
-        index_module.get_provider_backoff_remaining(
-            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
-        )
-        == 0
-    )
+        assert result is None
+        assert mock_ai.call_count == 1
 
 
 def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
 
-    with patch("api.index._reserve_groq_rate_limit", return_value=None), patch(
-        "api.index.OpenAI"
-    ) as mock_openai:
+    with (
+        patch("api.index._reserve_groq_rate_limit", return_value=None),
+        patch("api.index.OpenAI") as mock_openai,
+    ):
         result = get_groq_compound_response(
             {"role": "system", "content": "system"},
             [{"role": "user", "content": "hola"}],
@@ -1280,7 +1183,9 @@ def test_get_groq_compound_response_falls_back_to_paid_after_free_429(monkeypatc
     paid_client = MagicMock()
     paid_client.chat.completions.create.return_value = paid_response
 
-    with patch("api.index.OpenAI", side_effect=[free_client, paid_client]) as mock_openai:
+    with patch(
+        "api.index.OpenAI", side_effect=[free_client, paid_client]
+    ) as mock_openai:
         result = get_groq_compound_response(
             {"role": "system", "content": "system"},
             [{"role": "user", "content": "hola"}],
@@ -1404,11 +1309,14 @@ def test_get_groq_compound_response_result_caches_successful_response(monkeypatc
 def test_run_compound_task_uses_compound_as_source_for_main_model():
     from api.index import _run_compound_task
 
-    with patch(
-        "api.index.get_groq_compound_response", return_value="compuesto"
-    ) as mock_compound, patch(
-        "api.index.complete_with_providers", return_value="respuesta final"
-    ) as mock_complete:
+    with (
+        patch(
+            "api.index.get_groq_compound_response", return_value="compuesto"
+        ) as mock_compound,
+        patch(
+            "api.index.complete_with_providers", return_value="respuesta final"
+        ) as mock_complete,
+    ):
         result = _run_compound_task(
             task="algo",
             messages=[{"role": "user", "content": "algo"}],
@@ -1450,14 +1358,15 @@ def test_disable_tools_in_system_message_removes_tool_section():
     assert "[TOOL]" not in text
     assert "No llames herramientas" in text
 
+
 def test_run_compound_task_logs_compound_source_text():
     from api.index import _run_compound_task
 
-    with patch(
-        "api.index.get_groq_compound_response", return_value="compuesto"
-    ), patch(
-        "api.index.complete_with_providers", return_value="respuesta final"
-    ), patch("builtins.print") as mock_print:
+    with (
+        patch("api.index.get_groq_compound_response", return_value="compuesto"),
+        patch("api.index.complete_with_providers", return_value="respuesta final"),
+        patch("builtins.print") as mock_print,
+    ):
         result = _run_compound_task(
             task="algo",
             messages=[{"role": "user", "content": "algo"}],
@@ -1466,7 +1375,9 @@ def test_run_compound_task_logs_compound_source_text():
         )
 
     assert result == "respuesta final"
-    printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+    printed = "\n".join(
+        str(call.args[0]) for call in mock_print.call_args_list if call.args
+    )
     assert "_run_compound_task: compound source " in printed
     assert "_run_compound_task: compound source text >>>" in printed
     assert "compuesto" in printed
@@ -1475,11 +1386,11 @@ def test_run_compound_task_logs_compound_source_text():
 def test_run_compound_task_logs_when_persona_pass_returns_empty():
     from api.index import _run_compound_task
 
-    with patch(
-        "api.index.get_groq_compound_response", return_value="compuesto"
-    ), patch(
-        "api.index.complete_with_providers", return_value=None
-    ), patch("builtins.print") as mock_print:
+    with (
+        patch("api.index.get_groq_compound_response", return_value="compuesto"),
+        patch("api.index.complete_with_providers", return_value=None),
+        patch("builtins.print") as mock_print,
+    ):
         result = _run_compound_task(
             task="algo",
             messages=[{"role": "user", "content": "algo"}],
@@ -1488,7 +1399,9 @@ def test_run_compound_task_logs_when_persona_pass_returns_empty():
         )
 
     assert result == "compuesto"
-    printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+    printed = " ".join(
+        str(call.args[0]) for call in mock_print.call_args_list if call.args
+    )
     assert "persona pass returned empty" in printed
 
 
@@ -1504,9 +1417,11 @@ def test_fetch_link_metadata_uses_ttl_constant():
     mock_response.url = "https://example.com"
     mock_response.close = MagicMock()
 
-    with patch("api.index.request_with_ssl_fallback", return_value=mock_response), patch(
-        "api.index.config_redis"
-    ) as mock_redis:
+    with (
+        patch("api.index.request_with_ssl_fallback", return_value=mock_response),
+        patch("api.index.config_redis") as mock_redis,
+    ):
+
         class R:
             def __init__(self):
                 self.calls = []
@@ -1531,7 +1446,7 @@ def test_can_embed_url_primes_link_metadata_cache():
     from api.index import can_embed_url, fetch_link_metadata
 
     html_body = (
-        '<html><head>'
+        "<html><head>"
         '<meta property="og:title" content="Agustin Cortes (@agucortes)" />'
         '<meta property="og:description" content="Texto del post" />'
         '<meta name="twitter:card" content="tweet" />'
@@ -1556,14 +1471,16 @@ def test_can_embed_url_primes_link_metadata_cache():
 
     redis_client = R()
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.utils.links.request_with_ssl_fallback", return_value=embed_response
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.utils.links.request_with_ssl_fallback", return_value=embed_response),
     ):
         assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
 
-    with patch("api.index.config_redis", return_value=redis_client), patch(
-        "api.index.request_with_ssl_fallback"
-    ) as mock_fetch_request:
+    with (
+        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.request_with_ssl_fallback") as mock_fetch_request,
+    ):
         result = fetch_link_metadata("https://fixupx.com/status/2032173338240467235")
 
     assert result["title"] == "Agustin Cortes (@agucortes)"

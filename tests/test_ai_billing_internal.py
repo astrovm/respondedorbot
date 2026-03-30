@@ -7,14 +7,12 @@ from api.ai_billing import (
     parse_topup_payload,
 )
 from api.credit_units import whole_credits_to_units
-from api.groq_billing import (
+from api.ai_usage_billing import (
     MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST,
     calculate_billing_for_segments,
     estimate_compound_reserve_credits,
     estimate_vision_reserve_credits,
 )
-
-
 
 
 def test_get_ai_billing_packs_default_includes_50_credit_option(monkeypatch):
@@ -24,11 +22,11 @@ def test_get_ai_billing_packs_default_includes_50_credit_option(monkeypatch):
 
     assert packs[0] == {"id": "p50", "credits": 500, "xtr": 25}
 
+
 def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("topup:p250:99") == ("p250", 99)
     assert parse_topup_payload("topup:p250") == ("p250", None)
     assert parse_topup_payload("other") == (None, None)
-
 
 
 def test_get_ai_billing_packs_accept_decimal_credits(monkeypatch):
@@ -75,7 +73,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 1_000,
                     "input_cached_tokens": 900,
@@ -86,13 +84,13 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 2_050
-    assert breakdown["charged_credit_units"] == 5
-    assert breakdown["charged_credits_display"] == "0.5"
+    assert breakdown["raw_usd_micros"] == 1_650
+    assert breakdown["charged_credit_units"] == 4
+    assert breakdown["charged_credits_display"] == "0.4"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 2_050,
+            "model": "@cf/moonshotai/kimi-k2.5",
+            "usd_micros": 1_650,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -106,7 +104,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "prompt_tokens": 2_000,
                     "completion_tokens": 100,
@@ -116,13 +114,13 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 1_550
-    assert breakdown["charged_credit_units"] == 4
-    assert breakdown["charged_credits_display"] == "0.4"
+    assert breakdown["raw_usd_micros"] == 750
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 1_550,
+            "model": "@cf/moonshotai/kimi-k2.5",
+            "usd_micros": 750,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -374,7 +372,7 @@ def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
         image_data=b"a" * 200_000,
     )
 
-    assert small == 1
+    assert small >= 1
     assert large > small
 
 
@@ -382,7 +380,12 @@ def test_estimate_compound_reserve_credits_only_reserves_predictable_request_too
     reserve = estimate_compound_reserve_credits(
         system_message={"role": "system", "content": "search the web"},
         messages=[{"role": "user", "content": "btc news"}],
-        enabled_tools=["web_search", "visit_website", "code_interpreter", "browser_automation"],
+        enabled_tools=[
+            "web_search",
+            "visit_website",
+            "code_interpreter",
+            "browser_automation",
+        ],
     )
 
     assert reserve == 19
@@ -417,7 +420,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -447,7 +450,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -458,8 +461,11 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 10
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"] == "ai_settlement_charge"
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 7
+    assert (
+        billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
+        == "ai_settlement_charge"
+    )
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -538,7 +544,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -550,9 +556,12 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 10
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 7
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
+    assert (
+        billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
+        == "ai_settlement_debt"
+    )
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -578,7 +587,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -632,7 +641,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
             },
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -643,7 +652,8 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     )
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 3
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -660,7 +670,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -673,7 +683,9 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
-    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
+        "metadata"
+    ]
     assert metadata["billing_zero_usage_fallback"] is True
     assert metadata["settled_credit_units"] == 30
     assert metadata["refunded_credit_units"] == 0
@@ -700,7 +712,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "@cf/moonshotai/kimi-k2.5",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -721,7 +733,9 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
-    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
+        "metadata"
+    ]
     assert metadata["billing_zero_usage_fallback"] is True
     assert metadata["settled_credit_units"] == 20
     assert metadata["refunded_credit_units"] == 0

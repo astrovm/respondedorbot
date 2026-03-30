@@ -1,5 +1,3 @@
-"""Groq pricing, usage normalization, and credit calculations."""
-
 from __future__ import annotations
 
 import base64
@@ -10,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from api.credit_units import format_credit_units
 
 
-PRICING_VERSION = "2026-03-06"
+PRICING_VERSION = "2026-03-29"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.0
 CREDIT_CEIL_DIVISOR_USD_MICROS = int(CREDIT_USD_MICROS / BILLING_MARKUP_MULTIPLIER)
@@ -29,17 +27,17 @@ MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 120.0
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
-    "moonshotai/kimi-k2-instruct-0905": {
-        "input_per_million": 1_000_000,
-        "cached_input_per_million": 500_000,
+    "@cf/moonshotai/kimi-k2.5": {
+        "input_per_million": 600_000,
+        "cached_input_per_million": 100_000,
         "output_per_million": 3_000_000,
     },
     "meta-llama/llama-4-scout-17b-16e-instruct": {
         "input_per_million": 110_000,
         "output_per_million": 340_000,
     },
-    "whisper-large-v3-turbo": {
-        "audio_per_hour": 40_000,
+    "whisper-large-v3": {
+        "audio_per_hour": 111_000,
     },
     "openai/gpt-oss-120b": {
         "input_per_million": 150_000,
@@ -91,9 +89,7 @@ def ensure_mapping(value: Any) -> Optional[Dict[str, Any]]:
             pass
     if hasattr(value, "__dict__"):
         data = {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_")
+            key: item for key, item in vars(value).items() if not key.startswith("_")
         }
         if data:
             return data
@@ -171,7 +167,7 @@ def estimate_chat_reserve_credits(
     max_output_tokens: int = CHAT_OUTPUT_TOKEN_LIMIT,
     extra_input_tokens: int = 0,
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS["moonshotai/kimi-k2-instruct-0905"]
+    pricing = MODEL_PRICING_USD_MICROS["@cf/moonshotai/kimi-k2.5"]
     input_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
         input_tokens += estimate_message_tokens([system_message])
@@ -192,7 +188,7 @@ def estimate_vision_reserve_credits(
     image_url = ""
     if image_data:
         image_base64 = base64.b64encode(image_data).decode("utf-8")
-        image_url = f"data:image/jpeg;base64,{image_base64}"
+        image_url = f"data:image/webp;base64,{image_base64}"
     input_payload = [
         {
             "role": "user",
@@ -211,7 +207,7 @@ def estimate_vision_reserve_credits(
 
 
 def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
-    hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3-turbo"]["audio_per_hour"]
+    hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3"]["audio_per_hour"]
     seconds = max(0.0, float(audio_seconds or 0.0))
     if seconds <= 0:
         return 1
@@ -234,7 +230,9 @@ def estimate_compound_reserve_credits(
         input_tokens * pricing["input_per_million"]
         + max_output_tokens * pricing["output_per_million"]
     ) // 1_000_000
-    normalized_tools = {str(tool).strip().lower() for tool in enabled_tools or [] if str(tool).strip()}
+    normalized_tools = {
+        str(tool).strip().lower() for tool in enabled_tools or [] if str(tool).strip()
+    }
     if "web_search" in normalized_tools:
         usd_micros += WEB_SEARCH_PREMIUM_USD_MICROS
     if "visit_website" in normalized_tools:
@@ -255,9 +253,7 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
     usage_map = dict(usage or {})
     prompt_tokens_details = ensure_mapping(usage_map.get("prompt_tokens_details")) or {}
     input_tokens = int(
-        usage_map.get("input_tokens")
-        or usage_map.get("prompt_tokens")
-        or 0
+        usage_map.get("input_tokens") or usage_map.get("prompt_tokens") or 0
     )
     input_cached_tokens = int(
         usage_map.get("input_cached_tokens")
@@ -265,9 +261,7 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
         or 0
     )
     output_tokens = int(
-        usage_map.get("output_tokens")
-        or usage_map.get("completion_tokens")
-        or 0
+        usage_map.get("output_tokens") or usage_map.get("completion_tokens") or 0
     )
     input_cached_tokens = max(0, min(input_tokens, input_cached_tokens))
     input_non_cached_tokens = max(0, input_tokens - input_cached_tokens)
@@ -279,7 +273,9 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
     }
 
 
-def _calculate_model_token_cost(model: str, usage: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def _calculate_model_token_cost(
+    model: str, usage: Optional[Mapping[str, Any]]
+) -> Dict[str, Any]:
     pricing = MODEL_PRICING_USD_MICROS.get(model)
     if not pricing or not usage:
         return {
@@ -431,7 +427,9 @@ def _estimate_time_based_tool_cost(normalized_tool: str, seconds: float) -> int:
     return 0
 
 
-def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def calculate_billing_for_segments(
+    segments: Iterable[Mapping[str, Any]],
+) -> Dict[str, Any]:
     """Calculate raw and marked-up billing totals for Groq usage segments."""
 
     total_usd_micros = 0
@@ -452,12 +450,12 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
 
         if kind == "transcribe":
-            hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3-turbo"]["audio_per_hour"]
+            hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3"]["audio_per_hour"]
             usd_micros = int(audio_seconds * hourly_rate / 3600)
             total_usd_micros += usd_micros
             model_breakdown.append(
                 {
-                    "model": model or "whisper-large-v3-turbo",
+                    "model": model or "whisper-large-v3",
                     "usd_micros": usd_micros,
                     "audio_seconds": audio_seconds,
                 }
@@ -477,7 +475,9 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
             if not breakdown_items and executed_tools:
                 unsupported_notes.append("compound_missing_usage_breakdown")
             for item in breakdown_items:
-                item_model = str(item.get("model") or item.get("name") or GPT_OSS_120B_FALLBACK_MODEL)
+                item_model = str(
+                    item.get("model") or item.get("name") or GPT_OSS_120B_FALLBACK_MODEL
+                )
                 model_usage = ensure_mapping(item.get("usage")) or item
                 model_cost = _calculate_model_token_cost(item_model, model_usage)
                 if item.get("note"):
@@ -507,7 +507,9 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
                 estimated_time_based_candidates.append(
                     (
                         len(segment_tool_breakdown),
-                        _estimate_time_based_tool_cost(normalized_tool, estimated_seconds),
+                        _estimate_time_based_tool_cost(
+                            normalized_tool, estimated_seconds
+                        ),
                         estimated_note,
                     )
                 )
@@ -523,7 +525,9 @@ def calculate_billing_for_segments(segments: Iterable[Mapping[str, Any]]) -> Dic
                     segment_tool_breakdown[idx]["note"] = selected_note
                 else:
                     segment_tool_breakdown[idx]["usd_micros"] = 0
-                    segment_tool_breakdown[idx]["note"] = f"estimated_shared_cap_from:{selected_note}"
+                    segment_tool_breakdown[idx]["note"] = (
+                        f"estimated_shared_cap_from:{selected_note}"
+                    )
 
         for tool_cost in segment_tool_breakdown:
             tool_cost.pop("normalized_tool", None)

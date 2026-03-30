@@ -44,12 +44,9 @@ import traceback
 import wave
 from pykakasi import kakasi
 from mutagen import File as MutagenFile
-from openpyxl import load_workbook
-from decimal import Decimal
 import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
-from functools import lru_cache
 
 if TYPE_CHECKING:
     from openai.types.responses import ResponseInputParam
@@ -89,7 +86,7 @@ from api.ai_billing import (
     maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
     parse_topup_payload as _billing_parse_topup_payload,
 )
-from api.groq_billing import (
+from api.ai_usage_billing import (
     CHAT_OUTPUT_TOKEN_LIMIT,
     GPT_OSS_120B_FALLBACK_MODEL,
     GroqUsageResult,
@@ -98,6 +95,7 @@ from api.groq_billing import (
     estimate_chat_reserve_credits,
     estimate_compound_reserve_credits,
     estimate_message_tokens,
+    estimate_text_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
     ensure_mapping_list,
@@ -197,9 +195,14 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "visit_website",
     "browser_automation",
 )
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
+GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
+CLOUDFLARE_AI_MODEL = "workers-ai/@cf/moonshotai/kimi-k2.5"
+CLOUDFLARE_AI_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1"
+CLOUDFLARE_AI_GATEWAY_ID = environ.get("CLOUDFLARE_AI_GATEWAY_ID", "")
+CLOUDFLARE_AI_GATEWAY_TOKEN = environ.get("CLOUDFLARE_AI_GATEWAY_TOKEN", "")
+AI_GATEWAY_SESSION_HEADER = "x-session-affinity"
 
 
 # Polymarket constants
@@ -882,7 +885,7 @@ GROQ_PAID_RATE_LIMITS = {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": CLOUDFLARE_AI_MODEL,
     },
     "compound": {
         "rpm": 200,
@@ -913,7 +916,7 @@ GROQ_FREE_RATE_LIMITS = {
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": CLOUDFLARE_AI_MODEL,
     },
     "compound": {
         "rpm": 30,
@@ -3429,6 +3432,7 @@ def resolve_tool_calls(
     messages: List[Dict[str, Any]],
     initial_response: Optional[str],
     response_meta: Optional[Dict[str, Any]] = None,
+    image_data: Optional[bytes] = None,
 ) -> Optional[str]:
     """Resolve tool calls from an initial model response, returning a final reply."""
     if not initial_response:
@@ -3473,12 +3477,17 @@ def resolve_tool_calls(
     final = None
     while attempts < 3:
         if response_meta is None:
-            final = complete_with_providers(system_message, messages)
+            final = complete_with_providers(
+                system_message,
+                messages,
+                image_data=image_data,
+            )
         else:
             final = complete_with_providers(
                 system_message,
                 messages,
                 response_meta=response_meta,
+                image_data=image_data,
             )
         if not final:
             print(
@@ -3541,6 +3550,27 @@ def ask_ai(
     try:
         messages = list(messages or [])
 
+        if image_data:
+            print(f"Processing image with Groq Vision before sending to Kimi...")
+            image_description_result = _describe_image_groq_result(
+                image_data,
+                "Describe what you see in this image in detail.",
+                image_file_id,
+                use_cache=True,
+            )
+            if image_description_result:
+                if image_description_result.text and messages:
+                    last_msg = messages[-1]
+                    if last_msg.get("role") == "user":
+                        original_content = last_msg.get("content", "")
+                        last_msg["content"] = (
+                            f"[Imagen: {image_description_result.text}]\n\n{original_content}"
+                        )
+                if response_meta is not None:
+                    billing_segments = response_meta.setdefault("billing_segments", [])
+                    billing_segments.append(image_description_result.billing_segment())
+            image_data = None
+
         # Build context with market and weather data
         context_data = {
             "market": get_market_context(),
@@ -3557,40 +3587,13 @@ def ask_ai(
             else None
         )
 
-        # If we have an image, first describe it with the vision model then continue normal flow
-        if image_data:
-            print("Processing image with Groq vision model...")
-
-            # Always use a description prompt for the vision model, not the user's question
-            user_text = "Describe what you see in this image in detail."
-
-            # Describe the image using Groq
-            image_result = _describe_image_groq_result(
-                image_data, user_text, image_file_id
-            )
-            image_description = image_result.text if image_result else None
-
-            if image_description:
-                _append_billing_segment(response_meta, image_result)
-                # Add image description to the conversation context
-                image_context = f"[Imagen: {image_description}]"
-
-                # Modify the last message to include the image description
-                if messages:
-                    last_message = messages[-1]
-                    if isinstance(last_message.get("content"), str):
-                        last_message["content"] = (
-                            last_message["content"] + f"\n\n{image_context}"
-                        )
-
-                print(f"Image described, continuing with normal AI flow...")
-            else:
-                print("Failed to describe image, continuing without description...")
-
-        # Continue with normal AI flow (for both image and text).
+        # Continue with normal AI flow (text only, image already processed).
         # First pass: get an initial response that might include a tool call.
         if response_meta is None:
-            initial = complete_with_providers(system_message, messages)
+            initial = complete_with_providers(
+                system_message,
+                messages,
+            )
         else:
             initial = complete_with_providers(
                 system_message,
@@ -3603,7 +3606,11 @@ def ask_ai(
             )
 
         if response_meta is None:
-            tool_final = resolve_tool_calls(system_message, messages, initial)
+            tool_final = resolve_tool_calls(
+                system_message,
+                messages,
+                initial,
+            )
         else:
             tool_final = resolve_tool_calls(
                 system_message,
@@ -3635,19 +3642,26 @@ def complete_with_providers(
     messages: List[Dict[str, Any]],
     *,
     response_meta: Optional[Dict[str, Any]] = None,
+    image_data: Optional[bytes] = None,
 ) -> Optional[str]:
-    """Try Groq and return the first response."""
-
     if response_meta is None:
-        response_text = get_groq_ai_response(system_message, messages)
+        response_text = get_chat_ai_response(
+            system_message,
+            messages,
+            image_data=image_data,
+        )
         if response_text:
-            print("complete_with_providers: got response from Groq")
+            print("complete_with_providers: got response from AI")
             return response_text
     else:
-        response = _get_groq_ai_response_result(system_message, messages)
+        response = _get_chat_ai_response_result(
+            system_message,
+            messages,
+            image_data=image_data,
+        )
         if response:
             _append_billing_segment(response_meta, response)
-            print("complete_with_providers: got response from Groq")
+            print("complete_with_providers: got response from AI")
             return response.text
     return None
 
@@ -4737,7 +4751,7 @@ def estimate_ai_base_reserve_credits(
     return reserve, {
         "reserve_mode": "chat",
         "reserve_reason": "standard_chat",
-        "reserve_model": "moonshotai/kimi-k2-instruct-0905",
+        "reserve_model": CLOUDFLARE_AI_MODEL,
         "rate_limit_scope": "chat",
         "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
     }
@@ -4755,7 +4769,7 @@ def estimate_image_context_rate_limit_tokens(
     image_data: bytes, prompt_text: str
 ) -> int:
     image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/jpeg;base64,{image_base64}"
+    image_url = f"data:image/webp;base64,{image_base64}"
     input_payload = [
         {
             "role": "user",
@@ -4766,6 +4780,42 @@ def estimate_image_context_rate_limit_tokens(
         }
     ]
     return estimate_message_tokens(input_payload) + VISION_OUTPUT_TOKEN_LIMIT
+
+
+def _build_cloudflare_usage_result(
+    *,
+    kind: str,
+    text: str,
+    model: str,
+    payload_messages: List[Dict[str, Any]],
+    audio_seconds: Optional[float] = None,
+    cached: bool = False,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> GroqUsageResult:
+    estimated_input_tokens = estimate_message_tokens(payload_messages)
+    estimated_output_tokens = estimate_text_tokens(text)
+
+    usage = {
+        "prompt_tokens": estimated_input_tokens,
+        "completion_tokens": estimated_output_tokens,
+        "total_tokens": estimated_input_tokens + estimated_output_tokens,
+    }
+
+    return GroqUsageResult(
+        kind=kind,
+        text=text,
+        model=model,
+        usage=usage,
+        usage_breakdown=[],
+        executed_tools=[],
+        audio_seconds=audio_seconds,
+        cached=cached,
+        metadata={
+            "provider": "cloudflare",
+            "usage_source": "estimated",
+            **dict(metadata or {}),
+        },
+    )
 
 
 def _build_groq_usage_result(
@@ -4791,49 +4841,137 @@ def _build_groq_usage_result(
     )
 
 
-def _get_groq_ai_response_result(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+def _build_cloudflare_messages_payload(
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    image_data: Optional[bytes] = None,
+) -> List[Dict[str, Any]]:
+    payload_messages = [system_msg]
+    if not image_data:
+        payload_messages.extend(messages)
+        return payload_messages
+
+    already_multimodal = False
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, Mapping)
+            and str(part.get("type") or "").strip().lower() == "image_url"
+            for part in content
+        ):
+            already_multimodal = True
+            break
+
+    if already_multimodal:
+        payload_messages.extend(dict(message) for message in messages)
+        return payload_messages
+
+    target_user_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            target_user_index = index
+            break
+
+    image_base64 = encode_image_to_base64(image_data)
+    image_url = f"data:image/webp;base64,{image_base64}"
+
+    for index, message in enumerate(messages):
+        message_copy = dict(message)
+        content = message_copy.get("content")
+        if index == target_user_index and message_copy.get("role") == "user":
+            if isinstance(content, list):
+                content = list(content)
+                content.append({"type": "image_url", "image_url": {"url": image_url}})
+                message_copy["content"] = content
+            elif isinstance(content, str):
+                message_copy["content"] = [
+                    {"type": "text", "text": content},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ]
+        payload_messages.append(message_copy)
+
+    return payload_messages
+
+
+def _get_cloudflare_ai_response_result(
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    image_data: Optional[bytes] = None,
 ) -> Optional[GroqUsageResult]:
-    """First option using Groq AI"""
+    cf_gateway_token = CLOUDFLARE_AI_GATEWAY_TOKEN
+    cf_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+    cf_gateway_id = CLOUDFLARE_AI_GATEWAY_ID
 
-    estimated_token_count = (
-        estimate_message_tokens([system_msg] + messages) + CHAT_OUTPUT_TOKEN_LIMIT
+    if not cf_gateway_token or not cf_account_id or not cf_gateway_id:
+        print(
+            "Cloudflare AI Gateway not configured: need CLOUDFLARE_AI_GATEWAY_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_AI_GATEWAY_ID"
+        )
+        return None
+
+    base_url = f"{CLOUDFLARE_AI_GATEWAY_URL}/{cf_account_id}/{cf_gateway_id}/compat"
+
+    print(
+        f"Trying Cloudflare Workers AI via Gateway ({cf_gateway_id}) with Kimi K2.5..."
     )
+    _increment_ai_provider_request_count()
 
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
-        print(f"Trying Groq AI as first option with account={account}...")
-        _increment_ai_provider_request_count()
+    try:
+        client = OpenAI(
+            api_key=cf_gateway_token,
+            base_url=base_url,
+        )
 
-        response = groq_client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct-0905",
-            messages=cast(Any, [system_msg] + messages),
+        payload_messages = _build_cloudflare_messages_payload(
+            system_msg,
+            messages,
+            image_data=image_data,
+        )
+
+        response = client.chat.completions.create(
+            model=CLOUDFLARE_AI_MODEL,
+            messages=payload_messages,
             max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         )
 
-        if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                print("Groq AI response successful")
-                return _build_groq_usage_result(
-                    kind="chat",
-                    text=str(response.choices[0].message.content or ""),
-                    model="moonshotai/kimi-k2-instruct-0905",
-                    response=response,
-                    metadata={"groq_account": account},
-                )
-        return None
+        if response.choices and response.choices[0].message:
+            content = response.choices[0].message.content
+            print("Cloudflare AI response successful")
+            return _build_cloudflare_usage_result(
+                kind="chat",
+                text=str(content),
+                model=CLOUDFLARE_AI_MODEL,
+                payload_messages=payload_messages,
+            )
+    except Exception as e:
+        print(f"Cloudflare AI request failed: {e}")
 
-    return _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="chat",
-        label="Groq AI",
-        token_count=estimated_token_count,
+    return None
+
+
+def _get_chat_ai_response_result(
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    image_data: Optional[bytes] = None,
+) -> Optional[GroqUsageResult]:
+    return _get_cloudflare_ai_response_result(
+        system_msg,
+        messages,
+        image_data=image_data,
     )
 
 
-def get_groq_ai_response(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+def get_chat_ai_response(
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    image_data: Optional[bytes] = None,
 ) -> Optional[str]:
-    result = _get_groq_ai_response_result(system_msg, messages)
+    result = _get_chat_ai_response_result(
+        system_msg,
+        messages,
+        image_data=image_data,
+    )
     if result:
         return result.text
     return None
@@ -5681,12 +5819,29 @@ def _get_groq_client(
         print(f"Groq API key not configured for account={account}")
         return None
 
-    client_kwargs: Dict[str, Any] = {
-        "api_key": groq_api_key,
-        "base_url": "https://api.groq.com/openai/v1",
+    cf_gateway_token = CLOUDFLARE_AI_GATEWAY_TOKEN
+    cf_account_id = environ.get("CLOUDFLARE_ACCOUNT_ID")
+    cf_gateway_id = CLOUDFLARE_AI_GATEWAY_ID
+
+    if not cf_gateway_token or not cf_account_id or not cf_gateway_id:
+        print(
+            "Cloudflare AI Gateway not configured for Groq: need CLOUDFLARE_AI_GATEWAY_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_AI_GATEWAY_ID"
+        )
+        return None
+
+    base_url = f"{CLOUDFLARE_AI_GATEWAY_URL}/{cf_account_id}/{cf_gateway_id}/compat"
+
+    merged_headers: Dict[str, str] = {
+        "cf-aig-authorization": f"Bearer {cf_gateway_token}",
     }
     if default_headers:
-        client_kwargs["default_headers"] = dict(default_headers)
+        merged_headers.update(dict(default_headers))
+
+    client_kwargs: Dict[str, Any] = {
+        "api_key": groq_api_key,
+        "base_url": base_url,
+        "default_headers": merged_headers,
+    }
     return OpenAI(**client_kwargs)
 
 
@@ -5939,7 +6094,7 @@ def _describe_image_groq_result(
             )
 
     image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/jpeg;base64,{image_base64}"
+    image_url = f"data:image/webp;base64,{image_base64}"
     estimated_token_count = (
         estimate_message_tokens(
             [
@@ -6184,7 +6339,7 @@ def describe_media_by_id(
 
     def _processor(media: bytes) -> Optional[GroqUsageResult]:
         resized = resize_image_if_needed(media)
-        return _describe_image_groq_result(resized, prompt, file_id)
+        return _describe_image_groq_result(resized, prompt, file_id, use_cache=False)
 
     return _process_media_with_cache(
         file_id=file_id,
@@ -6196,33 +6351,22 @@ def describe_media_by_id(
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
-    """Resize image if it's too large for vision processing"""
+    """Resize and re-encode image to WebP for vision processing"""
     try:
-        # Open the image
         image = Image.open(io.BytesIO(image_data))
         original_size = image.size
 
-        # Check if resize is needed
         if max(original_size) > max_size:
-            # Calculate new size maintaining aspect ratio
             ratio = min(max_size / original_size[0], max_size / original_size[1])
             new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-            # Resize image
-            resized_image = image.resize(new_size, Image.Resampling.LANCZOS)
+        output_buffer = io.BytesIO()
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGB")
+        image.save(output_buffer, format="WEBP", quality=75, method=6)
 
-            # Convert back to bytes
-            output_buffer = io.BytesIO()
-            # Save as JPEG to ensure compatibility and smaller size
-            if resized_image.mode in ("RGBA", "LA", "P"):
-                # Convert to RGB for JPEG
-                resized_image = resized_image.convert("RGB")
-            resized_image.save(output_buffer, format="JPEG", quality=85, optimize=True)
-
-            resized_data = output_buffer.getvalue()
-            return resized_data
-        else:
-            return image_data
+        return output_buffer.getvalue()
 
     except ImportError:
         print("WARNING: PIL not available, cannot resize image")

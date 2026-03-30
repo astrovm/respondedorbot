@@ -55,7 +55,7 @@ search_command = index.search_command
 parse_tool_call = index.parse_tool_call
 execute_tool = index.execute_tool
 complete_with_providers = index.complete_with_providers
-get_groq_ai_response = index.get_groq_ai_response
+get_chat_ai_response = index.get_chat_ai_response
 get_groq_compound_response = index.get_groq_compound_response
 get_provider_backoff_remaining = index.get_provider_backoff_remaining
 handle_ai_response = index.handle_ai_response
@@ -192,4 +192,6 @@ def get_bot_message_metadata(redis_client: redis.Redis, chat_id: str, message_id
     )
 
 
-__all__ = [name for name in globals() if not name.startswith("_")] + ["_decode_redis_value"]
+__all__ = [name for name in globals() if not name.startswith("_")] + [
+    "_decode_redis_value"
+]

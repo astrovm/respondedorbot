@@ -8,7 +8,7 @@ Beyond the attitude, he actually knows his stuff: crypto, hacking, Linux, gaming
 
 ## Features
 
-- **AI chat**: configurable personality powered by Groq, responds to trigger words in groups
+- **AI chat**: configurable personality powered by Cloudflare Workers AI (Kimi K2.5), responds to trigger words in groups
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
 - **BCRA economic data**: `/bcra`, `/variables` (base monetaria, inflation, dollar rates, reserves, etc.)
 - **Media handling**: audio transcription (Whisper) and image description (vision) via `/transcribe`
@@ -50,8 +50,9 @@ Copy `.env.example` and fill in the values. Key variables:
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache |
 | `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
-| `GROQ_API_KEY` | Paid Groq API key |
-| `GROQ_FREE_API_KEY` | Optional free-tier Groq key (tried first, falls back to paid) |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token for Workers AI (primary) |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
+| `GROQ_API_KEY` | Groq API key for `/buscar` web search |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` GIFs |
 | `FUNCTION_URL` | Deployment URL |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
@@ -67,9 +68,13 @@ AI responses cost credits. Users get onboarding credits on first interaction, th
 
 In groups, personal balance is spent first, then group balance.
 
-## Groq Routing
+## AI Provider
 
-If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key. Webhook retries are deduped per Telegram update to avoid double-billing.
+Chat uses **Cloudflare Workers AI** with Kimi K2.5.
+
+Web search (`/buscar`) uses **Groq Compound** exclusively.
+
+Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to enable chat.
 
 ## Webhook Setup
 

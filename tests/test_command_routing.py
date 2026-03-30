@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_convert_to_command():
     # Test basic string
     msg_text1 = "h3llo W0RLD"
@@ -52,6 +53,7 @@ def test_should_use_groq_compound_tools_truthy(monkeypatch):
 
     monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
     assert should_use_groq_compound_tools() is False
+
 
 def test_optional_redis_client_success():
     from api.index import _optional_redis_client
@@ -179,16 +181,13 @@ def test_should_gordo_respond():
         # Test private chat
         msg = {"chat": {"type": "private"}, "from": {"username": "test"}}
         assert (
-            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
-            is True
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None) is True
         )
 
         # Test mention
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
         assert (
-            should_gordo_respond(
-                commands, "", "@testbot hello", msg, chat_config, None
-            )
+            should_gordo_respond(commands, "", "@testbot hello", msg, chat_config, None)
             is True
         )
 
@@ -199,8 +198,7 @@ def test_should_gordo_respond():
             "reply_to_message": {"from": {"username": "testbot"}},
         }
         assert (
-            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
-            is True
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None) is True
         )
 
         # Test trigger word with mocked random
@@ -208,9 +206,7 @@ def test_should_gordo_respond():
             mock_random.return_value = 0.05  # Below 0.1 threshold
             msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
             assert (
-                should_gordo_respond(
-                    commands, "", "hey gordo", msg, chat_config, None
-                )
+                should_gordo_respond(commands, "", "hey gordo", msg, chat_config, None)
                 is True
             )
 
@@ -249,10 +245,7 @@ def test_should_gordo_respond_ignores_link_fix_reply_when_toggle_enabled():
         }
 
         assert (
-            should_gordo_respond(
-                commands, "", "hello", msg, chat_config, None
-            )
-            is False
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None) is False
         )
 
 
@@ -290,9 +283,7 @@ def test_should_gordo_respond_allows_link_fix_reply_when_toggle_disabled():
         }
 
         assert (
-            should_gordo_respond(
-                commands, "", "investiga eso", msg, chat_config, None
-            )
+            should_gordo_respond(commands, "", "investiga eso", msg, chat_config, None)
             is True
         )
 
@@ -348,14 +339,13 @@ def test_should_gordo_respond_respects_random_toggle():
     }
     msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
 
-    with patch("os.environ.get") as mock_env, patch(
-        "random.random", return_value=0.05
-    ) as mock_random:
+    with (
+        patch("os.environ.get") as mock_env,
+        patch("random.random", return_value=0.05) as mock_random,
+    ):
         mock_env.return_value = "testbot"
         assert (
-            should_gordo_respond(
-                commands, "", "hey gordo", msg, chat_config, None
-            )
+            should_gordo_respond(commands, "", "hey gordo", msg, chat_config, None)
             is False
         )
         mock_random.assert_not_called()
@@ -379,9 +369,7 @@ def test_should_gordo_respond_blocks_followups_when_disabled():
     with patch("os.environ.get") as mock_env:
         mock_env.return_value = "testbot"
         assert (
-            should_gordo_respond(
-                commands, "", "hola", msg, chat_config, reply_metadata
-            )
+            should_gordo_respond(commands, "", "hola", msg, chat_config, reply_metadata)
             is False
         )
 
@@ -421,9 +409,7 @@ def test_should_auto_process_media_requires_direct_invocation_in_groups():
             "chat": {"type": "group"},
             "from": {"username": "user"},
         }
-        assert (
-            should_auto_process_media(commands, "", "", plain_group_msg) is False
-        )
+        assert should_auto_process_media(commands, "", "", plain_group_msg) is False
 
         mention_group_msg = {
             "chat": {"type": "group"},
@@ -442,9 +428,7 @@ def test_should_auto_process_media_requires_direct_invocation_in_groups():
             "from": {"username": "user"},
             "reply_to_message": {"from": {"username": "testbot"}},
         }
-        assert (
-            should_auto_process_media(commands, "", "", reply_group_msg) is True
-        )
+        assert should_auto_process_media(commands, "", "", reply_group_msg) is True
 
 
 def test_gen_random():
@@ -607,7 +591,7 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": "@cf/moonshotai/kimi-k2.5",
     }
     assert index.GROQ_RATE_LIMITS["compound"] == {
         "rpm": 200,
@@ -626,14 +610,14 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 200_000,
         "ash": 400_000,
         "asd": 4_000_000,
-        "model": "whisper-large-v3-turbo",
+        "model": "whisper-large-v3",
     }
     assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
         "rpm": 60,
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": "@cf/moonshotai/kimi-k2.5",
     }
     assert index.GROQ_FREE_RATE_LIMITS["compound"] == {
         "rpm": 30,
@@ -653,7 +637,7 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 2_000,
         "ash": 7_200,
         "asd": 28_800,
-        "model": "whisper-large-v3-turbo",
+        "model": "whisper-large-v3",
     }
 
 
@@ -662,11 +646,14 @@ def test_check_global_rate_limit_enforces_chat_tpm(monkeypatch):
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"0", b"0", b"249999"]
 
-    assert check_global_rate_limit(
-        redis_client,
-        scope="chat",
-        token_count=2,
-    ) is False
+    assert (
+        check_global_rate_limit(
+            redis_client,
+            scope="chat",
+            token_count=2,
+        )
+        is False
+    )
 
 
 def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
@@ -674,11 +661,14 @@ def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"0", b"0", b"399999", b"3999999"]
 
-    assert check_global_rate_limit(
-        redis_client,
-        scope="transcribe",
-        audio_seconds=2.0,
-    ) is False
+    assert (
+        check_global_rate_limit(
+            redis_client,
+            scope="transcribe",
+            audio_seconds=2.0,
+        )
+        is False
+    )
 
 
 def test_check_global_rate_limit_uses_paid_when_free_is_exhausted(monkeypatch):
@@ -703,11 +693,14 @@ def test_check_global_rate_limit_enforces_free_daily_token_budget(monkeypatch):
     redis_client = MagicMock()
     redis_client.get.side_effect = [b"0", b"0", b"0", b"299999"]
 
-    assert check_global_rate_limit(
-        redis_client,
-        scope="chat",
-        token_count=2,
-    ) is False
+    assert (
+        check_global_rate_limit(
+            redis_client,
+            scope="chat",
+            token_count=2,
+        )
+        is False
+    )
 
 
 def test_reserve_and_reconcile_groq_rate_limit_releases_unused_tokens():
@@ -962,9 +955,7 @@ def test_should_gordo_respond_complex_cases():
         # Test with command not in command list but starts with /
         msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
         assert (
-            should_gordo_respond(
-                commands, "/unknown", "hello", msg, chat_config, None
-            )
+            should_gordo_respond(commands, "/unknown", "hello", msg, chat_config, None)
             is False
         )
 
@@ -989,8 +980,7 @@ def test_should_gordo_respond_complex_cases():
             "reply_to_message": {"from": {"username": "not_bot"}},
         }
         assert (
-            should_gordo_respond(commands, "", "hello", msg, chat_config, None)
-            is False
+            should_gordo_respond(commands, "", "hello", msg, chat_config, None) is False
         )
 
     # Test trigger words in a separate block with proper random mocking
@@ -1032,9 +1022,11 @@ def test_should_gordo_respond_complex_cases():
 def test_cached_requests_basic():
     from api.index import cached_requests
 
-    with patch("requests.get") as mock_get, patch("redis.Redis") as mock_redis, patch(
-        "time.time"
-    ) as mock_time:
+    with (
+        patch("requests.get") as mock_get,
+        patch("redis.Redis") as mock_redis,
+        patch("time.time") as mock_time,
+    ):
         # Setup mocks
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
@@ -1138,24 +1130,29 @@ def test_ensure_callback_updates_enabled_updates_webhook():
     from api import index as index_module
 
     index_module._WEBHOOK_CALLBACKS_CHECKED = False
-    with patch.dict(
-        index_module.environ,
-        {
-            "TELEGRAM_TOKEN": "token",
-            "WEBHOOK_AUTH_KEY": "secret",
-            "FUNCTION_URL": "https://example.com",
-        },
-        clear=True,
-    ), patch(
-        "api.index.get_telegram_webhook_info",
-        return_value={
-            "url": "https://example.com?key=secret",
-            "allowed_updates": ["message"],
-        },
-    ) as mock_info, patch(
-        "api.index.set_telegram_webhook",
-        return_value=True,
-    ) as mock_set, patch("api.index._log_config_event") as mock_log:
+    with (
+        patch.dict(
+            index_module.environ,
+            {
+                "TELEGRAM_TOKEN": "token",
+                "WEBHOOK_AUTH_KEY": "secret",
+                "FUNCTION_URL": "https://example.com",
+            },
+            clear=True,
+        ),
+        patch(
+            "api.index.get_telegram_webhook_info",
+            return_value={
+                "url": "https://example.com?key=secret",
+                "allowed_updates": ["message"],
+            },
+        ) as mock_info,
+        patch(
+            "api.index.set_telegram_webhook",
+            return_value=True,
+        ) as mock_set,
+        patch("api.index._log_config_event") as mock_log,
+    ):
         ensure_callback_updates_enabled()
 
     mock_info.assert_called_once_with("token")
@@ -1168,21 +1165,25 @@ def test_ensure_callback_updates_enabled_skips_when_allowed():
     from api import index as index_module
 
     index_module._WEBHOOK_CALLBACKS_CHECKED = False
-    with patch.dict(
-        index_module.environ,
-        {
-            "TELEGRAM_TOKEN": "token",
-            "WEBHOOK_AUTH_KEY": "secret",
-            "FUNCTION_URL": "https://example.com",
-        },
-        clear=True,
-    ), patch(
-        "api.index.get_telegram_webhook_info",
-        return_value={
-            "url": "https://example.com?key=secret",
-            "allowed_updates": ["message", "callback_query", "pre_checkout_query"],
-        },
-    ), patch("api.index.set_telegram_webhook") as mock_set:
+    with (
+        patch.dict(
+            index_module.environ,
+            {
+                "TELEGRAM_TOKEN": "token",
+                "WEBHOOK_AUTH_KEY": "secret",
+                "FUNCTION_URL": "https://example.com",
+            },
+            clear=True,
+        ),
+        patch(
+            "api.index.get_telegram_webhook_info",
+            return_value={
+                "url": "https://example.com?key=secret",
+                "allowed_updates": ["message", "callback_query", "pre_checkout_query"],
+            },
+        ),
+        patch("api.index.set_telegram_webhook") as mock_set,
+    ):
         ensure_callback_updates_enabled()
 
     mock_set.assert_not_called()
@@ -1203,9 +1204,7 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    def fake_get(
-        url, params=None, headers=None, timeout=5, verify=True
-    ):  # noqa: ARG001
+    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] == 1:
             raise requests.RequestException("boom")
@@ -1258,8 +1257,6 @@ def test_get_oil_price_success():
     ]
 
 
-
-
 def test_get_oil_price_success_without_csv_header():
     mock_text_brent = "CB.F,20260309,161651,103.23,119.46,100.02,101.17,,\n"
     mock_text_wti = "CL.F,20260309,161655,92.31,119.43,96.45,98.77,,\n"
@@ -1276,6 +1273,7 @@ def test_get_oil_price_success_without_csv_header():
         "Brent: 101.17 USD (-2% 24hs)",
         "WTI: 98.77 USD (+7% 24hs)",
     ]
+
 
 def test_get_oil_price_failure():
     with patch("api.index.requests.get", side_effect=Exception("boom")):

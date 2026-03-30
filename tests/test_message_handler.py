@@ -255,14 +255,14 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                         "raw_usd_micros": 2188,
                         "model_breakdown": [
                             {
-                                "model": "moonshotai/kimi-k2-instruct-0905",
+                                "model": "@cf/moonshotai/kimi-k2.5",
                                 "usd_micros": 2000,
                                 "input_tokens": 1000,
                                 "input_cached_tokens": 800,
                                 "input_non_cached_tokens": 200,
                             },
                             {
-                                "model": "moonshotai/kimi-k2-instruct-0905",
+                                "model": "@cf/moonshotai/kimi-k2.5",
                                 "usd_micros": 188,
                                 "input_tokens": 200,
                                 "input_cached_tokens": 100,
@@ -302,7 +302,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     assert "requests: chat=2, compound=1" in sent_text
     assert "cache_hits: compound=1" in sent_text
     assert "cacheados=900 ahorro_cache=450" in sent_text
-    assert "moonshotai/kimi-k2-instruct-0905=2188" in sent_text
+    assert "@cf/moonshotai/kimi-k2.5=2188" in sent_text
     assert "search=8000 (2x)" in sent_text
     assert "python=500 (1x)" in sent_text
 
@@ -865,7 +865,7 @@ def test_handle_msg_with_audio():
             None,
             {
                 "kind": "transcribe",
-                "model": "whisper-large-v3-turbo",
+                "model": "whisper-large-v3",
                 "audio_seconds": 1,
             },
         )
@@ -958,7 +958,7 @@ def test_handle_msg_with_transcribe_command():
             [
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 }
             ],
@@ -1013,7 +1013,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
             [
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 }
             ],
@@ -1146,7 +1146,7 @@ def test_handle_msg_auto_audio_charges_media_credits():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 },
             ),
@@ -1236,7 +1236,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 12,
                 },
             ),
@@ -1291,7 +1291,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1312,7 +1312,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 },
             ),
@@ -1417,7 +1417,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1426,7 +1426,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1494,7 +1494,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 },
             ]
@@ -1670,7 +1670,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1679,7 +1679,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1734,7 +1734,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1743,7 +1743,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1752,7 +1752,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "@cf/moonshotai/kimi-k2.5",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
