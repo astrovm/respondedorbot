@@ -4933,6 +4933,7 @@ def _get_cloudflare_ai_response_result(
             model=CLOUDFLARE_AI_MODEL,
             messages=payload_messages,
             max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
         if response.choices and response.choices[0].message:

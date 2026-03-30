@@ -495,7 +495,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     assert reserve == 2
     assert metadata["reserve_mode"] == "chat"
     assert metadata["reserve_reason"] == "standard_chat"
-    assert metadata["reserve_model"] == "@cf/moonshotai/kimi-k2.5"
+    assert metadata["reserve_model"] == "workers-ai/@cf/moonshotai/kimi-k2.5"
 
 
 def test_normalize_search_query_replaces_stale_year_for_current_pricing_query():
@@ -1099,24 +1099,35 @@ def test_complete_with_providers_with_image_data_forwards_payload():
 
 def test_get_cloudflare_ai_response_result_uses_multimodal_payload(monkeypatch):
     from api.index import _get_cloudflare_ai_response_result
+    import api.index as index_module
 
-    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
     monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
-    captured_payload = {}
+    captured_call = {}
+
+    class FakeMessage:
+        content = "ok"
+
+    class FakeChoice:
+        message = FakeMessage()
 
     class FakeResponse:
-        def raise_for_status(self):
-            return None
+        choices = [FakeChoice()]
 
-        def json(self):
-            return {"success": True, "result": {"response": "ok"}}
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured_call.update(kwargs)
+            return FakeResponse()
 
-    def fake_post(*args, **kwargs):
-        captured_payload.update(kwargs.get("json") or {})
-        return FakeResponse()
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
 
-    with patch("api.index.requests.post", side_effect=fake_post):
+        chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    with patch("api.index.OpenAI", FakeClient):
         result = _get_cloudflare_ai_response_result(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
@@ -1125,14 +1136,11 @@ def test_get_cloudflare_ai_response_result_uses_multimodal_payload(monkeypatch):
 
     assert result is not None
     assert result.text == "ok"
-    user_message = captured_payload["messages"][1]
-    assert user_message["role"] == "user"
-    assert isinstance(user_message["content"], list)
-    assert user_message["content"][0] == {"type": "text", "text": "hola"}
-    assert user_message["content"][1]["type"] == "image_url"
-    assert user_message["content"][1]["image_url"]["url"].startswith(
-        "data:image/webp;base64,"
+    assert "extra_body" in captured_call
+    assert (
+        captured_call["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
     )
+    assert captured_call["model"] == "workers-ai/@cf/moonshotai/kimi-k2.5"
 
 
 def test_complete_with_providers_returns_none_when_all_fail():
@@ -1165,8 +1173,13 @@ def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkey
 
 
 def test_get_groq_compound_response_falls_back_to_paid_after_free_429(monkeypatch):
+    import api.index as index_module
+
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     free_client = MagicMock()
     free_client.chat.completions.create.side_effect = Exception(
@@ -1198,7 +1211,12 @@ def test_get_groq_compound_response_falls_back_to_paid_after_free_429(monkeypatc
 
 
 def test_get_groq_compound_response_uses_enabled_tools(monkeypatch):
+    import api.index as index_module
+
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     fake_choice = MagicMock()
     fake_choice.message.content = "ok"

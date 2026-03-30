@@ -1369,9 +1369,13 @@ def test_resize_image_if_needed_processing_error():
         assert result == test_data  # Should return original data on error
 
 
-def test_describe_image_groq_success():
+def test_describe_image_groq_success(monkeypatch):
     """Test describe_image_groq with successful API response"""
     from api.index import describe_image_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1379,6 +1383,7 @@ def test_describe_image_groq_success():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         fake_response = MagicMock()
@@ -1394,9 +1399,13 @@ def test_describe_image_groq_success():
         fake_client.responses.create.assert_called_once()
 
 
-def test_describe_image_groq_api_error():
+def test_describe_image_groq_api_error(monkeypatch):
     """Test describe_image_groq with API error"""
     from api.index import describe_image_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1404,6 +1413,7 @@ def test_describe_image_groq_api_error():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         fake_client = MagicMock()
@@ -1415,8 +1425,12 @@ def test_describe_image_groq_api_error():
         assert result is None
 
 
-def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
+def test_describe_image_groq_skips_call_when_local_rate_limit_hits(monkeypatch):
     from api.index import describe_image_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1425,6 +1439,7 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         result = describe_image_groq(b"image_data")
@@ -1435,25 +1450,35 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
 
 def test_describe_image_groq_falls_back_to_paid_after_free_429(monkeypatch):
     from api.index import describe_image_groq
+    import api.index as index_module
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
     monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
-    free_client = MagicMock()
-    free_client.responses.create.side_effect = Exception(
-        "Error code: 429 - rate limit reached"
-    )
+    with patch("api.index.environ.get") as mock_env:
+        mock_env.side_effect = lambda key, default=None: {
+            "GROQ_FREE_API_KEY": "free_api_key",
+            "GROQ_API_KEY": "paid_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
+        }.get(key, default)
 
-    paid_response = MagicMock()
-    paid_response.output_text = "A paid fallback image description"
+        free_client = MagicMock()
+        free_client.responses.create.side_effect = Exception(
+            "Error code: 429 - rate limit reached"
+        )
 
-    paid_client = MagicMock()
-    paid_client.responses.create.return_value = paid_response
+        paid_response = MagicMock()
+        paid_response.output_text = "A paid fallback image description"
 
-    with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
-    ) as mock_openai:
-        result = describe_image_groq(b"image_data")
+        paid_client = MagicMock()
+        paid_client.responses.create.return_value = paid_response
+
+        with patch(
+            "api.index.OpenAI", side_effect=[free_client, paid_client]
+        ) as mock_openai:
+            result = describe_image_groq(b"image_data")
 
     assert result == "A paid fallback image description"
     assert mock_openai.call_count == 2
@@ -1467,9 +1492,13 @@ def test_describe_image_groq_falls_back_to_paid_after_free_429(monkeypatch):
     )
 
 
-def test_transcribe_audio_groq_success():
+def test_transcribe_audio_groq_success(monkeypatch):
     """Test transcribe_audio_groq with successful transcription"""
     from api.index import transcribe_audio_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1477,6 +1506,7 @@ def test_transcribe_audio_groq_success():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         fake_response = MagicMock()
@@ -1492,9 +1522,13 @@ def test_transcribe_audio_groq_success():
         fake_client.audio.transcriptions.create.assert_called_once()
 
 
-def test_transcribe_audio_groq_network_error():
+def test_transcribe_audio_groq_network_error(monkeypatch):
     """Test transcribe_audio_groq with network error"""
     from api.index import transcribe_audio_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1502,6 +1536,7 @@ def test_transcribe_audio_groq_network_error():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         fake_client = MagicMock()
@@ -1513,8 +1548,12 @@ def test_transcribe_audio_groq_network_error():
         assert result is None
 
 
-def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
+def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits(monkeypatch):
     from api.index import transcribe_audio_groq
+    import api.index as index_module
+
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
     with (
         patch("api.index.environ.get") as mock_env,
@@ -1523,6 +1562,7 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_API_KEY": "test_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
         }.get(key, default)
 
         result = transcribe_audio_groq(b"audio_data")
@@ -1533,25 +1573,33 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
 
 def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
     from api.index import transcribe_audio_groq
+    import api.index as index_module
 
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_TOKEN", "token")
+    monkeypatch.setattr(index_module, "CLOUDFLARE_AI_GATEWAY_ID", "gateway")
 
-    free_client = MagicMock()
-    free_client.audio.transcriptions.create.side_effect = Exception(
-        "Error code: 429 - rate limit reached"
-    )
+    with patch("api.index.environ.get") as mock_env:
+        mock_env.side_effect = lambda key, default=None: {
+            "GROQ_FREE_API_KEY": "free_api_key",
+            "GROQ_API_KEY": "paid_api_key",
+            "CLOUDFLARE_ACCOUNT_ID": "account",
+        }.get(key, default)
 
-    paid_response = MagicMock()
-    paid_response.text = "paid fallback transcription"
+        free_client = MagicMock()
+        free_client.audio.transcriptions.create.side_effect = Exception(
+            "Error code: 429 - rate limit reached"
+        )
 
-    paid_client = MagicMock()
-    paid_client.audio.transcriptions.create.return_value = paid_response
+        paid_response = MagicMock()
+        paid_response.text = "paid fallback transcription"
 
-    with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
-    ) as mock_openai:
-        result = transcribe_audio_groq(b"audio_data")
+        paid_client = MagicMock()
+        paid_client.audio.transcriptions.create.return_value = paid_response
+
+        with patch(
+            "api.index.OpenAI", side_effect=[free_client, paid_client]
+        ) as mock_openai:
+            result = transcribe_audio_groq(b"audio_data")
 
     assert result == "paid fallback transcription"
     assert mock_openai.call_count == 2
