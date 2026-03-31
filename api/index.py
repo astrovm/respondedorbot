@@ -6199,12 +6199,7 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     return _chat_build_config_keyboard(config)
 
 
-def ensure_callback_updates_enabled() -> None:
-    pass
-
-
 def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
-    ensure_callback_updates_enabled()
     redis_client = config_redis()
     config = get_chat_config(redis_client, chat_id)
     return build_config_text(config), build_config_keyboard(config)
@@ -6648,7 +6643,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         handle_rate_limit=handle_rate_limit,
         handle_successful_payment_message=handle_successful_payment_message,
         handle_config_command=handle_config_command,
-        ensure_callback_updates_enabled=ensure_callback_updates_enabled,
         is_chat_admin=is_chat_admin,
         report_unauthorized_config_attempt=_report_unauthorized_config_attempt,
         handle_transcribe=handle_transcribe,
