@@ -28,12 +28,19 @@ class BotPtbTests(unittest.TestCase):
         builder = MagicMock()
         app = MagicMock()
         app.bot_data = {}
+        telegram_ext = MagicMock()
 
         builder.token.return_value = builder
         builder.post_init.return_value = builder
         builder.build.return_value = app
+        telegram_ext.ApplicationBuilder = MagicMock(return_value=builder)
+        telegram_ext.CallbackQueryHandler = MagicMock()
+        telegram_ext.MessageHandler = MagicMock()
+        telegram_ext.PreCheckoutQueryHandler = MagicMock()
+        telegram_ext.filters = MagicMock()
+        telegram_ext.filters.ALL = object()
 
-        with patch("telegram.ext.ApplicationBuilder", return_value=builder):
+        with patch("api.bot_ptb.importlib.import_module", return_value=telegram_ext):
             redis_client = MagicMock()
             result = bot_ptb.create_application(
                 token="test-token",
@@ -72,30 +79,6 @@ class BotPtbTests(unittest.TestCase):
         app.run_polling.assert_called_once_with(
             drop_pending_updates=False,
             allowed_updates=["message"],
-        )
-
-    def test_run_webhook_requires_webhook_url(self):
-        with self.assertRaisesRegex(
-            ValueError, "webhook_url is required for webhook mode"
-        ):
-            bot_ptb.run_webhook(token="test-token", webhook_url=None)
-
-    def test_run_webhook_passes_args_to_application(self):
-        app = MagicMock()
-        with patch("api.bot_ptb.create_application", return_value=app):
-            bot_ptb.run_webhook(
-                token="test-token",
-                webhook_url="https://example.com/webhook",
-                secret_token="secret",
-                allowed_updates=["message", "callback_query"],
-            )
-
-        app.run_webhook.assert_called_once_with(
-            listen="0.0.0.0",
-            port=8443,
-            webhook_url="https://example.com/webhook",
-            secret_token="secret",
-            allowed_updates=["message", "callback_query"],
         )
 
 

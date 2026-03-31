@@ -152,26 +152,3 @@ def run_polling(
         drop_pending_updates=drop_pending_updates,
         allowed_updates=list(allowed_updates) if allowed_updates is not None else None,
     )
-
-
-def run_webhook(
-    token: Optional[str] = None,
-    redis_client: Optional[Any] = None,
-    listen: str = "0.0.0.0",
-    port: int = 8443,
-    webhook_url: Optional[str] = None,
-    secret_token: Optional[str] = None,
-    allowed_updates: Optional[Sequence[str]] = None,
-) -> None:
-    if not webhook_url:
-        raise ValueError("webhook_url is required for webhook mode")
-
-    application = create_application(token=token, redis_client=redis_client)
-    logger.info("Starting PTB webhook runtime on %s:%s", listen, port)
-    application.run_webhook(
-        listen=listen,
-        port=port,
-        webhook_url=webhook_url,
-        secret_token=secret_token,
-        allowed_updates=list(allowed_updates) if allowed_updates is not None else None,
-    )
