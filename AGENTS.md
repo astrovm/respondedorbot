@@ -138,9 +138,54 @@ The bot's personality and behavior are configured entirely through environment v
 
 This approach allows the codebase to remain public while keeping specific bot personalities private and makes deployment much simpler across different platforms.
 
+## Agent Behavior & Efficiency
+
+### Approach
+- Think before acting. Read existing files before writing code.
+- Be concise in output but thorough in reasoning.
+- Prefer editing over rewriting whole files.
+- Do not re-read files already read unless the file may have changed.
+- No sycophantic openers or closing fluff.
+- Keep solutions simple and direct. No over-engineering.
+- If unsure: say so. Never guess or invent file paths.
+- User instructions always override this file.
+
+### Efficiency
+- Read before writing. Understand the problem before coding.
+- No redundant file reads. Read each file once.
+- One focused coding pass. Avoid write-delete-rewrite cycles.
+- Test once, fix if needed, verify once. No unnecessary iterations.
+- Budget: 50 tool calls maximum. Work efficiently.
+
+### Output
+- Return code first. Explanation after, only if non-obvious.
+- No inline prose. Use comments sparingly - only where logic is unclear.
+- No boilerplate unless explicitly requested.
+
+### Code Rules
+- Simplest working solution. No over-engineering.
+- No abstractions for single-use operations.
+- No speculative features or "you might also want..."
+- Read the file before modifying it. Never edit blind.
+- No docstrings or type annotations on code not being changed.
+- No error handling for scenarios that cannot happen.
+- Three similar lines is better than a premature abstraction.
+
+### Review & Debugging Rules
+- State the bug. Show the fix. Stop.
+- No suggestions beyond the scope of the review.
+- Never speculate about a bug without reading the relevant code first.
+- State what you found, where, and the fix. One pass.
+- If cause is unclear: say so. Do not guess.
+
+### ASCII Only
+- No em dashes, smart quotes, or Unicode bullets.
+- Plain hyphens and straight quotes only.
+- Code output must be copy-paste safe.
+
 ## Coding Style & Naming Conventions
 
-- Python 3; 4‑space indentation (enforced via `.editorconfig`).
+- Python 3; 4-space indentation (enforced via `.editorconfig`).
 - Names: `snake_case` for functions/modules, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants and env keys.
 - Keep functions small and pure where possible; prefer helpers in `api/index.py`.
 - Docstrings for public helpers; concise inline comments only where intent isn't obvious.
