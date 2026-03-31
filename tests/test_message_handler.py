@@ -864,7 +864,7 @@ def test_handle_msg_with_audio():
             None,
             {
                 "kind": "transcribe",
-                "model": "whisper-large-v3-turbo",
+                "model": "whisper-large-v3",
                 "audio_seconds": 1,
             },
         )
@@ -957,7 +957,7 @@ def test_handle_msg_with_transcribe_command():
             [
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 }
             ],
@@ -1012,7 +1012,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
             [
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 }
             ],
@@ -1145,7 +1145,7 @@ def test_handle_msg_auto_audio_charges_media_credits():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 },
             ),
@@ -1235,7 +1235,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 12,
                 },
             ),
@@ -1311,7 +1311,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
                 None,
                 {
                     "kind": "transcribe",
-                    "model": "whisper-large-v3-turbo",
+                    "model": "whisper-large-v3",
                     "audio_seconds": 1,
                 },
             ),
