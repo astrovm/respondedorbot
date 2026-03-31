@@ -65,7 +65,13 @@ def main() -> int:
         print("FATAL: TELEGRAM_TOKEN not set", file=sys.stderr)
         return 1
 
+    from api.index import update_telegram_bot_commands
     from api.bot_ptb import run_polling
+
+    try:
+        update_telegram_bot_commands()
+    except Exception as e:
+        print(f"Warning: failed to update bot commands: {e}", file=sys.stderr)
 
     try:
         run_polling(
