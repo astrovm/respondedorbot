@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+import sys
+import importlib
+from typing import List, Optional
+
+
+def _load_dotenv() -> None:
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return
+
+    try:
+        dotenv = importlib.import_module("dotenv")
+        load_dotenv = getattr(dotenv, "load_dotenv")
+
+        load_dotenv(env_path, override=False)
+        return
+    except ImportError:
+        pass
+
+    with open(env_path, "r", encoding="utf-8") as file_obj:
+        for raw_line in file_obj:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def _parse_allowed_updates() -> List[str]:
+    env_value = os.environ.get("PTB_ALLOWED_UPDATES", "")
+    if env_value.strip():
+        parsed = [item.strip() for item in env_value.split(",") if item.strip()]
+        if parsed:
+            return parsed
+    return ["message", "callback_query", "pre_checkout_query"]
+
+
+def _parse_drop_pending_updates() -> bool:
+    return os.environ.get("PTB_DROP_PENDING_UPDATES", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def main() -> int:
+    _load_dotenv()
+
+    token: Optional[str] = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        print("FATAL: TELEGRAM_TOKEN not set", file=sys.stderr)
+        return 1
+
+    from api.bot_ptb import run_polling
+
+    try:
+        run_polling(
+            token=token,
+            drop_pending_updates=_parse_drop_pending_updates(),
+            allowed_updates=_parse_allowed_updates(),
+        )
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        return 0
+    except Exception as error:
+        print(f"FATAL: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
