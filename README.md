@@ -25,13 +25,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your keys
-flask --app api/index run --host 0.0.0.0 --port 8080
+python run_polling.py
 ```
 
 ## Project Structure
 
 ```text
-api/index.py            # Flask entrypoint, command handlers, AI logic
+api/index.py            # Core command handlers and AI logic
+api/bot_ptb.py          # python-telegram-bot polling runtime
+run_polling.py          # Polling entrypoint
 api/message_handler.py  # Message flow, billing, rate-limit gating
 tests/                  # pytest suite
 ```
@@ -46,14 +48,12 @@ Copy `.env.example` and fill in the values. Key variables:
 | `BOT_TRIGGER_WORDS` | Comma-separated keywords that trigger responses in groups |
 | `TELEGRAM_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_USERNAME` | Bot username |
-| `WEBHOOK_AUTH_KEY` | Webhook authentication key |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache |
 | `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
 | `GROQ_API_KEY` | Paid Groq API key |
 | `GROQ_FREE_API_KEY` | Optional free-tier Groq key (tried first, falls back to paid) |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` GIFs |
-| `FUNCTION_URL` | Deployment URL |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
@@ -69,17 +69,7 @@ In groups, personal balance is spent first, then group balance.
 
 ## Groq Routing
 
-If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key. Webhook retries are deduped per Telegram update to avoid double-billing.
-
-## Webhook Setup (Vercel)
-
-```text
-# Set webhook
-{FUNCTION_URL}/?update_webhook=true&key={WEBHOOK_AUTH_KEY}
-
-# Check webhook
-{FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}
-```
+If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key.
 
 ## VPS Polling Mode (python-telegram-bot)
 
@@ -111,36 +101,6 @@ python run_polling.py
 | --- | --- | --- |
 | `PTB_ALLOWED_UPDATES` | Comma-separated update types to receive | `message,callback_query,pre_checkout_query` |
 | `PTB_DROP_PENDING_UPDATES` | Drop pending updates on startup | `true` |
-
-### Systemd Service Example
-
-```ini
-# /etc/systemd/system/respondedorbot.service
-[Unit]
-Description=Respondedor Bot (PTB Polling)
-After=network.target
-
-[Service]
-Type=simple
-User=botuser
-WorkingDirectory=/opt/respondedorbot
-Environment=PATH=/opt/respondedorbot/.venv/bin
-Environment=TELEGRAM_TOKEN=your_token_here
-Environment=REDIS_HOST=localhost
-ExecStart=/opt/respondedorbot/.venv/bin/python run_polling.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-```bash
-sudo systemctl enable respondedorbot
-sudo systemctl start respondedorbot
-sudo systemctl status respondedorbot
-```
 
 ## Tests
 

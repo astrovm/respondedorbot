@@ -2,11 +2,13 @@
 
 ## Project Overview
 
-This is a configurable Telegram bot written in Python/Flask that can be customized with different personalities and characteristics. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, BCRA economic data, audio/image transcription, and various utility commands. The bot's personality and behavior are fully configurable through environment variables.
+This is a configurable Telegram bot written in Python that can be customized with different personalities and characteristics. The bot provides cryptocurrency prices, currency exchange rates, AI-powered conversations, BCRA economic data, audio/image transcription, and various utility commands. The bot's personality and behavior are fully configurable through environment variables.
 
 ## Project Structure & Module Organization
 
-- `api/index.py`: Flask app and Telegram webhook handler; most bot logic lives here.
+- `api/index.py`: Core handlers and bot logic.
+- `api/bot_ptb.py`: python-telegram-bot polling runtime.
+- `run_polling.py`: Polling entrypoint.
 - `test.py`: Pytest-based unit tests for `api.index` helpers.
 - `benchmark_bot.py`: Script to benchmark LLM responses against the bot's personality.
 - `requirements.txt`: Python runtime dependencies.
@@ -17,7 +19,7 @@ This is a configurable Telegram bot written in Python/Flask that can be customiz
 ## Build, Test, and Development Commands
 
 - Create env: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`.
-- Run locally: `flask --app api/index run --host 0.0.0.0 --port 8080` (reads env from `.env`).
+- Run locally: `python run_polling.py` (reads env from `.env`).
 - Run tests: `pytest test.py` or `python -m pytest test.py -v`.
 - Run specific tests: `python -m pytest test.py::test_convert_to_command -v`.
 - Lint/format (optional): adhere to PEP 8; use your editor's formatter.
@@ -27,7 +29,7 @@ This is a configurable Telegram bot written in Python/Flask that can be customiz
 ### Core Components
 
 **Main Application (`api/index.py`):**
-- Flask web server handling Telegram webhooks
+- Core command routing and AI integration
 - Redis-based caching system for API responses and chat history
 - Groq integration for AI conversations
 - Multiple command handlers for crypto prices, currency rates, utilities
@@ -40,17 +42,16 @@ This is a configurable Telegram bot written in Python/Flask that can be customiz
 - `handle_transcribe_with_message()` - Audio/image transcription handler at api/index.py:792
 
 ### Data Flow
-1. Telegram webhook → `responder()` → `process_request_parameters()` → `handle_msg()`
+1. Telegram update (PTB polling) → `api/bot_ptb.py` async handlers → `handle_msg()`
 2. Message processing: text extraction → command parsing → rate limiting → handler execution
 3. AI responses: chat history retrieval → message building → Groq API → response caching
 4. All API calls go through `cached_requests()` with configurable TTL
 
 ### Dependencies
-- **Flask**: Web framework for webhook handling
 - **Redis**: Caching layer for API responses and chat history
 - **OpenAI SDK**: client library used to call Groq's OpenAI-compatible API
 - **Requests**: HTTP client for external APIs
-- **Cryptography**: For webhook security tokens
+- **python-telegram-bot**: Polling runtime and Telegram update handling
 
 ### External APIs
 - **Telegram Bot API**: Message sending/receiving and file downloads
@@ -66,8 +67,6 @@ Required environment variables are documented in README.md. Critical ones:
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Cache configuration
 - `COINMARKETCAP_KEY`, `GROQ_API_KEY`: API access
 - `ADMIN_CHAT_ID`: Error reporting destination
-- `WEBHOOK_AUTH_KEY`: Webhook authentication key
-- `FUNCTION_URL`: Deployment URL
 - `FRIENDLY_INSTANCE_NAME`: Instance identification for reports
 
 ### Rate Limiting
@@ -93,11 +92,6 @@ Required environment variables are documented in README.md. Critical ones:
 - Image description via Groq vision model
 - 7-day Redis caching for both audio and image processing
 - Automatic file download from Telegram servers
-
-### Webhook Setup
-To configure the Telegram webhook:
-- Set webhook: `{function_url}/?update_webhook=true&key={webhook_auth_key}`
-- Check webhook: `{function_url}/?check_webhook=true&key={webhook_auth_key}`
 
 ## Bot Configuration
 The bot's personality and behavior are configured entirely through environment variables:
@@ -133,5 +127,4 @@ This approach allows the codebase to remain public while keeping specific bot pe
 ## Security & Configuration Tips
 
 - Never commit secrets; use `.env.example` to document required vars (see `README.md`).
-- Validate `WEBHOOK_AUTH_KEY` usage when touching webhook paths; avoid logging secrets.
 - Networked features rely on `REDIS_*`, Groq, and other API keys—handle failures gracefully and cache via Redis when available.

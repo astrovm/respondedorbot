@@ -1,5 +1,3 @@
-"""Main Telegram message handling flow extracted from the Flask entrypoint."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
