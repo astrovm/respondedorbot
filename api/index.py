@@ -37,6 +37,8 @@ import random
 import re
 import redis
 import requests
+import subprocess
+import tempfile
 import time
 import traceback
 import wave
@@ -2510,7 +2512,7 @@ def handle_transcribe_with_message_result(
         # Check if this is a reply to another message
         if "reply_to_message" not in message:
             return (
-                "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí",
+                "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí",
                 [],
             )
 
@@ -2595,7 +2597,7 @@ def handle_transcribe_with_message_result(
                         billing_segment
                     ] if billing_segment else []
 
-        return "ese mensaje no tiene audio, imagen ni sticker para laburar", []
+        return "ese mensaje no tiene audio, video, imagen ni sticker para laburar", []
 
     except Exception as e:
         print(f"Error in handle_transcribe: {e}")
@@ -3439,7 +3441,7 @@ def resolve_tool_calls(
             )
             break
         print(
-            f"ask_ai: final len={len(final)} preview='{final[:160].replace('\n', ' ')}'"
+            f"ask_ai: final len={len(final)} preview='{final[:160].replace(chr(10), ' ')}'"
         )
         next_tool_call = parse_tool_call(final)
         if not next_tool_call:
@@ -3552,7 +3554,7 @@ def ask_ai(
             )
         if initial:
             print(
-                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace('\n', ' ')}'"
+                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace(chr(10), ' ')}'"
             )
 
         if response_meta is None:
@@ -5574,13 +5576,19 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
             photo_file_id = replied_msg["sticker"]["file_id"]
             print(f"Found sticker in quoted message: {photo_file_id}")
 
-    # Extract audio/voice
+    # Extract audio/voice/video
     audio_file_id = None
     if "voice" in message and message["voice"]:
         audio_file_id = message["voice"]["file_id"]
     elif "audio" in message and message["audio"]:
         audio_file_id = message["audio"]["file_id"]
-    # Also check for audio in replied message
+    elif "video" in message and message["video"]:
+        audio_file_id = message["video"]["file_id"]
+        print(f"Found video: {audio_file_id}")
+    elif "video_note" in message and message["video_note"]:
+        audio_file_id = message["video_note"]["file_id"]
+        print(f"Found video_note: {audio_file_id}")
+    # Also check for audio/video in replied message
     elif "reply_to_message" in message and message["reply_to_message"]:
         replied_msg = message["reply_to_message"]
         if "voice" in replied_msg and replied_msg["voice"]:
@@ -5589,6 +5597,12 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
         elif "audio" in replied_msg and replied_msg["audio"]:
             audio_file_id = replied_msg["audio"]["file_id"]
             print(f"Found audio in quoted message: {audio_file_id}")
+        elif "video" in replied_msg and replied_msg["video"]:
+            audio_file_id = replied_msg["video"]["file_id"]
+            print(f"Found video in quoted message: {audio_file_id}")
+        elif "video_note" in replied_msg and replied_msg["video_note"]:
+            audio_file_id = replied_msg["video_note"]["file_id"]
+            print(f"Found video_note in quoted message: {audio_file_id}")
 
     return text, photo_file_id, audio_file_id
 
@@ -5832,6 +5846,43 @@ def measure_audio_duration_seconds(audio_data: bytes) -> Optional[float]:
     return None
 
 
+def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
+    """Extract audio track from video bytes using ffmpeg.
+
+    Returns audio bytes in OGG/Opus format, or None on failure.
+    """
+    if not video_data:
+        return None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as vid_f, \
+             tempfile.NamedTemporaryFile(suffix=".ogg") as aud_f:
+            vid_f.write(video_data)
+            vid_f.flush()
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", vid_f.name,
+                    "-vn",
+                    "-acodec", "libopus",
+                    "-b:a", "64k",
+                    aud_f.name,
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                print(f"ffmpeg failed: {result.stderr[:500]}")
+                return None
+            aud_f.seek(0)
+            audio_bytes = aud_f.read()
+            if len(audio_bytes) == 0:
+                return None
+            return audio_bytes
+    except Exception as e:
+        print(f"Error extracting audio from video: {e}")
+        return None
+
+
 def _describe_image_groq_result(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
@@ -6070,7 +6121,14 @@ def transcribe_file_by_id(
 
         duration_seconds = measure_audio_duration_seconds(media_bytes)
         if duration_seconds is None:
-            return None, "duration", None
+            # Could be a video file -- try extracting audio with ffmpeg
+            extracted = extract_audio_from_video(media_bytes)
+            if extracted:
+                print("Extracted audio from video for transcription")
+                media_bytes = extracted
+                duration_seconds = measure_audio_duration_seconds(media_bytes)
+            if duration_seconds is None:
+                return None, "duration", None
 
         result = _transcribe_audio_groq_result(
             media_bytes, file_id, use_cache=use_cache
