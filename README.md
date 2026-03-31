@@ -71,7 +71,7 @@ In groups, personal balance is spent first, then group balance.
 
 If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key. Webhook retries are deduped per Telegram update to avoid double-billing.
 
-## Webhook Setup
+## Webhook Setup (Vercel)
 
 ```text
 # Set webhook
@@ -79,6 +79,67 @@ If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free k
 
 # Check webhook
 {FUNCTION_URL}/?check_webhook=true&key={WEBHOOK_AUTH_KEY}
+```
+
+## VPS Polling Mode (python-telegram-bot)
+
+The bot now supports **python-telegram-bot v20+** for running on a VPS without webhooks. This uses PTB's built-in polling with automatic offset tracking, flood wait handling, and connection pooling.
+
+### Why Polling?
+- No need for public HTTPS endpoint
+- Automatic offset management (no missed updates)
+- Built-in error recovery and backoff
+- Better for development and small deployments
+
+### Running in Polling Mode
+
+```bash
+# Install dependencies (python-telegram-bot is already in requirements.txt)
+pip install -r requirements.txt
+
+# Configure environment variables
+cp .env.example .env
+# Edit .env with your keys
+
+# Start the bot
+python run_polling.py
+```
+
+### Polling Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PTB_ALLOWED_UPDATES` | Comma-separated update types to receive | `message,callback_query,pre_checkout_query` |
+| `PTB_DROP_PENDING_UPDATES` | Drop pending updates on startup | `true` |
+
+### Systemd Service Example
+
+```ini
+# /etc/systemd/system/respondedorbot.service
+[Unit]
+Description=Respondedor Bot (PTB Polling)
+After=network.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/respondedorbot
+Environment=PATH=/opt/respondedorbot/.venv/bin
+Environment=TELEGRAM_TOKEN=your_token_here
+Environment=REDIS_HOST=localhost
+ExecStart=/opt/respondedorbot/.venv/bin/python run_polling.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+sudo systemctl enable respondedorbot
+sudo systemctl start respondedorbot
+sudo systemctl status respondedorbot
 ```
 
 ## Tests
