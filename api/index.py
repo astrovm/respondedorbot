@@ -168,8 +168,8 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "visit_website",
     "browser_automation",
 )
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-GROQ_TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
+GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3-turbo"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 
 
@@ -835,7 +835,7 @@ GROQ_PAID_RATE_LIMITS = {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": "groq/moonshotai/kimi-k2-instruct-0905",
     },
     "compound": {
         "rpm": 200,
@@ -866,7 +866,7 @@ GROQ_FREE_RATE_LIMITS = {
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": "moonshotai/kimi-k2-instruct-0905",
+        "model": "groq/moonshotai/kimi-k2-instruct-0905",
     },
     "compound": {
         "rpm": 30,
@@ -4758,7 +4758,7 @@ def _get_groq_ai_response_result(
         _increment_ai_provider_request_count()
 
         response = groq_client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct-0905",
+            model="groq/moonshotai/kimi-k2-instruct-0905",
             messages=cast(Any, [system_msg] + messages),
             max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         )
@@ -4769,7 +4769,7 @@ def _get_groq_ai_response_result(
                 return _build_groq_usage_result(
                     kind="chat",
                     text=str(response.choices[0].message.content or ""),
-                    model="moonshotai/kimi-k2-instruct-0905",
+                    model="groq/moonshotai/kimi-k2-instruct-0905",
                     response=response,
                     metadata={"groq_account": account},
                 )
@@ -5634,12 +5634,22 @@ def _get_groq_client(
         print(f"Groq API key not configured for account={account}")
         return None
 
+    # Cloudflare AI Gateway configuration
+    cf_aig_token = environ.get("CF_AIG_TOKEN")
+    cf_gateway_base_url = environ.get(
+        "CF_AIG_BASE_URL", "https://api.groq.com/openai/v1"
+    )
+
+    headers: Dict[str, str] = dict(default_headers) if default_headers else {}
+    if cf_aig_token:
+        headers["cf-aig-authorization"] = f"Bearer {cf_aig_token}"
+
     client_kwargs: Dict[str, Any] = {
         "api_key": groq_api_key,
-        "base_url": "https://api.groq.com/openai/v1",
+        "base_url": cf_gateway_base_url,
     }
-    if default_headers:
-        client_kwargs["default_headers"] = dict(default_headers)
+    if headers:
+        client_kwargs["default_headers"] = headers
     return OpenAI(**client_kwargs)
 
 
