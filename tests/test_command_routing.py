@@ -610,7 +610,7 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 200_000,
         "ash": 400_000,
         "asd": 4_000_000,
-        "model": "groq/whisper-large-v3-turbo",
+        "model": "groq/whisper-large-v3",
     }
     assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
         "rpm": 60,
@@ -637,7 +637,7 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 2_000,
         "ash": 7_200,
         "asd": 28_800,
-        "model": "groq/whisper-large-v3-turbo",
+        "model": "groq/whisper-large-v3",
     }
 
 
