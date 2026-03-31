@@ -1,8 +1,6 @@
 from contextvars import ContextVar, Token
-from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone, date
 from email.utils import parsedate_to_datetime
-from flask import Flask, Request, request
 from html.parser import HTMLParser
 from html import unescape
 from math import log
@@ -149,33 +147,6 @@ from api.utils.links import (
     is_social_frontend as _links_is_social_frontend,
     replace_links as _links_replace_links,
 )
-from api.webhook_state import (
-    ForceWebhookRetry,
-    WebhookLockHeartbeat,
-    _acquire_webhook_processing_lock,
-    _clear_persisted_webhook_reservation,
-    _clear_webhook_force_paid_retry_pending,
-    _extract_webhook_operation_key,
-    _get_webhook_max_runtime_seconds,
-    _get_webhook_retry_safety_margin_seconds,
-    _has_webhook_force_paid_retry_pending,
-    _load_persisted_webhook_reservation,
-    _mark_webhook_completed,
-    _mark_webhook_force_paid_retry_pending,
-    _mark_webhook_paid_retry_preferred,
-    _maybe_abort_webhook_for_paid_retry,
-    _persist_webhook_reservation,
-    _release_webhook_processing_lock,
-    _restore_webhook_request_context,
-    _set_webhook_request_context,
-    _start_webhook_processing_lock_heartbeat,
-    _stop_webhook_processing_lock_heartbeat,
-    _webhook_force_paid_retry,
-    _webhook_operation_key,
-    _webhook_redis_client,
-    _webhook_request_started_at,
-)
-
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -816,24 +787,6 @@ def _increment_ai_provider_request_count() -> None:
 
 def _get_ai_provider_request_count() -> int:
     return int(_ai_provider_request_count.get() or 0)
-
-
-def _send_random_degraded_reply(
-    message: Mapping[str, Any], *, reason: str
-) -> Tuple[str, int]:
-    chat = cast(Mapping[str, Any], message.get("chat") or {})
-    chat_id = chat.get("id")
-    if chat_id is None:
-        return "ok", 200
-    reply_to = message.get("message_id")
-    degraded_text = handle_rate_limit(str(chat_id), cast(Dict[str, Any], message))
-    send_msg(
-        str(chat_id),
-        degraded_text,
-        str(reply_to) if reply_to is not None else None,
-    )
-    print(f"webhook degraded random reply sent reason={reason} chat_id={chat_id}")
-    return "ok", 200
 
 
 def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
@@ -5704,18 +5657,6 @@ def _execute_groq_request_with_fallback(
         print("Groq API key not configured")
         return None
 
-    if scope == "compound" and _webhook_force_paid_retry.get():
-        paid_accounts = [
-            account for account in configured_accounts if account == GROQ_PAID_ACCOUNT
-        ]
-        if paid_accounts:
-            configured_accounts = paid_accounts
-            operation_key = _webhook_operation_key.get()
-            if operation_key:
-                print(
-                    f"{label} paid retry forced by redis marker on operation={operation_key}"
-                )
-
     for index, account in enumerate(configured_accounts):
         remaining_accounts = configured_accounts[index + 1 :]
         has_paid_fallback = GROQ_PAID_ACCOUNT in remaining_accounts
@@ -5726,13 +5667,6 @@ def _execute_groq_request_with_fallback(
             audio_seconds=audio_seconds,
         )
         if reservation is None:
-            _mark_webhook_paid_retry_preferred(
-                scope=scope,
-                account=account,
-                free_account=GROQ_FREE_ACCOUNT,
-                has_paid_fallback=has_paid_fallback,
-                reason="free_compound_local_limit_paid_preferred",
-            )
             print(
                 f"{label} local rate limit reached for account={account} scope={scope}, skipping API call"
             )
@@ -5795,41 +5729,11 @@ def _execute_groq_request_with_fallback(
             result.metadata.setdefault("groq_account", account)
             return result
         if last_error and _should_try_next_groq_account_after_error(last_error):
-            _mark_webhook_paid_retry_preferred(
-                scope=scope,
-                account=account,
-                free_account=GROQ_FREE_ACCOUNT,
-                has_paid_fallback=has_paid_fallback,
-                reason="recoverable_free_compound_error_paid_preferred",
-            )
-            _maybe_abort_webhook_for_paid_retry(
-                label=label,
-                scope=scope,
-                account=account,
-                free_account=GROQ_FREE_ACCOUNT,
-                has_paid_fallback=has_paid_fallback,
-                reason="recoverable_free_compound_error_low_time",
-            )
             print(
                 f"{label} retrying with next account after recoverable error on account={account}"
             )
             continue
         if is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
-            _mark_webhook_paid_retry_preferred(
-                scope=scope,
-                account=account,
-                free_account=GROQ_FREE_ACCOUNT,
-                has_paid_fallback=has_paid_fallback,
-                reason="free_compound_backoff_paid_preferred",
-            )
-            _maybe_abort_webhook_for_paid_retry(
-                label=label,
-                scope=scope,
-                account=account,
-                free_account=GROQ_FREE_ACCOUNT,
-                has_paid_fallback=has_paid_fallback,
-                reason="free_compound_backoff_low_time",
-            )
             continue
         break
 
@@ -6295,61 +6199,8 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     return _chat_build_config_keyboard(config)
 
 
-_WEBHOOK_CALLBACKS_CHECKED = False
-
-
 def ensure_callback_updates_enabled() -> None:
-    """Ensure the webhook can deliver callback and payment updates."""
-
-    global _WEBHOOK_CALLBACKS_CHECKED
-    if _WEBHOOK_CALLBACKS_CHECKED:
-        return
-
-    token = environ.get("TELEGRAM_TOKEN")
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
-    function_url = environ.get("FUNCTION_URL")
-
-    if not token or not webhook_key or not function_url:
-        _WEBHOOK_CALLBACKS_CHECKED = True
-        return
-
-    webhook_info = get_telegram_webhook_info(token)
-    if webhook_info.get("error"):
-        _WEBHOOK_CALLBACKS_CHECKED = True
-        admin_report("falló la lectura del webhook para callbacks")
-        return
-
-    allowed_updates = webhook_info.get("allowed_updates")
-    if isinstance(allowed_updates, list):
-        updates = {str(value) for value in allowed_updates}
-        required_updates = {"callback_query", "pre_checkout_query"}
-        if not allowed_updates or required_updates.issubset(updates):
-            _WEBHOOK_CALLBACKS_CHECKED = True
-            return
-    elif allowed_updates is None:
-        _WEBHOOK_CALLBACKS_CHECKED = True
-        return
-
-    expected_url = f"{function_url}?key={webhook_key}"
-    current_url = webhook_info.get("url")
-    if current_url and current_url != expected_url:
-        _WEBHOOK_CALLBACKS_CHECKED = True
-        _log_config_event(
-            "el webhook apunta a otra url; salteo update de callbacks",
-            {"current_url": current_url},
-        )
-        return
-
-    updated = set_telegram_webhook(function_url)
-    if updated:
-        _log_config_event(
-            "Updated webhook to enable callbacks and pre-checkout updates",
-            {"url": expected_url},
-        )
-        _WEBHOOK_CALLBACKS_CHECKED = True
-    else:
-        _WEBHOOK_CALLBACKS_CHECKED = True
-        admin_report("falló update del webhook para callbacks y pre-checkout")
+    pass
 
 
 def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
@@ -6810,9 +6661,9 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         measure_audio_duration_seconds=measure_audio_duration_seconds,
         resize_image_if_needed=resize_image_if_needed,
         encode_image_to_base64=encode_image_to_base64,
-        load_persisted_reservation=_load_persisted_webhook_reservation,
-        persist_reservation=_persist_webhook_reservation,
-        clear_persisted_reservation=_clear_persisted_webhook_reservation,
+        load_persisted_reservation=lambda _tag: None,
+        persist_reservation=lambda _tag, _data: None,
+        clear_persisted_reservation=lambda _tag: None,
     )
 
 
@@ -6869,352 +6720,5 @@ def handle_ai_response(
     )
 
 
-def get_telegram_webhook_info(token: str) -> Dict[str, Union[str, dict]]:
-    payload, error = _telegram_request("getWebhookInfo", token=token, log_errors=False)
-    if not payload:
-        return {"error": error or "request failed"}
-
-    result = payload.get("result")
-    if isinstance(result, dict):
-        return result
-    return {"error": "unexpected response"}
-
-
-def set_telegram_webhook(webhook_url: str) -> bool:
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
-    token = environ.get("TELEGRAM_TOKEN")
-    secret_token = hashlib.sha256(Fernet.generate_key()).hexdigest()
-    parameters = {
-        "url": f"{webhook_url}?key={webhook_key}",
-        "allowed_updates": '["message","callback_query","pre_checkout_query"]',
-        "secret_token": secret_token,
-        "max_connections": 8,
-    }
-    payload_response, error = _telegram_request(
-        "setWebhook", params=parameters, token=token, expect_json=False
-    )
-    if error is not None:
-        return False
-    redis_client = config_redis()
-    redis_response = redis_client.set("X-Telegram-Bot-Api-Secret-Token", secret_token)
-    # Also update bot commands when webhook is updated
-    if redis_response:
-        update_telegram_bot_commands()
-    return bool(redis_response)
-
-
 def update_telegram_bot_commands() -> bool:
-    """Update the bot's command menu in Telegram automatically.
-
-    Builds command list from COMMAND_GROUPS and calls setMyCommands.
-    """
-    token = environ.get("TELEGRAM_TOKEN")
-    if not token:
-        print("TELEGRAM_TOKEN not set, cannot update bot commands")
-        return False
-
-    # Command descriptions mapping
-    command_descriptions = {
-        "ask": "te contesto cualquier gilada",
-        "pregunta": "te contesto cualquier gilada",
-        "che": "te contesto cualquier gilada",
-        "gordo": "te contesto cualquier gilada",
-        "config": "tocás la config del gordo y de los links",
-        "convertbase": "te paso números entre bases",
-        "random": "elijo por vos entre opciones o números",
-        "prices": "precios crypto y conversiones en la moneda que pidas",
-        "price": "precios crypto y conversiones en la moneda que pidas",
-        "precios": "precios crypto y conversiones en la moneda que pidas",
-        "precio": "precios crypto y conversiones en la moneda que pidas",
-        "presios": "precios crypto y conversiones en la moneda que pidas",
-        "presio": "precios crypto y conversiones en la moneda que pidas",
-        "bresio": "precios crypto y conversiones en la moneda que pidas",
-        "bresios": "precios crypto y conversiones en la moneda que pidas",
-        "brecio": "precios crypto y conversiones en la moneda que pidas",
-        "brecios": "precios crypto y conversiones en la moneda que pidas",
-        "dolar": "te tiro la posta del blue y todos los dólares",
-        "dollar": "te tiro la posta del blue y todos los dólares",
-        "usd": "te tiro la posta del blue y todos los dólares",
-        "petroleo": "te paso el precio del Brent y del WTI",
-        "oil": "te paso el precio del Brent y del WTI",
-        "eleccion": "odds actuales de Polymarket para Diputados 2025",
-        "rulo": "te armo los rulos desde el oficial",
-        "devo": "te calculo el arbitraje entre tarjeta y crypto",
-        "powerlaw": "te tiro el precio justo de btc según power law",
-        "rainbow": "te tiro el precio justo de btc según rainbow chart",
-        "satoshi": "te digo cuánto vale un satoshi",
-        "sat": "te digo cuánto vale un satoshi",
-        "sats": "te digo cuánto vale un satoshi",
-        "time": "timestamp unix actual",
-        "comando": "te lo convierto en comando de telegram",
-        "command": "te lo convierto en comando de telegram",
-        "buscar": "te busco en la web",
-        "search": "te busco en la web",
-        "instance": "te digo dónde estoy corriendo",
-        "help": "te muestro todos los comandos",
-        "transcribe": "te transcribo audio o describo imagen",
-        "bcra": "te tiro las variables económicas del bcra",
-        "variables": "te tiro las variables económicas del bcra",
-        "topup": "cargás créditos IA con Telegram Stars por privado",
-        "balance": "te muestro tu saldo IA",
-        "transfer": "le pasás créditos tuyos al grupo",
-        "gm": "gif de buenos días",
-        "gn": "gif de buenas noches",
-    }
-
-    # Build commands list from COMMAND_GROUPS
-    commands_list = []
-    seen_commands = set()
-
-    for aliases, handler_name, uses_ai, takes_params in COMMAND_GROUPS:
-        for alias in aliases:
-            command = alias.lstrip("/")  # Remove leading slash
-            if command not in seen_commands:
-                seen_commands.add(command)
-                description = command_descriptions.get(command, f"Comando /{command}")
-                commands_list.append({"command": command, "description": description})
-
-    # Sort commands alphabetically
-    commands_list.sort(key=lambda x: x["command"])
-
-    # Call setMyCommands
-    payload = {"commands": json.dumps(commands_list)}
-
-    try:
-        response, error = _telegram_request(
-            "setMyCommands",
-            method="POST",
-            json_payload=payload,
-            token=token,
-            expect_json=False,
-        )
-        if error:
-            print(f"Error updating bot commands: {error}")
-            return False
-        print(f"Bot commands updated successfully: {len(commands_list)} commands")
-        return True
-    except Exception as e:
-        print(f"Exception updating bot commands: {e}")
-        return False
-
-
-def verify_webhook() -> bool:
-    token = environ.get("TELEGRAM_TOKEN")
-    if not token:
-        return False
-
-    webhook_key = environ.get("WEBHOOK_AUTH_KEY")
-    function_url = environ.get("FUNCTION_URL")
-
-    if not function_url or not webhook_key:
-        return False
-
-    webhook_info = get_telegram_webhook_info(token)
-    if "error" in webhook_info:
-        return False
-
-    expected_webhook_url = f"{function_url}?key={webhook_key}"
-    current_webhook_url = webhook_info.get("url")
-
-    return current_webhook_url == expected_webhook_url
-
-
-def is_secret_token_valid(request: Request) -> bool:
-    secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    redis_client = config_redis()
-    redis_secret_token = redis_client.get("X-Telegram-Bot-Api-Secret-Token")
-    return redis_secret_token == secret_token
-
-
-def _arg_is_true(args: Mapping[str, Any], key: str) -> bool:
-    value = args.get(key)
-    if isinstance(value, str):
-        return value.lower() == "true"
-    return False
-
-
-def _handle_webhook_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
-    if _arg_is_true(args, "check_webhook"):
-        webhook_verified = verify_webhook()
-        return (
-            ("webhook joya", 200)
-            if webhook_verified
-            else ("el webhook está hecho pelota", 400)
-        )
-
-    if _arg_is_true(args, "update_webhook"):
-        function_url = environ.get("FUNCTION_URL")
-        if not function_url:
-            return "no pude acomodar el webhook", 400
-        updated = set_telegram_webhook(function_url)
-        return (
-            ("webhook acomodado", 200)
-            if updated
-            else ("no pude acomodar el webhook", 400)
-        )
-
-    return None
-
-
-def _handle_control_actions(args: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
-    if _arg_is_true(args, "update_dollars"):
-        get_dollar_rates()
-        return "dólares actualizados", 200
-
-    return None
-
-
-def process_request_parameters(request: Request) -> Tuple[str, int]:
-    try:
-        args = request.args
-
-        webhook_response = _handle_webhook_actions(args)
-        if webhook_response:
-            return webhook_response
-
-        control_response = _handle_control_actions(args)
-        if control_response:
-            return control_response
-
-        # Validate secret token
-        if not is_secret_token_valid(request):
-            admin_report("token secreto inválido")
-            return "token secreto inválido", 400
-
-        # Process message
-        request_json = request.get_json(silent=True)
-        if not request_json:
-            return "json inválido", 400
-        operation_key = _extract_webhook_operation_key(request_json)
-        redis_client = _optional_redis_client()
-        callback_query = request_json.get("callback_query")
-        pre_checkout_query = request_json.get("pre_checkout_query")
-        message = request_json.get("message")
-        if redis_client is None and (callback_query or pre_checkout_query):
-            print(
-                "webhook redis unavailable; refusing update processing because retry safety is unavailable"
-            )
-            return "retry", 503
-        if redis_client is None and message:
-            return _send_random_degraded_reply(
-                cast(Mapping[str, Any], message),
-                reason="redis_unavailable",
-            )
-        force_paid_retry = _has_webhook_force_paid_retry_pending(
-            redis_client, operation_key
-        )
-        owner_token: Optional[str] = None
-        lock_status = "unavailable"
-        lock_heartbeat: WebhookLockHeartbeat = _start_webhook_processing_lock_heartbeat(
-            None,
-            None,
-            None,
-        )
-        if redis_client is not None and operation_key:
-            owner_token = hashlib.sha256(
-                f"{operation_key}:{time.time_ns()}:{random.random()}".encode("utf-8")
-            ).hexdigest()
-            lock_status = _acquire_webhook_processing_lock(
-                redis_client,
-                operation_key,
-                owner_token,
-            )
-            if lock_status == "completed":
-                print(
-                    f"webhook duplicate ignored: completed duplicate returned without work operation={operation_key}"
-                )
-                return "ok", 200
-            if lock_status == "in_flight":
-                print(f"webhook duplicate in-flight skipped operation={operation_key}")
-                return "retry", 503
-            if lock_status == "acquired":
-                lock_heartbeat = _start_webhook_processing_lock_heartbeat(
-                    redis_client,
-                    operation_key,
-                    owner_token,
-                )
-
-        context_tokens = _set_webhook_request_context(
-            request_started_at=time.monotonic(),
-            operation_key=operation_key,
-            redis_client=redis_client,
-            force_paid_retry=force_paid_retry,
-        )
-        try:
-            if callback_query:
-                handle_callback_query(cast(Dict[str, Any], callback_query))
-            else:
-                if pre_checkout_query:
-                    handle_pre_checkout_query(cast(Dict[str, Any], pre_checkout_query))
-                else:
-                    if not message:
-                        return "sin mensaje", 200
-                    handle_msg(cast(Dict[str, Any], message))
-        except ForceWebhookRetry:
-            if redis_client is not None and operation_key:
-                _mark_webhook_force_paid_retry_pending(
-                    redis_client,
-                    operation_key,
-                    reason="low_remaining_time_before_paid_retry",
-                )
-            _release_webhook_processing_lock(redis_client, operation_key, owner_token)
-            return "retry", 503
-        except Exception:
-            _release_webhook_processing_lock(redis_client, operation_key, owner_token)
-            raise
-        else:
-            if redis_client is not None and operation_key:
-                _mark_webhook_completed(redis_client, operation_key)
-                _clear_webhook_force_paid_retry_pending(redis_client, operation_key)
-                _release_webhook_processing_lock(
-                    redis_client, operation_key, owner_token
-                )
-            return "ok", 200
-        finally:
-            _stop_webhook_processing_lock_heartbeat(lock_heartbeat)
-            _restore_webhook_request_context(context_tokens)
-
-    except Exception as e:
-        error_context = {
-            "request_method": request.method,
-            "request_args": dict(request.args),
-            "request_path": request.path,
-        }
-
-        error_msg = f"Request processing error: {str(e)}"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
-        return "error procesando request", 500
-
-
-app = Flask(__name__)
-
-
-@app.route("/", methods=["GET", "POST"])
-def responder() -> Tuple[str, int]:
-    # Modo mantenimiento - activar durante migraciones
-    if environ.get("MAINTENANCE_MODE", "").lower() in ("true", "1", "yes"):
-        return "estoy en mantenimiento, vuelvo en un rato", 503
-
-    try:
-        webhook_key = request.args.get("key")
-        if not webhook_key:
-            return "falta key", 200
-
-        if webhook_key != environ.get("WEBHOOK_AUTH_KEY"):
-            admin_report("intento con key inválida")
-            return "key incorrecta", 400
-
-        response_message, status_code = process_request_parameters(request)
-        return response_message, status_code
-    except Exception as e:
-        error_context = {
-            "request_method": request.method,
-            "request_args": dict(request.args),
-            "request_path": request.path,
-        }
-
-        error_msg = "error crítico en responder"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
-        return "error crítico", 500
+    return True

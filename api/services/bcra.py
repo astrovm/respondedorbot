@@ -1,5 +1,3 @@
-"""BCRA API helpers and caching logic extracted from the main Flask entrypoint."""
-
 from __future__ import annotations
 
 import io
@@ -84,9 +82,7 @@ def _normalize_text(value: Any) -> str:
     except Exception:
         text = ""
     normalized = (
-        unicodedata.normalize("NFKD", text)
-        .encode("ascii", "ignore")
-        .decode("ascii")
+        unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     )
     return normalized.lower()
 
@@ -187,12 +183,18 @@ def _config_redis(*args, **kwargs) -> redis.Redis:
     return _redis_factory_fn(*args, **kwargs)
 
 
-def _admin_report(message: str, error: Optional[Exception] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+def _admin_report(
+    message: str,
+    error: Optional[Exception] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
     if _admin_reporter_fn:
         _admin_reporter_fn(message, error, extra)
 
 
-def _get_cache_history(hours_ago: int, cache_key: str, client: redis.Redis) -> Optional[Dict[str, Any]]:
+def _get_cache_history(
+    hours_ago: int, cache_key: str, client: redis.Redis
+) -> Optional[Dict[str, Any]]:
     if hours_ago <= 0:
         return None
     if _cache_history_fn is None:
@@ -472,9 +474,7 @@ def bcra_list_variables(
             return results
 
         cat = _normalize_text(category)
-        return [
-            r for r in results if cat in _normalize_text(r.get("categoria", ""))
-        ]
+        return [r for r in results if cat in _normalize_text(r.get("categoria", ""))]
     except Exception:
         return None
 
@@ -697,7 +697,9 @@ def get_currency_band_limits(
 
     effective_fetcher = fetcher or fetch_currency_band_limits
 
-    def load_cached(allow_stale: bool) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    def load_cached(
+        allow_stale: bool,
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         cached, meta = _get_cached_currency_band_entry(allow_stale=allow_stale)
         if cached:
             date_raw = cast(
@@ -857,7 +859,9 @@ def cache_bcra_variables(variables: Dict[str, Any], ttl: int = TTL_BCRA) -> None
     )
 
 
-def _attach_bcra_meta(value: Optional[Dict[str, Any]], meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _attach_bcra_meta(
+    value: Optional[Dict[str, Any]], meta: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     if not value:
         return None
     if meta.get("is_fresh"):
@@ -977,9 +981,7 @@ def cache_mayorista_missing(
     date_key: str,
     redis_client: Optional[redis.Redis] = None,
     *,
-    redis_setex_json_fn: Optional[
-        Callable[[redis.Redis, str, int, Any], Any]
-    ] = None,
+    redis_setex_json_fn: Optional[Callable[[redis.Redis, str, int, Any], Any]] = None,
 ) -> None:
     """Store a short-lived sentinel indicating mayorista is missing for date_key."""
 
@@ -1005,9 +1007,7 @@ def calculate_tcrm_100(
     config_redis_fn: Optional[Callable[..., redis.Redis]] = None,
     redis_get_json_fn: Optional[Callable[[redis.Redis, str], Any]] = None,
     redis_set_json_fn: Optional[Callable[[redis.Redis, str, Any], Any]] = None,
-    redis_setex_json_fn: Optional[
-        Callable[[redis.Redis, str, int, Any], Any]
-    ] = None,
+    redis_setex_json_fn: Optional[Callable[[redis.Redis, str, int, Any], Any]] = None,
     bcra_get_value_for_date_fn: Optional[Callable[[str, str], Optional[float]]] = None,
     cache_mayorista_missing_fn: Optional[
         Callable[[str, Optional[redis.Redis]], None]
@@ -1084,9 +1084,7 @@ def calculate_tcrm_100(
                         if parsed is not None:
                             wholesale_value = float(parsed)
                 if wholesale_value is None:
-                    fetched = bcra_value_for_date(
-                        "tipo de cambio mayorista", date_key
-                    )
+                    fetched = bcra_value_for_date("tipo de cambio mayorista", date_key)
                     if fetched is not None:
                         wholesale_value = float(fetched)
                     else:
@@ -1135,9 +1133,7 @@ def get_cached_tcrm_100(
     config_redis_fn: Optional[Callable[..., redis.Redis]] = None,
     redis_get_json_fn: Optional[Callable[[redis.Redis, str], Any]] = None,
     redis_set_json_fn: Optional[Callable[[redis.Redis, str, Any], Any]] = None,
-    redis_setex_json_fn: Optional[
-        Callable[[redis.Redis, str, int, Any], Any]
-    ] = None,
+    redis_setex_json_fn: Optional[Callable[[redis.Redis, str, int, Any], Any]] = None,
     calculate_tcrm_fn: Optional[Callable[..., Optional[float]]] = None,
     get_latest_itcrm_fn: Optional[Callable[[], Optional[Tuple[float, str]]]] = None,
     bcra_get_value_for_date_fn: Optional[Callable[[str, str], Optional[float]]] = None,
@@ -1181,9 +1177,7 @@ def get_cached_tcrm_100(
             dt = parse_date_string(itcrm_date_str or "")
             if dt is not None:
                 date_key = dt.date().isoformat()
-                mayorista_cached = get_json(
-                    redis_client, f"bcra_mayorista:{date_key}"
-                )
+                mayorista_cached = get_json(redis_client, f"bcra_mayorista:{date_key}")
                 if isinstance(mayorista_cached, dict):
                     if mayorista_cached.get("missing"):
                         skip_mayorista_fetch = True
@@ -1459,8 +1453,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             valuation_dt = _parse_iso_datetime(response_payload.get(key))
         except Exception as exc:
             print(
-                "Error parsing country risk valuation datetime "
-                f"from key '{key}': {exc}"
+                f"Error parsing country risk valuation datetime from key '{key}': {exc}"
             )
             valuation_dt = None
         if valuation_dt:
@@ -1505,7 +1498,7 @@ def format_bcra_variables(
             if is_percentage:
                 return f"{num:.1f}%" if num >= 10 else f"{num:.2f}%"
             if num >= 1_000_000:
-                return f"{num/1000:,.0f}".replace(",", ".")
+                return f"{num / 1000:,.0f}".replace(",", ".")
             if num >= 1000:
                 return f"{num:,.0f}".replace(",", ".")
             return f"{num:.2f}".replace(".", ",")

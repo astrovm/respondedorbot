@@ -21,7 +21,6 @@ def cleanup_test_artifacts():
 def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
     index_module._provider_backoff_until.clear()
-    index_module._WEBHOOK_CALLBACKS_CHECKED = False
     monkeypatch.setattr(
         index_module.chat_config_db_service,
         "is_configured",

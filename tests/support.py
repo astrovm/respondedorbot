@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Mapping, Optional, cast
 
 import pytest
 import redis
-from flask import Flask, request
 
 from api import config as config_module
 from api import index
@@ -41,9 +40,6 @@ from api.message_state import (
 from api.services import bcra as bcra_service
 
 
-app = Flask(__name__)
-
-responder = index.responder
 convert_to_command = index.convert_to_command
 config_redis = index.config_redis
 check_global_rate_limit = index.check_global_rate_limit
@@ -63,7 +59,6 @@ handle_msg = index.handle_msg
 replace_links = index.replace_links
 handle_config_command = index.handle_config_command
 handle_callback_query = index.handle_callback_query
-ensure_callback_updates_enabled = index.ensure_callback_updates_enabled
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE
 get_rulo = index.get_rulo
 get_oil_price = index.get_oil_price
@@ -192,4 +187,6 @@ def get_bot_message_metadata(redis_client: redis.Redis, chat_id: str, message_id
     )
 
 
-__all__ = [name for name in globals() if not name.startswith("_")] + ["_decode_redis_value"]
+__all__ = [name for name in globals() if not name.startswith("_")] + [
+    "_decode_redis_value"
+]
