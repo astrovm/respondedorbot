@@ -14,7 +14,6 @@ def test_handle_msg_topup_private_returns_keyboard():
     with (
         patch("api.index.config_redis", return_value=redis_client),
         patch("api.index.send_msg") as mock_send_msg,
-        patch("api.index.ensure_callback_updates_enabled"),
         patch("api.index.credits_db_service.is_configured", return_value=True),
         patch(
             "api.index.build_topup_keyboard",
