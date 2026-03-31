@@ -77,7 +77,6 @@ class MessageHandlerDeps:
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
     handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
-    ensure_callback_updates_enabled: Callable[[], None]
     is_chat_admin: Callable[..., bool]
     report_unauthorized_config_attempt: Callable[..., None]
     handle_transcribe: Callable[[], str]
@@ -697,7 +696,6 @@ def _handle_topup_command(
         )
         return response_msg, None, False, command
 
-    deps.ensure_callback_updates_enabled()
     return "elegí cuánto querés cargar:", deps.build_topup_keyboard(), False, command
 
 
