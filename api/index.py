@@ -171,7 +171,7 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "browser_automation",
 )
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
-GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3-turbo"
+GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 
 
@@ -5854,17 +5854,23 @@ def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
     if not video_data:
         return None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4") as vid_f, \
-             tempfile.NamedTemporaryFile(suffix=".ogg") as aud_f:
+        with (
+            tempfile.NamedTemporaryFile(suffix=".mp4") as vid_f,
+            tempfile.NamedTemporaryFile(suffix=".ogg") as aud_f,
+        ):
             vid_f.write(video_data)
             vid_f.flush()
             result = subprocess.run(
                 [
-                    "ffmpeg", "-y",
-                    "-i", vid_f.name,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    vid_f.name,
                     "-vn",
-                    "-acodec", "libopus",
-                    "-b:a", "64k",
+                    "-acodec",
+                    "libopus",
+                    "-b:a",
+                    "64k",
                     aud_f.name,
                 ],
                 capture_output=True,
