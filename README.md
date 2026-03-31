@@ -57,6 +57,21 @@ Copy `.env.example` and fill in the values. Key variables:
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
+## Docker Deployment
+
+Build and run with Docker:
+
+```bash
+docker build -t respondedorbot .
+docker run --env-file .env respondedorbot
+```
+
+Or use the pre-built image from GitHub Container Registry:
+
+```bash
+docker run --env-file .env ghcr.io/astrovm/respondedorbot:latest
+```
+
 ## AI Credits Billing
 
 AI responses cost credits. Users get onboarding credits on first interaction, then recharge with Telegram Stars.
@@ -71,31 +86,7 @@ In groups, personal balance is spent first, then group balance.
 
 If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key.
 
-## VPS Polling Mode (python-telegram-bot)
-
-The bot now supports **python-telegram-bot v20+** for running on a VPS without webhooks. This uses PTB's built-in polling with automatic offset tracking, flood wait handling, and connection pooling.
-
-### Why Polling?
-- No need for public HTTPS endpoint
-- Automatic offset management (no missed updates)
-- Built-in error recovery and backoff
-- Better for development and small deployments
-
-### Running in Polling Mode
-
-```bash
-# Install dependencies (python-telegram-bot is already in requirements.txt)
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-# Edit .env with your keys
-
-# Start the bot
-python run_polling.py
-```
-
-### Polling Environment Variables
+## Configuration Options
 
 | Variable | Description | Default |
 | --- | --- | --- |
@@ -107,3 +98,11 @@ python run_polling.py
 ```bash
 pytest -q
 ```
+
+## Architecture
+
+The bot uses **python-telegram-bot v20+** with polling mode:
+- Automatic offset tracking and duplicate prevention
+- Built-in flood wait handling and error recovery
+- Async handlers with sync code bridging for the existing codebase
+- No webhook required — works behind NAT and firewalls
