@@ -416,7 +416,7 @@ def test_handle_transcribe_with_message_no_reply():
     message = {"message_id": 1, "chat": {"id": 123}, "text": "/transcribe"}
 
     result = handle_transcribe_with_message(message)
-    assert result == "respondeme un audio, imagen o sticker y te digo qué carajo hay ahí"
+    assert result == "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí"
 
 
 def test_handle_transcribe_with_message_voice_cached():
@@ -620,7 +620,7 @@ def test_handle_transcribe_with_message_no_media():
     }
 
     result = handle_transcribe_with_message(message)
-    assert result == "ese mensaje no tiene audio, imagen ni sticker para laburar"
+    assert result == "ese mensaje no tiene audio, video, imagen ni sticker para laburar"
 
 
 def test_handle_transcribe_with_message_exception():
@@ -1506,6 +1506,117 @@ def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
     assert index.get_provider_backoff_remaining(
         index._get_groq_backoff_key(index.GROQ_FREE_ACCOUNT, "transcribe")
     ) > 0
+
+
+# Tests for video transcription support
+
+
+def test_extract_message_content_video():
+    from api.index import extract_message_content
+
+    message = {"text": "", "video": {"file_id": "vid123"}}
+    text, photo_id, audio_id = extract_message_content(message)
+    assert audio_id == "vid123"
+
+
+def test_extract_message_content_video_note():
+    from api.index import extract_message_content
+
+    message = {"text": "", "video_note": {"file_id": "vn456"}}
+    text, photo_id, audio_id = extract_message_content(message)
+    assert audio_id == "vn456"
+
+
+def test_extract_message_content_video_in_reply():
+    from api.index import extract_message_content
+
+    message = {
+        "text": "/transcribe",
+        "reply_to_message": {"video": {"file_id": "vid_reply"}},
+    }
+    text, photo_id, audio_id = extract_message_content(message)
+    assert audio_id == "vid_reply"
+
+
+def test_extract_message_content_video_note_in_reply():
+    from api.index import extract_message_content
+
+    message = {
+        "text": "/transcribe",
+        "reply_to_message": {"video_note": {"file_id": "vn_reply"}},
+    }
+    text, photo_id, audio_id = extract_message_content(message)
+    assert audio_id == "vn_reply"
+
+
+def test_extract_message_content_audio_takes_priority_over_video():
+    from api.index import extract_message_content
+
+    message = {
+        "text": "",
+        "audio": {"file_id": "aud1"},
+        "video": {"file_id": "vid1"},
+    }
+    text, photo_id, audio_id = extract_message_content(message)
+    assert audio_id == "aud1"
+
+
+def test_transcribe_file_by_id_video_fallback():
+    from api.index import transcribe_file_by_id
+
+    with patch("api.index.get_cached_transcription", return_value=None), \
+         patch("api.index.download_telegram_file", return_value=b"video bytes"), \
+         patch("api.index.measure_audio_duration_seconds") as mock_measure, \
+         patch("api.index.extract_audio_from_video") as mock_extract, \
+         patch("api.index._transcribe_audio_groq_result") as mock_transcribe:
+
+        # First call (video bytes) returns None, second call (extracted audio) returns 5.0
+        mock_measure.side_effect = [None, 5.0]
+        mock_extract.return_value = b"extracted audio"
+        mock_transcribe.return_value = MagicMock(
+            text="transcribed from video",
+            audio_seconds=5.0,
+            billing_segment=lambda: {"kind": "transcribe", "audio_seconds": 5.0},
+        )
+
+        text, error, billing = transcribe_file_by_id("file123", use_cache=False)
+        assert text == "transcribed from video"
+        assert error is None
+        mock_extract.assert_called_once_with(b"video bytes")
+
+
+def test_transcribe_file_by_id_video_extraction_fails():
+    from api.index import transcribe_file_by_id
+
+    with patch("api.index.get_cached_transcription", return_value=None), \
+         patch("api.index.download_telegram_file", return_value=b"bad data"), \
+         patch("api.index.measure_audio_duration_seconds", return_value=None), \
+         patch("api.index.extract_audio_from_video", return_value=None):
+
+        text, error, billing = transcribe_file_by_id("file123", use_cache=False)
+        assert text is None
+        assert error == "duration"
+
+
+def test_extract_audio_duration_seconds_video():
+    from api.message_handler import _extract_audio_duration_seconds
+
+    message = {"video": {"duration": 42}}
+    assert _extract_audio_duration_seconds(message) == 42.0
+
+
+def test_extract_audio_duration_seconds_video_note():
+    from api.message_handler import _extract_audio_duration_seconds
+
+    message = {"video_note": {"duration": 15}}
+    assert _extract_audio_duration_seconds(message) == 15.0
+
+
+def test_extract_audio_duration_seconds_video_in_reply():
+    from api.message_handler import _extract_audio_duration_seconds
+
+    message = {"reply_to_message": {"video": {"duration": 30}}}
+    assert _extract_audio_duration_seconds(message) == 30.0
 
 
 # Tests for web search functionality

@@ -359,18 +359,13 @@ def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
         message,
         cast(Mapping[str, Any], message.get("reply_to_message") or {}),
     ):
-        voice = container.get("voice")
-        if isinstance(voice, Mapping):
-            try:
-                return max(0.0, float(voice.get("duration") or 0.0))
-            except (TypeError, ValueError):
-                return 0.0
-        audio = container.get("audio")
-        if isinstance(audio, Mapping):
-            try:
-                return max(0.0, float(audio.get("duration") or 0.0))
-            except (TypeError, ValueError):
-                return 0.0
+        for key in ("voice", "audio", "video", "video_note"):
+            media = container.get(key)
+            if isinstance(media, Mapping):
+                try:
+                    return max(0.0, float(media.get("duration") or 0.0))
+                except (TypeError, ValueError):
+                    return 0.0
     return 0.0
 
 
