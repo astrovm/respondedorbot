@@ -86,13 +86,6 @@ In groups, personal balance is spent first, then group balance.
 
 If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key.
 
-## Configuration Options
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `PTB_ALLOWED_UPDATES` | Comma-separated update types to receive | `message,callback_query,pre_checkout_query` |
-| `PTB_DROP_PENDING_UPDATES` | Drop pending updates on startup | `true` |
-
 ## Tests
 
 ```bash
