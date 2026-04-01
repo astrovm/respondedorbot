@@ -59,7 +59,29 @@ Copy `.env.example` and fill in the values. Key variables:
 
 ## Docker Deployment
 
-Build and run with Docker:
+### Option 1: Docker Compose (Recommended - includes Redis)
+
+The easiest way to run the bot with all dependencies:
+
+```bash
+docker-compose up -d
+```
+
+This starts both the bot and Redis. To view logs:
+
+```bash
+docker-compose logs -f bot
+```
+
+To stop:
+
+```bash
+docker-compose down
+```
+
+### Option 2: Docker only (you need external Redis)
+
+If you have Redis running elsewhere:
 
 ```bash
 docker build -t respondedorbot .
