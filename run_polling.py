@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import importlib
-from typing import List, Optional
+from typing import Optional
 
 
 def _load_dotenv() -> None:
@@ -39,24 +39,6 @@ def _load_dotenv() -> None:
                 os.environ[key] = value
 
 
-def _parse_allowed_updates() -> List[str]:
-    env_value = os.environ.get("PTB_ALLOWED_UPDATES", "")
-    if env_value.strip():
-        parsed = [item.strip() for item in env_value.split(",") if item.strip()]
-        if parsed:
-            return parsed
-    return ["message", "callback_query", "pre_checkout_query"]
-
-
-def _parse_drop_pending_updates() -> bool:
-    return os.environ.get("PTB_DROP_PENDING_UPDATES", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-    }
-
-
 def main() -> int:
     _load_dotenv()
 
@@ -76,8 +58,8 @@ def main() -> int:
     try:
         run_polling(
             token=token,
-            drop_pending_updates=_parse_drop_pending_updates(),
-            allowed_updates=_parse_allowed_updates(),
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "pre_checkout_query"],
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
