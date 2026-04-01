@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from os import environ
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from api.chat_context import (
     extract_numeric_chat_id,
@@ -33,46 +42,15 @@ AI_BILLING_DEFAULT_PACKS = [
     {"id": "p2500", "credits": whole_credits_to_units(2500), "xtr": 1250},
 ]
 
+
 def get_ai_onboarding_credits() -> int:
     """Return onboarding credit units granted once per user."""
-
-    raw_value = str(environ.get("AI_ONBOARDING_CREDITS") or "3").strip()
-    parsed = parse_credit_units(raw_value)
-    if parsed is None:
-        return whole_credits_to_units(3)
-    return max(0, parsed)
+    return whole_credits_to_units(3)
 
 
 def get_ai_billing_packs() -> List[Dict[str, int]]:
-    """Load Stars billing packs from env or defaults."""
-
-    raw_value = str(environ.get("AI_STARS_PACKS_JSON") or "").strip()
-    if not raw_value:
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    try:
-        loaded = json.loads(raw_value)
-    except json.JSONDecodeError:
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    if not isinstance(loaded, list):
-        return list(AI_BILLING_DEFAULT_PACKS)
-
-    normalized: List[Dict[str, int]] = []
-    for item in loaded:
-        if not isinstance(item, Mapping):
-            continue
-        pack_id = str(item.get("id", "")).strip()
-        credits = parse_credit_units(item.get("credits"))
-        try:
-            xtr = int(item.get("xtr"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-        if not pack_id or credits is None or credits <= 0 or xtr <= 0:
-            continue
-        normalized.append({"id": pack_id, "credits": credits, "xtr": xtr})
-
-    return normalized or list(AI_BILLING_DEFAULT_PACKS)
+    """Return Stars billing packs."""
+    return list(AI_BILLING_DEFAULT_PACKS)
 
 
 def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
@@ -210,8 +188,12 @@ class AIMessageBilling:
     numeric_chat_id: Optional[int]
     message: Mapping[str, Any]
     onboarding_checked: bool = False
-    billing_not_configured_message: str = "el cobro de ia no está andando, avisale al admin"
-    billing_missing_scope_message: str = "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
+    billing_not_configured_message: str = (
+        "el cobro de ia no está andando, avisale al admin"
+    )
+    billing_missing_scope_message: str = (
+        "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
+    )
     billing_charge_error_message: str = "se trabó el cobro de ia, probá de nuevo"
     charge_errors: List[str] = field(default_factory=list)
     load_persisted_reservation_fn: Callable[[str], Optional[Mapping[str, Any]]] = (
@@ -232,7 +214,9 @@ class AIMessageBilling:
             None,
         )
 
-    def _build_insufficient_credits_reply(self, charge_result: Mapping[str, Any]) -> str:
+    def _build_insufficient_credits_reply(
+        self, charge_result: Mapping[str, Any]
+    ) -> str:
         random_response = build_random_reply(
             self.gen_random_fn,
             cast(Mapping[str, Any], self.message.get("from") or {}),
@@ -430,7 +414,9 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
+        reserved_credit_units = int(
+            reservation_meta.get("reserved_credit_units", 0) or 0
+        )
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
         if not billing_segments:
@@ -479,7 +465,11 @@ class AIMessageBilling:
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
         chat_scope_id = reservation_meta.get("chat_scope_id")
-        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
+        source = (
+            "chat"
+            if str(reservation_meta.get("source") or "user") == "chat"
+            else "user"
+        )
 
         if raw_usd_micros == 0:
             actual_credit_units = reserved_credit_units
@@ -660,7 +650,9 @@ class AIMessageBilling:
         usage_tags = [str(item.get("usage_tag") or "ai_usage") for item in reservations]
         usage_tag = usage_tags[0] if len(set(usage_tags)) == 1 else "ai_usage_batch"
         chat_scope_id = reservations[0].get("chat_scope_id")
-        source = "chat" if str(reservations[0].get("source") or "user") == "chat" else "user"
+        source = (
+            "chat" if str(reservations[0].get("source") or "user") == "chat" else "user"
+        )
 
         if not billing_segments:
             breakdown = {
@@ -847,7 +839,9 @@ class AIMessageBilling:
             settlement_metadata=settlement_metadata,
         )
         for item in reservations:
-            self.clear_persisted_reservation_fn(str(item.get("usage_tag") or "ai_usage"))
+            self.clear_persisted_reservation_fn(
+                str(item.get("usage_tag") or "ai_usage")
+            )
 
     def refund_reserved_ai_credits(
         self,
@@ -861,8 +855,14 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
-        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
+        reserved_credit_units = int(
+            reservation_meta.get("reserved_credit_units", 0) or 0
+        )
+        source = (
+            "chat"
+            if str(reservation_meta.get("source") or "user") == "chat"
+            else "user"
+        )
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         refund_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
