@@ -131,28 +131,28 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PollingEntrypointTests(unittest.TestCase):
-    def test_main_uses_environment(self):
+    def test_main_uses_hardcoded_defaults(self):
         with (
             patch.dict(
                 "os.environ",
                 {
                     "TELEGRAM_TOKEN": "abc",
-                    "PTB_ALLOWED_UPDATES": "message,callback_query",
-                    "PTB_DROP_PENDING_UPDATES": "false",
                 },
-                clear=False,
+                clear=True,
             ),
             patch("run_polling._load_dotenv"),
-            patch("api.bot_ptb.run_polling") as run_polling,
+            patch("api.bot_ptb.run_polling") as mock_run_polling,
         ):
-            from run_polling import main
+            import importlib
+            import run_polling
 
-            self.assertEqual(main(), 0)
+            importlib.reload(run_polling)
+            self.assertEqual(run_polling.main(), 0)
 
-        run_polling.assert_called_once_with(
+        mock_run_polling.assert_called_once_with(
             token="abc",
-            drop_pending_updates=False,
-            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "pre_checkout_query"],
         )
 
     def test_main_requires_token(self):
