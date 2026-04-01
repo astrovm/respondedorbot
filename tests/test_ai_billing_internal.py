@@ -15,14 +15,11 @@ from api.groq_billing import (
 )
 
 
-
-
-def test_get_ai_billing_packs_default_includes_50_credit_option(monkeypatch):
-    monkeypatch.delenv("AI_STARS_PACKS_JSON", raising=False)
-
+def test_get_ai_billing_packs_includes_50_credit_option():
     packs = get_ai_billing_packs()
 
     assert packs[0] == {"id": "p50", "credits": 500, "xtr": 25}
+
 
 def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("topup:p250:99") == ("p250", 99)
@@ -30,14 +27,12 @@ def test_parse_topup_payload_accepts_optional_user_id():
     assert parse_topup_payload("other") == (None, None)
 
 
+def test_get_ai_billing_packs_returns_default_packs():
+    packs = get_ai_billing_packs()
 
-def test_get_ai_billing_packs_accept_decimal_credits(monkeypatch):
-    monkeypatch.setenv(
-        "AI_STARS_PACKS_JSON",
-        '[{"id":"p15","credits":1.5,"xtr":5}]',
-    )
-
-    assert get_ai_billing_packs() == [{"id": "p15", "credits": 15, "xtr": 5}]
+    assert len(packs) == 6
+    assert packs[0] == {"id": "p50", "credits": 500, "xtr": 25}
+    assert packs[-1] == {"id": "p2500", "credits": 25000, "xtr": 1250}
 
 
 def test_build_insufficient_credits_message_mentions_group_balances():
@@ -382,7 +377,12 @@ def test_estimate_compound_reserve_credits_only_reserves_predictable_request_too
     reserve = estimate_compound_reserve_credits(
         system_message={"role": "system", "content": "search the web"},
         messages=[{"role": "user", "content": "btc news"}],
-        enabled_tools=["web_search", "visit_website", "code_interpreter", "browser_automation"],
+        enabled_tools=[
+            "web_search",
+            "visit_website",
+            "code_interpreter",
+            "browser_automation",
+        ],
     )
 
     assert reserve == 19
@@ -459,7 +459,10 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 10
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"] == "ai_settlement_charge"
+    assert (
+        billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
+        == "ai_settlement_charge"
+    )
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -552,7 +555,10 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
     billing.credits_db_service.apply_ai_debt.assert_called_once()
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 10
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"] == "ai_settlement_debt"
+    assert (
+        billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
+        == "ai_settlement_debt"
+    )
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -673,7 +679,9 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
-    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
+        "metadata"
+    ]
     assert metadata["billing_zero_usage_fallback"] is True
     assert metadata["settled_credit_units"] == 30
     assert metadata["refunded_credit_units"] == 0
@@ -721,7 +729,9 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
-    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
+        "metadata"
+    ]
     assert metadata["billing_zero_usage_fallback"] is True
     assert metadata["settled_credit_units"] == 20
     assert metadata["refunded_credit_units"] == 0
