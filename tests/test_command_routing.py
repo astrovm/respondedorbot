@@ -508,10 +508,9 @@ def test_format_balance_command_group_includes_topup_and_transfer_hints():
     assert "/transfer <monto>" in text
 
 
-def test_get_ai_onboarding_credits_default_is_30_units(monkeypatch):
+def test_get_ai_onboarding_credits_is_30_units():
     from api.index import get_ai_onboarding_credits
 
-    monkeypatch.delenv("AI_ONBOARDING_CREDITS", raising=False)
     assert get_ai_onboarding_credits() == 30
 
 
