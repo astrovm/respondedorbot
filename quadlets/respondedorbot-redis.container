@@ -1,0 +1,17 @@
+[Unit]
+Description=respondedorbot Redis cache
+After=network-online.target
+
+[Container]
+Image=docker.io/redis:7-alpine
+ContainerName=respondedorbot-redis
+Volume=respondedorbot-redis.volume:/data
+Network=respondedorbot.network
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target

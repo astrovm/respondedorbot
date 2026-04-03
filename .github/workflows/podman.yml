@@ -1,0 +1,57 @@
+name: Build and Push Container Image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Build image
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          TAG_FLAGS="--tag ${REPO}:sha-${{ github.sha }}"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:${{ github.ref_name }}"
+            if [ "${{ github.ref_name }}" = "main" ]; then
+              TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:latest"
+            fi
+          fi
+          podman build \
+            ${TAG_FLAGS} \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          podman push "${REPO}:sha-${{ github.sha }}"
+          podman push "${REPO}:${{ github.ref_name }}"
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            podman push "${REPO}:latest"
+          fi

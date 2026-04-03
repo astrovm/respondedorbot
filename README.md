@@ -57,41 +57,56 @@ Copy `.env.example` and fill in the values. Key variables:
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
-## Docker Deployment
+## Container Deployment (Podman)
 
-### Option 1: Docker Compose (Recommended - includes Redis)
+### Option 1: Quadlets with systemd (Recommended)
 
-The easiest way to run the bot with all dependencies:
-
-```bash
-docker-compose up -d
-```
-
-This starts both the bot and Redis. To view logs:
+Quadlets are Podman-native systemd unit files. Copy the files from `quadlets/` and enable the services:
 
 ```bash
-docker-compose logs -f bot
+mkdir -p ~/.config/containers/systemd
+cp quadlets/* ~/.config/containers/systemd/
+
+# Put your .env at ~/respondedorbot/.env
+mkdir -p ~/respondedorbot
+cp .env.example ~/respondedorbot/.env
+# Edit ~/respondedorbot/.env with your keys
+
+systemctl --user daemon-reload
+systemctl --user enable --now respondedorbot.service
 ```
 
-To stop:
+View logs:
 
 ```bash
-docker-compose down
+journalctl --user -fu respondedorbot.service
 ```
 
-### Option 2: Docker only (you need external Redis)
+Stop:
+
+```bash
+systemctl --user stop respondedorbot.service respondedorbot-redis.service
+```
+
+Auto-update images (equivalent to Watchtower):
+
+```bash
+systemctl --user enable --now podman-auto-update.timer
+```
+
+### Option 2: Podman run (external Redis)
 
 If you have Redis running elsewhere:
 
 ```bash
-docker build -t respondedorbot .
-docker run --env-file .env respondedorbot
+podman build -t respondedorbot -f Containerfile .
+podman run --env-file .env respondedorbot
 ```
 
 Or use the pre-built image from GitHub Container Registry:
 
 ```bash
-docker run --env-file .env ghcr.io/astrovm/respondedorbot:latest
+podman run --env-file .env ghcr.io/astrovm/respondedorbot:latest
 ```
 
 ## AI Credits Billing
