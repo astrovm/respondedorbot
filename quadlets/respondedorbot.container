@@ -1,0 +1,19 @@
+[Unit]
+Description=respondedorbot Telegram bot
+After=network-online.target respondedorbot-redis.service
+Requires=respondedorbot-redis.service
+
+[Container]
+Image=ghcr.io/astrovm/respondedorbot:latest
+EnvironmentFile=%h/respondedorbot/.env
+Environment=REDIS_HOST=respondedorbot-redis
+Environment=REDIS_PORT=6379
+Network=respondedorbot.network
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target
