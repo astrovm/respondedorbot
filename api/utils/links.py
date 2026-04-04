@@ -19,7 +19,7 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
     "fixupx.com",
     "fxbsky.app",
-    "kkinstagram.com",
+    "kksave.com",
     "eeinstagram.com",
     "rxddit.com",
 }
@@ -361,7 +361,7 @@ def replace_links(
         (r"(https?://)(?:www\.)?x\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?xcancel\.com([^\s]*)", r"\1fixupx.com\2"),
         (r"(https?://)(?:www\.)?bsky\.app([^\s]*)", r"\1fxbsky.app\2"),
-        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kkinstagram.com\2"),
+        (r"(https?://)(?:www\.)?instagram\.com([^\s]*)", r"\1kksave.com\2"),
         (
             r"(https?://)((?:[a-zA-Z0-9-]+\.)?)reddit\.com([^\s]*)",
             r"\1\2rxddit.com\3",
@@ -387,7 +387,7 @@ def replace_links(
             replaced_host = cleaned.netloc.lower().split(":", 1)[0]
             if replaced_host.startswith("www."):
                 replaced_host = replaced_host[4:]
-            if replaced_host == "kkinstagram.com":
+            if replaced_host == "kksave.com":
                 fallback_cleaned = cleaned._replace(netloc="eeinstagram.com")
                 fallback_replaced_full = urlunparse(fallback_cleaned)
 
