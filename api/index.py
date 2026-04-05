@@ -1435,41 +1435,35 @@ def _cache_media(prefix: str, file_id: str, text: str, ttl: int) -> None:
 
 
 def get_cached_transcription(file_id: str) -> Optional[str]:
-    """Get cached audio transcription from Redis"""
     return _get_cached_media("audio_transcription", file_id)
 
 
 def cache_transcription(file_id: str, text: str, ttl: int = TTL_MEDIA_CACHE) -> None:
-    """Cache audio transcription in Redis (default 7 days)"""
     _cache_media("audio_transcription", file_id, text, ttl)
 
 
 def get_cached_description(file_id: str) -> Optional[str]:
-    """Get cached image description from Redis"""
     return _get_cached_media("image_description", file_id)
 
 
 def cache_description(
     file_id: str, description: str, ttl: int = TTL_MEDIA_CACHE
 ) -> None:
-    """Cache image description in Redis (default 7 days)"""
     _cache_media("image_description", file_id, description, ttl)
 
 
 # get cached data from previous hour
 def get_cache_history(hours_ago, request_hash, redis_client):
-    # subtract hours to current date
     timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
-    # get previous api data from redis cache
     cached_data = redis_client.get(request_cache_history_key(timestamp, request_hash))
-
     if cached_data is None:
         return None
-    else:
-        cache_history = json.loads(cached_data)
-        if cache_history is not None and "timestamp" not in cache_history:
-            cache_history = None
-        return cache_history
+    cache_history = json.loads(cached_data)
+    return (
+        cache_history
+        if cache_history is not None and "timestamp" in cache_history
+        else None
+    )
 
 
 def cached_requests(
@@ -1626,7 +1620,6 @@ def select_random(msg_text: str) -> str:
 def get_api_or_cache_prices(
     convert_to: str, limit: Optional[int] = None, hourly_cache: bool = False
 ):
-    # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {"start": "1", "limit": "100", "convert": convert_to}
     headers = {
@@ -1634,7 +1627,6 @@ def get_api_or_cache_prices(
         "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
     }
 
-    # Allow callers to limit the page size directly (dedupe across features)
     if isinstance(limit, int) and limit > 0:
         parameters["limit"] = str(limit)
 
@@ -1847,7 +1839,6 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
         return None
 
 
-# get crypto pices from coinmarketcap
 def get_prices(msg_text: str) -> Optional[str]:
     msg_text, tf = _parse_timeframe(msg_text, _CMC_CHANGE_FIELD)
     if tf is None and msg_text.strip():
@@ -1859,9 +1850,7 @@ def get_prices(msg_text: str) -> Optional[str]:
     tf_label = tf or "24h"
 
     prices_number = 0
-    # when the user asks for sats we need to ask for btc to the api and convert later
     convert_to = "USD"
-    # here we keep the currency that we'll request to the api
     convert_to_parameter = "USD"
     supported_symbols = {
         "ARS",
@@ -2008,7 +1997,6 @@ def get_prices(msg_text: str) -> Optional[str]:
             else:
                 return f"no laburo con {convert_to} gordo"
 
-    # get prices from api or cache
     prices = get_api_or_cache_prices(convert_to_parameter)
 
     if msg_text != "":
@@ -2026,7 +2014,6 @@ def get_prices(msg_text: str) -> Optional[str]:
     if msg_text.upper().isupper():
         new_prices = []
         coins = msg_text.upper().replace(" ", "").split(",")
-
         if "STABLES" in coins or "STABLECOINS" in coins:
             coins.extend(
                 [
@@ -2081,11 +2068,9 @@ def get_prices(msg_text: str) -> Optional[str]:
         prices_number = len(new_prices)
         prices["data"] = new_prices
 
-    # default number of prices
     if prices_number < 1:
         prices_number = 10
 
-    # generate the message to answer the user
     msg = ""
     if not prices or "data" not in prices:
         return "no pude traer precios de crypto boludo"
@@ -2579,11 +2564,8 @@ def satoshi() -> str:
         if btc_price_ars is None:
             return "no pude traer el precio de btc en ars"
 
-        # Calculate satoshi value (1 BTC = 100,000,000 sats)
         sat_value_usd = btc_price_usd / 100_000_000
         sat_value_ars = btc_price_ars / 100_000_000
-
-        # Calculate how many sats per unit
         sats_per_dollar = int(100_000_000 / btc_price_usd)
         sats_per_peso = 100_000_000 / btc_price_ars
 
@@ -2599,9 +2581,7 @@ $1 ARS = {sats_per_peso:.3f} sats"""
 
 
 def handle_bcra_variables() -> str:
-    """Handle BCRA economic variables command"""
     try:
-        # Use unified cache/API helper
         variables = get_or_refresh_bcra_variables()
 
         if not variables:
@@ -2841,7 +2821,6 @@ def convert_base(msg_text: str) -> str:
         if not 2 <= base_to <= 36:
             return f"base destino '{base_to_str}' tiene que ser entre 2 y 36 boludo"
 
-        # Convert input to output base
         digits = []
         value = 0
         for digit in number_str:
@@ -2894,19 +2873,16 @@ def convert_to_command(msg_text: str) -> str:
     if not msg_text:
         return "y que queres que convierta boludo? mandate texto"
 
-    # Convert emojis to their textual representation in Spanish with underscore delimiters
     emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
     if is_japanese_text(emoji_text):
         romanized_text = romanize_japanese(emoji_text)
     else:
         romanized_text = emoji_text
 
-    # Convert to uppercase and replace Ñ
     replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", romanized_text.upper()).replace(
         "Ñ", "NI"
     )
 
-    # Normalize the text and remove consecutive spaces
     single_spaced_text = re.sub(
         r"\s+",
         " ",
@@ -2915,7 +2891,6 @@ def convert_to_command(msg_text: str) -> str:
         .decode("utf-8"),
     )
 
-    # Replace consecutive dots and specific punctuation marks
     translated_punctuation = re.sub(
         r"\.{3}", "_PUNTOSSUSPENSIVOS_", single_spaced_text
     ).translate(
@@ -2930,14 +2905,12 @@ def convert_to_command(msg_text: str) -> str:
         )
     )
 
-    # Remove non-alphanumeric characters and consecutive, trailing and leading underscores
     cleaned_text = re.sub(
         r"^_+|_+$",
         "",
         re.sub(r"[^A-Za-z0-9_]", "", re.sub(r"_+", "_", translated_punctuation)),
     )
 
-    # If there are no remaining characters after processing, return an error
     if not cleaned_text:
         return "no me mandes giladas boludo, tiene que tener letras o numeros"
 
