@@ -3289,108 +3289,108 @@ def send_animation(
 
 # Giphy API constants
 GIPHY_API_URL = "https://api.giphy.com/v1/gifs"
-TTL_GIPHY_GIF = 300  # 5 minutes cache
+TTL_GIPHY_POOL = 86400  # 24 hours
+GIPHY_POOL_SIZE = 50
+
+GIPHY_GM_TERMS = [
+    "good morning",
+    "buenos dias",
+    "morning coffee",
+    "rise and shine",
+]
+GIPHY_GN_TERMS = [
+    "good night",
+    "buenas noches",
+    "sweet dreams",
+    "go to sleep",
+]
 
 
-def _fetch_giphy_random_gif(search_term: str) -> Optional[str]:
-    """Fetch a random GIF URL from Giphy API for a search term."""
+def _fetch_giphy_pool(category: str) -> List[str]:
+    """Fetch a pool of GIF URLs from GIPHY for a category. Returns list of URLs."""
     api_key = environ.get("GIPHY_API_KEY")
     if not api_key:
-        print(f"GIPHY_API_KEY not configured, cannot fetch GIF for: {search_term}")
-        return None
+        return []
 
-    # List of varied search terms for randomness
-    gm_terms = [
-        "good morning",
-        "buenos dias",
-        "morning coffee",
-        "sunrise",
-        "wake up",
-        "fresh morning",
-        "morning vibes",
-        "sunny morning",
-    ]
-    gn_terms = [
-        "good night",
-        "buenas noches",
-        "sleep tight",
-        "sweet dreams",
-        "night time",
-        "moonlight",
-        "bedtime",
-        "nighty night",
-    ]
+    terms = GIPHY_GM_TERMS if category == "gm" else GIPHY_GN_TERMS
+    urls: List[str] = []
 
-    # Pick a random variation of the search term
-    if search_term == "good morning":
-        query = random.choice(gm_terms)
-    elif search_term == "good night":
-        query = random.choice(gn_terms)
-    else:
-        query = search_term
+    # One call per term to cover all search terms
+    for term in terms:
+        try:
+            params = {
+                "api_key": api_key,
+                "q": term,
+                "limit": 25,
+                "offset": random.randint(0, 100),
+                "rating": "g",
+            }
+            response = requests.get(f"{GIPHY_API_URL}/search", params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            for gif in data.get("data", []):
+                url = gif.get("images", {}).get("original", {}).get("url")
+                if url:
+                    urls.append(url)
+        except Exception as e:
+            print(f"Error fetching Giphy pool for {category}: {e}")
 
-    cache_key = f"giphy:{query.replace(' ', '_')}"
+    return urls
 
-    # Check cache first
+
+def _get_giphy_pool(category: str) -> List[str]:
+    """Return cached GIF pool, refreshing from API if expired or empty.
+    Falls back to stale pool if refresh fails."""
+    pool_key = f"giphy_pool:{category}"
+    stale_key = f"giphy_pool_stale:{category}"
     redis_client = _optional_redis_client()
-    try:
-        if redis_client:
-            cached_url = redis_client.get(cache_key)
-            if cached_url:
-                return str(cached_url)
-    except Exception as e:
-        print(f"Error checking Giphy cache: {e}")
 
-    # Fetch from Giphy API
-    try:
-        url = f"{GIPHY_API_URL}/search"
-        params = {
-            "api_key": api_key,
-            "q": query,
-            "limit": 25,  # Get multiple results for randomness
-            "offset": random.randint(0, 50),  # Random offset for variety
-            "rating": "g",  # General audience
-        }
+    if redis_client:
+        try:
+            raw = redis_client.get(pool_key)
+            if raw:
+                return json.loads(str(raw))
+        except Exception as e:
+            print(f"Error reading Giphy pool from cache: {e}")
 
-        response = requests.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        data = response.json()
+    urls = _fetch_giphy_pool(category)
 
-        if data.get("data") and len(data["data"]) > 0:
-            # Pick a random GIF from results
-            gif_data = random.choice(data["data"])
-            gif_url = gif_data.get("images", {}).get("original", {}).get("url")
+    if urls and redis_client:
+        try:
+            redis_client.setex(pool_key, TTL_GIPHY_POOL, json.dumps(urls))
+            redis_client.set(stale_key, json.dumps(urls))  # no TTL, permanent fallback
+        except Exception as e:
+            print(f"Error caching Giphy pool: {e}")
+    elif not urls and redis_client:
+        try:
+            raw = redis_client.get(stale_key)
+            if raw:
+                print(f"Giphy API failed, using stale pool for {category}")
+                return json.loads(str(raw))
+        except Exception as e:
+            print(f"Error reading stale Giphy pool: {e}")
 
-            if gif_url:
-                # Cache the result
-                try:
-                    if redis_client:
-                        redis_client.setex(cache_key, TTL_GIPHY_GIF, gif_url)
-                except Exception as e:
-                    print(f"Error caching Giphy result: {e}")
-                return gif_url
+    return urls
 
-    except Exception as e:
-        print(f"Error fetching from Giphy: {e}")
 
-    return None
+def _get_random_gif(category: str) -> Optional[str]:
+    pool = _get_giphy_pool(category)
+    if not pool:
+        return None
+    return random.choice(pool)
 
 
 def get_good_morning() -> str:
-    """Get a random good morning GIF URL."""
-    gif_url = _fetch_giphy_random_gif("good morning")
+    gif_url = _get_random_gif("gm")
     if gif_url:
         return gif_url
-    # Fallback message if API fails
     return "buen día boludo"
 
 
 def get_good_night() -> str:
-    """Get a random good night GIF URL."""
-    gif_url = _fetch_giphy_random_gif("good night")
+    gif_url = _get_random_gif("gn")
     if gif_url:
         return gif_url
-    # Fallback message if API fails
     return "buenas noches boludo"
 
 
