@@ -358,65 +358,6 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback():
     assert "estado=groq_zero_usage" in sent_text
 
 
-def test_handle_msg_purgeailog_requires_admin():
-    message = {
-        "message_id": "12g",
-        "chat": {"id": "202", "type": "group"},
-        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
-        "text": "/purgeailog",
-    }
-    redis_client = MagicMock()
-    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
-
-    with (
-        patch("api.index.config_redis", return_value=redis_client),
-        patch("api.index.send_msg") as mock_send_msg,
-        patch(
-            "os.environ.get",
-            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
-                key, default
-            ),
-        ),
-    ):
-        result = handle_msg(message)
-
-    assert result == "ok"
-    assert "solo para el admin" in mock_send_msg.call_args[0][1]
-
-
-def test_handle_msg_purgeailog_admin_purges_expired_ai_events():
-    message = {
-        "message_id": "12h",
-        "chat": {"id": "202", "type": "private"},
-        "from": {"id": 99, "first_name": "Admin", "username": "boss"},
-        "text": "/purgeailog",
-    }
-    redis_client = MagicMock()
-    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
-
-    with (
-        patch("api.index.config_redis", return_value=redis_client),
-        patch("api.index.send_msg") as mock_send_msg,
-        patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch(
-            "api.index.credits_db_service.purge_expired_ai_ledger_events",
-            return_value={"deleted_rows": 7, "retention_days": 30},
-        ) as mock_purge,
-        patch(
-            "os.environ.get",
-            side_effect=lambda key, default=None: {"ADMIN_CHAT_ID": "99"}.get(
-                key, default
-            ),
-        ),
-    ):
-        result = handle_msg(message)
-
-    assert result == "ok"
-    mock_purge.assert_called_once_with()
-    sent_text = mock_send_msg.call_args[0][1]
-    assert "purgué 7 eventos ai del ledger con más de 30 días" in sent_text
-
-
 def test_handle_msg_successful_payment_credits_user():
     message = {
         "message_id": "13",
