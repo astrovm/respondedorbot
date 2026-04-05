@@ -1427,7 +1427,9 @@ def test_describe_image_groq_falls_back_to_openrouter_after_free_429(monkeypatch
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     free_client = MagicMock()
     free_client.responses.create.side_effect = Exception(
