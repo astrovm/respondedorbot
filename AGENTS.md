@@ -24,6 +24,7 @@
 - No docstrings or type annotations on code not being changed.
 - No error handling for scenarios that cannot happen.
 - Three similar lines is better than a premature abstraction.
+- Always add new imports at the top of the file, never inline inside functions.
 
 ## Review Rules
 
