@@ -404,10 +404,6 @@ def _refresh_with_backoff(
 
 
 __all__ = [
-    "CACHE_STALE_GRACE_BANDS",
-    "CACHE_STALE_GRACE_BCRA",
-    "TTL_BCRA",
-    "TTL_MAYORISTA_MISSING",
     "bcra_api_get",
     "bcra_fetch_latest_variables",
     "bcra_get_value_for_date",

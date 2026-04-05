@@ -7,7 +7,7 @@ from math import log
 from openai import OpenAI
 from os import environ
 from PIL import Image
-from requests.exceptions import RequestException, SSLError
+from requests.exceptions import RequestException
 from typing import (
     Dict,
     List,
@@ -24,7 +24,6 @@ from typing import (
     TypeVar,
     NamedTuple,
     TYPE_CHECKING,
-    TypedDict,
     Literal,
 )
 import ast
@@ -44,12 +43,9 @@ import traceback
 import wave
 from pykakasi import kakasi
 from mutagen import File as MutagenFile
-from openpyxl import load_workbook
-from decimal import Decimal
 import unicodedata
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse, urlunparse
-from functools import lru_cache
 
 if TYPE_CHECKING:
     from openai.types.responses import ResponseInputParam
@@ -60,11 +56,6 @@ from api.utils import (
     fmt_num,
     fmt_signed_pct,
     local_cache_get,
-    now_utc_iso,
-    parse_date_string,
-    parse_monetary_number,
-    to_ddmmyy,
-    to_es_number,
     update_local_cache,
 )
 from api.services.redis_helpers import (
@@ -115,8 +106,6 @@ from api.ai_pipeline import (
     remove_gordo_prefix as _ai_remove_gordo_prefix,
 )
 from api.chat_settings import (
-    CHAT_ADMIN_STATUS_TTL,
-    CHAT_CONFIG_DEFAULTS,
     build_config_keyboard as _chat_build_config_keyboard,
     build_config_text as _chat_build_config_text,
     coerce_bool as _chat_coerce_bool,
