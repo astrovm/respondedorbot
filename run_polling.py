@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import importlib
+import threading
+import time
 from typing import Optional
 
 
@@ -39,6 +41,18 @@ def _load_dotenv() -> None:
                 os.environ[key] = value
 
 
+def _price_refresh_loop() -> None:
+    from api.index import refresh_price_caches
+
+    time.sleep(300)  # wait 5 min after startup before first run
+    while True:
+        try:
+            refresh_price_caches()
+        except Exception as e:
+            print(f"Price cache refresh error: {e}", file=sys.stderr)
+        time.sleep(1800)  # 30 minutes
+
+
 def main() -> int:
     _load_dotenv()
 
@@ -49,6 +63,8 @@ def main() -> int:
 
     from api.index import update_telegram_bot_commands
     from api.bot_ptb import run_polling
+
+    threading.Thread(target=_price_refresh_loop, daemon=True).start()
 
     try:
         update_telegram_bot_commands()
