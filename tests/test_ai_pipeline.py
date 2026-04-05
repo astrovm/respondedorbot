@@ -46,17 +46,25 @@ def test_openrouter_config_helpers(monkeypatch):
     )
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
     monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
 
     with patch("api.index.OpenAI") as mock_openai:
         client = _get_openrouter_client(default_headers={"x-test": "1"})
 
     assert _get_openrouter_api_key() == "openrouter_key"
-    assert _get_openrouter_base_url() == "https://openrouter.example/v1"
+    assert (
+        _get_openrouter_base_url()
+        == "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
+    )
     assert client is mock_openai.return_value
     assert mock_openai.call_args.kwargs["api_key"] == "openrouter_key"
-    assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.example/v1"
+    assert (
+        mock_openai.call_args.kwargs["base_url"]
+        == "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
+    )
     assert (
         mock_openai.call_args.kwargs["default_headers"]["cf-aig-authorization"]
         == "Bearer cf-token"
@@ -89,13 +97,15 @@ def test_should_allow_openrouter_fallback_requires_openrouter_and_only_for_chat_
     from api.index import should_allow_openrouter_fallback
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("CF_AIG_OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
     assert should_allow_openrouter_fallback("chat") is False
     assert should_allow_openrouter_fallback("vision") is False
     assert should_allow_openrouter_fallback("compound") is False
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
     monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
     assert should_allow_openrouter_fallback("chat") is True
     assert should_allow_openrouter_fallback("vision") is True
@@ -952,7 +962,9 @@ def test_complete_with_providers_does_not_call_openrouter_after_groq_chain(monke
     messages = [{"role": "user", "content": "hello"}]
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     with (
         patch("api.index.get_groq_ai_response") as mock_groq,
@@ -975,7 +987,9 @@ def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypa
     response_meta = {}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     openrouter_result = GroqUsageResult(
         kind="chat",
@@ -1174,7 +1188,9 @@ def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatc
     index_module._provider_backoff_until.clear()
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     free_client = MagicMock()
     free_client.chat.completions.create.side_effect = Exception(
@@ -1222,7 +1238,9 @@ def test_get_openrouter_ai_response_returns_none_when_provider_raises(monkeypatc
     from api.index import _get_openrouter_ai_response_result
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     failing_client = MagicMock()
     failing_client.chat.completions.create.side_effect = Exception("boom")
@@ -1242,7 +1260,9 @@ def test_describe_image_openrouter_result_returns_none_when_provider_raises(
     from api.index import _describe_image_openrouter_result
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     failing_client = MagicMock()
     failing_client.chat.completions.create.side_effect = Exception("boom")
@@ -1257,7 +1277,9 @@ def test_get_openrouter_ai_response_skips_unmapped_model_without_client(monkeypa
     from api.index import _get_openrouter_ai_response_result
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+    )
 
     with (
         patch("api.index._get_openrouter_model_for_groq_model", return_value=None),

@@ -952,11 +952,24 @@ def _get_openrouter_api_key() -> Optional[str]:
 
 
 def _get_openrouter_base_url() -> Optional[str]:
-    value = environ.get("CF_AIG_OPENROUTER_BASE_URL")
+    value = environ.get("CF_AIG_BASE_URL")
     if value is None:
-        return None
+        return "https://openrouter.ai/api/v1"
+
     value = str(value).strip()
-    return value or None
+    if not value:
+        return "https://openrouter.ai/api/v1"
+    if "gateway.ai.cloudflare.com" not in value:
+        return "https://openrouter.ai/api/v1"
+
+    parsed = urlparse(value)
+    path = parsed.path.rstrip("/")
+    if not path:
+        return "https://openrouter.ai/api/v1"
+
+    base_path = path.rsplit("/", 1)[0]
+    openrouter_path = f"{base_path}/openrouter" if base_path else "/openrouter"
+    return urlunparse(parsed._replace(path=openrouter_path))
 
 
 def _get_openrouter_client(
