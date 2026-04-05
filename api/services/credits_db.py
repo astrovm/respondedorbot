@@ -28,6 +28,7 @@ AI_LEDGER_EVENT_TYPES = (
 )
 CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_002
 CREDIT_UNITS_MIGRATION_NAME = "credit_amounts_scaled_to_tenths_v1"
+AI_LEDGER_RETENTION_DAYS = 30
 
 
 class CreditsDBError(RuntimeError):
@@ -867,7 +868,9 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
     return results
 
 
-def purge_expired_ai_ledger_events(retention_days: int = 7) -> Dict[str, Any]:
+def purge_expired_ai_ledger_events(
+    retention_days: int = AI_LEDGER_RETENTION_DAYS,
+) -> Dict[str, Any]:
     """Delete AI ledger events older than the retention window."""
 
     ensure_schema()

@@ -1054,6 +1054,38 @@ def test_cached_requests_basic():
         assert result["data"] == {"key": "value"}
 
 
+def test_cached_requests_sets_ttl_and_namespaced_keys(monkeypatch):
+    from api.index import REQUEST_CACHE_HISTORY_TTL, cached_requests
+
+    writes = []
+
+    class FakeRedis:
+        def get(self, _key):
+            return None
+
+    class FakeResponse:
+        text = '{"ok": true}'
+
+        def raise_for_status(self):
+            return None
+
+    def fake_set_json(_client, key, value, ttl=None):
+        writes.append((key, ttl, value))
+        return True
+
+    monkeypatch.setattr("api.index.config_redis", lambda: FakeRedis())
+    monkeypatch.setattr("api.index.redis_get_json", lambda client, key: None)
+    monkeypatch.setattr("api.index.redis_set_json", fake_set_json)
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+
+    cached_requests("https://example.com", None, None, 300, hourly_cache=True)
+
+    assert writes[0][0].startswith("request_cache:")
+    assert writes[0][1] == 300
+    assert writes[1][0].startswith("request_cache_history:")
+    assert writes[1][1] == REQUEST_CACHE_HISTORY_TTL
+
+
 def test_convert_base_basic():
     from api.index import convert_base
 
@@ -1187,9 +1219,9 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
     def fake_redis_get_json(client, key):
         return None
 
-    def fake_redis_set_json(client, key, value):
+    def fake_redis_set_json(client, key, value, ttl=None):
         write_calls.append(key)
-        if len(key) > 64:
+        if key.startswith("request_cache_history:"):
             hourly_exists["value"] = True
 
     class FakeRedis:
@@ -1217,12 +1249,16 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
     monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
-    first_count = len([k for k in write_calls if len(k) > 64])
+    first_count = len(
+        [k for k in write_calls if k.startswith("request_cache_history:")]
+    )
     assert first_count >= 1
 
     write_calls.clear()
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
-    second_hourly_writes = len([k for k in write_calls if len(k) > 64])
+    second_hourly_writes = len(
+        [k for k in write_calls if k.startswith("request_cache_history:")]
+    )
     assert second_hourly_writes == 0
 
 
