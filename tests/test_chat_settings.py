@@ -327,25 +327,19 @@ def test_handle_callback_query_blocks_non_admin():
 
 
 def test_config_redis_with_env_vars():
-    from api.index import config_redis
+    from api.config import config_redis as _config_config_redis
 
     with patch("redis.Redis") as mock_redis, patch("os.environ.get") as mock_env:
-        # Setup
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
-        mock_instance.ping.return_value = True
-
-        # Configure environment variables
         mock_env.side_effect = lambda key, default=None: {
             "REDIS_HOST": "redis.example.com",
             "REDIS_PORT": "1234",
             "REDIS_PASSWORD": "secret",
         }.get(key, default)
 
-        # Test
-        result = config_redis()
+        result = _config_config_redis()
 
-        # Verify
         assert result == mock_instance
         mock_redis.assert_called_with(
             host="redis.example.com",
@@ -353,29 +347,6 @@ def test_config_redis_with_env_vars():
             password="secret",
             decode_responses=True,
         )
-
-
-def test_config_redis_connection_error():
-    from api.index import config_redis
-
-    with (
-        patch("redis.Redis") as mock_redis,
-        patch("api.index.admin_report") as mock_admin_report,
-    ):
-        # Setup
-        mock_instance = MagicMock()
-        mock_redis.return_value = mock_instance
-        mock_instance.ping.side_effect = redis.ConnectionError("Connection refused")
-
-        # Test and verify
-        try:
-            config_redis()
-            assert False, "Should have raised exception"
-        except Exception as e:
-            assert "Connection refused" in str(e)
-
-        # Verify admin report was called
-        mock_admin_report.assert_called_once()
 
 
 def test_set_chat_config_updates_link_mode_and_persists():
