@@ -400,7 +400,7 @@ def test_handle_msg_purgeailog_admin_purges_expired_ai_events():
         patch("api.index.credits_db_service.is_configured", return_value=True),
         patch(
             "api.index.credits_db_service.purge_expired_ai_ledger_events",
-            return_value={"deleted_rows": 7, "retention_days": 7},
+            return_value={"deleted_rows": 7, "retention_days": 30},
         ) as mock_purge,
         patch(
             "os.environ.get",
@@ -412,9 +412,9 @@ def test_handle_msg_purgeailog_admin_purges_expired_ai_events():
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_purge.assert_called_once_with(retention_days=7)
+    mock_purge.assert_called_once_with(retention_days=30)
     sent_text = mock_send_msg.call_args[0][1]
-    assert "purgué 7 eventos ai del ledger con más de 7 días" in sent_text
+    assert "purgué 7 eventos ai del ledger con más de 30 días" in sent_text
 
 
 def test_handle_msg_successful_payment_credits_user():

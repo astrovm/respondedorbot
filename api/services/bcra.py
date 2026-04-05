@@ -27,6 +27,7 @@ import requests
 from openpyxl import load_workbook
 from urllib3.exceptions import InsecureRequestWarning
 
+from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.utils import (
     fmt_num,
@@ -321,7 +322,12 @@ def _persist_cache_entry(
                 on_error(exc)
         else:
             try:
-                redis_set_json(redis_client, f"{cache_key}:last_success", payload)
+                redis_set_json(
+                    redis_client,
+                    f"{cache_key}:last_success",
+                    payload,
+                    ttl=last_success_ttl(ttl, stale_grace),
+                )
             except Exception:
                 pass
             if on_redis_write is not None:
@@ -795,6 +801,7 @@ def bcra_get_value_for_date(desc_substr: str, date_iso: str) -> Optional[float]:
                     redis_client,
                     f"bcra_mayorista:{date_iso}",
                     {"value": val_f, "date": to_ddmmyy(date_iso)},
+                    ttl=LAST_SUCCESS_MIN_TTL,
                 )
         except Exception:
             pass
@@ -841,6 +848,7 @@ def cache_bcra_variables(variables: Dict[str, Any], ttl: int = TTL_BCRA) -> None
                 redis_client,
                 f"bcra_mayorista:{date_key}",
                 {"value": value_num, "date": str(raw_data.get("date", ""))},
+                ttl=LAST_SUCCESS_MIN_TTL,
             )
             break
 

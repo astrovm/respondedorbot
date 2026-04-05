@@ -1,0 +1,12 @@
+[Unit]
+Description=respondedorbot cache and ledger maintenance
+After=respondedorbot.service respondedorbot-redis.service
+Requires=respondedorbot.service respondedorbot-redis.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sh -lc 'container=$(/usr/bin/podman ps --format "{{.Names}}" | /usr/bin/grep -E "^(respondedorbot|systemd-respondedorbot)$" | /usr/bin/head -n1); test -n "$container"; exec /usr/bin/podman exec "$container" python /app/run_maintenance.py'
+ExecStartPost=/usr/bin/sh -lc 'df -h /; du -sh %h/.local/share/containers 2>/dev/null || true; podman system df'
+
+[Install]
+WantedBy=default.target
