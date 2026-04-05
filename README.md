@@ -28,8 +28,6 @@ python run_polling.py
 
 ## Configuration
 
-Copy `.env.example` and fill in the values:
-
 | Variable | Description |
 | --- | --- |
 | `BOT_SYSTEM_PROMPT` | Complete AI personality prompt |
@@ -48,9 +46,8 @@ Copy `.env.example` and fill in the values:
 ## Project layout
 
 - `api/` - application code
-- `api/services/maintenance.py` - Redis/ledger cleanup logic
 - `quadlets/` - Podman Quadlet container definitions
-- `systemd/` - user systemd service and timer units for maintenance and Podman prune
+- `systemd/` - systemd service and timer units
 - `run_polling.py` - bot entrypoint
 - `run_maintenance.py` - maintenance entrypoint (run inside the container)
 - `tests/` - test suite
@@ -77,10 +74,7 @@ cp quadlets/* ~/.config/containers/systemd/
 
 mkdir -p ~/respondedorbot
 cp .env.example ~/respondedorbot/.env
-# Edit ~/respondedorbot/.env
-# REDIS_HOST=respondedorbot-redis
-# REDIS_PORT=6379
-# REDIS_PASSWORD=
+# Edit ~/respondedorbot/.env — set REDIS_HOST=respondedorbot-redis
 
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus
@@ -92,37 +86,20 @@ systemctl --user start respondedorbot.service
 
 ### Persist across reboots
 
-`systemctl --user enable` on Quadlet-generated units fails on some distros.
-Use symlinks instead:
+`systemctl --user enable` fails on Quadlet-generated units on some distros — use symlinks instead:
 
 ```bash
 mkdir -p ~/.config/systemd/user/default.target.wants
-
 ln -sf ~/.config/containers/systemd/respondedorbot.container \
   ~/.config/systemd/user/default.target.wants/respondedorbot.container
-
 ln -sf ~/.config/containers/systemd/respondedorbot-redis.container \
   ~/.config/systemd/user/default.target.wants/respondedorbot-redis.container
-
 systemctl --user daemon-reload
 ```
 
-### Useful commands
+### Maintenance timers
 
 ```bash
-# Logs
-journalctl --user -fu respondedorbot.service
-
-# Status
-systemctl --user status respondedorbot.service --no-pager
-
-# Stop
-systemctl --user stop respondedorbot.service respondedorbot-redis.service
-
-# Auto-update images
-systemctl --user enable --now podman-auto-update.timer
-
-# Automatic cache and ledger maintenance
 cp systemd/respondedorbot-maintenance.* ~/.config/systemd/user/
 cp systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -130,18 +107,13 @@ systemctl --user enable --now respondedorbot-maintenance.timer
 systemctl --user enable --now respondedorbot-podman-prune.timer
 ```
 
-## Storage hygiene
-
-- Journald, APT, and tmp cleanup are host-level responsibilities.
-- Redis cache/state cleanup and AI ledger cleanup run via `run_maintenance.py`.
-- Rootless Podman image growth is bounded by `respondedorbot-podman-prune.timer`.
-- Check current usage with:
+### Useful commands
 
 ```bash
-journalctl --disk-usage
-df -h /
-du -sh ~/.local/share/containers
-podman system df
+journalctl --user -fu respondedorbot.service
+systemctl --user status respondedorbot.service --no-pager
+systemctl --user stop respondedorbot.service respondedorbot-redis.service
+systemctl --user enable --now podman-auto-update.timer
 podman exec systemd-respondedorbot python /app/run_maintenance.py
 ```
 
