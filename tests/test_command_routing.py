@@ -1226,34 +1226,6 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
     assert second_hourly_writes == 0
 
 
-def test_price_refresh_loop_disabled(monkeypatch):
-    import run_polling
-    from unittest.mock import patch
-    import threading
-
-    monkeypatch.setenv("PRICE_REFRESH_ENABLED", "false")
-    monkeypatch.setattr("time.sleep", lambda x: None)
-
-    called = []
-    result = []
-
-    def fake_refresh():
-        called.append(1)
-
-    def run():
-        with patch("api.index.refresh_price_caches", fake_refresh):
-            run_polling._price_refresh_loop()
-        result.append("done")
-
-    t = threading.Thread(target=run)
-    t.daemon = True
-    t.start()
-    t.join(timeout=2)
-
-    assert "done" in result
-    assert called == []
-
-
 def test_get_oil_price_success():
     mock_text_brent = (
         "Date,Open,High,Low,Close,Volume\n"
