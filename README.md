@@ -40,7 +40,6 @@ python run_polling.py
 | `GROQ_API_KEY` | Paid Groq API key used after free Groq for compound flows |
 | `GROQ_FREE_API_KEY` | Optional free-tier key for free Groq chat/vision/transcribe |
 | `OPENROUTER_API_KEY` | OpenRouter API key used for chat/vision fallback |
-| `CF_AIG_OPENROUTER_BASE_URL` | OpenRouter base URL (for example `https://openrouter.ai/api/v1`) |
 | `CF_AIG_TOKEN` | Cloudflare AI Gateway token forwarded to OpenRouter requests |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
