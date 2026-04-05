@@ -62,11 +62,9 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/balance",), "balance_command", False, False),
     (("/printcredits",), "printcredits_command", False, True),
     (("/creditlog",), "creditlog_command", False, True),
-    (("/purgeailog",), "purgeailog_command", False, False),
     (("/transfer",), "transfer_command", False, True),
     (("/gm",), "get_good_morning", False, False),
     (("/gn",), "get_good_night", False, False),
-    (("/updatecommands",), "update_commands_command", False, False),
 )
 
 LINK_REPLACEMENT_DOMAINS = (

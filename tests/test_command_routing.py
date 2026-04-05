@@ -805,7 +805,8 @@ def test_initialize_commands():
     assert "/balance" in commands
     assert "/printcredits" in commands
     assert "/creditlog" in commands
-    assert "/purgeailog" in commands
+    assert "/purgeailog" not in commands
+    assert "/updatecommands" not in commands
     assert "/transfer" in commands
 
     # Test that AI commands are properly marked
