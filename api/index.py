@@ -3290,7 +3290,6 @@ def send_animation(
 # Giphy API constants
 GIPHY_API_URL = "https://api.giphy.com/v1/gifs"
 TTL_GIPHY_POOL = 86400  # 24 hours
-GIPHY_POOL_SIZE = 50
 
 GIPHY_GM_TERMS = [
     "good morning",
