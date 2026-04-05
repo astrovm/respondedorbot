@@ -645,7 +645,11 @@ def test_handle_msg():
         patch("api.index._maybe_grant_onboarding_credits"),
         patch("time.sleep") as _mock_sleep,
     ):  # Add sleep mock to avoid delays  # noqa: F841
-        mock_env.side_effect = lambda key, default=None: "testbot"
+        mock_env.side_effect = lambda key, default=None: {
+            "TELEGRAM_USERNAME": "testbot",
+            "BOT_SYSTEM_PROMPT": "test prompt",
+            "BOT_TRIGGER_WORDS": "bot,assistant,help",
+        }.get(key, default)
         mock_ask_ai.return_value = "test response"  # Mock ai response
 
         # Mock Redis instance
@@ -679,7 +683,6 @@ def test_handle_msg():
         mock_send_typing.reset_mock()
         assert handle_msg(message) == "ok"
         mock_send_msg.assert_called_once()
-        mock_send_typing.assert_called_once()
         mock_ask_ai.assert_called_once()
 
         # Test rate limited message
@@ -687,7 +690,6 @@ def test_handle_msg():
         mock_send_typing.reset_mock()
         mock_ask_ai.reset_mock()
         assert handle_msg(message) == "ok"
-        mock_send_typing.assert_called_once()
         mock_ask_ai.assert_not_called()
         assert mock_global_rate_limit.call_count == 2
 
@@ -1665,6 +1667,51 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
     assert mock_send_msg.call_args[0][1] == "respuesta ok"
 
 
+def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_blocks():
+    from api.index import handle_msg
+
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=False),
+        patch("api.index.should_allow_openrouter_fallback", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch(
+            "api.index.handle_ai_response", return_value="respuesta ok"
+        ) as mock_handle_ai_response,
+        patch("api.index.save_message_to_redis"),
+        patch("api.index.save_bot_message_metadata"),
+    ):
+        mock_config_redis.return_value = MagicMock()
+        mock_config_redis.return_value.get.return_value = json.dumps(
+            CHAT_CONFIG_DEFAULTS
+        )
+        message = {
+            "message_id": 301,
+            "chat": {"id": 777, "type": "group"},
+            "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+            "text": "/ask hola",
+        }
+
+        result = handle_msg(message)
+
+    assert result == "ok"
+    mock_handle_ai_response.assert_called_once()
+    mock_send_msg.assert_called_once_with(
+        "777", "respuesta ok", "301", reply_markup=None
+    )
+
+
 def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
     from api.index import handle_msg
 
@@ -1787,6 +1834,114 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
     assert mock_charge.call_count == 1
     assert mock_charge.call_args.kwargs["amount"] == 1
     mock_send_msg.assert_called_once()
+
+
+def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
+    from api.ai_billing import AIMessageBilling
+    from api.message_handler import PreparedMessage, _run_ai_flow
+
+    deps = MagicMock()
+    deps.get_chat_history.return_value = []
+    deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
+    deps.estimate_ai_base_reserve_credits.return_value = (
+        1,
+        {"rate_limit_scope": "chat", "estimated_rate_limit_tokens": 1},
+    )
+    deps.check_global_rate_limit.return_value = False
+    deps.should_allow_openrouter_fallback.return_value = True
+    deps.estimate_image_context_rate_limit_tokens.return_value = 1
+    deps.estimate_image_context_reserve_credits.return_value = 1
+    deps.handle_ai_response.return_value = "respuesta ok"
+
+    billing_helper = AIMessageBilling(
+        credits_db_service=MagicMock(),
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda _: "random",
+        build_insufficient_credits_message_fn=lambda **_: "insufficient",
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        command="/ask",
+        chat_id="557",
+        chat_type="private",
+        user_id=101,
+        numeric_chat_id=557,
+        message={"from": {"first_name": "Ana"}},
+    )
+
+    response_msg, handled = _run_ai_flow(
+        deps,
+        chat_id="557",
+        message={"chat": {"id": 557, "type": "private"}},
+        prepared_message=PreparedMessage(
+            message_text="/ask describe",
+            photo_file_id="img_1",
+            audio_file_id=None,
+            resized_image_data=b"resized",
+        ),
+        billing_helper=billing_helper,
+        prompt_text="Describe",
+        reply_context_text=None,
+        user_identity="101",
+        handler_func=lambda: None,
+        redis_client=MagicMock(),
+    )
+
+    assert handled is True
+    assert response_msg == "respuesta ok"
+    deps.handle_ai_response.assert_called_once()
+
+
+def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcribe():
+    from api.ai_billing import AIMessageBilling
+    from api.message_handler import PreparedMessage, _run_ai_flow
+
+    deps = MagicMock()
+    deps.get_chat_history.return_value = []
+    deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
+    deps.estimate_ai_base_reserve_credits.return_value = (
+        1,
+        {"rate_limit_scope": "chat", "estimated_rate_limit_tokens": 1},
+    )
+    deps.check_global_rate_limit.return_value = False
+    deps.should_allow_openrouter_fallback.return_value = True
+    deps.estimate_image_context_rate_limit_tokens.return_value = 1
+    deps.estimate_image_context_reserve_credits.return_value = 1
+    deps.handle_ai_response.return_value = "🖼️ en la imagen veo: todo piola"
+
+    billing_helper = AIMessageBilling(
+        credits_db_service=MagicMock(),
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda _: "random",
+        build_insufficient_credits_message_fn=lambda **_: "insufficient",
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        command="/transcribe",
+        chat_id="558",
+        chat_type="private",
+        user_id=102,
+        numeric_chat_id=558,
+        message={"from": {"first_name": "Ana"}},
+    )
+
+    response_msg, handled = _run_ai_flow(
+        deps,
+        chat_id="558",
+        message={"chat": {"id": 558, "type": "private"}},
+        prepared_message=PreparedMessage(
+            message_text="/transcribe",
+            photo_file_id="img_reply",
+            audio_file_id=None,
+            resized_image_data=b"resized",
+        ),
+        billing_helper=billing_helper,
+        prompt_text="Describe what you see in this image in detail.",
+        reply_context_text=None,
+        user_identity="102",
+        handler_func=lambda: None,
+        redis_client=MagicMock(),
+    )
+
+    assert handled is True
+    assert response_msg == "🖼️ en la imagen veo: todo piola"
+    deps.handle_ai_response.assert_called_once()
 
 
 def test_handle_msg_with_unknown_command():

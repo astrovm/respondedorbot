@@ -10,6 +10,98 @@ def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
     ]
 
 
+def test_get_groq_accounts_for_scope_is_scope_aware(monkeypatch):
+    from api.index import _get_groq_accounts_for_scope
+
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free-key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid-key")
+
+    assert _get_groq_accounts_for_scope("chat") == ["free"]
+    assert _get_groq_accounts_for_scope("vision") == ["free"]
+    assert _get_groq_accounts_for_scope("transcribe") == ["free"]
+    assert _get_groq_accounts_for_scope("compound") == ["free", "paid"]
+
+
+def test_get_openrouter_model_for_groq_model_maps_supported_models():
+    from api.index import _get_openrouter_model_for_groq_model
+
+    assert (
+        _get_openrouter_model_for_groq_model("groq/moonshotai/kimi-k2-instruct-0905")
+        == "moonshotai/kimi-k2-0905"
+    )
+    assert (
+        _get_openrouter_model_for_groq_model(
+            "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+        )
+        == "meta-llama/llama-4-scout"
+    )
+    assert _get_openrouter_model_for_groq_model("groq/whisper-large-v3") is None
+
+
+def test_openrouter_config_helpers(monkeypatch):
+    from api.index import (
+        _get_openrouter_api_key,
+        _get_openrouter_base_url,
+        _get_openrouter_client,
+    )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
+
+    with patch("api.index.OpenAI") as mock_openai:
+        client = _get_openrouter_client(default_headers={"x-test": "1"})
+
+    assert _get_openrouter_api_key() == "openrouter_key"
+    assert _get_openrouter_base_url() == "https://openrouter.example/v1"
+    assert client is mock_openai.return_value
+    assert mock_openai.call_args.kwargs["api_key"] == "openrouter_key"
+    assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.example/v1"
+    assert (
+        mock_openai.call_args.kwargs["default_headers"]["cf-aig-authorization"]
+        == "Bearer cf-token"
+    )
+
+
+def test_check_global_rate_limit_uses_scope_specific_accounts(monkeypatch):
+    from api.index import check_global_rate_limit
+
+    calls = []
+
+    def fake_peek(account, scope, **kwargs):
+        calls.append((account, scope))
+        return True
+
+    monkeypatch.setattr("api.index._get_groq_accounts_for_scope", lambda scope: [scope])
+    monkeypatch.setattr("api.index._peek_groq_rate_limit", fake_peek)
+
+    assert check_global_rate_limit(None, scope="chat") is True
+    assert calls == [("chat", "chat")]
+
+    calls.clear()
+    assert check_global_rate_limit(None, scope="compound") is True
+    assert calls == [("compound", "compound")]
+
+
+def test_should_allow_openrouter_fallback_requires_openrouter_and_only_for_chat_vision(
+    monkeypatch,
+):
+    from api.index import should_allow_openrouter_fallback
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("CF_AIG_OPENROUTER_BASE_URL", raising=False)
+    assert should_allow_openrouter_fallback("chat") is False
+    assert should_allow_openrouter_fallback("vision") is False
+    assert should_allow_openrouter_fallback("compound") is False
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
+    assert should_allow_openrouter_fallback("chat") is True
+    assert should_allow_openrouter_fallback("vision") is True
+    assert should_allow_openrouter_fallback("compound") is False
+
+
 def test_build_ai_messages():
     from api.index import build_ai_messages
 
@@ -841,27 +933,71 @@ def test_complete_with_providers_returns_none_when_groq_fails():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq:
+    with (
+        patch("api.index.get_groq_ai_response") as mock_groq,
+        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
+    ):
         mock_groq.return_value = None
+        mock_openrouter.return_value = None
 
         result = complete_with_providers(system_message, messages)
 
         assert result is None
         assert mock_groq.call_count == 1
+        assert mock_openrouter.call_count == 0
 
 
-def test_complete_with_providers_all_fail():
-    """Test complete_with_providers when all providers fail"""
+def test_complete_with_providers_does_not_call_openrouter_after_groq_chain(monkeypatch):
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq:
-        mock_groq.return_value = None
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+
+    with (
+        patch("api.index.get_groq_ai_response") as mock_groq,
+        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
+    ):
+        mock_groq.return_value = "OpenRouter response"
 
         result = complete_with_providers(system_message, messages)
 
-        assert result is None
+        assert result == "OpenRouter response"
         assert mock_groq.call_count == 1
+        assert mock_openrouter.call_count == 0
+
+
+def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypatch):
+    from api.groq_billing import GroqUsageResult
+
+    system_message = {"role": "system", "content": "test"}
+    messages = [{"role": "user", "content": "hello"}]
+    response_meta = {}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+
+    openrouter_result = GroqUsageResult(
+        kind="chat",
+        text="OpenRouter response",
+        model="moonshotai/kimi-k2-0905",
+        usage={"input_tokens": 100, "output_tokens": 50},
+        metadata={"provider": "openrouter"},
+    )
+
+    with (
+        patch("api.index.get_groq_ai_response") as mock_groq,
+        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
+    ):
+        mock_groq.return_value = None
+        mock_openrouter.return_value = openrouter_result
+
+        result = complete_with_providers(
+            system_message, messages, response_meta=response_meta
+        )
+
+    assert result == "OpenRouter response"
+    assert response_meta["billing_segments"] == [openrouter_result.billing_segment()]
 
 
 def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
@@ -869,9 +1005,9 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
 
     from api import index as index_module
 
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
     index_module._provider_backoff_until[
-        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+        index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
     ] = time.time() + 30
 
     with patch("api.index.OpenAI") as mock_openai:
@@ -885,7 +1021,7 @@ def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
 
 
 def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
 
     with (
         patch("api.index._reserve_groq_rate_limit", return_value=None),
@@ -907,7 +1043,7 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
 
     index_module._provider_backoff_until.clear()
 
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
 
     fake_client = MagicMock()
     fake_client.chat.completions.create.side_effect = Exception(
@@ -922,7 +1058,7 @@ def test_get_groq_ai_response_sets_backoff_on_rate_limit(monkeypatch):
 
         assert result is None
         remaining = index_module.get_provider_backoff_remaining(
-            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+            index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
         )
         assert remaining > 0
         assert mock_openai.call_count == 1
@@ -949,7 +1085,7 @@ def test_get_groq_ai_response_uses_retry_after_header_for_scope_backoff(monkeypa
             self.response = MagicMock(headers={"retry-after": "30"})
 
     index_module._provider_backoff_until.clear()
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
 
     fake_client = MagicMock()
     fake_client.chat.completions.create.side_effect = RateLimitError()
@@ -962,7 +1098,7 @@ def test_get_groq_ai_response_uses_retry_after_header_for_scope_backoff(monkeypa
 
     assert result is None
     remaining = index_module.get_provider_backoff_remaining(
-        index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+        index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
     )
     assert 0 < remaining <= 30
 
@@ -992,7 +1128,7 @@ def test_get_groq_ai_response_prefers_free_account(monkeypatch):
     assert mock_openai.call_args.kwargs["api_key"] == "free_key"
 
 
-def test_get_groq_ai_response_falls_back_to_paid_when_free_local_limit_hits(
+def test_get_groq_ai_response_does_not_fall_back_to_paid_when_free_local_limit_hits(
     monkeypatch,
 ):
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
@@ -1028,57 +1164,112 @@ def test_get_groq_ai_response_falls_back_to_paid_when_free_local_limit_hits(
             [{"role": "user", "content": "hola"}],
         )
 
-    assert result == "paid fallback"
-    assert mock_openai.call_count == 1
-    assert mock_openai.call_args.kwargs["api_key"] == "paid_key"
+    assert result is None
+    mock_openai.assert_not_called()
 
 
-def test_get_groq_ai_response_falls_back_to_paid_after_free_429(monkeypatch):
+def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatch):
     from api import index as index_module
 
     index_module._provider_backoff_until.clear()
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
 
     free_client = MagicMock()
     free_client.chat.completions.create.side_effect = Exception(
         "Error code: 429 - rate limit reached"
     )
 
-    paid_choice = MagicMock()
-    paid_choice.message.content = "paid fallback"
-    paid_choice.finish_reason = "stop"
+    openrouter_choice = MagicMock()
+    openrouter_choice.message.content = "openrouter fallback"
+    openrouter_choice.finish_reason = "stop"
 
-    paid_response = MagicMock()
-    paid_response.choices = [paid_choice]
+    openrouter_response = MagicMock()
+    openrouter_response.choices = [openrouter_choice]
 
-    paid_client = MagicMock()
-    paid_client.chat.completions.create.return_value = paid_response
+    openrouter_client = MagicMock()
+    openrouter_client.chat.completions.create.return_value = openrouter_response
 
     with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
+        "api.index.OpenAI", side_effect=[free_client, openrouter_client]
     ) as mock_openai:
         result = get_groq_ai_response(
             {"role": "system", "content": "system"},
             [{"role": "user", "content": "hola"}],
         )
 
-    assert result == "paid fallback"
+    assert result == "openrouter fallback"
     assert mock_openai.call_count == 2
     assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
-    assert (
-        index_module.get_provider_backoff_remaining(
-            index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "openrouter_key"
+
+
+def test_get_groq_ai_response_does_not_use_paid_account_for_non_compound(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+
+    with patch("api.index.OpenAI") as mock_openai:
+        result = get_groq_ai_response(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
         )
-        > 0
-    )
-    assert (
-        index_module.get_provider_backoff_remaining(
-            index_module._get_groq_backoff_key(index_module.GROQ_PAID_ACCOUNT, "chat")
+
+    assert result is None
+    mock_openai.assert_not_called()
+
+
+def test_get_openrouter_ai_response_returns_none_when_provider_raises(monkeypatch):
+    from api.index import _get_openrouter_ai_response_result
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+
+    failing_client = MagicMock()
+    failing_client.chat.completions.create.side_effect = Exception("boom")
+
+    with patch("api.index.OpenAI", return_value=failing_client):
+        result = _get_openrouter_ai_response_result(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
         )
-        == 0
-    )
+
+    assert result is None
+
+
+def test_describe_image_openrouter_result_returns_none_when_provider_raises(
+    monkeypatch,
+):
+    from api.index import _describe_image_openrouter_result
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+
+    failing_client = MagicMock()
+    failing_client.chat.completions.create.side_effect = Exception("boom")
+
+    with patch("api.index.OpenAI", return_value=failing_client):
+        result = _describe_image_openrouter_result(b"image-bytes")
+
+    assert result is None
+
+
+def test_get_openrouter_ai_response_skips_unmapped_model_without_client(monkeypatch):
+    from api.index import _get_openrouter_ai_response_result
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
+
+    with (
+        patch("api.index._get_openrouter_model_for_groq_model", return_value=None),
+        patch("api.index.OpenAI") as mock_openai,
+    ):
+        result = _get_openrouter_ai_response_result(
+            {"role": "system", "content": "system"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is None
+    mock_openai.assert_not_called()
 
 
 def test_get_groq_compound_response_skips_call_when_local_rate_limit_hits(monkeypatch):

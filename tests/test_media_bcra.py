@@ -1367,7 +1367,7 @@ def test_describe_image_groq_success():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         fake_response = MagicMock()
@@ -1392,7 +1392,7 @@ def test_describe_image_groq_api_error():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         fake_client = MagicMock()
@@ -1413,7 +1413,7 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         result = describe_image_groq(b"image_data")
@@ -1422,38 +1422,37 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
         mock_openai.assert_not_called()
 
 
-def test_describe_image_groq_falls_back_to_paid_after_free_429(monkeypatch):
+def test_describe_image_groq_falls_back_to_openrouter_after_free_429(monkeypatch):
     from api.index import describe_image_groq
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv("CF_AIG_OPENROUTER_BASE_URL", "https://openrouter.example/v1")
 
     free_client = MagicMock()
     free_client.responses.create.side_effect = Exception(
         "Error code: 429 - rate limit reached"
     )
 
-    paid_response = MagicMock()
-    paid_response.output_text = "A paid fallback image description"
+    openrouter_choice = MagicMock()
+    openrouter_choice.message.content = "A openrouter fallback image description"
+    openrouter_choice.finish_reason = "stop"
 
-    paid_client = MagicMock()
-    paid_client.responses.create.return_value = paid_response
+    openrouter_response = MagicMock()
+    openrouter_response.choices = [openrouter_choice]
+
+    openrouter_client = MagicMock()
+    openrouter_client.chat.completions.create.return_value = openrouter_response
 
     with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
+        "api.index.OpenAI", side_effect=[free_client, openrouter_client]
     ) as mock_openai:
         result = describe_image_groq(b"image_data")
 
-    assert result == "A paid fallback image description"
+    assert result == "A openrouter fallback image description"
     assert mock_openai.call_count == 2
     assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
-    assert (
-        index.get_provider_backoff_remaining(
-            index._get_groq_backoff_key(index.GROQ_FREE_ACCOUNT, "vision")
-        )
-        > 0
-    )
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "openrouter_key"
 
 
 def test_transcribe_audio_groq_success():
@@ -1465,7 +1464,7 @@ def test_transcribe_audio_groq_success():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         fake_response = MagicMock()
@@ -1490,7 +1489,7 @@ def test_transcribe_audio_groq_network_error():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         fake_client = MagicMock()
@@ -1511,7 +1510,7 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
         patch("api.index.OpenAI") as mock_openai,
     ):
         mock_env.side_effect = lambda key, default=None: {
-            "GROQ_API_KEY": "test_api_key",
+            "GROQ_FREE_API_KEY": "test_api_key",
         }.get(key, default)
 
         result = transcribe_audio_groq(b"audio_data")
@@ -1520,7 +1519,7 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
         mock_openai.assert_not_called()
 
 
-def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
+def test_transcribe_audio_groq_does_not_fall_back_to_paid_after_free_429(monkeypatch):
     from api.index import transcribe_audio_groq
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
@@ -1531,27 +1530,12 @@ def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
         "Error code: 429 - rate limit reached"
     )
 
-    paid_response = MagicMock()
-    paid_response.text = "paid fallback transcription"
-
-    paid_client = MagicMock()
-    paid_client.audio.transcriptions.create.return_value = paid_response
-
-    with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
-    ) as mock_openai:
+    with patch("api.index.OpenAI", return_value=free_client) as mock_openai:
         result = transcribe_audio_groq(b"audio_data")
 
-    assert result == "paid fallback transcription"
-    assert mock_openai.call_count == 2
+    assert result is None
+    assert mock_openai.call_count == 1
     assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
-    assert (
-        index.get_provider_backoff_remaining(
-            index._get_groq_backoff_key(index.GROQ_FREE_ACCOUNT, "transcribe")
-        )
-        > 0
-    )
 
 
 # Tests for video transcription support

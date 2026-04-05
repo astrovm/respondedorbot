@@ -6,11 +6,11 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 
 ## Features
 
-- **AI chat**: configurable personality powered by Groq, responds to trigger words in groups
+- **AI chat**: configurable personality powered by Groq with OpenRouter fallback for chat/vision when local Groq is exhausted
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
 - **BCRA economic data**: `/bcra`, `/variables`
-- **Media**: audio transcription (Whisper) and image description (vision) via `/transcribe`
-- **Web search**: `/buscar` / `/search` using Groq Compound
+- **Media**: audio transcription (Whisper) stays Groq-only; image description can fall back to OpenRouter
+- **Web search**: `/buscar` / `/search` using free Groq first, then paid Groq
 - **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context
@@ -37,11 +37,20 @@ python run_polling.py
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache |
 | `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
-| `GROQ_API_KEY` | Paid Groq API key |
-| `GROQ_FREE_API_KEY` | Optional free-tier key (tried first, falls back to paid on 429) |
+| `GROQ_API_KEY` | Paid Groq API key used after free Groq for compound flows |
+| `GROQ_FREE_API_KEY` | Optional free-tier key for free Groq chat/vision/transcribe |
+| `OPENROUTER_API_KEY` | OpenRouter API key used for chat/vision fallback |
+| `CF_AIG_OPENROUTER_BASE_URL` | OpenRouter base URL (for example `https://openrouter.ai/api/v1`) |
+| `CF_AIG_TOKEN` | Cloudflare AI Gateway token forwarded to OpenRouter requests |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
+
+### Provider contract
+
+- chat and vision try local Groq first, then OpenRouter if local Groq is exhausted
+- compound uses free Groq first, then paid Groq
+- transcription stays free Groq-only
 
 ## Project layout
 

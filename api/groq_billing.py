@@ -49,6 +49,20 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 }
 
 
+MODEL_BILLING_ALIASES = {
+    "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-instruct-0905",
+    "moonshotai/kimi-k2-0905": "moonshotai/kimi-k2-instruct-0905",
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-scout": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "groq/whisper-large-v3": "whisper-large-v3",
+}
+
+
+def normalize_model_id_for_billing(model: str) -> str:
+    normalized = str(model or "").strip()
+    return MODEL_BILLING_ALIASES.get(normalized, normalized)
+
+
 @dataclass
 class GroqUsageResult:
     """Structured Groq response with billing metadata."""
@@ -278,10 +292,11 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
 def _calculate_model_token_cost(
     model: str, usage: Optional[Mapping[str, Any]]
 ) -> Dict[str, Any]:
-    pricing = MODEL_PRICING_USD_MICROS.get(model)
+    normalized_model = normalize_model_id_for_billing(model)
+    pricing = MODEL_PRICING_USD_MICROS.get(normalized_model)
     if not pricing or not usage:
         return {
-            "model": model,
+            "model": normalized_model,
             "usd_micros": 0,
             "input_tokens": 0,
             "input_cached_tokens": 0,
@@ -300,7 +315,7 @@ def _calculate_model_token_cost(
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
     ) // 1_000_000
     return {
-        "model": model,
+        "model": normalized_model,
         "usd_micros": int(usd_micros),
         **tokens,
     }
@@ -457,7 +472,9 @@ def calculate_billing_for_segments(
             total_usd_micros += usd_micros
             model_breakdown.append(
                 {
-                    "model": model or "whisper-large-v3",
+                    "model": normalize_model_id_for_billing(
+                        model or "whisper-large-v3"
+                    ),
                     "usd_micros": usd_micros,
                     "audio_seconds": audio_seconds,
                 }
