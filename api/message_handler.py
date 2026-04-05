@@ -1028,44 +1028,6 @@ def _handle_admin_creditlog_command(
     )
 
 
-def _handle_admin_purge_ai_log_command(
-    deps: MessageHandlerDeps,
-    *,
-    command: str,
-    chat_id: str,
-    user_id: Optional[int],
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/purgeailog":
-        return None, None, False, None
-
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
-    if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
-
-    billing_required_response = _require_billing_for_command(deps, command=command)
-    if billing_required_response is not None:
-        return billing_required_response
-
-    try:
-        purge_result = deps.credits_db_service.purge_expired_ai_ledger_events()
-    except Exception as error:
-        deps.admin_report(
-            "Error purging /purgeailog",
-            error,
-            {"chat_id": chat_id, "user_id": user_id},
-        )
-        return "se trabó purgando el ai log, probá de nuevo", None, False, command
-
-    deleted_rows = int(purge_result.get("deleted_rows") or 0)
-    retention_days = int(purge_result.get("retention_days") or 30)
-    return (
-        f"listo, purgué {deleted_rows} eventos ai del ledger con más de {retention_days} días",
-        None,
-        False,
-        command,
-    )
-
-
 def _handle_transfer_command(
     deps: MessageHandlerDeps,
     *,
@@ -1138,42 +1100,6 @@ def _handle_transfer_command(
         f"te quedan: {format_credit_units(transfer_result.get('user_balance', 0))}"
     )
     return response_msg, None, False, command
-
-
-def _handle_update_commands_command(
-    deps: MessageHandlerDeps,
-    *,
-    command: str,
-    user_id: Optional[int],
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/updatecommands":
-        return None, None, False, None
-
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
-    if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
-
-    try:
-        # Import here to avoid circular dependency
-        from api.index import update_telegram_bot_commands
-
-        result = update_telegram_bot_commands()
-        if result:
-            return "comandos actualizados en el menú de telegram", None, False, command
-        else:
-            return (
-                "no pude actualizar los comandos, revisá los logs",
-                None,
-                False,
-                command,
-            )
-    except Exception as error:
-        deps.admin_report(
-            "Error updating commands /updatecommands",
-            error,
-            {"user_id": user_id},
-        )
-        return "error al actualizar comandos", None, False, command
 
 
 def _handle_non_ai_command(
@@ -1370,23 +1296,6 @@ def _handle_known_command(
         command=command,
         sanitized_message_text=sanitized_message_text,
         chat_id=chat_id,
-        user_id=user_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_admin_purge_ai_log_command(
-        deps,
-        command=command,
-        chat_id=chat_id,
-        user_id=user_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_update_commands_command(
-        deps,
-        command=command,
         user_id=user_id,
     )
     if response[0] is not None or response[3] is not None:
