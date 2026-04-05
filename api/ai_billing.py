@@ -419,7 +419,7 @@ class AIMessageBilling:
         )
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
-        if not billing_segments:
+        if billing_segments is None:
             breakdown = {
                 "pricing_version": None,
                 "markup_multiplier": None,
@@ -461,6 +461,19 @@ class AIMessageBilling:
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
         raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
+        has_usage = any(
+            int(segment.get("usage", {}).get("input_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("output_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("prompt_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("completion_tokens", 0) or 0) > 0
+            or int(
+                (segment.get("usage", {}).get("prompt_tokens_details", {}) or {}).get(
+                    "cached_tokens", 0
+                )
+                or 0
+            )
+            for segment in billing_segments
+        )
         refunded_credit_units = 0
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
@@ -471,9 +484,9 @@ class AIMessageBilling:
             else "user"
         )
 
-        if raw_usd_micros == 0:
-            actual_credit_units = reserved_credit_units
-        elif actual_credit_units < reserved_credit_units:
+        if raw_usd_micros == 0 and not has_usage:
+            actual_credit_units = 0
+        if actual_credit_units < reserved_credit_units:
             refunded_credit_units = reserved_credit_units - actual_credit_units
             try:
                 self.credits_db_service.refund_ai_charge(
@@ -654,7 +667,7 @@ class AIMessageBilling:
             "chat" if str(reservations[0].get("source") or "user") == "chat" else "user"
         )
 
-        if not billing_segments:
+        if billing_segments is None:
             breakdown = {
                 "pricing_version": None,
                 "markup_multiplier": None,
@@ -704,9 +717,23 @@ class AIMessageBilling:
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
 
-        if raw_usd_micros == 0:
-            actual_credit_units = reserved_credit_units_total
-        elif actual_credit_units < reserved_credit_units_total:
+        has_usage = any(
+            int(segment.get("usage", {}).get("input_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("output_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("prompt_tokens", 0) or 0) > 0
+            or int(segment.get("usage", {}).get("completion_tokens", 0) or 0) > 0
+            or int(
+                (segment.get("usage", {}).get("prompt_tokens_details", {}) or {}).get(
+                    "cached_tokens", 0
+                )
+                or 0
+            )
+            for segment in billing_segments
+        )
+
+        if raw_usd_micros == 0 and not has_usage:
+            actual_credit_units = 0
+        if actual_credit_units < reserved_credit_units_total:
             refunded_credit_units = reserved_credit_units_total - actual_credit_units
             try:
                 self.credits_db_service.refund_ai_charge(

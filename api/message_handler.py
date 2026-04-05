@@ -74,6 +74,7 @@ class MessageHandlerDeps:
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
     ]
     check_global_rate_limit: Callable[..., bool]
+    should_allow_openrouter_fallback: Callable[[str], bool]
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
     handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
@@ -551,11 +552,12 @@ def _run_ai_flow(
         if getattr(handler_func, "__name__", "") == "search_command"
         else "chat",
     )
+    rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
     if not deps.check_global_rate_limit(
         redis_client,
-        scope=str(reserve_meta.get("rate_limit_scope") or "chat"),
+        scope=rate_limit_scope,
         token_count=int(reserve_meta.get("estimated_rate_limit_tokens") or 0),
-    ):
+    ) and not deps.should_allow_openrouter_fallback(rate_limit_scope):
         return deps.handle_rate_limit(chat_id, message), False
     base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
         "ai_response_base",
@@ -578,7 +580,7 @@ def _run_ai_flow(
                 prepared_message.resized_image_data,
                 image_prompt,
             ),
-        ):
+        ) and not deps.should_allow_openrouter_fallback("vision"):
             billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="image_context_local_rate_limit"
             )
@@ -1166,7 +1168,7 @@ def _handle_non_ai_command(
                         resized_image,
                         "Describe what you see in this image in detail.",
                     ),
-                ):
+                ) and not deps.should_allow_openrouter_fallback("vision"):
                     return (
                         deps.handle_rate_limit(chat_id, message),
                         None,
