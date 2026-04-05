@@ -1,8 +1,6 @@
 # respondedorbot
 
-An AI-powered Telegram bot that plays the role of "el gordo", a politically incorrect Argentine character inspired by the classic "atendedor de boludos" and "viejo inimputable" memes. He's blunt, unfiltered, and answers everything in a single lowercase phrase using Argentine slang. Think of him as the guy at the ciber who spent too long on Taringa and the deep web.
-
-Beyond the attitude, he actually knows his stuff: crypto, hacking, Linux, gaming, psychiatry, economics, and internet culture from the golden age of forums and Flash games. If the question is real, the answer is real.
+An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect Argentine character who answers everything in a single lowercase phrase using Argentine slang.
 
 **[t.me/respondedorbot](https://t.me/respondedorbot)**
 
@@ -10,12 +8,12 @@ Beyond the attitude, he actually knows his stuff: crypto, hacking, Linux, gaming
 
 - **AI chat**: configurable personality powered by Groq, responds to trigger words in groups
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
-- **BCRA economic data**: `/bcra`, `/variables` (base monetaria, inflation, dollar rates, reserves, etc.)
-- **Media handling**: audio transcription (Whisper) and image description (vision) via `/transcribe`
-- **Web search**: `/buscar` / `/search` using Groq Compound for real-time info
+- **BCRA economic data**: `/bcra`, `/variables`
+- **Media**: audio transcription (Whisper) and image description (vision) via `/transcribe`
+- **Web search**: `/buscar` / `/search` using Groq Compound
 - **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
-- **AI credits billing**: Telegram Stars integration (`/topup`, `/balance`, `/transfer`)
-- **Link enrichment**: URLs in messages get fetched metadata injected into AI context
+- **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
+- **Link enrichment**: URLs get metadata injected into AI context
 
 ## Quick Start
 
@@ -28,19 +26,9 @@ cp .env.example .env
 python run_polling.py
 ```
 
-## Project Structure
-
-```text
-api/index.py            # Core command handlers and AI logic
-api/bot_ptb.py          # python-telegram-bot polling runtime
-run_polling.py          # Polling entrypoint
-api/message_handler.py  # Message flow, billing, rate-limit gating
-tests/                  # pytest suite
-```
-
 ## Configuration
 
-Copy `.env.example` and fill in the values. Key variables:
+Copy `.env.example` and fill in the values:
 
 | Variable | Description |
 | --- | --- |
@@ -52,87 +40,80 @@ Copy `.env.example` and fill in the values. Key variables:
 | `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
 | `GROQ_API_KEY` | Paid Groq API key |
-| `GROQ_FREE_API_KEY` | Optional free-tier Groq key (tried first, falls back to paid) |
-| `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` GIFs |
+| `GROQ_FREE_API_KEY` | Optional free-tier key (tried first, falls back to paid on 429) |
+| `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
-## Container Deployment (Podman)
+## Deployment (Podman + systemd)
 
-### Option 1: Quadlets with systemd (Recommended)
-
-Quadlets are Podman-native systemd unit files. Copy the files from `quadlets/` and enable the services:
+### Prerequisites (Debian/Ubuntu)
 
 ```bash
+sudo apt install -y podman uidmap dbus-user-session slirp4netns fuse-overlayfs
+sudo useradd -m -s /bin/bash respondedorbot
+sudo loginctl enable-linger respondedorbot
+```
+
+### Setup (as `respondedorbot` user)
+
+```bash
+git clone https://github.com/astrovm/respondedorbot
+cd respondedorbot
+
 mkdir -p ~/.config/containers/systemd
 cp quadlets/* ~/.config/containers/systemd/
 
-# Put your .env at ~/respondedorbot/.env
 mkdir -p ~/respondedorbot
 cp .env.example ~/respondedorbot/.env
-# Edit ~/respondedorbot/.env with your keys
+# Edit ~/respondedorbot/.env
+# REDIS_HOST=respondedorbot-redis
+# REDIS_PORT=6379
+# REDIS_PASSWORD=
+
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus
 
 systemctl --user daemon-reload
-systemctl --user enable --now respondedorbot.service
+systemctl --user start respondedorbot-redis.service
+systemctl --user start respondedorbot.service
 ```
 
-View logs:
+### Persist across reboots
+
+`systemctl --user enable` on Quadlet-generated units fails on some distros.
+Use symlinks instead:
 
 ```bash
+mkdir -p ~/.config/systemd/user/default.target.wants
+
+ln -sf ~/.config/containers/systemd/respondedorbot.container \
+  ~/.config/systemd/user/default.target.wants/respondedorbot.container
+
+ln -sf ~/.config/containers/systemd/respondedorbot-redis.container \
+  ~/.config/systemd/user/default.target.wants/respondedorbot-redis.container
+
+systemctl --user daemon-reload
+```
+
+### Useful commands
+
+```bash
+# Logs
 journalctl --user -fu respondedorbot.service
-```
 
-Stop:
+# Status
+systemctl --user status respondedorbot.service --no-pager
 
-```bash
+# Stop
 systemctl --user stop respondedorbot.service respondedorbot-redis.service
-```
 
-Auto-update images (equivalent to Watchtower):
-
-```bash
+# Auto-update images
 systemctl --user enable --now podman-auto-update.timer
 ```
-
-### Option 2: Podman run (external Redis)
-
-If you have Redis running elsewhere:
-
-```bash
-podman build -t respondedorbot -f Containerfile .
-podman run --env-file .env respondedorbot
-```
-
-Or use the pre-built image from GitHub Container Registry:
-
-```bash
-podman run --env-file .env ghcr.io/astrovm/respondedorbot:latest
-```
-
-## AI Credits Billing
-
-AI responses cost credits. Users get onboarding credits on first interaction, then recharge with Telegram Stars.
-
-- `/topup` - buy credits with Stars (private chat only)
-- `/balance` - check credits (personal in DM, personal + group in groups)
-- `/transfer <amount>` - move credits from personal to group balance
-
-In groups, personal balance is spent first, then group balance.
-
-## Groq Routing
-
-If both `GROQ_FREE_API_KEY` and `GROQ_API_KEY` are set, the bot tries the free key first for all Groq calls. On rate limit (429) or local budget exhaustion, it retries with the paid key.
 
 ## Tests
 
 ```bash
 pytest -q
 ```
-
-## Architecture
-
-The bot uses **python-telegram-bot v20+** with polling mode:
-- Automatic offset tracking and duplicate prevention
-- Built-in flood wait handling and error recovery
-- Async handlers with sync code bridging for the existing codebase
-- No webhook required — works behind NAT and firewalls
