@@ -940,8 +940,6 @@ __all__ = [
     "AIMessageBilling",
     "build_insufficient_credits_message",
     "build_topup_keyboard",
-    "extract_numeric_chat_id",
-    "extract_user_id",
     "format_balance_command",
     "get_ai_billing_pack",
     "get_ai_billing_packs",
