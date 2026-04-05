@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_get_rulo():
     dolar_data = {
         "oficial": {"price": 1440},
@@ -54,10 +55,10 @@ def test_get_weather():
     # Create a fixed datetime for testing
     current_time = datetime(2024, 1, 1, 12, 0)  # Create naive datetime first
 
-    with patch("api.index.datetime") as mock_datetime, patch(
-        "api.index.cached_requests"
-    ) as mock_cached_requests:
-
+    with (
+        patch("api.index.datetime") as mock_datetime,
+        patch("api.index.cached_requests") as mock_cached_requests,
+    ):
         # Set up datetime mock to handle timezone
         class MockDatetime:
             @classmethod
@@ -258,6 +259,7 @@ def test_get_prices_existing_paths_unchanged():
     from api.index import get_prices
 
     with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+
         def mock_get_prices_side_effect(currency):
             return {
                 "data": [
@@ -325,9 +327,10 @@ def test_get_weather_description():
 def test_get_dollar_rates_basic():
     from api.index import get_dollar_rates
 
-    with patch("api.index.cached_requests") as mock_cached_requests, patch(
-        "api.index.get_cached_tcrm_100"
-    ) as mock_tcrm:
+    with (
+        patch("api.index.cached_requests") as mock_cached_requests,
+        patch("api.index.get_cached_tcrm_100") as mock_tcrm,
+    ):
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
             "data": {
@@ -374,9 +377,10 @@ def test_get_dollar_rates_api_failure():
     from api.index import get_dollar_rates
     import pytest
 
-    with patch("api.index.cached_requests") as mock_cached_requests, patch(
-        "api.index.get_cached_tcrm_100"
-    ) as mock_tcrm:
+    with (
+        patch("api.index.cached_requests") as mock_cached_requests,
+        patch("api.index.get_cached_tcrm_100") as mock_tcrm,
+    ):
         # Mock API failure
         mock_cached_requests.return_value = None
         mock_tcrm.return_value = (None, None)
@@ -384,6 +388,15 @@ def test_get_dollar_rates_api_failure():
         # The function should raise an exception when API fails
         with pytest.raises(TypeError):
             get_dollar_rates()
+
+
+def test_get_dollar_rates_unsupported_timeframe():
+    from api.index import get_dollar_rates
+
+    result = get_dollar_rates("7d")
+    assert result is not None
+    assert "7d" in result
+    assert "no soportado" in result
 
 
 def test_get_devo_with_fee_only():
@@ -479,9 +492,10 @@ def test_powerlaw_basic():
 def test_rainbow_basic():
     from api.index import rainbow
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices, patch(
-        "api.index.datetime"
-    ) as mock_datetime:
+    with (
+        patch("api.index.get_api_or_cache_prices") as mock_get_prices,
+        patch("api.index.datetime") as mock_datetime,
+    ):
         # Mock the API response for BTC price
         mock_get_prices.return_value = {
             "data": [
@@ -500,10 +514,11 @@ def test_rainbow_basic():
 def test_get_market_context_success():
     from api.index import get_market_context
 
-    with patch("api.index.cached_requests") as mock_cached, patch(
-        "api.index.clean_crypto_data"
-    ) as mock_clean, patch("os.environ.get") as mock_env:
-
+    with (
+        patch("api.index.cached_requests") as mock_cached,
+        patch("api.index.clean_crypto_data") as mock_clean,
+        patch("os.environ.get") as mock_env,
+    ):
         # Mock crypto response
         crypto_response = {
             "data": {"data": [{"symbol": "BTC", "quote": {"USD": {"price": 50000}}}]}
@@ -536,10 +551,10 @@ def test_get_market_context_success():
 def test_get_market_context_crypto_fail():
     from api.index import get_market_context
 
-    with patch("api.index.cached_requests") as mock_cached, patch(
-        "os.environ.get"
-    ) as mock_env:
-
+    with (
+        patch("api.index.cached_requests") as mock_cached,
+        patch("os.environ.get") as mock_env,
+    ):
         # Mock dollar response only
         dollar_response = {"data": {"oficial": {"price": 1000}}}
 
@@ -562,14 +577,13 @@ def test_get_market_context_crypto_fail():
 def test_get_market_context_all_fail():
     from api.index import get_market_context
 
-    with patch("api.index.cached_requests") as mock_cached, patch(
-        "os.environ.get"
-    ) as mock_env, patch("api.index.get_cached_bcra_variables") as mock_get_bcra, patch(
-        "api.index.bcra_fetch_latest_variables"
-    ) as mock_fetch_bcra, patch(
-        "api.index.cache_bcra_variables"
-    ) as mock_cache_bcra:
-
+    with (
+        patch("api.index.cached_requests") as mock_cached,
+        patch("os.environ.get") as mock_env,
+        patch("api.index.get_cached_bcra_variables") as mock_get_bcra,
+        patch("api.index.bcra_fetch_latest_variables") as mock_fetch_bcra,
+        patch("api.index.cache_bcra_variables") as mock_cache_bcra,
+    ):
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
         mock_get_bcra.return_value = None
@@ -584,10 +598,10 @@ def test_get_market_context_all_fail():
 def test_get_weather_context_success():
     from api.index import get_weather_context
 
-    with patch("api.index.get_weather") as mock_weather, patch(
-        "api.index.get_weather_description"
-    ) as mock_description:
-
+    with (
+        patch("api.index.get_weather") as mock_weather,
+        patch("api.index.get_weather_description") as mock_description,
+    ):
         mock_weather.return_value = {"temperature": 25.0, "weather_code": 0}
         mock_description.return_value = "cielo despejado"
 
@@ -677,9 +691,12 @@ def test_get_hacker_news_context_success():
         def raise_for_status(self) -> None:
             return None
 
-    with patch("api.index.config_redis", side_effect=RuntimeError("no redis")), patch(
-        "api.index.requests.get", return_value=DummyResponse(sample_xml)
-    ) as mock_get:
+    with (
+        patch("api.index.config_redis", side_effect=RuntimeError("no redis")),
+        patch(
+            "api.index.requests.get", return_value=DummyResponse(sample_xml)
+        ) as mock_get,
+    ):
         items = get_hacker_news_context(limit=2)
 
     assert len(items) == 2
@@ -706,9 +723,11 @@ def test_get_hacker_news_context_uses_cache():
         }
     ]
 
-    with patch("api.index.config_redis", return_value=object()), patch(
-        "api.index.redis_get_json", return_value=cached_items
-    ) as mock_cache, patch("api.index.requests.get") as mock_get:
+    with (
+        patch("api.index.config_redis", return_value=object()),
+        patch("api.index.redis_get_json", return_value=cached_items) as mock_cache,
+        patch("api.index.requests.get") as mock_get,
+    ):
         items = get_hacker_news_context(limit=1)
 
     assert items == cached_items[:1]
@@ -986,6 +1005,87 @@ def test_sort_dollar_rates_with_none_variations():
     assert len(result) == 9
     for rate in result:
         assert rate["history"] is None
+
+
+def test_sort_dollar_rates_non24h_no_history_gives_none_variations():
+    from api.index import sort_dollar_rates
+
+    dollar_rates = {
+        "timestamp": 1000,
+        "data": {
+            "mayorista": {"price": 1100.0, "variation": 1.0},
+            "oficial": {"price": 1100.0, "variation": 1.0},
+            "tarjeta": {"price": 1870.0, "variation": 1.0},
+            "mep": {"al30": {"ci": {"price": 1180.0, "variation": 2.0}}},
+            "ccl": {"al30": {"ci": {"price": 1200.0, "variation": 2.0}}},
+            "blue": {"ask": 1190.0, "bid": 1170.0, "variation": 1.5},
+            "cripto": {
+                "ccb": {"ask": 1220.0, "bid": 1200.0, "variation": 1.0},
+                "usdc": {"ask": 1210.0, "bid": 1190.0, "variation": 0.5},
+                "usdt": {"ask": 1215.0, "bid": 1195.0, "variation": 0.8},
+            },
+        },
+    }
+    result = sort_dollar_rates(dollar_rates, hours_ago=1)
+    assert all(r["history"] is None for r in result)
+
+
+def test_format_dollar_rates_shows_no_history_footer():
+    from api.index import format_dollar_rates
+
+    rates = [
+        {"name": "Blue", "price": 1200.0, "history": None},
+        {"name": "Oficial", "price": 1100.0, "history": None},
+    ]
+    result = format_dollar_rates(rates, hours_ago=6)
+    assert result is not None
+    assert "sin datos historicos" in result
+    assert "6hs" in result
+
+
+def test_format_dollar_rates_no_footer_for_24h():
+    from api.index import format_dollar_rates
+
+    rates = [{"name": "Blue", "price": 1200.0, "history": None}]
+    result = format_dollar_rates(rates, hours_ago=24)
+    assert "sin datos historicos" not in result
+
+
+def test_get_prices_unsupported_timeframe():
+    from api.index import get_prices
+
+    result = get_prices("BTC 6h")
+    assert result is not None
+    assert "6h" in result
+    assert "no soportado" in result
+
+
+def test_get_prices_7d_uses_correct_cmc_field():
+    from api.index import get_prices
+
+    mock_response = {
+        "timestamp": 1000,
+        "data": {
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "quote": {
+                        "USD": {
+                            "price": 90000.0,
+                            "percent_change_24h": 1.0,
+                            "percent_change_7d": 5.5,
+                        }
+                    },
+                }
+            ]
+        },
+    }
+    with patch("api.index.cached_requests", return_value=mock_response):
+        result = get_prices("BTC 7d")
+    assert result is not None
+    assert "5.5" in result or "+5.5" in result
+    assert "7d" in result
 
 
 def test_format_dollar_rates_with_positive_variations():
