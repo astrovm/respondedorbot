@@ -330,6 +330,7 @@ def test_get_dollar_rates_basic():
     with (
         patch("api.index.cached_requests") as mock_cached_requests,
         patch("api.index.get_cached_tcrm_100") as mock_tcrm,
+        patch("api.index.get_currency_band_limits", return_value=None),
     ):
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
