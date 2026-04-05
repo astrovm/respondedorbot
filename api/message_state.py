@@ -20,6 +20,7 @@ from typing import (
 import redis
 
 from api.chat_context import format_user_identity
+from api.services.maintenance import CHAT_STATE_TTL
 
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -30,7 +31,6 @@ ExtractMessageText = Callable[[Dict[str, Any]], str]
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
 CHAT_HISTORY_MAX_MESSAGES = 4
-CHAT_STATE_TTL = 30 * 24 * 60 * 60
 
 
 def truncate_text(text: Optional[str], max_length: int = 256) -> str:
