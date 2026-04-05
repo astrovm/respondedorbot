@@ -162,6 +162,45 @@ LINK_METADATA_MAX_BYTES = 64_000
 MAX_LINKS_IN_MESSAGE = 3
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
+
+# Timeframe support for /prices (maps to CMC native fields)
+_CMC_CHANGE_FIELD: Dict[str, str] = {
+    "1h": "percent_change_1h",
+    "24h": "percent_change_24h",
+    "7d": "percent_change_7d",
+    "30d": "percent_change_30d",
+}
+
+# Timeframe support for /usd (maps to Redis hourly snapshot lookback)
+_DOLLAR_TIMEFRAME_HOURS: Dict[str, int] = {
+    "1h": 1,
+    "6h": 6,
+    "12h": 12,
+    "24h": 24,
+    "48h": 48,
+}
+
+# Combined set of all valid timeframe tokens
+_ALL_TIMEFRAMES: Dict[str, int] = {
+    **_DOLLAR_TIMEFRAME_HOURS,
+    "7d": 168,
+    "30d": 720,
+}
+
+
+def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]:
+    """Strip a trailing timeframe token from msg_text.
+
+    Returns (cleaned_text, tf_key) where tf_key is None if no timeframe found.
+    """
+    parts = msg_text.strip().rsplit(None, 1)
+    if parts and parts[-1].lower() in valid:
+        tf = parts[-1].lower()
+        remaining = parts[0].strip() if len(parts) > 1 else ""
+        return remaining, tf
+    return msg_text.strip(), None
+
+
 BA_TZ = timezone(timedelta(hours=-3))
 GROQ_COMPOUND_DEFAULT_MODEL = "groq/compound"
 GROQ_COMPOUND_DEFAULT_TOOLS = (
@@ -306,7 +345,7 @@ def _fetch_polymarket_live_price(
 
 
 def _fetch_criptoya_dollar_data(
-    *, hourly_cache: bool = True
+    *, hourly_cache: bool = True, get_history: int = 0
 ) -> Optional[Dict[str, Any]]:
     """Retrieve dollar rates from CriptoYa with shared cache semantics."""
 
@@ -316,6 +355,7 @@ def _fetch_criptoya_dollar_data(
         None,
         TTL_DOLLAR,
         hourly_cache,
+        get_history,
     )
 
 
@@ -1582,7 +1622,9 @@ def select_random(msg_text: str) -> str:
     return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
 
-def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
+def get_api_or_cache_prices(
+    convert_to: str, limit: Optional[int] = None, hourly_cache: bool = False
+):
     # coinmarketcap api config
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {"start": "1", "limit": "100", "convert": convert_to}
@@ -1595,9 +1637,16 @@ def get_api_or_cache_prices(convert_to: str, limit: Optional[int] = None):
     if isinstance(limit, int) and limit > 0:
         parameters["limit"] = str(limit)
 
-    response = cached_requests(api_url, parameters, headers, TTL_PRICE)
+    response = cached_requests(api_url, parameters, headers, TTL_PRICE, hourly_cache)
 
     return response["data"] if response else None
+
+
+def refresh_price_caches() -> None:
+    """Refresh all price caches and store hourly snapshots for change calculations."""
+    _fetch_criptoya_dollar_data(hourly_cache=True)
+    get_api_or_cache_prices("ARS", hourly_cache=True)
+    get_api_or_cache_prices("USD", hourly_cache=True)
 
 
 def _fetch_polymarket_event(
@@ -1795,6 +1844,10 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
 
 # get crypto pices from coinmarketcap
 def get_prices(msg_text: str) -> Optional[str]:
+    msg_text, tf = _parse_timeframe(msg_text, _CMC_CHANGE_FIELD)
+    cmc_change_field = _CMC_CHANGE_FIELD.get(tf or "24h", "percent_change_24h")
+    tf_label = tf or "24h"
+
     prices_number = 0
     # when the user asks for sats we need to ask for btc to the api and convert later
     convert_to = "USD"
@@ -2040,12 +2093,10 @@ def get_prices(msg_text: str) -> Optional[str]:
         price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros + 4}f}".rstrip(
             "0"
         ).rstrip(".")
-        percentage = (
-            f"{coin['quote'][convert_to_parameter]['percent_change_24h']:+.2f}".rstrip(
-                "0"
-            ).rstrip(".")
-        )
-        line = f"{ticker}: {price} {convert_to} ({percentage}% 24hs)"
+        percentage = f"{coin['quote'][convert_to_parameter].get(cmc_change_field, 0):+.2f}".rstrip(
+            "0"
+        ).rstrip(".")
+        line = f"{ticker}: {price} {convert_to} ({percentage}% {tf_label})"
 
         if (
             prices
@@ -2061,55 +2112,130 @@ def get_prices(msg_text: str) -> Optional[str]:
 
 
 def sort_dollar_rates(
-    dollar_rates, tcrm_100: Optional[float] = None, tcrm_history: Optional[float] = None
+    dollar_rates,
+    tcrm_100: Optional[float] = None,
+    tcrm_history: Optional[float] = None,
+    hours_ago: int = 24,
 ):
     dollars = dollar_rates["data"]
+
+    # For 24h use CriptoYa's own variation (accurate, always present).
+    # For other timeframes use Redis hourly snapshots when available.
+    hist_dollars: Optional[Dict[str, Any]] = None
+    if hours_ago != 24:
+        history_entry = dollar_rates.get("history")
+        if isinstance(history_entry, dict) and "data" in history_entry:
+            hist_dollars = history_entry["data"]
+
+    def _var(
+        current_price: float, criptoya_variation, *hist_path: str
+    ) -> Optional[float]:
+        if hours_ago == 24:
+            return criptoya_variation
+        if hist_dollars is None:
+            return None
+        try:
+            obj: Any = hist_dollars
+            for key in hist_path:
+                obj = obj[key]
+            return _pct_change(current_price, float(obj))
+        except (KeyError, TypeError, ValueError):
+            return None
 
     sorted_dollar_rates = [
         {
             "name": "Mayorista",
             "price": dollars["mayorista"]["price"],
-            "history": dollars["mayorista"]["variation"],
+            "history": _var(
+                dollars["mayorista"]["price"],
+                dollars["mayorista"]["variation"],
+                "mayorista",
+                "price",
+            ),
         },
         {
             "name": "Oficial",
             "price": dollars["oficial"]["price"],
-            "history": dollars["oficial"]["variation"],
+            "history": _var(
+                dollars["oficial"]["price"],
+                dollars["oficial"]["variation"],
+                "oficial",
+                "price",
+            ),
         },
         {
             "name": "Tarjeta",
             "price": dollars["tarjeta"]["price"],
-            "history": dollars["tarjeta"]["variation"],
+            "history": _var(
+                dollars["tarjeta"]["price"],
+                dollars["tarjeta"]["variation"],
+                "tarjeta",
+                "price",
+            ),
         },
         {
             "name": "MEP",
             "price": dollars["mep"]["al30"]["ci"]["price"],
-            "history": dollars["mep"]["al30"]["ci"]["variation"],
+            "history": _var(
+                dollars["mep"]["al30"]["ci"]["price"],
+                dollars["mep"]["al30"]["ci"]["variation"],
+                "mep",
+                "al30",
+                "ci",
+                "price",
+            ),
         },
         {
             "name": "CCL",
             "price": dollars["ccl"]["al30"]["ci"]["price"],
-            "history": dollars["ccl"]["al30"]["ci"]["variation"],
+            "history": _var(
+                dollars["ccl"]["al30"]["ci"]["price"],
+                dollars["ccl"]["al30"]["ci"]["variation"],
+                "ccl",
+                "al30",
+                "ci",
+                "price",
+            ),
         },
         {
             "name": "Blue",
             "price": dollars["blue"]["ask"],
-            "history": dollars["blue"]["variation"],
+            "history": _var(
+                dollars["blue"]["ask"], dollars["blue"]["variation"], "blue", "ask"
+            ),
         },
         {
             "name": "Bitcoin",
             "price": dollars["cripto"]["ccb"]["ask"],
-            "history": dollars["cripto"]["ccb"]["variation"],
+            "history": _var(
+                dollars["cripto"]["ccb"]["ask"],
+                dollars["cripto"]["ccb"]["variation"],
+                "cripto",
+                "ccb",
+                "ask",
+            ),
         },
         {
             "name": "USDC",
             "price": dollars["cripto"]["usdc"]["ask"],
-            "history": dollars["cripto"]["usdc"]["variation"],
+            "history": _var(
+                dollars["cripto"]["usdc"]["ask"],
+                dollars["cripto"]["usdc"]["variation"],
+                "cripto",
+                "usdc",
+                "ask",
+            ),
         },
         {
             "name": "USDT",
             "price": dollars["cripto"]["usdt"]["ask"],
-            "history": dollars["cripto"]["usdt"]["variation"],
+            "history": _var(
+                dollars["cripto"]["usdt"]["ask"],
+                dollars["cripto"]["usdt"]["variation"],
+                "cripto",
+                "usdt",
+                "ask",
+            ),
         },
     ]
 
@@ -2163,16 +2289,24 @@ def format_dollar_rates(
     return "\n".join(msg_lines)
 
 
-def get_dollar_rates() -> Optional[str]:
-    dollars = _fetch_criptoya_dollar_data()
+def get_dollar_rates(msg_text: str = "") -> Optional[str]:
+    _, tf = _parse_timeframe(msg_text, _DOLLAR_TIMEFRAME_HOURS)
+    hours_ago = _DOLLAR_TIMEFRAME_HOURS.get(tf, 24) if tf else 24
+
+    dollars = _fetch_criptoya_dollar_data(
+        hourly_cache=True,
+        get_history=hours_ago if hours_ago != 24 else 0,
+    )
 
     tcrm_100, tcrm_history = get_cached_tcrm_100()
 
-    sorted_dollar_rates = sort_dollar_rates(dollars, tcrm_100, tcrm_history)
+    sorted_dollar_rates = sort_dollar_rates(
+        dollars, tcrm_100, tcrm_history, hours_ago=hours_ago
+    )
 
     band_limits = get_currency_band_limits()
 
-    return format_dollar_rates(sorted_dollar_rates, 24, band_limits)
+    return format_dollar_rates(sorted_dollar_rates, hours_ago, band_limits)
 
 
 def get_devo(msg_text: str) -> str:
@@ -2235,6 +2369,17 @@ def _safe_float(value: Any) -> Optional[float]:
             return float(value)
     except (TypeError, ValueError):
         return None
+    return None
+
+
+def _pct_change(current: float, historical: float) -> Optional[float]:
+    """Compute percentage change from historical to current. Returns None on bad input."""
+    try:
+        h = float(historical)
+        if h != 0:
+            return ((float(current) - h) / h) * 100
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
     return None
 
 
