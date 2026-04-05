@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune unused Podman images for the respondedorbot user
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/podman image prune -f
+
+[Install]
+WantedBy=default.target

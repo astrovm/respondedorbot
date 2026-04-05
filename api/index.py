@@ -72,6 +72,13 @@ from api.services.redis_helpers import (
     redis_set_json,
     redis_setex_json,
 )
+from api.services.maintenance import (
+    GIPHY_STALE_TTL,
+    REQUEST_CACHE_HISTORY_TTL,
+    request_cache_history_key,
+    request_cache_key,
+    request_cache_ttl,
+)
 from api.config import (
     config_redis as _config_config_redis,
     configure as configure_app_config,
@@ -1465,7 +1472,7 @@ def get_cache_history(hours_ago, request_hash, redis_client):
     # subtract hours to current date
     timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
     # get previous api data from redis cache
-    cached_data = redis_client.get(timestamp + request_hash)
+    cached_data = redis_client.get(request_cache_history_key(timestamp, request_hash))
 
     if cached_data is None:
         return None
@@ -1497,7 +1504,7 @@ def cached_requests(
         ).hexdigest()
 
         redis_client = config_redis()
-        redis_response = redis_get_json(redis_client, request_hash)
+        redis_response = redis_get_json(redis_client, request_cache_key(request_hash))
         cache_history = (
             get_cache_history(get_history, request_hash, redis_client)
             if get_history
@@ -1521,12 +1528,24 @@ def cached_requests(
                         "timestamp": timestamp,
                         "data": json.loads(response.text),
                     }
-                    redis_set_json(redis_client, request_hash, redis_value)
+                    redis_set_json(
+                        redis_client,
+                        request_cache_key(request_hash),
+                        redis_value,
+                        ttl=request_cache_ttl(expiration_time),
+                    )
                     if hourly_cache:
                         current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                        hourly_key = current_hour + request_hash
+                        hourly_key = request_cache_history_key(
+                            current_hour, request_hash
+                        )
                         if redis_client.get(hourly_key) is None:
-                            redis_set_json(redis_client, hourly_key, redis_value)
+                            redis_set_json(
+                                redis_client,
+                                hourly_key,
+                                redis_value,
+                                ttl=REQUEST_CACHE_HISTORY_TTL,
+                            )
                     if cache_history is not None:
                         redis_value["history"] = cache_history
                     return redis_value
@@ -3357,7 +3376,7 @@ def _get_giphy_pool(category: str) -> List[str]:
     if urls and redis_client:
         try:
             redis_client.setex(pool_key, TTL_GIPHY_POOL, json.dumps(urls))
-            redis_client.set(stale_key, json.dumps(urls))  # no TTL, permanent fallback
+            redis_client.setex(stale_key, GIPHY_STALE_TTL, json.dumps(urls))
         except Exception as e:
             print(f"Error caching Giphy pool: {e}")
     elif not urls and redis_client:

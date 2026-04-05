@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_format_user_message():
     # Test with username
     msg = {"from": {"first_name": "John", "username": "john123"}}
@@ -20,6 +21,7 @@ def test_format_user_message_with_reply_context():
 
 def test_save_message_to_redis():
     from api.index import save_message_to_redis
+    from api.message_state import CHAT_STATE_TTL
 
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -27,6 +29,8 @@ def test_save_message_to_redis():
 
         # Mock sismember to return False (message doesn't exist)
         mock_instance.sismember.return_value = False
+        pipeline = mock_instance.pipeline.return_value
+        pipeline.execute.return_value = [None, None, None, True, True, []]
 
         # Test successful save
         chat_id = "123"
@@ -37,9 +41,10 @@ def test_save_message_to_redis():
 
         # Verify pipeline calls
         mock_instance.pipeline.assert_called_once()
-        pipeline = mock_instance.pipeline.return_value
         pipeline.lpush.assert_called_once()
         pipeline.ltrim.assert_called_once()
+        pipeline.expire.assert_any_call(f"chat_history:{chat_id}", CHAT_STATE_TTL)
+        pipeline.expire.assert_any_call(f"chat_message_ids:{chat_id}", CHAT_STATE_TTL)
         pipeline.execute.assert_called_once()
 
 

@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Union,
+    cast,
+)
 
 import redis
 
@@ -19,6 +30,7 @@ ExtractMessageText = Callable[[Dict[str, Any]], str]
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
 CHAT_HISTORY_MAX_MESSAGES = 4
+CHAT_STATE_TTL = 30 * 24 * 60 * 60
 
 
 def truncate_text(text: Optional[str], max_length: int = 256) -> str:
@@ -64,6 +76,8 @@ def save_message_to_redis(
         pipe.lpush(chat_history_key, history_entry)
         pipe.sadd(message_ids_key, message_id)
         pipe.ltrim(chat_history_key, 0, max(0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1))
+        pipe.expire(chat_history_key, CHAT_STATE_TTL)
+        pipe.expire(message_ids_key, CHAT_STATE_TTL)
         pipe.lrange(chat_history_key, 0, -1)
         results = pipe.execute()
 
@@ -78,8 +92,12 @@ def save_message_to_redis(
 
         try:
             current_ids_set = redis_client.smembers(message_ids_key)
-            current_ids = list(cast(Set[str], current_ids_set)) if current_ids_set else []
-            to_remove = [entry_id for entry_id in current_ids if entry_id not in valid_ids]
+            current_ids = (
+                list(cast(Set[str], current_ids_set)) if current_ids_set else []
+            )
+            to_remove = [
+                entry_id for entry_id in current_ids if entry_id not in valid_ids
+            ]
         except Exception:
             to_remove = []
 
@@ -197,6 +215,8 @@ def get_bot_message_metadata(
             {"chat_id": chat_id, "message_id": message_id},
         )
     return None
+
+
 def describe_replied_message(
     reply_msg: Mapping[str, Any],
     *,
@@ -242,7 +262,9 @@ def build_reply_context_text(
     if not reply_description:
         return None
 
-    reply_user = format_user_identity(cast(Mapping[str, Any], reply_msg.get("from", {}))).strip()
+    reply_user = format_user_identity(
+        cast(Mapping[str, Any], reply_msg.get("from", {}))
+    ).strip()
     if reply_user:
         return f"{reply_user}: {reply_description}"
     return reply_description
@@ -265,6 +287,7 @@ def format_user_message(
 
 __all__ = [
     "BOT_MESSAGE_META_TTL",
+    "CHAT_STATE_TTL",
     "build_reply_context_text",
     "format_user_identity",
     "format_user_message",

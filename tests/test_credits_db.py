@@ -47,7 +47,10 @@ class _FakeCursor:
                 self.fetchone_result = (self.balance,)
             return
 
-        if "FROM onboarding_grants" in normalized and "WHERE user_id = %s" in normalized:
+        if (
+            "FROM onboarding_grants" in normalized
+            and "WHERE user_id = %s" in normalized
+        ):
             self.fetchone_result = (1,) if self.has_existing_grant else None
             return
 
@@ -114,7 +117,10 @@ class _MigrationCursor:
             self.fetchone_result = None
             return
 
-        if normalized == "UPDATE star_payments SET credits_awarded = credits_awarded * %s":
+        if (
+            normalized
+            == "UPDATE star_payments SET credits_awarded = credits_awarded * %s"
+        ):
             self.star_credits_awarded *= int(params[0])
             self.fetchone_result = None
             return
@@ -153,10 +159,13 @@ def test_grant_onboarding_if_needed_denies_when_overflow_detected():
     )
     fake_connection = _FakeConnection(fake_cursor)
 
-    with patch("api.services.credits_db.ensure_schema"), patch(
-        "api.services.credits_db.connect", return_value=fake_connection
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
     ):
-        granted, balance = credits_db.grant_onboarding_if_needed(42, whole_credits_to_units(3))
+        granted, balance = credits_db.grant_onboarding_if_needed(
+            42, whole_credits_to_units(3)
+        )
 
     assert granted is False
     assert balance == 0
@@ -168,7 +177,8 @@ def test_grant_onboarding_if_needed_denies_when_overflow_detected():
         for query, params in fake_cursor.executed
     )
     assert not any(
-        "INSERT INTO onboarding_grants" in query for query, _params in fake_cursor.executed
+        "INSERT INTO onboarding_grants" in query
+        for query, _params in fake_cursor.executed
     )
 
 
@@ -176,16 +186,20 @@ def test_grant_onboarding_if_needed_grants_credits_when_under_limit():
     fake_cursor = _FakeCursor(hourly_count=1, daily_count=2, insert_granted=True)
     fake_connection = _FakeConnection(fake_cursor)
 
-    with patch("api.services.credits_db.ensure_schema"), patch(
-        "api.services.credits_db.connect", return_value=fake_connection
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
     ):
-        granted, balance = credits_db.grant_onboarding_if_needed(42, whole_credits_to_units(3))
+        granted, balance = credits_db.grant_onboarding_if_needed(
+            42, whole_credits_to_units(3)
+        )
 
     assert granted is True
     assert balance == 30
     assert fake_connection.commit_count == 1
     assert any(
-        "INSERT INTO onboarding_grants" in query for query, _params in fake_cursor.executed
+        "INSERT INTO onboarding_grants" in query
+        for query, _params in fake_cursor.executed
     )
     assert any(
         "UPDATE credit_accounts" in query for query, _params in fake_cursor.executed
@@ -202,10 +216,13 @@ def test_grant_onboarding_if_needed_skips_overflow_logic_for_existing_users():
     fake_cursor.balance = 7
     fake_connection = _FakeConnection(fake_cursor)
 
-    with patch("api.services.credits_db.ensure_schema"), patch(
-        "api.services.credits_db.connect", return_value=fake_connection
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
     ):
-        granted, balance = credits_db.grant_onboarding_if_needed(42, whole_credits_to_units(3))
+        granted, balance = credits_db.grant_onboarding_if_needed(
+            42, whole_credits_to_units(3)
+        )
 
     assert granted is False
     assert balance == 7
@@ -224,8 +241,9 @@ def test_apply_ai_debt_allows_negative_user_balance():
     fake_cursor.balance = 1
     fake_connection = _FakeConnection(fake_cursor)
 
-    with patch("api.services.credits_db.ensure_schema"), patch(
-        "api.services.credits_db.connect", return_value=fake_connection
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
     ):
         balances = credits_db.apply_ai_debt(42, None, whole_credits_to_units(3), "user")
 
@@ -244,8 +262,9 @@ def test_mint_user_credits_increases_balance_and_writes_ledger():
     fake_cursor.balance = whole_credits_to_units(20)
     fake_connection = _FakeConnection(fake_cursor)
 
-    with patch("api.services.credits_db.ensure_schema"), patch(
-        "api.services.credits_db.connect", return_value=fake_connection
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
     ):
         result = credits_db.mint_user_credits(
             user_id=42,
@@ -282,3 +301,48 @@ def test_migrate_credit_amounts_to_units_scales_existing_rows_once():
     assert migrated_again is False
     assert cursor.balance == 3 * CREDIT_SCALE
     assert cursor.star_credits_awarded == 100 * CREDIT_SCALE
+
+
+def test_purge_expired_ai_ledger_events_defaults_to_30_days():
+    class Cursor:
+        def __init__(self):
+            self.rowcount = 4
+            self.executed = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            self.executed.append((" ".join(str(query).split()), params))
+
+    class Connection:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.commit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self):
+            return self._cursor
+
+        def commit(self):
+            self.commit_count += 1
+
+    cursor = Cursor()
+    connection = Connection(cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        result = credits_db.purge_expired_ai_ledger_events()
+
+    assert result == {"deleted_rows": 4, "retention_days": 30}
+    assert cursor.executed[0][1][1] == 30

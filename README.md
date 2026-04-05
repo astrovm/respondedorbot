@@ -110,6 +110,28 @@ systemctl --user stop respondedorbot.service respondedorbot-redis.service
 
 # Auto-update images
 systemctl --user enable --now podman-auto-update.timer
+
+# Automatic cache and ledger maintenance
+cp systemd/respondedorbot-maintenance.* ~/.config/systemd/user/
+cp systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now respondedorbot-maintenance.timer
+systemctl --user enable --now respondedorbot-podman-prune.timer
+```
+
+## Storage hygiene
+
+- Journald, APT, and tmp cleanup are host-level responsibilities.
+- Redis cache/state cleanup and AI ledger cleanup run via `run_maintenance.py`.
+- Rootless Podman image growth is bounded by `respondedorbot-podman-prune.timer`.
+- Check current usage with:
+
+```bash
+journalctl --disk-usage
+df -h /
+du -sh ~/.local/share/containers
+podman system df
+podman exec respondedorbot python /app/run_maintenance.py
 ```
 
 ## Tests
