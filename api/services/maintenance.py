@@ -40,7 +40,7 @@ def request_cache_ttl(expiration_time: int) -> int:
 
 
 def last_success_ttl(ttl: int, stale_grace: int) -> int:
-    return max(LAST_SUCCESS_MIN_TTL, int(ttl or 0) + int(stale_grace or 0))
+    return int(ttl or 0) + int(stale_grace or 0)
 
 
 def iter_legacy_cache_keys(redis_client: redis.Redis) -> Iterable[str]:
@@ -100,11 +100,13 @@ def run_maintenance() -> Dict[str, Any]:
     redis_client = config_redis()
     redis_config = apply_redis_memory_policy(redis_client)
     redis_cleanup = prune_redis_growth(redis_client)
-    ledger_cleanup = credits_db.purge_expired_ai_ledger_events(AI_LEDGER_RETENTION_DAYS)
+    if credits_db.is_configured():
+        ledger_cleanup = credits_db.purge_expired_ai_ledger_events(
+            AI_LEDGER_RETENTION_DAYS
+        )
+    else:
+        ledger_cleanup = {"skipped": True, "reason": "postgres not configured"}
     return {
-        "redis": {
-            **redis_cleanup,
-            **redis_config,
-        },
+        "redis": {**redis_cleanup, **redis_config},
         "ledger": ledger_cleanup,
     }
