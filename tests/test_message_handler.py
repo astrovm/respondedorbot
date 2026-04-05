@@ -412,7 +412,7 @@ def test_handle_msg_purgeailog_admin_purges_expired_ai_events():
         result = handle_msg(message)
 
     assert result == "ok"
-    mock_purge.assert_called_once_with(retention_days=30)
+    mock_purge.assert_called_once_with()
     sent_text = mock_send_msg.call_args[0][1]
     assert "purgué 7 eventos ai del ledger con más de 30 días" in sent_text
 

@@ -1047,11 +1047,7 @@ def _handle_admin_purge_ai_log_command(
         return billing_required_response
 
     try:
-        purge_result = deps.credits_db_service.purge_expired_ai_ledger_events(
-            retention_days=getattr(
-                deps.credits_db_service, "AI_LEDGER_RETENTION_DAYS", 30
-            )
-        )
+        purge_result = deps.credits_db_service.purge_expired_ai_ledger_events()
     except Exception as error:
         deps.admin_report(
             "Error purging /purgeailog",
