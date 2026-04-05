@@ -45,6 +45,17 @@ Copy `.env.example` and fill in the values:
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
+## Project layout
+
+- `api/` - application code
+- `api/services/maintenance.py` - Redis/ledger cleanup logic
+- `quadlets/` - Podman Quadlet container definitions
+- `systemd/` - user systemd service and timer units for maintenance and Podman prune
+- `run_polling.py` - bot entrypoint
+- `run_maintenance.py` - maintenance entrypoint (run inside the container)
+- `tests/` - test suite
+- `Containerfile` - container image definition
+
 ## Deployment (Podman + systemd)
 
 ### Prerequisites (Debian/Ubuntu)
@@ -131,7 +142,7 @@ journalctl --disk-usage
 df -h /
 du -sh ~/.local/share/containers
 podman system df
-podman exec respondedorbot python /app/run_maintenance.py
+podman exec systemd-respondedorbot python /app/run_maintenance.py
 ```
 
 ## Tests
