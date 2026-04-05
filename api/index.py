@@ -201,6 +201,10 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
+OPENROUTER_MODEL_MAP = {
+    "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-0905",
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout",
+}
 
 
 # Polymarket constants
@@ -933,6 +937,55 @@ def _get_groq_api_key(account: str) -> Optional[str]:
 
 def _get_configured_groq_accounts() -> List[str]:
     return [account for account in GROQ_ACCOUNT_ORDER if _get_groq_api_key(account)]
+
+
+def _get_openrouter_model_for_groq_model(model: str) -> Optional[str]:
+    return OPENROUTER_MODEL_MAP.get(model)
+
+
+def _get_openrouter_api_key() -> Optional[str]:
+    value = environ.get("OPENROUTER_API_KEY")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _get_openrouter_base_url() -> Optional[str]:
+    value = environ.get("CF_AIG_OPENROUTER_BASE_URL")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _get_openrouter_client(
+    *, default_headers: Optional[Mapping[str, str]] = None
+) -> Optional[OpenAI]:
+    openrouter_api_key = _get_openrouter_api_key()
+    openrouter_base_url = _get_openrouter_base_url()
+    if not openrouter_api_key or not openrouter_base_url:
+        return None
+
+    headers: Dict[str, str] = dict(default_headers) if default_headers else {}
+    cf_aig_token = environ.get("CF_AIG_TOKEN")
+    if cf_aig_token:
+        headers["cf-aig-authorization"] = f"Bearer {cf_aig_token}"
+
+    client_kwargs: Dict[str, Any] = {
+        "api_key": openrouter_api_key,
+        "base_url": openrouter_base_url,
+    }
+    if headers:
+        client_kwargs["default_headers"] = headers
+    return OpenAI(**client_kwargs)
+
+
+def _get_groq_accounts_for_scope(scope: str) -> List[str]:
+    configured_accounts = _get_configured_groq_accounts()
+    if scope == "compound":
+        return configured_accounts
+    return [account for account in configured_accounts if account == GROQ_FREE_ACCOUNT]
 
 
 def _get_groq_backoff_key(account: str, scope: str) -> str:
@@ -3738,16 +3791,19 @@ def complete_with_providers(
     """Try Groq and return the first response."""
 
     if response_meta is None:
-        response_text = get_groq_ai_response(system_message, messages)
-        if response_text:
-            print("complete_with_providers: got response from Groq")
-            return response_text
-    else:
-        response = _get_groq_ai_response_result(system_message, messages)
-        if response:
-            _append_billing_segment(response_meta, response)
-            print("complete_with_providers: got response from Groq")
-            return response.text
+        return get_groq_ai_response(system_message, messages)
+
+    response = _get_groq_ai_response_result(system_message, messages)
+    if response:
+        _append_billing_segment(response_meta, response)
+        print("complete_with_providers: got response from Groq")
+        return response.text
+
+    openrouter_result = _get_openrouter_ai_response_result(system_message, messages)
+    if openrouter_result:
+        _append_billing_segment(response_meta, openrouter_result)
+        print("complete_with_providers: got response from OpenRouter")
+        return openrouter_result.text
     return None
 
 
@@ -4929,10 +4985,48 @@ def _get_groq_ai_response_result(
     )
 
 
+def _get_openrouter_ai_response_result(
+    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> Optional[GroqUsageResult]:
+    model = _get_openrouter_model_for_groq_model(
+        "groq/moonshotai/kimi-k2-instruct-0905"
+    )
+    if not model:
+        return None
+
+    client = _get_openrouter_client()
+    if client is None:
+        return None
+
+    print("Trying OpenRouter AI as fallback...")
+    _increment_ai_provider_request_count()
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=cast(Any, [system_msg] + messages),
+            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+        )
+    except Exception:
+        return None
+    if response and hasattr(response, "choices") and response.choices:
+        if response.choices[0].finish_reason == "stop":
+            return _build_groq_usage_result(
+                kind="chat",
+                text=str(response.choices[0].message.content or ""),
+                model=model,
+                response=response,
+                metadata={"provider": "openrouter"},
+            )
+    return None
+
+
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
     result = _get_groq_ai_response_result(system_msg, messages)
+    if result:
+        return result.text
+    result = _get_openrouter_ai_response_result(system_msg, messages)
     if result:
         return result.text
     return None
@@ -5556,7 +5650,7 @@ def check_global_rate_limit(
 ) -> bool:
     """Check whether a Groq scope still has local budget available."""
 
-    configured_accounts = _get_configured_groq_accounts()
+    configured_accounts = _get_groq_accounts_for_scope(scope)
     if not configured_accounts:
         return True
 
@@ -5571,6 +5665,12 @@ def check_global_rate_limit(
         ):
             return True
     return False
+
+
+def should_allow_openrouter_fallback(scope: str) -> bool:
+    if scope not in {"chat", "vision"}:
+        return False
+    return _get_openrouter_client() is not None
 
 
 def get_ai_onboarding_credits() -> int:
@@ -5818,7 +5918,7 @@ def _execute_groq_request_with_fallback(
     default_headers: Optional[Mapping[str, str]] = None,
     attempt: Callable[[str, OpenAI], Optional[GroqUsageResult]],
 ) -> Optional[GroqUsageResult]:
-    configured_accounts = list(_get_configured_groq_accounts())
+    configured_accounts = list(_get_groq_accounts_for_scope(scope))
     if not configured_accounts:
         print("Groq API key not configured")
         return None
@@ -6111,10 +6211,64 @@ def _describe_image_groq_result(
         token_count=estimated_token_count,
     )
 
+    if result is None:
+        result = _describe_image_openrouter_result(image_data, user_text, file_id)
+
     if result and result.text and file_id:
         cache_description(file_id, result.text)
 
     return result
+
+
+def _describe_image_openrouter_result(
+    image_data: bytes,
+    user_text: str = "¿Qué ves en esta imagen?",
+    file_id: Optional[str] = None,
+) -> Optional[GroqUsageResult]:
+    model = _get_openrouter_model_for_groq_model(
+        "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+    )
+    if not model:
+        return None
+
+    client = _get_openrouter_client()
+    if client is None:
+        return None
+
+    print("Trying OpenRouter vision as fallback...")
+    _increment_ai_provider_request_count()
+    image_base64 = encode_image_to_base64(image_data)
+    image_url = f"data:image/jpeg;base64,{image_base64}"
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=cast(
+                Any,
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    }
+                ],
+            ),
+            max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
+        )
+    except Exception:
+        return None
+    if response and hasattr(response, "choices") and response.choices:
+        content = getattr(response.choices[0].message, "content", None)
+        if content:
+            return _build_groq_usage_result(
+                kind="vision",
+                text=str(content),
+                model=model,
+                response=response,
+                metadata={"file_id": file_id, "provider": "openrouter"},
+            )
+    return None
 
 
 def describe_image_groq(
@@ -6856,6 +7010,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         handle_transcribe_with_message=handle_transcribe_with_message,
         handle_transcribe_with_message_result=handle_transcribe_with_message_result,
         check_global_rate_limit=check_global_rate_limit,
+        should_allow_openrouter_fallback=should_allow_openrouter_fallback,
         handle_rate_limit=handle_rate_limit,
         handle_successful_payment_message=handle_successful_payment_message,
         handle_config_command=handle_config_command,

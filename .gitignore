@@ -130,3 +130,6 @@ dmypy.json
 
 # Vercel
 .vercel
+
+# Local git worktrees
+.worktrees/

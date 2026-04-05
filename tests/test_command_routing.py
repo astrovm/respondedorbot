@@ -96,13 +96,13 @@ def test_hash_cache_key_is_stable():
 
 
 def test_check_global_rate_limit(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"999", b"499999"]
+    redis_client.get.side_effect = [b"0", b"0"]
     assert check_global_rate_limit(redis_client) is True
 
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"1000", b"10"]
+    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
     assert check_global_rate_limit(redis_client) is False
 
     redis_client = MagicMock()
@@ -571,13 +571,13 @@ def test_check_global_rate_limit_edge_cases(monkeypatch):
 
 
 def test_check_global_rate_limit_uses_groq_chat_budget(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"999", b"499999"]
+    redis_client.get.side_effect = [b"0", b"0"]
     assert check_global_rate_limit(redis_client) is True
 
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"1000", b"10"]
+    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
     assert check_global_rate_limit(redis_client) is False
 
     redis_client = MagicMock()
@@ -641,9 +641,11 @@ def test_groq_rate_limits_match_developer_plan_constants():
 
 
 def test_check_global_rate_limit_enforces_chat_tpm(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"0", b"0", b"249999"]
+    monkeypatch.setattr(
+        "api.index._peek_groq_rate_limit", lambda *args, **kwargs: False
+    )
 
     assert (
         check_global_rate_limit(
@@ -656,9 +658,11 @@ def test_check_global_rate_limit_enforces_chat_tpm(monkeypatch):
 
 
 def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     redis_client = MagicMock()
-    redis_client.get.side_effect = [b"0", b"0", b"399999", b"3999999"]
+    monkeypatch.setattr(
+        "api.index._peek_groq_rate_limit", lambda *args, **kwargs: False
+    )
 
     assert (
         check_global_rate_limit(
@@ -670,20 +674,14 @@ def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
     )
 
 
-def test_check_global_rate_limit_uses_paid_when_free_is_exhausted(monkeypatch):
+def test_check_global_rate_limit_skips_paid_for_chat(monkeypatch):
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
     monkeypatch.setenv("GROQ_API_KEY", "paid_key")
 
     redis_client = MagicMock()
-    redis_client.get.side_effect = [
-        b"60",
-        b"10",
-        b"0",
-        b"999",
-        b"499999",
-    ]
+    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
 
-    assert check_global_rate_limit(redis_client) is True
+    assert check_global_rate_limit(redis_client) is False
 
 
 def test_check_global_rate_limit_enforces_free_daily_token_budget(monkeypatch):
