@@ -32,6 +32,8 @@ def decode_redis_value(value: Any) -> Optional[str]:
     if value is not None:
         return str(value)
     return None
+
+
 def load_chat_config_from_redis(
     redis_client: redis.Redis,
     chat_id: str,
@@ -83,11 +85,15 @@ def get_chat_config(
             )
             return config
 
-        pg_config = chat_config_db_service.get_chat_config(chat_id, CHAT_CONFIG_DEFAULTS)
+        pg_config = chat_config_db_service.get_chat_config(
+            chat_id, CHAT_CONFIG_DEFAULTS
+        )
         if isinstance(pg_config, dict):
             return pg_config
 
-        redis_config = load_chat_config_from_redis(redis_client, chat_id, log_event=log_event)
+        redis_config = load_chat_config_from_redis(
+            redis_client, chat_id, log_event=log_event
+        )
         if redis_config != CHAT_CONFIG_DEFAULTS:
             try:
                 chat_config_db_service.set_chat_config(chat_id, redis_config)
@@ -225,7 +231,9 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
         config.get("ignore_link_fix_followups"), default=True
     )
 
-    def choice_button(label: str, value: str, current: str, *, action: str) -> Dict[str, str]:
+    def choice_button(
+        label: str, value: str, current: str, *, action: str
+    ) -> Dict[str, str]:
         prefix = "✅" if current == value else "▫️"
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:{value}"}
 
@@ -272,7 +280,9 @@ def is_chat_admin(
     telegram_request: Callable[..., Any],
     log_event: ConfigLogger,
     redis_get_json_fn: Callable[[redis.Redis, str], Optional[Any]] = redis_get_json,
-    redis_setex_json_fn: Callable[[redis.Redis, str, int, Any], bool] = redis_setex_json,
+    redis_setex_json_fn: Callable[
+        [redis.Redis, str, int, Any], bool
+    ] = redis_setex_json,
 ) -> bool:
     """Return True if user_id is an admin of the chat."""
 

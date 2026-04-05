@@ -1279,17 +1279,13 @@ def _handle_non_ai_command(
             )
         return response_msg, None, False, command
 
-    # Special handling for GIF commands - send as animation
     if command in ("/gm", "/gn"):
         gif_url = handler_func()
         msg_id = str(message.get("message_id", ""))
         if gif_url.startswith("http"):
-            # It's a GIF URL, send as animation with reply
             deps.send_animation(chat_id, gif_url, msg_id=msg_id)
             return None, None, False, command
-        else:
-            # Fallback text message
-            return gif_url, None, False, command
+        return gif_url, None, False, command
 
     response_msg = (
         handler_func(sanitized_message_text) if takes_params else handler_func()
