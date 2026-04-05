@@ -180,13 +180,6 @@ _DOLLAR_TIMEFRAME_HOURS: Dict[str, int] = {
     "48h": 48,
 }
 
-# Combined set of all valid timeframe tokens
-_ALL_TIMEFRAMES: Dict[str, int] = {
-    **_DOLLAR_TIMEFRAME_HOURS,
-    "7d": 168,
-    "30d": 720,
-}
-
 
 def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]:
     """Strip a trailing timeframe token from msg_text.
@@ -1531,9 +1524,9 @@ def cached_requests(
                     redis_set_json(redis_client, request_hash, redis_value)
                     if hourly_cache:
                         current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                        redis_set_json(
-                            redis_client, current_hour + request_hash, redis_value
-                        )
+                        hourly_key = current_hour + request_hash
+                        if redis_client.get(hourly_key) is None:
+                            redis_set_json(redis_client, hourly_key, redis_value)
                     if cache_history is not None:
                         redis_value["history"] = cache_history
                     return redis_value
@@ -1647,6 +1640,10 @@ def refresh_price_caches() -> None:
     _fetch_criptoya_dollar_data(hourly_cache=True)
     get_api_or_cache_prices("ARS", hourly_cache=True)
     get_api_or_cache_prices("USD", hourly_cache=True)
+    try:
+        get_oil_price()
+    except Exception:
+        pass
 
 
 def _fetch_polymarket_event(
@@ -1845,6 +1842,11 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
 # get crypto pices from coinmarketcap
 def get_prices(msg_text: str) -> Optional[str]:
     msg_text, tf = _parse_timeframe(msg_text, _CMC_CHANGE_FIELD)
+    if tf is None and msg_text.strip():
+        last_token = msg_text.strip().rsplit(None, 1)[-1].lower()
+        if re.fullmatch(r"\d+[hd]", last_token):
+            valid = ", ".join(_CMC_CHANGE_FIELD)
+            return f"timeframe '{last_token}' no soportado, uso: {valid}"
     cmc_change_field = _CMC_CHANGE_FIELD.get(tf or "24h", "percent_change_24h")
     tf_label = tf or "24h"
 
@@ -2286,11 +2288,19 @@ def format_dollar_rates(
             line += f" ({formatted_percentage}% {hours_ago}hs)"
         msg_lines.append(line)
 
+    if hours_ago != 24 and all(r.get("history") is None for r in rates):
+        msg_lines.append(f"\n(sin datos historicos para {hours_ago}hs todavia)")
+
     return "\n".join(msg_lines)
 
 
 def get_dollar_rates(msg_text: str = "") -> Optional[str]:
     _, tf = _parse_timeframe(msg_text, _DOLLAR_TIMEFRAME_HOURS)
+    if tf is None and msg_text.strip():
+        token = msg_text.strip().lower()
+        if re.fullmatch(r"\d+[hd]", token):
+            valid = ", ".join(_DOLLAR_TIMEFRAME_HOURS)
+            return f"timeframe '{token}' no soportado, uso: {valid}"
     hours_ago = _DOLLAR_TIMEFRAME_HOURS.get(tf, 24) if tf else 24
 
     dollars = _fetch_criptoya_dollar_data(
@@ -2298,13 +2308,19 @@ def get_dollar_rates(msg_text: str = "") -> Optional[str]:
         get_history=hours_ago if hours_ago != 24 else 0,
     )
 
-    tcrm_100, tcrm_history = get_cached_tcrm_100()
+    tcrm_100, tcrm_history = get_cached_tcrm_100(hours_ago)
 
     sorted_dollar_rates = sort_dollar_rates(
         dollars, tcrm_100, tcrm_history, hours_ago=hours_ago
     )
 
     band_limits = get_currency_band_limits()
+
+    # Band deltas are daily-only values from the BCRA API - hide them for non-24h
+    if band_limits and hours_ago != 24:
+        band_limits = {
+            k: v for k, v in band_limits.items() if not k.endswith("_change_pct")
+        }
 
     return format_dollar_rates(sorted_dollar_rates, hours_ago, band_limits)
 
@@ -2942,6 +2958,7 @@ esto es lo que sé hacer, boludo:
 - /rulo: te armo los rulos desde el oficial
 
 - /dolar, /dollar, /usd: te tiro la posta del blue y todos los dólares
+- /usd 1h: variacion de la ultima hora (acepta 1h, 6h, 12h, 24h, 48h)
 
 - /petroleo, /oil: te paso el precio del Brent y del WTI
 
@@ -2962,6 +2979,8 @@ esto es lo que sé hacer, boludo:
 - /prices btc, eth, xmr: bitcoin, ethereum y monero en usd
 - /prices dai in sats: dai en satoshis
 - /prices stables: stablecoins en usd
+- /prices btc 7d: variacion de 7 dias (acepta 1h, 24h, 7d, 30d)
+- /prices 10 1h: top 10 con variacion de 1 hora
 
 - /random pizza, carne, sushi: elijo por vos
 - /random 1-10: numero random del 1 al 10
@@ -6952,19 +6971,19 @@ def update_telegram_bot_commands() -> bool:
         "config": "tocás la config del gordo y de los links",
         "convertbase": "te paso números entre bases",
         "random": "elijo por vos entre opciones o números",
-        "prices": "precios crypto y conversiones en la moneda que pidas",
-        "price": "precios crypto y conversiones en la moneda que pidas",
-        "precios": "precios crypto y conversiones en la moneda que pidas",
-        "precio": "precios crypto y conversiones en la moneda que pidas",
-        "presios": "precios crypto y conversiones en la moneda que pidas",
-        "presio": "precios crypto y conversiones en la moneda que pidas",
-        "bresio": "precios crypto y conversiones en la moneda que pidas",
-        "bresios": "precios crypto y conversiones en la moneda que pidas",
-        "brecio": "precios crypto y conversiones en la moneda que pidas",
-        "brecios": "precios crypto y conversiones en la moneda que pidas",
-        "dolar": "te tiro la posta del blue y todos los dólares",
-        "dollar": "te tiro la posta del blue y todos los dólares",
-        "usd": "te tiro la posta del blue y todos los dólares",
+        "prices": "precios crypto [1h/24h/7d/30d]",
+        "price": "precios crypto [1h/24h/7d/30d]",
+        "precios": "precios crypto [1h/24h/7d/30d]",
+        "precio": "precios crypto [1h/24h/7d/30d]",
+        "presios": "precios crypto [1h/24h/7d/30d]",
+        "presio": "precios crypto [1h/24h/7d/30d]",
+        "bresio": "precios crypto [1h/24h/7d/30d]",
+        "bresios": "precios crypto [1h/24h/7d/30d]",
+        "brecio": "precios crypto [1h/24h/7d/30d]",
+        "brecios": "precios crypto [1h/24h/7d/30d]",
+        "dolar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
+        "dollar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
+        "usd": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
         "petroleo": "te paso el precio del Brent y del WTI",
         "oil": "te paso el precio del Brent y del WTI",
         "eleccion": "odds actuales de Polymarket para Diputados 2025",

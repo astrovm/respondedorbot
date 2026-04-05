@@ -1166,6 +1166,94 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         assert calls["n"] == 2  # one failure + one retry
 
 
+def test_parse_timeframe_rejects_unknown_timeframe():
+    from api.index import _parse_timeframe, _CMC_CHANGE_FIELD, _DOLLAR_TIMEFRAME_HOURS
+
+    text, tf = _parse_timeframe("BTC 5h", _CMC_CHANGE_FIELD)
+    assert tf is None
+    assert text == "BTC 5h"
+
+    text, tf = _parse_timeframe("5h", _DOLLAR_TIMEFRAME_HOURS)
+    assert tf is None
+    assert text == "5h"
+
+
+def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
+    from api.index import cached_requests
+
+    write_calls = []
+    hourly_exists = {"value": False}
+
+    def fake_redis_get_json(client, key):
+        return None
+
+    def fake_redis_set_json(client, key, value):
+        write_calls.append(key)
+        if len(key) > 64:
+            hourly_exists["value"] = True
+
+    class FakeRedis:
+        def get(self, key):
+            if hourly_exists["value"]:
+                return b"exists"
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+    def fake_config_redis():
+        return FakeRedis()
+
+    class FakeResponse:
+        text = '{"data": "ok"}'
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("api.index.config_redis", fake_config_redis)
+    monkeypatch.setattr("api.index.redis_get_json", fake_redis_get_json)
+    monkeypatch.setattr("api.index.redis_set_json", fake_redis_set_json)
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+
+    cached_requests("https://example.com", None, None, 300, hourly_cache=True)
+    first_count = len([k for k in write_calls if len(k) > 64])
+    assert first_count >= 1
+
+    write_calls.clear()
+    cached_requests("https://example.com", None, None, 300, hourly_cache=True)
+    second_hourly_writes = len([k for k in write_calls if len(k) > 64])
+    assert second_hourly_writes == 0
+
+
+def test_price_refresh_loop_disabled(monkeypatch):
+    import run_polling
+    from unittest.mock import patch
+    import threading
+
+    monkeypatch.setenv("PRICE_REFRESH_ENABLED", "false")
+    monkeypatch.setattr("time.sleep", lambda x: None)
+
+    called = []
+    result = []
+
+    def fake_refresh():
+        called.append(1)
+
+    def run():
+        with patch("api.index.refresh_price_caches", fake_refresh):
+            run_polling._price_refresh_loop()
+        result.append("done")
+
+    t = threading.Thread(target=run)
+    t.daemon = True
+    t.start()
+    t.join(timeout=2)
+
+    assert "done" in result
+    assert called == []
+
+
 def test_get_oil_price_success():
     mock_text_brent = (
         "Date,Open,High,Low,Close,Volume\n"
