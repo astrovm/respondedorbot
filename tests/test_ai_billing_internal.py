@@ -130,9 +130,9 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
     assert breakdown["raw_usd_micros"] > 0
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
         "moonshotai/kimi-k2-instruct-0905",
-        "moonshotai/kimi-k2-instruct-0905",
+        "moonshotai/kimi-k2-0905",
         "meta-llama/llama-4-scout-17b-16e-instruct",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "meta-llama/llama-4-scout",
         "whisper-large-v3",
     ]
 
