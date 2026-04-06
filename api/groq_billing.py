@@ -29,6 +29,7 @@ MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST = 120.0
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
+    # Groq pricing
     "moonshotai/kimi-k2-instruct-0905": {
         "input_per_million": 1_000_000,
         "cached_input_per_million": 500_000,
@@ -37,6 +38,16 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     "meta-llama/llama-4-scout-17b-16e-instruct": {
         "input_per_million": 110_000,
         "output_per_million": 340_000,
+    },
+    # OpenRouter pricing
+    "moonshotai/kimi-k2-0905": {
+        "input_per_million": 400_000,
+        "cached_input_per_million": 150_000,
+        "output_per_million": 2_000_000,
+    },
+    "meta-llama/llama-4-scout": {
+        "input_per_million": 80_000,
+        "output_per_million": 300_000,
     },
     "whisper-large-v3": {
         "audio_per_hour": 111_000,
@@ -51,9 +62,7 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 
 MODEL_BILLING_ALIASES = {
     "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-instruct-0905",
-    "moonshotai/kimi-k2-0905": "moonshotai/kimi-k2-instruct-0905",
     "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
-    "meta-llama/llama-4-scout": "meta-llama/llama-4-scout-17b-16e-instruct",
     "groq/whisper-large-v3": "whisper-large-v3",
 }
 
