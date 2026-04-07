@@ -871,30 +871,24 @@ GROQ_PAID_RATE_LIMITS = {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": GROQ_CHAT_MODEL,
     },
     "compound": {
         "rpm": 200,
         "rpd": 20_000,
         "tpm": 200_000,
-        "model": GROQ_COMPOUND_DEFAULT_MODEL,
     },
     "vision": {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 300_000,
-        "model": GROQ_VISION_MODEL,
     },
     "transcribe": {
         "rpm": 400,
         "rpd": 200_000,
         "ash": 400_000,
         "asd": 4_000_000,
-        "model": GROQ_TRANSCRIBE_MODEL,
     },
 }
-
-GROQ_RATE_LIMITS = GROQ_PAID_RATE_LIMITS
 
 GROQ_FREE_RATE_LIMITS = {
     "chat": {
@@ -902,27 +896,23 @@ GROQ_FREE_RATE_LIMITS = {
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": GROQ_CHAT_MODEL,
     },
     "compound": {
         "rpm": 30,
         "rpd": 250,
         "tpm": 70_000,
-        "model": GROQ_COMPOUND_DEFAULT_MODEL,
     },
     "vision": {
         "rpm": 30,
         "rpd": 1_000,
         "tpm": 30_000,
         "tpd": 500_000,
-        "model": GROQ_VISION_MODEL,
     },
     "transcribe": {
         "rpm": 20,
         "rpd": 2_000,
         "ash": 7_200,
         "asd": 28_800,
-        "model": GROQ_TRANSCRIBE_MODEL,
     },
 }
 
@@ -6234,9 +6224,7 @@ def _describe_image_openrouter_result(
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
 ) -> Optional[GroqUsageResult]:
-    model = _get_openrouter_model_for_groq_model(
-        "groq/meta-llama/llama-4-scout-17b-16e-instruct"
-    )
+    model = _get_openrouter_model_for_groq_model(GROQ_VISION_MODEL)
     if not model:
         return None
 

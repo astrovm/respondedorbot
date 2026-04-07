@@ -586,57 +586,49 @@ def test_check_global_rate_limit_uses_groq_chat_budget(monkeypatch):
 
 
 def test_groq_rate_limits_match_developer_plan_constants():
-    assert index.GROQ_RATE_LIMITS["chat"] == {
+    assert index.GROQ_PAID_RATE_LIMITS["chat"] == {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": "groq/moonshotai/kimi-k2-instruct-0905",
     }
-    assert index.GROQ_RATE_LIMITS["compound"] == {
+    assert index.GROQ_PAID_RATE_LIMITS["compound"] == {
         "rpm": 200,
         "rpd": 20_000,
         "tpm": 200_000,
-        "model": "groq/compound",
     }
-    assert index.GROQ_RATE_LIMITS["vision"] == {
+    assert index.GROQ_PAID_RATE_LIMITS["vision"] == {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 300_000,
-        "model": "groq/meta-llama/llama-4-scout-17b-16e-instruct",
     }
-    assert index.GROQ_RATE_LIMITS["transcribe"] == {
+    assert index.GROQ_PAID_RATE_LIMITS["transcribe"] == {
         "rpm": 400,
         "rpd": 200_000,
         "ash": 400_000,
         "asd": 4_000_000,
-        "model": "groq/whisper-large-v3",
     }
     assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
         "rpm": 60,
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": "groq/moonshotai/kimi-k2-instruct-0905",
     }
     assert index.GROQ_FREE_RATE_LIMITS["compound"] == {
         "rpm": 30,
         "rpd": 250,
         "tpm": 70_000,
-        "model": "groq/compound",
     }
     assert index.GROQ_FREE_RATE_LIMITS["vision"] == {
         "rpm": 30,
         "rpd": 1_000,
         "tpm": 30_000,
         "tpd": 500_000,
-        "model": "groq/meta-llama/llama-4-scout-17b-16e-instruct",
     }
     assert index.GROQ_FREE_RATE_LIMITS["transcribe"] == {
         "rpm": 20,
         "rpd": 2_000,
         "ash": 7_200,
         "asd": 28_800,
-        "model": "groq/whisper-large-v3",
     }
 
 
