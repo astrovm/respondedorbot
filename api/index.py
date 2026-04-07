@@ -995,10 +995,7 @@ def _get_openrouter_client(
 
 
 def _get_groq_accounts_for_scope(scope: str) -> List[str]:
-    configured_accounts = _get_configured_groq_accounts()
-    if scope == "compound":
-        return configured_accounts
-    return [account for account in configured_accounts if account == GROQ_FREE_ACCOUNT]
+    return _get_configured_groq_accounts()
 
 
 def _get_groq_backoff_key(account: str, scope: str) -> str:
