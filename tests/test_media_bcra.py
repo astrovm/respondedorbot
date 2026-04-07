@@ -1521,7 +1521,7 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
         mock_openai.assert_not_called()
 
 
-def test_transcribe_audio_groq_does_not_fall_back_to_paid_after_free_429(monkeypatch):
+def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
     from api.index import transcribe_audio_groq
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
@@ -1532,12 +1532,21 @@ def test_transcribe_audio_groq_does_not_fall_back_to_paid_after_free_429(monkeyp
         "Error code: 429 - rate limit reached"
     )
 
-    with patch("api.index.OpenAI", return_value=free_client) as mock_openai:
+    paid_choice = MagicMock()
+    paid_choice.text = "transcribed text"
+
+    paid_client = MagicMock()
+    paid_client.audio.transcriptions.create.return_value = paid_choice
+
+    with patch(
+        "api.index.OpenAI", side_effect=[free_client, paid_client]
+    ) as mock_openai:
         result = transcribe_audio_groq(b"audio_data")
 
-    assert result is None
-    assert mock_openai.call_count == 1
+    assert result is not None
+    assert mock_openai.call_count == 2
     assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
 
 
 # Tests for video transcription support

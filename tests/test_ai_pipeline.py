@@ -10,15 +10,15 @@ def test_get_groq_compound_enabled_tools_parses_env(monkeypatch):
     ]
 
 
-def test_get_groq_accounts_for_scope_is_scope_aware(monkeypatch):
+def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch):
     from api.index import _get_groq_accounts_for_scope
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free-key")
     monkeypatch.setenv("GROQ_API_KEY", "paid-key")
 
-    assert _get_groq_accounts_for_scope("chat") == ["free"]
-    assert _get_groq_accounts_for_scope("vision") == ["free"]
-    assert _get_groq_accounts_for_scope("transcribe") == ["free"]
+    assert _get_groq_accounts_for_scope("chat") == ["free", "paid"]
+    assert _get_groq_accounts_for_scope("vision") == ["free", "paid"]
+    assert _get_groq_accounts_for_scope("transcribe") == ["free", "paid"]
     assert _get_groq_accounts_for_scope("compound") == ["free", "paid"]
 
 
@@ -1142,7 +1142,7 @@ def test_get_groq_ai_response_prefers_free_account(monkeypatch):
     assert mock_openai.call_args.kwargs["api_key"] == "free_key"
 
 
-def test_get_groq_ai_response_does_not_fall_back_to_paid_when_free_local_limit_hits(
+def test_get_groq_ai_response_falls_back_to_paid_when_free_local_limit_hits(
     monkeypatch,
 ):
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
@@ -1178,15 +1178,19 @@ def test_get_groq_ai_response_does_not_fall_back_to_paid_when_free_local_limit_h
             [{"role": "user", "content": "hola"}],
         )
 
-    assert result is None
-    mock_openai.assert_not_called()
+    assert result == "paid fallback"
+    assert mock_openai.call_count == 1
+    assert mock_openai.call_args.kwargs["api_key"] == "paid_key"
 
 
-def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatch):
+def test_get_groq_ai_response_falls_back_to_openrouter_after_free_and_paid_429(
+    monkeypatch,
+):
     from api import index as index_module
 
     index_module._provider_backoff_until.clear()
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
@@ -1194,6 +1198,11 @@ def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatc
 
     free_client = MagicMock()
     free_client.chat.completions.create.side_effect = Exception(
+        "Error code: 429 - rate limit reached"
+    )
+
+    paid_client = MagicMock()
+    paid_client.chat.completions.create.side_effect = Exception(
         "Error code: 429 - rate limit reached"
     )
 
@@ -1208,7 +1217,7 @@ def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatc
     openrouter_client.chat.completions.create.return_value = openrouter_response
 
     with patch(
-        "api.index.OpenAI", side_effect=[free_client, openrouter_client]
+        "api.index.OpenAI", side_effect=[free_client, paid_client, openrouter_client]
     ) as mock_openai:
         result = get_groq_ai_response(
             {"role": "system", "content": "system"},
@@ -1216,22 +1225,34 @@ def test_get_groq_ai_response_falls_back_to_openrouter_after_free_429(monkeypatc
         )
 
     assert result == "openrouter fallback"
-    assert mock_openai.call_count == 2
+    assert mock_openai.call_count == 3
     assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "openrouter_key"
+    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_key"
+    assert mock_openai.call_args_list[2].kwargs["api_key"] == "openrouter_key"
 
 
-def test_get_groq_ai_response_does_not_use_paid_account_for_non_compound(monkeypatch):
+def test_get_groq_ai_response_uses_paid_account_when_only_paid_configured(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "paid_key")
 
-    with patch("api.index.OpenAI") as mock_openai:
+    paid_choice = MagicMock()
+    paid_choice.message.content = "paid response"
+    paid_choice.finish_reason = "stop"
+
+    paid_response = MagicMock()
+    paid_response.choices = [paid_choice]
+
+    paid_client = MagicMock()
+    paid_client.chat.completions.create.return_value = paid_response
+
+    with patch("api.index.OpenAI", return_value=paid_client) as mock_openai:
         result = get_groq_ai_response(
             {"role": "system", "content": "system"},
             [{"role": "user", "content": "hola"}],
         )
 
-    assert result is None
-    mock_openai.assert_not_called()
+    assert result == "paid response"
+    assert mock_openai.call_count == 1
+    assert mock_openai.call_args.kwargs["api_key"] == "paid_key"
 
 
 def test_get_openrouter_ai_response_returns_none_when_provider_raises(monkeypatch):
