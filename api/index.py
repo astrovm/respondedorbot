@@ -198,12 +198,13 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "visit_website",
     "browser_automation",
 )
+GROQ_CHAT_MODEL = "groq/moonshotai/kimi-k2-instruct-0905"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 OPENROUTER_MODEL_MAP = {
-    "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-0905",
-    "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout",
+    GROQ_CHAT_MODEL: "moonshotai/kimi-k2-0905",
+    GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
 }
 
 
@@ -870,7 +871,7 @@ GROQ_PAID_RATE_LIMITS = {
         "rpm": 1000,
         "rpd": 500_000,
         "tpm": 250_000,
-        "model": "groq/moonshotai/kimi-k2-instruct-0905",
+        "model": GROQ_CHAT_MODEL,
     },
     "compound": {
         "rpm": 200,
@@ -901,7 +902,7 @@ GROQ_FREE_RATE_LIMITS = {
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-        "model": "groq/moonshotai/kimi-k2-instruct-0905",
+        "model": GROQ_CHAT_MODEL,
     },
     "compound": {
         "rpm": 30,
@@ -994,7 +995,7 @@ def _get_openrouter_client(
     return OpenAI(**client_kwargs)
 
 
-def _get_groq_accounts_for_scope(scope: str) -> List[str]:
+def _get_groq_accounts_for_scope() -> List[str]:
     return _get_configured_groq_accounts()
 
 
@@ -4970,7 +4971,7 @@ def _get_groq_ai_response_result(
         _increment_ai_provider_request_count()
 
         response = groq_client.chat.completions.create(
-            model="groq/moonshotai/kimi-k2-instruct-0905",
+            model=GROQ_CHAT_MODEL,
             messages=cast(Any, [system_msg] + messages),
             max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         )
@@ -4981,7 +4982,7 @@ def _get_groq_ai_response_result(
                 return _build_groq_usage_result(
                     kind="chat",
                     text=str(response.choices[0].message.content or ""),
-                    model="groq/moonshotai/kimi-k2-instruct-0905",
+                    model=GROQ_CHAT_MODEL,
                     response=response,
                     metadata={"groq_account": account},
                 )
@@ -4998,9 +4999,7 @@ def _get_groq_ai_response_result(
 def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[GroqUsageResult]:
-    model = _get_openrouter_model_for_groq_model(
-        "groq/moonshotai/kimi-k2-instruct-0905"
-    )
+    model = _get_openrouter_model_for_groq_model(GROQ_CHAT_MODEL)
     if not model:
         return None
 
@@ -5660,7 +5659,7 @@ def check_global_rate_limit(
 ) -> bool:
     """Check whether a Groq scope still has local budget available."""
 
-    configured_accounts = _get_groq_accounts_for_scope(scope)
+    configured_accounts = _get_groq_accounts_for_scope()
     if not configured_accounts:
         return True
 
@@ -5680,7 +5679,7 @@ def check_global_rate_limit(
 def should_allow_openrouter_fallback(scope: str) -> bool:
     if scope not in {"chat", "vision"}:
         return False
-    return _get_openrouter_client() is not None
+    return _get_openrouter_api_key() is not None
 
 
 def get_ai_onboarding_credits() -> int:
@@ -5928,7 +5927,7 @@ def _execute_groq_request_with_fallback(
     default_headers: Optional[Mapping[str, str]] = None,
     attempt: Callable[[str, OpenAI], Optional[GroqUsageResult]],
 ) -> Optional[GroqUsageResult]:
-    configured_accounts = list(_get_groq_accounts_for_scope(scope))
+    configured_accounts = list(_get_groq_accounts_for_scope())
     if not configured_accounts:
         print("Groq API key not configured")
         return None
