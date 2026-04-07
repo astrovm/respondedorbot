@@ -9,7 +9,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **AI chat**: configurable personality powered by Groq with OpenRouter fallback for chat/vision when local Groq is exhausted
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
 - **BCRA economic data**: `/bcra`, `/variables`
-- **Media**: audio transcription (Whisper) stays Groq-only; image description can fall back to OpenRouter
+- **Media**: audio transcription (Whisper) tries Groq free then paid; image description also falls back to OpenRouter
 - **Web search**: `/buscar` / `/search` using free Groq first, then paid Groq
 - **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
@@ -47,9 +47,9 @@ python run_polling.py
 
 ### Provider contract
 
-- chat and vision try local Groq first, then OpenRouter if local Groq is exhausted
-- compound uses free Groq first, then paid Groq
-- transcription stays free Groq-only
+- all scopes try free Groq first, then paid Groq
+- chat and vision also fall back to OpenRouter if both Groq accounts are exhausted
+- compound and transcription stop at paid Groq (no OpenRouter fallback)
 
 ## Project layout
 
