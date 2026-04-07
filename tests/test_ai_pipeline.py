@@ -16,10 +16,7 @@ def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free-key")
     monkeypatch.setenv("GROQ_API_KEY", "paid-key")
 
-    assert _get_groq_accounts_for_scope("chat") == ["free", "paid"]
-    assert _get_groq_accounts_for_scope("vision") == ["free", "paid"]
-    assert _get_groq_accounts_for_scope("transcribe") == ["free", "paid"]
-    assert _get_groq_accounts_for_scope("compound") == ["free", "paid"]
+    assert _get_groq_accounts_for_scope() == ["free", "paid"]
 
 
 def test_get_openrouter_model_for_groq_model_maps_supported_models():
@@ -80,15 +77,17 @@ def test_check_global_rate_limit_uses_scope_specific_accounts(monkeypatch):
         calls.append((account, scope))
         return True
 
-    monkeypatch.setattr("api.index._get_groq_accounts_for_scope", lambda scope: [scope])
+    monkeypatch.setattr(
+        "api.index._get_groq_accounts_for_scope", lambda: ["test-account"]
+    )
     monkeypatch.setattr("api.index._peek_groq_rate_limit", fake_peek)
 
     assert check_global_rate_limit(None, scope="chat") is True
-    assert calls == [("chat", "chat")]
+    assert calls == [("test-account", "chat")]
 
     calls.clear()
     assert check_global_rate_limit(None, scope="compound") is True
-    assert calls == [("compound", "compound")]
+    assert calls == [("test-account", "compound")]
 
 
 def test_should_allow_openrouter_fallback_requires_openrouter_and_only_for_chat_vision(
