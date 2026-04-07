@@ -602,9 +602,9 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "tpm": 300_000,
     }
     assert index.GROQ_PAID_RATE_LIMITS["transcribe"] == {
-        "rpm": 400,
+        "rpm": 300,
         "rpd": 200_000,
-        "ash": 400_000,
+        "ash": 200_000,
         "asd": 4_000_000,
     }
     assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
