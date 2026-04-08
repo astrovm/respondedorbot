@@ -485,7 +485,7 @@ class AIMessageBilling:
         )
 
         if raw_usd_micros == 0 and not has_usage:
-            actual_credit_units = 0
+            actual_credit_units = reserved_credit_units
         if actual_credit_units < reserved_credit_units:
             refunded_credit_units = reserved_credit_units - actual_credit_units
             try:
@@ -732,7 +732,7 @@ class AIMessageBilling:
         )
 
         if raw_usd_micros == 0 and not has_usage:
-            actual_credit_units = 0
+            actual_credit_units = reserved_credit_units_total
         if actual_credit_units < reserved_credit_units_total:
             refunded_credit_units = reserved_credit_units_total - actual_credit_units
             try:
