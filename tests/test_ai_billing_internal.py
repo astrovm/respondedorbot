@@ -706,19 +706,13 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         reason="ai_response_success",
     )
 
-    assert billing.credits_db_service.refund_ai_charge.call_count == 2
-    assert [
-        call.kwargs["amount"]
-        for call in billing.credits_db_service.refund_ai_charge.call_args_list
-    ] == [
-        9,
-        10,
-    ]
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 9
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     assert billing.credits_db_service.record_ai_settlement_result.call_count == 2
 
 
-def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_refunds_later_reserves():
+def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_keeps_reserved_charge():
     billing = _build_billing_helper()
 
     billing.settle_reserved_ai_credits_batch(
@@ -740,8 +734,7 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_ref
         reason="ai_response_success",
     )
 
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 10
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     assert billing.credits_db_service.record_ai_settlement_result.call_count == 2
     first_metadata = (
@@ -755,11 +748,12 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_ref
         ]
     )
     assert first_metadata["missing_usage_billing"] is True
-    assert second_metadata["missing_usage_billing"] is False
-    assert second_metadata["refunded_credit_units"] == 10
+    assert first_metadata["refunded_credit_units"] == 0
+    assert second_metadata["billing_zero_usage_fallback"] is True
+    assert second_metadata["refunded_credit_units"] == 0
 
 
-def test_settle_reserved_ai_credits_batch_empty_segments_refunds_reserved_charge():
+def test_settle_reserved_ai_credits_batch_empty_segments_keeps_reserved_charge():
     billing = _build_billing_helper()
 
     billing.settle_reserved_ai_credits_batch(
@@ -781,8 +775,7 @@ def test_settle_reserved_ai_credits_batch_empty_segments_refunds_reserved_charge
         reason="ai_response_success",
     )
 
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 20
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
@@ -832,7 +825,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
-def test_settle_reserved_ai_credits_refunds_groq_zero_usage_to_zero_net_charge():
+def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage():
     billing = _build_billing_helper()
 
     billing.settle_reserved_ai_credits(
@@ -855,16 +848,15 @@ def test_settle_reserved_ai_credits_refunds_groq_zero_usage_to_zero_net_charge()
         reason="ok",
     )
 
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 30
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
         "metadata"
     ]
     assert metadata["billing_zero_usage_fallback"] is True
-    assert metadata["settled_credit_units"] == 0
-    assert metadata["refunded_credit_units"] == 30
+    assert metadata["settled_credit_units"] == 30
+    assert metadata["refunded_credit_units"] == 0
 
 
 def test_settle_reserved_ai_credits_refunds_cache_only_usage():
@@ -902,7 +894,7 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
     assert metadata["refunded_credit_units"] == 28
 
 
-def test_settle_reserved_ai_credits_batch_refunds_zero_usage_to_zero_net_charge():
+def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is_zero():
     billing = _build_billing_helper()
 
     billing.settle_reserved_ai_credits_batch(
@@ -941,16 +933,15 @@ def test_settle_reserved_ai_credits_batch_refunds_zero_usage_to_zero_net_charge(
         reason="ai_response_success",
     )
 
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 20
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
         "metadata"
     ]
     assert metadata["billing_zero_usage_fallback"] is True
-    assert metadata["settled_credit_units"] == 0
-    assert metadata["refunded_credit_units"] == 20
+    assert metadata["settled_credit_units"] == 20
+    assert metadata["refunded_credit_units"] == 0
 
 
 def test_settle_reserved_ai_credits_refunds_transcribe_partial_usage():
@@ -1036,7 +1027,7 @@ def test_settle_reserved_ai_credits_refunds_compound_partial_usage():
     assert metadata["refunded_credit_units"] == expected_refund
 
 
-def test_settle_reserved_ai_credits_without_usage_refunds_reserved_charge():
+def test_settle_reserved_ai_credits_without_usage_keeps_reserved_charge():
     billing = _build_billing_helper()
 
     billing.settle_reserved_ai_credits(
@@ -1051,8 +1042,7 @@ def test_settle_reserved_ai_credits_without_usage_refunds_reserved_charge():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 20
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
