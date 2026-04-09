@@ -172,7 +172,7 @@ def test_should_gordo_respond():
         mock_env.side_effect = env_side_effect
 
         # Test command
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {"chat": {"type": "group"}, "from": {"id": 42, "username": "test"}}
         assert (
             should_gordo_respond(commands, "/test", "hello", msg, chat_config, None)
             is True
@@ -185,7 +185,7 @@ def test_should_gordo_respond():
         )
 
         # Test mention
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {"chat": {"type": "group"}, "from": {"id": 42, "username": "test"}}
         assert (
             should_gordo_respond(commands, "", "@testbot hello", msg, chat_config, None)
             is True
@@ -943,14 +943,14 @@ def test_should_gordo_respond_complex_cases():
         mock_env.return_value = "testbot"  # Set mock bot username
 
         # Test with command not in command list but starts with /
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {"chat": {"type": "group"}, "from": {"id": 42, "username": "test"}}
         assert (
             should_gordo_respond(commands, "/unknown", "hello", msg, chat_config, None)
             is False
         )
 
         # Test with message containing bot username in middle of message
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {"chat": {"type": "group"}, "from": {"id": 42, "username": "test"}}
         assert (
             should_gordo_respond(
                 commands,
@@ -978,17 +978,25 @@ def test_should_gordo_respond_complex_cases():
         mock_env.return_value = "testbot"
 
         # Test with trigger word but probability too high (0.5 > 0.1)
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {"chat": {"type": "group"}, "from": {"id": 42, "username": "test"}}
         assert (
             should_gordo_respond(commands, "", "hey gordo", msg, chat_config, None)
             is False
         )
 
-    with patch("os.environ.get") as mock_env, patch("random.random", return_value=0.05):
+    with (
+        patch("os.environ.get") as mock_env,
+        patch("random.random", return_value=0.05),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._fetch_balance", return_value=10),
+    ):
         mock_env.return_value = "testbot"
 
         # Test with multiple trigger words and low probability (0.05 < 0.1)
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {
+            "chat": {"id": "77", "type": "group"},
+            "from": {"id": 42, "username": "test"},
+        }
         assert (
             should_gordo_respond(
                 commands,
@@ -1002,10 +1010,42 @@ def test_should_gordo_respond_complex_cases():
         )
 
         # Test with case-insensitive trigger words
-        msg = {"chat": {"type": "group"}, "from": {"username": "test"}}
+        msg = {
+            "chat": {"id": "77", "type": "group"},
+            "from": {"id": 42, "username": "test"},
+        }
         assert (
             should_gordo_respond(commands, "", "hey GORDO", msg, chat_config, None)
             is True
+        )
+
+
+def test_index_should_gordo_respond_blocks_random_replies_without_credits():
+    from api.index import should_gordo_respond
+
+    config_module.set_cache(
+        {
+            "trigger_words": ["gordo", "test", "bot"],
+            "system_prompt": "You are a test bot",
+        }
+    )
+
+    chat_config = {
+        "link_mode": "off",
+        "ai_random_replies": True,
+        "ai_command_followups": True,
+        "ignore_link_fix_followups": True,
+    }
+    msg = {"chat": {"id": "77", "type": "group"}, "from": {"id": 42}}
+
+    with (
+        patch("os.environ.get", return_value="testbot"),
+        patch("random.random", return_value=0.05),
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index._fetch_balance", side_effect=[0, 0]),
+    ):
+        assert (
+            should_gordo_respond({}, "", "che gordo", msg, chat_config, None) is False
         )
 
 
