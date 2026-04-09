@@ -5614,7 +5614,7 @@ def should_gordo_respond(
     chat_config: Mapping[str, Any],
     reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
-    return _command_should_gordo_respond(
+    should_respond = _command_should_gordo_respond(
         commands,
         command,
         message_text,
@@ -5623,6 +5623,48 @@ def should_gordo_respond(
         reply_metadata,
         load_bot_config_fn=load_bot_config,
     )
+    if not should_respond:
+        return False
+
+    chat = cast(Mapping[str, Any], message.get("chat") or {})
+    chat_type = str(chat.get("type") or "")
+    if chat_type == "private" or command in commands:
+        return True
+
+    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
+    if bot_username and f"@{bot_username}" in message_text.lower():
+        return True
+
+    reply = message.get("reply_to_message") or {}
+    if (
+        isinstance(reply, Mapping)
+        and str((reply.get("from") or {}).get("username") or "") == bot_username
+    ):
+        return True
+
+    return _has_ai_credits_for_random_reply(message)
+
+
+def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
+    if not credits_db_service.is_configured():
+        return False
+
+    user_id = _extract_user_id(message)
+    if user_id is None:
+        return False
+
+    if _fetch_balance("user", user_id) > 0:
+        return True
+
+    chat = cast(Mapping[str, Any], message.get("chat") or {})
+    if not _is_group_chat_type(str(chat.get("type") or "")):
+        return False
+
+    chat_id = _extract_numeric_chat_id(str(chat.get("id") or ""))
+    if chat_id is None:
+        return False
+
+    return _fetch_balance("chat", chat_id) > 0
 
 
 def should_auto_process_media(
