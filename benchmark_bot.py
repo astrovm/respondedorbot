@@ -14,27 +14,27 @@ from api.config import load_bot_config as load_core_bot_config
 
 try:  # Optional dependency used in manual benchmarking CLI
     from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - fallback for environments without python-dotenv
+except (
+    ImportError
+):  # pragma: no cover - fallback for environments without python-dotenv
+
     def load_dotenv(*args: Any, **kwargs: Any) -> bool:  # type: ignore[override]
         return False
+
 
 # Load environment variables from .env file
 load_dotenv()
 
 
 class GordoBenchmark:
-    def __init__(self, groq_api_key: str):
-        self.api_key = groq_api_key
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         self.bot_config = self.load_bot_config()
 
-        # Modelos disponibles en Groq
         self.models = [
-            "openai/gpt-oss-120b",
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "qwen/qwen3-32b",
-            "moonshotai/kimi-k2-instruct-0905",
+            "z-ai/glm-5.1",
+            "qwen/qwen3.6-plus-04-02",
         ]
 
     def load_bot_config(self) -> Dict[str, Any]:
@@ -135,10 +135,10 @@ class GordoBenchmark:
         print(f"📝 Trigger words: {trigger_words}\n")
 
         for i, scenario in enumerate(scenarios, 1):
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             print(f"📋 CASO {i}/{len(scenarios)}: {scenario['category'].upper()}")
             print(f"❓ PROMPT: {scenario['prompt']}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
             # Obtener respuestas de todos los modelos
             responses = {}
@@ -148,11 +148,11 @@ class GordoBenchmark:
                 print(f"  Consultando {model}...")
                 response = self.call_model(model, scenario["prompt"])
                 responses[model] = response
-                time.sleep(5)  # Rate limiting para Groq
+                time.sleep(1)
 
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("📊 RESPUESTAS:")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
             # Mostrar todas las respuestas
             for j, (model, response) in enumerate(responses.items(), 1):
@@ -246,9 +246,9 @@ class GordoBenchmark:
 
 
 def main():
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        print("❌ Error: GROQ_API_KEY no configurada")
+        print("❌ Error: OPENROUTER_API_KEY no configurada")
         return
 
     benchmark = GordoBenchmark(api_key)
