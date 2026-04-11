@@ -41,6 +41,7 @@
 ## Git
 
 - Merge to `main` with a single squashed commit.
+- Commit messages must always be in English.
 
 ## Formatting
 
