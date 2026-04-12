@@ -670,7 +670,9 @@ def _fetch_urls_from_latest_message(
     if not urls:
         return ""
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(urls)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(urls), 5)
+    ) as executor:
         results = list(executor.map(fetch_url_content, urls))
 
     parts = []
