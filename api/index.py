@@ -99,7 +99,6 @@ from api.groq_billing import (
     ensure_mapping_list,
     WEB_SEARCH_USD_MICROS_PER_REQUEST,
 )
-from api.agent_loop import run_agent_loop
 from api.agent_tools import fetch_url_content
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
@@ -192,13 +191,9 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
-FALLBACK_CHAT_MODEL = "z-ai/glm-5.1"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
-AGENT_MAX_ITERATIONS = 4
-AGENT_MAX_TOOL_CALLS = 5
-AGENT_MAX_WEB_SEARCHES = 3
 OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
 OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 15
 OPENROUTER_MODEL_MAP = {
@@ -692,108 +687,6 @@ def _build_tool_result_content(tool_name: str, result: Any) -> str:
             parts.append("sin contenido")
         return "\n".join(parts)
     return json.dumps(result, ensure_ascii=False, default=str)
-
-
-def _normalize_agent_billing_segment(
-    segment: Mapping[str, Any],
-) -> Optional[Dict[str, Any]]:
-    segment_type = str(segment.get("type") or "").strip().lower()
-    if segment_type == "billing_segment":
-        segment_payload = ensure_mapping(segment.get("segment"))
-        return dict(segment_payload or {}) if segment_payload else None
-    if {"kind", "model"}.issubset(segment):
-        return dict(segment)
-    return None
-
-
-def _append_agent_billing_segments(
-    response_meta: Optional[Dict[str, Any]], segments: Sequence[Any]
-) -> None:
-    if response_meta is None:
-        return
-    for segment in segments:
-        if not isinstance(segment, Mapping):
-            continue
-        normalized = _normalize_agent_billing_segment(segment)
-        if normalized is not None:
-            _append_billing_segment(response_meta, normalized)
-
-
-def _build_agent_model_call(
-    *, enable_web_search: bool
-) -> Callable[[List[Dict[str, Any]]], Dict[str, Any]]:
-    def _call(transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
-        result = _get_openrouter_ai_response_result(
-            cast(Dict[str, Any], transcript[0]),
-            cast(List[Dict[str, Any]], transcript[1:]),
-            enable_web_search=enable_web_search,
-        )
-        if result is None:
-            return {"type": "final", "text": "", "billing_segment": None}
-        return {
-            "type": "final",
-            "text": result.text,
-            "billing_segment": result.billing_segment(),
-        }
-
-    return _call
-
-
-def _build_agent_tools(
-    enable_web_search: bool,
-) -> Dict[str, Callable[[Mapping[str, Any]], Any]]:
-    tools: Dict[str, Callable[[Mapping[str, Any]], Any]] = {
-        "fetch_url_content": lambda arguments: fetch_url_content(
-            str(arguments.get("url") or "")
-        )
-    }
-    if enable_web_search:
-        tools["web_search"] = lambda arguments: {
-            "query": str(arguments.get("query") or ""),
-            "error": "web_search provider loop not wired",
-        }
-    return tools
-
-
-def _run_ai_agent(
-    *,
-    system_message: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    response_meta: Optional[Dict[str, Any]],
-    enable_web_search: bool,
-) -> Dict[str, Any]:
-    conversation = [dict(message) for message in messages]
-    latest_text = _extract_latest_user_message_text(conversation)
-    latest_urls = _extract_latest_urls_from_messages(conversation)
-
-    if latest_urls and _should_prioritize_url_fetch(latest_text):
-        fetched = fetch_url_content(latest_urls[0])
-        conversation.append(
-            {
-                "role": "tool",
-                "name": "fetch_url_content",
-                "content": _build_tool_result_content("fetch_url_content", fetched),
-            }
-        )
-
-    result = run_agent_loop(
-        system_message=system_message,
-        conversation=conversation,
-        model_call_fn=_build_agent_model_call(enable_web_search=enable_web_search),
-        tools=_build_agent_tools(enable_web_search),
-        max_iterations=AGENT_MAX_ITERATIONS,
-        max_tool_calls=AGENT_MAX_TOOL_CALLS,
-    )
-
-    if response_meta is not None:
-        response_meta["agent_iterations"] = int(result.get("iterations") or 0)
-        response_meta["agent_final_reason"] = str(result.get("final_reason") or "")
-        response_meta["agent_tool_calls"] = int(result.get("tool_calls") or 0)
-        _append_agent_billing_segments(
-            response_meta, cast(Sequence[Any], result.get("billing_segments") or [])
-        )
-
-    return result
 
 
 def _get_groq_accounts_for_scope() -> List[str]:
@@ -3431,13 +3324,27 @@ def ask_ai(
             else:
                 print("Failed to describe image, continuing without description...")
 
-        agent_result = _run_ai_agent(
-            system_message=system_message,
-            messages=messages,
+        latest_text = _extract_latest_user_message_text(messages)
+        latest_urls = _extract_latest_urls_from_messages(messages)
+        if latest_urls and _should_prioritize_url_fetch(latest_text):
+            fetched = fetch_url_content(latest_urls[0])
+            messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        "CONTENIDO DE URL OBTENIDO:\n"
+                        f"{_build_tool_result_content('fetch_url_content', fetched)}"
+                    ),
+                }
+            ]
+
+        response = complete_with_providers(
+            system_message,
+            messages,
             response_meta=response_meta,
             enable_web_search=enable_web_search,
         )
-        response = str(agent_result.get("text") or "")
+        response = str(response or "")
         if response:
             print(
                 f"ask_ai: response len={len(response)} preview='{response[:160].replace(chr(10), ' ')}'"
@@ -4345,17 +4252,13 @@ def estimate_ai_base_reserve_credits(
     )
 
     if reserve_mode == "agent":
-        reserve = reserve * AGENT_MAX_ITERATIONS
-        reserve += AGENT_MAX_WEB_SEARCHES * credit_units_from_usd_micros(
-            WEB_SEARCH_USD_MICROS_PER_REQUEST
-        )
+        reserve = reserve * 4
         return reserve, {
             "reserve_mode": "agent",
             "reserve_reason": "bounded_agent",
             "reserve_model": "qwen/qwen3.6-plus",
             "rate_limit_scope": "chat",
-            "estimated_rate_limit_tokens": estimated_rate_limit_tokens
-            * AGENT_MAX_ITERATIONS,
+            "estimated_rate_limit_tokens": estimated_rate_limit_tokens * 4,
         }
 
     if reserve_mode == "search":
@@ -4433,7 +4336,7 @@ def _get_openrouter_ai_response_result(
     if client is None:
         return None
 
-    for model in (PRIMARY_CHAT_MODEL, FALLBACK_CHAT_MODEL):
+    for model in (PRIMARY_CHAT_MODEL,):
         print(f"Trying OpenRouter chat with model={model}...")
         _increment_ai_provider_request_count()
         try:

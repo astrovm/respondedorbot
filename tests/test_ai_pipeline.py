@@ -58,9 +58,9 @@ def test_openrouter_config_helpers(monkeypatch):
 def test_api_index_does_not_expose_unused_agent_limits():
     from api import index
 
-    assert index.AGENT_MAX_ITERATIONS == 4
-    assert index.AGENT_MAX_TOOL_CALLS == 5
-    assert index.AGENT_MAX_WEB_SEARCHES == 3
+    assert not hasattr(index, "AGENT_MAX_ITERATIONS")
+    assert not hasattr(index, "AGENT_MAX_TOOL_CALLS")
+    assert not hasattr(index, "AGENT_MAX_WEB_SEARCHES")
 
 
 def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
@@ -516,20 +516,12 @@ def test_ask_ai_prefers_url_fetch_for_summary_requests(monkeypatch):
         captured["url"] = url
         return {"url": url, "title": "Demo", "content": "contenido limpio"}
 
-    def fake_run_agent_loop(**kwargs):
-        transcript = kwargs["conversation"]
-        captured["conversation"] = transcript
-        return {
-            "text": "resumen listo",
-            "billing_segments": [],
-            "tool_calls": 1,
-            "iterations": 1,
-            "final_reason": "final",
-            "transcript": transcript,
-        }
+    def fake_complete(system_message, messages, **kwargs):
+        captured["messages"] = messages
+        return "resumen listo"
 
     monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
-    monkeypatch.setattr("api.index.run_agent_loop", fake_run_agent_loop)
+    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
 
     result = ask_ai(
         [{"role": "user", "content": "resumime https://example.com/post"}],
@@ -538,10 +530,73 @@ def test_ask_ai_prefers_url_fetch_for_summary_requests(monkeypatch):
 
     assert result == "resumen listo"
     assert captured["url"] == "https://example.com/post"
-    assert any(
-        item.get("role") == "tool" and item.get("name") == "fetch_url_content"
-        for item in captured["conversation"]
+    assert captured["messages"][-1]["role"] == "user"
+    assert "contenido limpio" in captured["messages"][-1]["content"]
+
+
+def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
+    from api.index import ask_ai
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
     )
+    monkeypatch.setattr(
+        "api.index.fetch_url_content",
+        lambda _url: {
+            "url": "https://example.com/post",
+            "title": "Demo",
+            "content": "contenido",
+        },
+    )
+
+    calls = []
+
+    def fake_complete(system_message, messages, **kwargs):
+        calls.append((system_message, messages, kwargs))
+        return "ok"
+
+    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+
+    result = ask_ai(
+        [{"role": "user", "content": "resumime https://example.com/post"}],
+        response_meta={},
+    )
+
+    assert result == "ok"
+    assert len(calls) == 1
+
+
+def test_estimate_ai_base_reserve_credits_agent_mode_without_search_overhead(
+    monkeypatch,
+):
+    from api.index import estimate_ai_base_reserve_credits
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+
+    chat_reserve, _ = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "hola"}],
+        reserve_mode="chat",
+    )
+    agent_reserve, metadata = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "hola"}],
+        reserve_mode="agent",
+    )
+
+    assert agent_reserve == chat_reserve * 4
+    assert metadata["reserve_mode"] == "agent"
+    assert metadata["reserve_reason"] == "bounded_agent"
 
 
 def test_ask_ai_with_provider_success():
@@ -650,10 +705,7 @@ def test_ask_ai_does_not_force_search_for_news_queries():
             "api.index.build_system_message",
             return_value={"role": "system", "content": "sys"},
         ),
-        patch(
-            "api.index._run_ai_agent",
-            return_value={"text": "ok", "billing_segments": []},
-        ) as mock_agent,
+        patch("api.index.complete_with_providers", return_value="ok") as mock_complete,
         patch("api.index.environ.get") as mock_env,
     ):
         mock_env.side_effect = lambda key, default=None: {
@@ -663,7 +715,7 @@ def test_ask_ai_does_not_force_search_for_news_queries():
         result = ask_ai([{"role": "user", "content": message_block}])
 
     assert result == "ok"
-    mock_agent.assert_called_once()
+    mock_complete.assert_called_once()
 
 
 def test_search_command_success():
@@ -993,7 +1045,7 @@ def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch)
     mock_openai.assert_not_called()
 
 
-def test_get_groq_ai_response_cascades_to_fallback_model_on_failure(monkeypatch):
+def test_get_groq_ai_response_returns_none_when_primary_model_fails(monkeypatch):
     from api.index import PRIMARY_CHAT_MODEL, get_groq_ai_response
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
@@ -1001,17 +1053,10 @@ def test_get_groq_ai_response_cascades_to_fallback_model_on_failure(monkeypatch)
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
     )
 
-    fallback_choice = MagicMock()
-    fallback_choice.message.content = "fallback response"
-    fallback_choice.finish_reason = "stop"
-
-    fallback_response = MagicMock()
-    fallback_response.choices = [fallback_choice]
-
     def create_side_effect(*args, **kwargs):
         if kwargs.get("model") == PRIMARY_CHAT_MODEL:
             raise Exception("primary failed")
-        return fallback_response
+        raise AssertionError("unexpected secondary model call")
 
     client = MagicMock()
     client.chat.completions.create.side_effect = create_side_effect
@@ -1022,7 +1067,7 @@ def test_get_groq_ai_response_cascades_to_fallback_model_on_failure(monkeypatch)
             [{"role": "user", "content": "hola"}],
         )
 
-    assert result == "fallback response"
+    assert result is None
 
 
 def test_describe_image_openrouter_result_returns_none_when_provider_raises(
