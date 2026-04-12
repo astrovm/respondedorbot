@@ -198,12 +198,12 @@ GROQ_COMPOUND_DEFAULT_TOOLS = (
     "visit_website",
     "browser_automation",
 )
-GROQ_CHAT_MODEL = "groq/moonshotai/kimi-k2-instruct-0905"
+PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
+FALLBACK_CHAT_MODEL = "z-ai/glm-5.1"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 OPENROUTER_MODEL_MAP = {
-    GROQ_CHAT_MODEL: "moonshotai/kimi-k2-0905",
     GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
 }
 
@@ -3789,22 +3789,16 @@ def complete_with_providers(
     *,
     response_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Try Groq and return the first response."""
+    """Try OpenRouter chat models and return the first response."""
 
     if response_meta is None:
         return get_groq_ai_response(system_message, messages)
 
-    response = _get_groq_ai_response_result(system_message, messages)
-    if response:
-        _append_billing_segment(response_meta, response)
-        print("complete_with_providers: got response from Groq")
-        return response.text
-
-    openrouter_result = _get_openrouter_ai_response_result(system_message, messages)
-    if openrouter_result:
-        _append_billing_segment(response_meta, openrouter_result)
+    result = _get_openrouter_ai_response_result(system_message, messages)
+    if result:
+        _append_billing_segment(response_meta, result)
         print("complete_with_providers: got response from OpenRouter")
-        return openrouter_result.text
+        return result.text
     return None
 
 
@@ -4893,7 +4887,7 @@ def estimate_ai_base_reserve_credits(
     return reserve, {
         "reserve_mode": "chat",
         "reserve_reason": "standard_chat",
-        "reserve_model": "moonshotai/kimi-k2-instruct-0905",
+        "reserve_model": "qwen/qwen3.6-plus",
         "rate_limit_scope": "chat",
         "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
     }
@@ -4947,84 +4941,39 @@ def _build_groq_usage_result(
     )
 
 
-def _get_groq_ai_response_result(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
-) -> Optional[GroqUsageResult]:
-    """First option using Groq AI"""
-
-    estimated_token_count = (
-        estimate_message_tokens([system_msg] + messages) + CHAT_OUTPUT_TOKEN_LIMIT
-    )
-
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
-        print(f"Trying Groq AI as first option with account={account}...")
-        _increment_ai_provider_request_count()
-
-        response = groq_client.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
-            messages=cast(Any, [system_msg] + messages),
-            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
-        )
-
-        if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                print("Groq AI response successful")
-                return _build_groq_usage_result(
-                    kind="chat",
-                    text=str(response.choices[0].message.content or ""),
-                    model=GROQ_CHAT_MODEL,
-                    response=response,
-                    metadata={"groq_account": account},
-                )
-        return None
-
-    return _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="chat",
-        label="Groq AI",
-        token_count=estimated_token_count,
-    )
-
-
 def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[GroqUsageResult]:
-    model = _get_openrouter_model_for_groq_model(GROQ_CHAT_MODEL)
-    if not model:
-        return None
-
     client = _get_openrouter_client()
     if client is None:
         return None
 
-    print("Trying OpenRouter AI as fallback...")
-    _increment_ai_provider_request_count()
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=cast(Any, [system_msg] + messages),
-            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
-        )
-    except Exception:
-        return None
-    if response and hasattr(response, "choices") and response.choices:
-        if response.choices[0].finish_reason == "stop":
-            return _build_groq_usage_result(
-                kind="chat",
-                text=str(response.choices[0].message.content or ""),
+    for model in (PRIMARY_CHAT_MODEL, FALLBACK_CHAT_MODEL):
+        print(f"Trying OpenRouter chat with model={model}...")
+        _increment_ai_provider_request_count()
+        try:
+            response = client.chat.completions.create(
                 model=model,
-                response=response,
-                metadata={"provider": "openrouter"},
+                messages=cast(Any, [system_msg] + messages),
+                max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
             )
+        except Exception:
+            continue
+        if response and hasattr(response, "choices") and response.choices:
+            if response.choices[0].finish_reason == "stop":
+                return _build_groq_usage_result(
+                    kind="chat",
+                    text=str(response.choices[0].message.content or ""),
+                    model=model,
+                    response=response,
+                    metadata={"provider": "openrouter"},
+                )
     return None
 
 
 def get_groq_ai_response(
     system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> Optional[str]:
-    result = _get_groq_ai_response_result(system_msg, messages)
-    if result:
-        return result.text
     result = _get_openrouter_ai_response_result(system_msg, messages)
     if result:
         return result.text

@@ -201,7 +201,7 @@ def estimate_chat_reserve_credits(
     max_output_tokens: int = CHAT_OUTPUT_TOKEN_LIMIT,
     extra_input_tokens: int = 0,
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS["moonshotai/kimi-k2-instruct-0905"]
+    pricing = MODEL_PRICING_USD_MICROS["qwen/qwen3.6-plus"]
     input_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
         input_tokens += estimate_message_tokens([system_message])
