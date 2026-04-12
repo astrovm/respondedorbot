@@ -34,6 +34,10 @@ def run_agent_loop(
             }
 
         tool_calls = list(result.get("tool_calls", []))
+        transcript.append(
+            {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        )
+
         if total_tool_calls + len(tool_calls) > max_tool_calls:
             return {
                 "text": "",
@@ -43,10 +47,6 @@ def run_agent_loop(
                 "billing_segments": billing_segments,
                 "transcript": transcript,
             }
-
-        transcript.append(
-            {"role": "assistant", "content": None, "tool_calls": tool_calls}
-        )
 
         for tool_call in tool_calls:
             tool_name = tool_call["name"]

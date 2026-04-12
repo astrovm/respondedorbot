@@ -158,3 +158,44 @@ def test_run_agent_loop_allows_final_turn_after_last_permitted_tool_call():
         *model_calls[1][-2:],
         {"role": "assistant", "content": "listo"},
     ]
+
+
+def test_run_agent_loop_records_assistant_turn_when_tool_budget_overflows():
+    from api.agent_loop import run_agent_loop
+
+    result = run_agent_loop(
+        system_message={"role": "system", "content": "sos util"},
+        conversation=[{"role": "user", "content": "resolve"}],
+        model_call_fn=lambda _transcript: {
+            "type": "tool_calls",
+            "tool_calls": [
+                {"name": "ping", "arguments": {}},
+                {"name": "pong", "arguments": {}},
+            ],
+            "billing_segment": {"provider": "test", "input_tokens": 2},
+        },
+        tools={
+            "ping": lambda _arguments: {"ok": True},
+            "pong": lambda _arguments: {"ok": True},
+        },
+        max_iterations=1,
+        max_tool_calls=1,
+    )
+
+    assert result["text"] == ""
+    assert result["iterations"] == 1
+    assert result["tool_calls"] == 0
+    assert result["final_reason"] == "max_tool_calls"
+    assert result["billing_segments"] == [{"provider": "test", "input_tokens": 2}]
+    assert result["transcript"] == [
+        {"role": "system", "content": "sos util"},
+        {"role": "user", "content": "resolve"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"name": "ping", "arguments": {}},
+                {"name": "pong", "arguments": {}},
+            ],
+        },
+    ]
