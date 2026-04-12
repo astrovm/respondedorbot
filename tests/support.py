@@ -48,11 +48,8 @@ extract_message_urls = index.extract_message_urls
 fetch_link_metadata = index.fetch_link_metadata
 build_message_links_context = index.build_message_links_context
 search_command = index.search_command
-parse_tool_call = index.parse_tool_call
-execute_tool = index.execute_tool
 complete_with_providers = index.complete_with_providers
 get_groq_ai_response = index.get_groq_ai_response
-get_groq_compound_response = index.get_groq_compound_response
 get_provider_backoff_remaining = index.get_provider_backoff_remaining
 handle_ai_response = index.handle_ai_response
 handle_msg = index.handle_msg
@@ -62,8 +59,6 @@ handle_callback_query = index.handle_callback_query
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE
 get_rulo = index.get_rulo
 get_oil_price = index.get_oil_price
-should_use_groq_compound_tools = index.should_use_groq_compound_tools
-get_groq_compound_enabled_tools = index.get_groq_compound_enabled_tools
 
 
 def parse_command(message_text: str, bot_name: str):

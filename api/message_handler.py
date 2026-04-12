@@ -548,9 +548,7 @@ def _run_ai_flow(
             if prepared_message.resized_image_data and prepared_message.photo_file_id
             else 0
         ),
-        reserve_mode="compound"
-        if getattr(handler_func, "__name__", "") == "search_command"
-        else "chat",
+        reserve_mode="chat",
     )
     rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
     if not deps.check_global_rate_limit(

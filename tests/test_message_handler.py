@@ -1501,12 +1501,12 @@ def test_handle_msg_search_command_uses_ai_billing():
         if isinstance(response_meta, dict):
             response_meta["billing_segments"] = [
                 {
-                    "kind": "compound",
-                    "model": "groq/compound",
+                    "kind": "chat",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             ]
-        return "resultado compound"
+        return "resultado web"
 
     with (
         patch("api.index.config_redis") as mock_config_redis,
@@ -1539,7 +1539,7 @@ def test_handle_msg_search_command_uses_ai_billing():
     assert result == "ok"
     mock_charge.assert_called_once()
     mock_send_msg.assert_called_once()
-    assert mock_send_msg.call_args[0][1] == "resultado compound"
+    assert mock_send_msg.call_args[0][1] == "resultado web"
 
 
 def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch):

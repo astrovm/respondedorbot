@@ -43,18 +43,6 @@ def test_convert_to_command():
     assert convert_to_command(msg_text8) == expected8
 
 
-def test_should_use_groq_compound_tools_truthy(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    assert should_use_groq_compound_tools() is True
-
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_test_key")
-    assert should_use_groq_compound_tools() is True
-
-    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
-    assert should_use_groq_compound_tools() is False
-
-
 def test_optional_redis_client_success():
     from api.index import _optional_redis_client
 

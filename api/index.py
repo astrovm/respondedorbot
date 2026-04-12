@@ -26,7 +26,6 @@ from typing import (
     TYPE_CHECKING,
     Literal,
 )
-import ast
 import base64
 import emoji
 import hashlib
@@ -89,12 +88,10 @@ from api.ai_billing import (
 )
 from api.groq_billing import (
     CHAT_OUTPUT_TOKEN_LIMIT,
-    GPT_OSS_120B_FALLBACK_MODEL,
     GroqUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
     estimate_chat_reserve_credits,
-    estimate_compound_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
@@ -150,7 +147,6 @@ from api.utils.links import (
 TTL_PRICE = 300  # 5 minutes
 TTL_DOLLAR = 300  # 5 minutes
 TTL_WEATHER = 1800  # 30 minutes
-TTL_GROQ_COMPOUND_CACHE = 300  # 5 minutes
 TTL_LINK_METADATA = 300  # 5 minutes
 TTL_POLYMARKET = 5  # 5 seconds
 TTL_POLYMARKET_STREAM = 5  # 5 seconds for live price lookups
@@ -191,13 +187,6 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 
 BA_TZ = timezone(timedelta(hours=-3))
-GROQ_COMPOUND_DEFAULT_MODEL = "groq/compound"
-GROQ_COMPOUND_DEFAULT_TOOLS = (
-    "web_search",
-    "code_interpreter",
-    "visit_website",
-    "browser_automation",
-)
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 FALLBACK_CHAT_MODEL = "z-ai/glm-5.1"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
@@ -221,19 +210,6 @@ POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
 
-CURRENT_INFO_QUERY_PATTERNS = [
-    r"\bhoy\b",
-    r"\bactual(?:es|izada|izado)?\b",
-    r"\bultimo(?:s|as)?\b",
-    r"\bultima(?:s)?\b",
-    r"\bprecio(?:s)?\b",
-    r"\bcosto(?:s)?\b",
-    r"\bcuanto\s+sale\b",
-    r"\bpromedio\b",
-    r"\bcotizacion(?:es)?\b",
-]
-YEAR_TOKEN_PATTERN = re.compile(r"\b20\d{2}\b")
-COMPOUND_SOURCE_LOG_LIMIT = 2000
 MESSAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
 )
@@ -244,28 +220,6 @@ MESSAGE_URL_PATTERN = re.compile(
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()]*)?"
     r")"
 )
-
-
-def should_use_groq_compound_tools() -> bool:
-    """Return True when Groq Compound built-in tools are enabled."""
-
-    return bool(_get_configured_groq_accounts())
-
-
-def get_groq_compound_enabled_tools() -> List[str]:
-    """Return the enabled Groq Compound tool list, sanitized by allowlist."""
-
-    return list(GROQ_COMPOUND_DEFAULT_TOOLS)
-
-
-def normalize_text_for_matching(text: str) -> str:
-    """Normalize text by removing accents and lowercasing for matching."""
-
-    normalized = unicodedata.normalize("NFKD", text)
-    normalized = "".join(
-        char for char in normalized if not unicodedata.combining(char)
-    ).lower()
-    return normalized
 
 
 def _extract_message_block_from_prompt(text: str) -> str:
@@ -353,207 +307,6 @@ def _fetch_criptoya_dollar_data(
     )
 
 
-def _extract_year_tokens(text: Optional[str]) -> Set[int]:
-    years: Set[int] = set()
-    if not text:
-        return years
-    for match in YEAR_TOKEN_PATTERN.findall(str(text)):
-        try:
-            years.add(int(match))
-        except ValueError:
-            continue
-    return years
-
-
-def _query_needs_current_info(text: Optional[str]) -> bool:
-    normalized = normalize_text_for_matching(str(text or ""))
-    if not normalized:
-        return False
-    return any(
-        re.search(pattern, normalized) for pattern in CURRENT_INFO_QUERY_PATTERNS
-    )
-
-
-def _normalize_search_query(
-    query: str,
-    messages: Sequence[Mapping[str, Any]],
-    *,
-    now: Optional[datetime] = None,
-) -> str:
-    normalized_query = re.sub(r"\s+", " ", str(query or "")).strip()
-    if not normalized_query:
-        return ""
-
-    current_year = int((now or datetime.now(BA_TZ)).year)
-    latest_user_text, latest_user_message, _ = _extract_latest_user_query_info(messages)
-    user_years = _extract_year_tokens(
-        " ".join(part for part in (latest_user_text, latest_user_message) if part)
-    )
-    query_years = _extract_year_tokens(normalized_query)
-    needs_current_info = _query_needs_current_info(
-        normalized_query
-    ) or _query_needs_current_info(latest_user_message)
-
-    if user_years:
-        return normalized_query
-
-    if (
-        query_years
-        and any(year < current_year for year in query_years)
-        and needs_current_info
-    ):
-        rewritten_query = YEAR_TOKEN_PATTERN.sub(str(current_year), normalized_query)
-        if rewritten_query != normalized_query:
-            print(
-                "_normalize_search_query: replaced stale year "
-                f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
-            )
-        return rewritten_query
-
-    if not query_years and needs_current_info:
-        rewritten_query = f"{normalized_query} {current_year}"
-        print(
-            "_normalize_search_query: appended current year "
-            f"query='{normalized_query[:120]}' rewritten='{rewritten_query[:120]}'"
-        )
-        return rewritten_query
-
-    return normalized_query
-
-
-def _format_text_for_log(
-    text: Optional[str], limit: int = COMPOUND_SOURCE_LOG_LIMIT
-) -> str:
-    raw = str(text or "").strip()
-    if len(raw) <= limit:
-        return raw
-    return raw[:limit] + "\n...[truncated]"
-
-
-def _disable_tools_in_system_message(system_message: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a copy of the system message without tool instructions for follow-up passes."""
-
-    content = system_message.get("content")
-    if not isinstance(content, list):
-        return system_message
-
-    cleaned_blocks: List[Dict[str, Any]] = []
-    for block in content:
-        if not isinstance(block, Mapping):
-            cleaned_blocks.append(cast(Dict[str, Any], block))
-            continue
-        if block.get("type") != "text":
-            cleaned_blocks.append(dict(block))
-            continue
-
-        text = str(block.get("text") or "")
-        tools_marker = "\n\nHERRAMIENTAS DISPONIBLES:\n"
-        if tools_marker in text:
-            text = text.split(tools_marker, 1)[0].rstrip()
-        text = (
-            f"{text}\n\n"
-            "SEGUIMIENTO DE HERRAMIENTA:\n"
-            "Ya tenés la información necesaria para esta respuesta. "
-            "No llames herramientas ni escribas líneas de llamada a herramientas; "
-            "respondé directo al usuario."
-        ).strip()
-        cleaned_block = dict(block)
-        cleaned_block["text"] = text
-        cleaned_blocks.append(cleaned_block)
-
-    return {
-        **system_message,
-        "content": cleaned_blocks,
-    }
-
-
-def _run_compound_task(
-    *,
-    task: str,
-    messages: Optional[List[Dict[str, Any]]] = None,
-    system_message: Optional[Dict[str, Any]] = None,
-    compound_system_message: Optional[Dict[str, Any]] = None,
-    response_meta: Optional[Dict[str, Any]] = None,
-    persona_pass: bool = True,
-) -> str:
-    if not compound_system_message:
-        print("_run_compound_task: compound unavailable (no system message)")
-        return "compound no está disponible en este momento"
-
-    normalized_task = _normalize_search_query(task, messages or [])
-    print(f"_run_compound_task: starting task='{normalized_task[:120]}'")
-    compound_messages = [{"role": "user", "content": normalized_task}]
-    source_text: Optional[str] = None
-
-    if response_meta is None:
-        source_text = get_groq_compound_response(
-            compound_system_message, compound_messages
-        )
-    else:
-        compound_result = _get_groq_compound_response_result(
-            compound_system_message, compound_messages
-        )
-        if compound_result:
-            _append_billing_segment(response_meta, compound_result)
-            source_text = compound_result.text
-
-    if not source_text:
-        print("_run_compound_task: compound returned empty response")
-        return "no pude completar la consulta con compound ahora"
-
-    print(
-        "_run_compound_task: compound source "
-        f"task='{normalized_task[:120]}' source_len={len(source_text)} persona_pass={persona_pass}"
-    )
-    print(
-        "_run_compound_task: compound source text >>>\n"
-        f"{_format_text_for_log(source_text)}\n"
-        "<<< compound source text"
-    )
-
-    if not persona_pass:
-        return source_text
-
-    if system_message is None:
-        return source_text
-
-    source_context = (
-        "FUENTE COMPOUND (resultado preliminar):\n"
-        f"{source_text}\n\n"
-        "Instrucciones: usá la fuente solo como referencia, verificá consistencia "
-        "y respondé al usuario con la personalidad configurada."
-    )
-    enriched_messages = list(messages or []) + [
-        {"role": "system", "content": source_context}
-    ]
-    followup_system_message = _disable_tools_in_system_message(system_message)
-
-    if response_meta is None:
-        final_response = complete_with_providers(
-            followup_system_message, enriched_messages
-        )
-    else:
-        final_response = complete_with_providers(
-            followup_system_message,
-            enriched_messages,
-            response_meta=response_meta,
-        )
-
-    if final_response:
-        print(
-            "_run_compound_task: persona pass succeeded "
-            f"task='{normalized_task[:120]}' final_len={len(final_response)}"
-        )
-        return final_response
-
-    print(
-        "_run_compound_task: persona pass returned empty; returning raw compound output "
-        f"for task='{normalized_task[:120]}' source_len={len(source_text)}"
-    )
-
-    return source_text
-
-
 def config_redis(host=None, port=None, password=None):
     configure_app_config(admin_reporter=globals().get("admin_report"))
     return _config_config_redis(host=host, port=port, password=password)
@@ -579,115 +332,6 @@ def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
     serialized = json.dumps(payload, sort_keys=True, default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
-
-
-def _build_groq_compound_cache_key(
-    *,
-    model: str,
-    system_msg: Optional[Mapping[str, Any]],
-    messages: Sequence[Mapping[str, Any]],
-    enabled_tools: Sequence[str],
-    default_headers: Optional[Mapping[str, str]],
-) -> str:
-    return _hash_cache_key(
-        "groq_compound",
-        {
-            "model": model,
-            "system_msg": system_msg,
-            "messages": list(messages),
-            "enabled_tools": list(enabled_tools),
-            "default_headers": dict(default_headers or {}),
-        },
-    )
-
-
-def _deserialize_cached_groq_usage_result(payload: Any) -> Optional[GroqUsageResult]:
-    payload_map = ensure_mapping(payload)
-    if not payload_map:
-        return None
-
-    text = str(payload_map.get("text") or "")
-    if not text:
-        return None
-
-    metadata = ensure_mapping(payload_map.get("metadata")) or {}
-    metadata["compound_cache_hit"] = True
-
-    audio_seconds_raw = payload_map.get("audio_seconds")
-    try:
-        audio_seconds = None if audio_seconds_raw is None else float(audio_seconds_raw)
-    except (TypeError, ValueError):
-        audio_seconds = None
-
-    return GroqUsageResult(
-        kind=str(payload_map.get("kind") or "compound"),
-        text=text,
-        model=str(payload_map.get("model") or GROQ_COMPOUND_DEFAULT_MODEL),
-        usage=ensure_mapping(payload_map.get("usage")),
-        usage_breakdown=ensure_mapping_list(payload_map.get("usage_breakdown")),
-        executed_tools=ensure_mapping_list(payload_map.get("executed_tools")),
-        audio_seconds=audio_seconds,
-        cached=True,
-        source="cache",
-        metadata=metadata,
-    )
-
-
-def _get_cached_groq_compound_result(
-    *,
-    model: str,
-    system_msg: Optional[Mapping[str, Any]],
-    messages: Sequence[Mapping[str, Any]],
-    enabled_tools: Sequence[str],
-    default_headers: Optional[Mapping[str, str]],
-) -> Optional[GroqUsageResult]:
-    redis_client = _optional_redis_client()
-    if redis_client is None:
-        return None
-
-    cache_key = _build_groq_compound_cache_key(
-        model=model,
-        system_msg=system_msg,
-        messages=messages,
-        enabled_tools=enabled_tools,
-        default_headers=default_headers,
-    )
-    cached_payload = redis_get_json(redis_client, cache_key)
-    result = _deserialize_cached_groq_usage_result(cached_payload)
-    if result is not None:
-        print(f"_get_groq_compound_response_result: cache hit key='{cache_key[:48]}'")
-    return result
-
-
-def _cache_groq_compound_result(
-    *,
-    model: str,
-    system_msg: Optional[Mapping[str, Any]],
-    messages: Sequence[Mapping[str, Any]],
-    enabled_tools: Sequence[str],
-    default_headers: Optional[Mapping[str, str]],
-    result: GroqUsageResult,
-) -> None:
-    if not result.text:
-        return
-
-    redis_client = _optional_redis_client()
-    if redis_client is None:
-        return
-
-    cache_key = _build_groq_compound_cache_key(
-        model=model,
-        system_msg=system_msg,
-        messages=messages,
-        enabled_tools=enabled_tools,
-        default_headers=default_headers,
-    )
-    redis_setex_json(
-        redis_client,
-        cache_key,
-        TTL_GROQ_COMPOUND_CACHE,
-        result.billing_segment(),
-    )
 
 
 _T = TypeVar("_T")
@@ -1385,13 +1029,6 @@ def _extract_groq_usage_token_count(usage: Optional[Mapping[str, Any]]) -> int:
 def _extract_result_token_count(result: Optional[GroqUsageResult]) -> int:
     if result is None:
         return 0
-    if result.kind == "compound":
-        total = 0
-        for item in ensure_mapping_list(result.usage_breakdown):
-            item_usage = ensure_mapping(item.get("usage")) or item
-            total += _extract_groq_usage_token_count(item_usage)
-        if total > 0:
-            return total
     return _extract_groq_usage_token_count(result.usage)
 
 
@@ -3577,119 +3214,12 @@ def get_weather() -> dict:
         return {}
 
 
-def resolve_tool_calls(
-    system_message: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    initial_response: Optional[str],
-    response_meta: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
-    """Resolve tool calls from an initial model response, returning a final reply."""
-    if not initial_response:
-        return None
-
-    tool_call = parse_tool_call(initial_response)
-    if not tool_call:
-        return None
-
-    tool_name, tool_args = tool_call
-
-    try:
-        print(
-            f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-        )
-        tool_output = execute_tool(tool_name, tool_args)
-    except Exception as tool_err:
-        tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-        print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
-
-    # Feed tool result back into the conversation and get final answer
-    tool_context = {
-        "tool": tool_name,
-        "args": tool_args,
-        "result": tool_output,
-    }
-    messages = messages + [
-        {
-            "role": "assistant",
-            "content": sanitize_tool_artifacts(initial_response),
-        },
-        {
-            "role": "user",
-            "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
-        },
-    ]
-
-    last_tool_name = tool_name
-    last_tool_output = tool_output
-
-    attempts = 0
-    final = None
-    while attempts < 3:
-        if response_meta is None:
-            final = complete_with_providers(system_message, messages)
-        else:
-            final = complete_with_providers(
-                system_message,
-                messages,
-                response_meta=response_meta,
-            )
-        if not final:
-            print(
-                "ask_ai: second pass returned None; falling back to tool-output formatting"
-            )
-            break
-        print(
-            f"ask_ai: final len={len(final)} preview='{final[:160].replace(chr(10), ' ')}'"
-        )
-        next_tool_call = parse_tool_call(final)
-        if not next_tool_call:
-            return final
-
-        tool_name, tool_args = next_tool_call
-        try:
-            print(
-                f"ask_ai: executing tool '{tool_name}' args={json.dumps(tool_args)[:200]}"
-            )
-            tool_output = execute_tool(tool_name, tool_args)
-        except Exception as tool_err:
-            tool_output = f"Error al ejecutar herramienta {tool_name}: {tool_err}"
-            print(f"ask_ai: tool '{tool_name}' raised error: {tool_err}")
-
-        tool_context = {
-            "tool": tool_name,
-            "args": tool_args,
-            "result": tool_output,
-        }
-        messages = messages + [
-            {
-                "role": "assistant",
-                "content": sanitize_tool_artifacts(final),
-            },
-            {
-                "role": "user",
-                "content": f"RESULTADO DE HERRAMIENTA:\n{json.dumps(tool_context)[:4000]}",
-            },
-        ]
-        last_tool_name = tool_name
-        last_tool_output = tool_output
-        attempts += 1
-
-    # If the second pass (or subsequent passes) failed, synthesize a response from the last tool output
-    try:
-        if last_tool_name == "compound":
-            return str(last_tool_output).strip()[:4000]
-        # Generic fallback for other tools
-        return f"Resultado de {last_tool_name}:\n{str(last_tool_output)[:1500]}"
-    except Exception:
-        # If even formatting fails, return a safe generic message
-        return "tuve un problema usando la herramienta, probá de nuevo más tarde"
-
-
 def ask_ai(
     messages: List[Dict[str, Any]],
     image_data: Optional[bytes] = None,
     image_file_id: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
+    enable_web_search: bool = False,
 ) -> str:
     try:
         messages = list(messages or [])
@@ -3702,13 +3232,7 @@ def ask_ai(
             "hacker_news": get_hacker_news_context(),
         }
 
-        # Build system message with personality, context and tool instructions
-        system_message = build_system_message(context_data, include_tools=True)
-        compound_system_message = (
-            build_compound_system_message()
-            if should_use_groq_compound_tools()
-            else None
-        )
+        system_message = build_system_message(context_data)
 
         # If we have an image, first describe it with the vision model then continue normal flow
         if image_data:
@@ -3740,38 +3264,25 @@ def ask_ai(
             else:
                 print("Failed to describe image, continuing without description...")
 
-        # Continue with normal AI flow (for both image and text).
-        # First pass: get an initial response that might include a tool call.
         if response_meta is None:
-            initial = complete_with_providers(system_message, messages)
+            response = complete_with_providers(
+                system_message,
+                messages,
+                enable_web_search=enable_web_search,
+            )
         else:
-            initial = complete_with_providers(
+            response = complete_with_providers(
                 system_message,
                 messages,
                 response_meta=response_meta,
+                enable_web_search=enable_web_search,
             )
-        if initial:
+        if response:
             print(
-                f"ask_ai: initial len={len(initial)} preview='{initial[:160].replace(chr(10), ' ')}'"
+                f"ask_ai: response len={len(response)} preview='{response[:160].replace(chr(10), ' ')}'"
             )
+            return response or get_fallback_response(messages)
 
-        if response_meta is None:
-            tool_final = resolve_tool_calls(system_message, messages, initial)
-        else:
-            tool_final = resolve_tool_calls(
-                system_message,
-                messages,
-                initial,
-                response_meta=response_meta,
-            )
-        if tool_final:
-            return tool_final
-
-        # If no tool call or second pass failed, return the best we had
-        if initial:
-            return initial or get_fallback_response(messages)
-
-        # Final fallback to random response if all AI providers fail
         return _mark_ai_fallback_response(get_fallback_response(messages))
 
     except Exception as e:
@@ -3788,13 +3299,22 @@ def complete_with_providers(
     messages: List[Dict[str, Any]],
     *,
     response_meta: Optional[Dict[str, Any]] = None,
+    enable_web_search: bool = False,
 ) -> Optional[str]:
     """Try OpenRouter chat models and return the first response."""
 
     if response_meta is None:
-        return get_groq_ai_response(system_message, messages)
+        return get_groq_ai_response(
+            system_message,
+            messages,
+            enable_web_search=enable_web_search,
+        )
 
-    result = _get_openrouter_ai_response_result(system_message, messages)
+    result = _get_openrouter_ai_response_result(
+        system_message,
+        messages,
+        enable_web_search=enable_web_search,
+    )
     if result:
         _append_billing_segment(response_meta, result)
         print("complete_with_providers: got response from OpenRouter")
@@ -3832,124 +3352,6 @@ def _prepare_tool_lines(text: str) -> List[_ToolLine]:
         if is_fence:
             in_fence = not in_fence
     return prepared
-
-
-def parse_tool_call(text: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Detect a tool call line like: [TOOL] compound {"task": "..."}"""
-    if not text:
-        return None
-    try:
-        prepared = _prepare_tool_lines(text)
-        i = 0
-        while i < len(prepared):
-            line = prepared[i]
-
-            if line.is_fence or line.in_fence:
-                i += 1
-                continue
-
-            marker_index = line.normalized.find("[TOOL]")
-            if marker_index == -1:
-                i += 1
-                continue
-
-            normalized = line.normalized[marker_index + len("[TOOL]") :].strip()
-            if normalized.startswith(":"):
-                normalized = normalized[1:].strip()
-
-            name_source_index = i
-            if not normalized:
-                j = i + 1
-                while j < len(prepared):
-                    candidate = prepared[j]
-                    if candidate.is_fence or candidate.in_fence:
-                        j += 1
-                        continue
-                    if candidate.normalized:
-                        normalized = candidate.normalized
-                        name_source_index = j
-                        break
-                    j += 1
-                if not normalized:
-                    i += 1
-                    continue
-
-            parts = normalized.split(" ", 1)
-            if not parts:
-                i += 1
-                continue
-
-            name = parts[0].strip().strip(":")
-            if not name:
-                i += 1
-                continue
-
-            remainder = parts[1].strip() if len(parts) > 1 else ""
-            if remainder.startswith(":"):
-                remainder = remainder[1:].strip()
-
-            json_candidate = remainder
-            j = name_source_index + 1
-
-            while "{" not in json_candidate and j < len(prepared):
-                addition_line = prepared[j]
-                if addition_line.is_fence or addition_line.in_fence:
-                    j += 1
-                    continue
-                if addition_line.normalized:
-                    json_candidate = (
-                        json_candidate + " " + addition_line.normalized
-                    ).strip()
-                j += 1
-
-            if "{" not in json_candidate:
-                i += 1
-                continue
-
-            open_count = json_candidate.count("{") - json_candidate.count("}")
-            while open_count > 0 and j < len(prepared):
-                addition_line = prepared[j]
-                if addition_line.is_fence or addition_line.in_fence:
-                    j += 1
-                    continue
-                if addition_line.normalized:
-                    json_candidate = (
-                        json_candidate + " " + addition_line.normalized
-                    ).strip()
-                    open_count += addition_line.normalized.count(
-                        "{"
-                    ) - addition_line.normalized.count("}")
-                j += 1
-
-            closing_index = json_candidate.rfind("}")
-            if closing_index == -1:
-                i += 1
-                continue
-
-            json_text = json_candidate[: closing_index + 1].strip().rstrip(",")
-
-            args: Any = None
-            try:
-                args = json.loads(json_text)
-            except Exception:
-                try:
-                    args = ast.literal_eval(json_text)
-                except Exception:
-                    print(
-                        f"parse_tool_call: failed to parse args after [TOOL] {name}: '{json_text[:200]}'"
-                    )
-                    args = None
-
-            if isinstance(args, dict) and name:
-                print(
-                    f"parse_tool_call: detected tool '{name}' with args keys={list(args.keys())}"
-                )
-                return name, args
-
-            i += 1
-    except Exception:
-        return None
-    return None
 
 
 def _normalize_http_url(raw_url: str) -> Optional[str]:
@@ -4399,23 +3801,6 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def execute_tool(name: str, args: Dict[str, Any]) -> str:
-    """Execute a named tool and return a plain-text result string."""
-    name = name.lower()
-    if name == "compound":
-        task = str(args.get("task") or args.get("query") or "").strip()
-        if not task:
-            return "task vacío"
-        if not should_use_groq_compound_tools():
-            return "compound no está disponible en este momento"
-        return _run_compound_task(
-            task=task,
-            compound_system_message=build_compound_system_message(),
-            persona_pass=False,
-        )
-    return f"herramienta desconocida: {name}"
-
-
 def sanitize_tool_artifacts(text: Optional[str]) -> str:
     """Remove any visible [TOOL] lines or code blocks that contain them from model output."""
     if not text:
@@ -4460,21 +3845,13 @@ def search_command(
     messages: List[Dict[str, Any]],
     response_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """/buscar command: run Groq Compound directly and return its raw response."""
+    """/buscar command: run the standard AI flow with web search enabled."""
 
     _, query_text, _ = _extract_latest_user_query_info(messages)
     q = query_text.strip()
     if not q:
         return "decime qué querés buscar capo"
-    if not should_use_groq_compound_tools():
-        return "compound no está disponible en este momento"
-    return _run_compound_task(
-        task=q,
-        messages=messages,
-        compound_system_message=build_compound_system_message(),
-        response_meta=response_meta,
-        persona_pass=False,
-    )
+    return ask_ai(messages, response_meta=response_meta, enable_web_search=True)
 
 
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
@@ -4830,7 +4207,6 @@ def estimate_ai_base_reserve_credits(
     reserve_mode: str = "chat",
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
-    compound_system_message: Optional[Dict[str, Any]] = None
     try:
         context_data = {
             "market": get_market_context(),
@@ -4838,41 +4214,11 @@ def estimate_ai_base_reserve_credits(
             "time": get_time_context(),
             "hacker_news": get_hacker_news_context(),
         }
-        system_message = build_system_message(context_data, include_tools=True)
+        system_message = build_system_message(context_data)
     except Exception as error:
         print(
             f"estimate_ai_base_reserve_credits: failed to build system message: {error}"
         )
-
-    try:
-        if should_use_groq_compound_tools():
-            compound_system_message = build_compound_system_message()
-    except Exception as error:
-        print(
-            f"estimate_ai_base_reserve_credits: failed to build compound system message: {error}"
-        )
-
-    if reserve_mode == "compound" and compound_system_message:
-        estimated_rate_limit_tokens = (
-            estimate_message_tokens(messages) + extra_input_tokens
-        )
-        estimated_rate_limit_tokens += estimate_message_tokens(
-            [compound_system_message]
-        )
-        estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
-        enabled_tools = get_groq_compound_enabled_tools()
-        reserve = estimate_compound_reserve_credits(
-            system_message=compound_system_message,
-            messages=messages,
-            enabled_tools=enabled_tools,
-        )
-        return reserve, {
-            "reserve_mode": "compound",
-            "reserve_reason": "explicit_compound",
-            "reserve_model": GROQ_COMPOUND_DEFAULT_MODEL,
-            "rate_limit_scope": "compound",
-            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
-        }
 
     estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
@@ -4942,7 +4288,10 @@ def _build_groq_usage_result(
 
 
 def _get_openrouter_ai_response_result(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    enable_web_search: bool = False,
 ) -> Optional[GroqUsageResult]:
     client = _get_openrouter_client()
     if client is None:
@@ -4952,123 +4301,55 @@ def _get_openrouter_ai_response_result(
         print(f"Trying OpenRouter chat with model={model}...")
         _increment_ai_provider_request_count()
         try:
+            request_kwargs: Dict[str, Any] = {
+                "model": model,
+                "messages": cast(Any, [system_msg] + messages),
+                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+            }
+            if enable_web_search:
+                request_kwargs["tools"] = [
+                    {
+                        "type": "openrouter:web_search",
+                        "parameters": {"engine": "firecrawl"},
+                    }
+                ]
             response = client.chat.completions.create(
-                model=model,
-                messages=cast(Any, [system_msg] + messages),
-                max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+                **request_kwargs,
             )
         except Exception:
             continue
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason == "stop":
+                usage = _extract_groq_usage_map(response) or {}
+                server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
+                metadata: Dict[str, Any] = {"provider": "openrouter"}
+                web_search_requests = server_tool_use.get("web_search_requests")
+                if web_search_requests is not None:
+                    try:
+                        metadata["web_search_requests"] = int(web_search_requests)
+                    except (TypeError, ValueError):
+                        pass
                 return _build_groq_usage_result(
                     kind="chat",
                     text=str(response.choices[0].message.content or ""),
                     model=model,
                     response=response,
-                    metadata={"provider": "openrouter"},
+                    metadata=metadata,
                 )
     return None
 
 
 def get_groq_ai_response(
-    system_msg: Dict[str, Any], messages: List[Dict[str, Any]]
+    system_msg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    enable_web_search: bool = False,
 ) -> Optional[str]:
-    result = _get_openrouter_ai_response_result(system_msg, messages)
-    if result:
-        return result.text
-    return None
-
-
-def _get_groq_compound_response_result(
-    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
-) -> Optional[GroqUsageResult]:
-    """Use Groq Compound built-in tools for a single response."""
-
-    model = GROQ_COMPOUND_DEFAULT_MODEL
-    enabled_tools = get_groq_compound_enabled_tools()
-    default_headers = {"Groq-Model-Version": "latest"}
-    estimated_token_count = estimate_message_tokens(messages) + CHAT_OUTPUT_TOKEN_LIMIT
-    if system_msg:
-        estimated_token_count += estimate_message_tokens([system_msg])
-
-    cached_result = _get_cached_groq_compound_result(
-        model=model,
-        system_msg=system_msg,
-        messages=messages,
-        enabled_tools=enabled_tools,
-        default_headers=default_headers,
+    result = _get_openrouter_ai_response_result(
+        system_msg,
+        messages,
+        enable_web_search=enable_web_search,
     )
-    if cached_result is not None:
-        _log_groq_request_result(
-            label="Groq Compound",
-            scope="compound",
-            account="cache",
-            token_count=estimated_token_count,
-            audio_seconds=0.0,
-            default_headers=default_headers,
-            result=cached_result,
-        )
-        return cached_result
-
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
-        print(f"Trying Groq Compound tools with account={account}...")
-        _increment_ai_provider_request_count()
-
-        payload_messages = messages
-        if system_msg:
-            payload_messages = [system_msg] + messages
-
-        response = groq_client.chat.completions.create(
-            model=model,
-            messages=cast(Any, payload_messages),
-            max_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
-            extra_body={
-                "compound_custom": {
-                    "tools": {"enabled_tools": enabled_tools},
-                }
-            },
-        )
-
-        if response and hasattr(response, "choices") and response.choices:
-            choice = response.choices[0]
-            content = getattr(choice.message, "content", None)
-            if content:
-                return _build_groq_usage_result(
-                    kind="compound",
-                    text=str(content),
-                    model=model,
-                    response=response,
-                    metadata={
-                        "fallback_usage_model": GPT_OSS_120B_FALLBACK_MODEL,
-                        "groq_account": account,
-                    },
-                )
-        return None
-
-    result = _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="compound",
-        label="Groq Compound",
-        token_count=estimated_token_count,
-        default_headers=default_headers,
-    )
-    if result is not None:
-        _cache_groq_compound_result(
-            model=model,
-            system_msg=system_msg,
-            messages=messages,
-            enabled_tools=enabled_tools,
-            default_headers=default_headers,
-            result=result,
-        )
-    return result
-
-
-def get_groq_compound_response(
-    system_msg: Optional[Dict[str, Any]], messages: List[Dict[str, Any]]
-) -> Optional[str]:
-    result = _get_groq_compound_response_result(system_msg, messages)
     if result:
         return result.text
     return None
@@ -5165,12 +4446,8 @@ def get_weather_description(code: int) -> str:
     return descriptions.get(code, "clima raro")
 
 
-def build_system_message(context: Dict, include_tools: bool = False) -> Dict[str, Any]:
-    """Build system message with personality and context.
-
-    include_tools: when True, advertise available tool calls and exact call syntax
-    so the model can request a tool in plain text (provider-agnostic).
-    """
+def build_system_message(context: Dict) -> Dict[str, Any]:
+    """Build system message with personality and context."""
     config = load_bot_config()
     market_info = format_market_info(context.get("market") or {})
     weather_source = context.get("weather")
@@ -5200,48 +4477,12 @@ CONTEXTO POLITICO:
 - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
 """
 
-    tools_section = ""
-    if include_tools:
-        tools_section = (
-            "\n\nHERRAMIENTAS DISPONIBLES:\n"
-            "- compound: puente a Groq Compound con web_search, visit_website, code_interpreter y browser_automation.\n"
-            "\nCÓMO LLAMAR HERRAMIENTAS:\n"
-            "Escribe exactamente una línea con el formato:\n"
-            "[TOOL] <nombre> {JSON}\n"
-            'Ejemplo:\n  [TOOL] compound {"task": "buscá inflación argentina hoy y resumí los puntos clave"}\n'
-            "Luego espera la respuesta y continúa con tu contestación final.\n"
-            "Usá herramientas solo si realmente ayudan (actualidad, datos frescos).\n"
-            "Si la pregunta es sobre precios/actualidad y el usuario no pidió un año puntual, "
-            "usá el año actual de FECHA ACTUAL; no inventes 2024/2025.\n"
-            "Después de usar compound, respondé directo al usuario con síntesis breve y sin mostrar la llamada a herramienta."
-        )
-
-    print(f"build_system_message: include_tools={include_tools}")
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": base_prompt + contextual_info + tools_section,
-            }
-        ],
-    }
-
-
-def build_compound_system_message() -> Dict[str, Any]:
-    """Build a minimal system message tailored for Groq Compound tools."""
-
-    tool_hint = (
-        "Respondé directo al usuario con síntesis breve."
-        " Si necesitás info actualizada, usá las herramientas para buscar y confirmar."
-    )
-
-    return {
-        "role": "system",
-        "content": [
-            {
-                "type": "text",
-                "text": tool_hint,
+                "text": base_prompt + contextual_info,
             }
         ],
     }
