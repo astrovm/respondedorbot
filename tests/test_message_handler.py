@@ -1955,7 +1955,6 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
     response_msg, handled = _run_ai_flow(
         deps,
         chat_id="557",
-        command="/ask",
         message={"chat": {"id": 557, "type": "private"}},
         prepared_message=PreparedMessage(
             message_text="/ask describe",
@@ -2010,7 +2009,6 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     response_msg, handled = _run_ai_flow(
         deps,
         chat_id="558",
-        command="/transcribe",
         message={"chat": {"id": 558, "type": "private"}},
         prepared_message=PreparedMessage(
             message_text="/transcribe",

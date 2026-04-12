@@ -2724,7 +2724,7 @@ esto es lo que sé hacer, boludo:
 
 - /time: timestamp unix actual
 
-- /transcribe: te transcribo audio o describo imagen (responde a un mensaje)
+- /transcribe, /describe: te transcribo audio o describo imagen (responde a un mensaje)
 
 - /gm: te mando un gif de buenos días random
 - /gn: te mando un gif de buenas noches random
@@ -6326,6 +6326,7 @@ def update_telegram_bot_commands() -> bool:
         "instance": "te digo dónde estoy corriendo",
         "help": "te muestro todos los comandos",
         "transcribe": "te transcribo audio o describo imagen",
+        "describe": "te transcribo audio o describo imagen",
         "bcra": "te tiro las variables económicas del bcra",
         "variables": "te tiro las variables económicas del bcra",
         "topup": "cargás créditos IA con Telegram Stars por privado",
