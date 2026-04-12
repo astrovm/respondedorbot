@@ -68,7 +68,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 1_000,
                     "input_cached_tokens": 900,
@@ -79,13 +79,13 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 2_050
-    assert breakdown["charged_credit_units"] == 5
-    assert breakdown["charged_credits_display"] == "0.5"
+    assert breakdown["raw_usd_micros"] == 1_300
+    assert breakdown["charged_credit_units"] == 3
+    assert breakdown["charged_credits_display"] == "0.3"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 2_050,
+            "model": "qwen/qwen3.6-plus",
+            "usd_micros": 1_300,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -99,12 +99,12 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
         [
             {
                 "kind": "chat",
-                "model": "groq/moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
@@ -127,8 +127,8 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
 
     assert breakdown["raw_usd_micros"] > 0
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
-        "moonshotai/kimi-k2-instruct-0905",
-        "moonshotai/kimi-k2-0905",
+        "qwen/qwen3.6-plus",
+        "qwen/qwen3.6-plus",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "meta-llama/llama-4-scout",
         "whisper-large-v3",
@@ -140,7 +140,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "prompt_tokens": 2_000,
                     "completion_tokens": 100,
@@ -150,13 +150,13 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 1_550
-    assert breakdown["charged_credit_units"] == 4
-    assert breakdown["charged_credits_display"] == "0.4"
+    assert breakdown["raw_usd_micros"] == 845
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 1_550,
+            "model": "qwen/qwen3.6-plus",
+            "usd_micros": 845,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -186,6 +186,25 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     assert breakdown["model_breakdown"] == []
     assert breakdown["tool_breakdown"] == []
     assert breakdown["unsupported_notes"] == []
+
+
+def test_calculate_billing_for_segments_bills_web_search_requests():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "metadata": {"web_search_requests": 2},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 8_130
+    assert breakdown["charged_credit_units"] == 17
+    assert breakdown["tool_breakdown"] == [
+        {"tool": "web_search", "count": 2, "usd_micros": 8_000}
+    ]
 
 
 def test_calculate_billing_for_segments_refunds_cache_only_usage_to_zero():
@@ -251,7 +270,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -281,7 +300,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -292,7 +311,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 10
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 1
     assert (
         billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
         == "ai_settlement_charge"
@@ -375,7 +394,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -387,7 +406,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 10
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 1
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert (
         billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
@@ -418,7 +437,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -463,7 +482,7 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -577,7 +596,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
             },
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -588,7 +607,8 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     )
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 9
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -605,7 +625,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -639,7 +659,7 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "prompt_tokens": 1_000,
                     "prompt_tokens_details": {"cached_tokens": 900},
@@ -651,14 +671,14 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
     )
 
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 28
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 29
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
         "metadata"
     ]
-    assert metadata["settled_credit_units"] == 2
-    assert metadata["refunded_credit_units"] == 28
+    assert metadata["settled_credit_units"] == 1
+    assert metadata["refunded_credit_units"] == 29
 
 
 def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is_zero():
@@ -682,7 +702,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,

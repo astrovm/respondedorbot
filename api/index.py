@@ -516,11 +516,6 @@ GROQ_PAID_RATE_LIMITS = {
         "rpd": 500_000,
         "tpm": 250_000,
     },
-    "compound": {
-        "rpm": 200,
-        "rpd": 20_000,
-        "tpm": 200_000,
-    },
     "vision": {
         "rpm": 1000,
         "rpd": 500_000,
@@ -540,11 +535,6 @@ GROQ_FREE_RATE_LIMITS = {
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-    },
-    "compound": {
-        "rpm": 30,
-        "rpd": 250,
-        "tpm": 70_000,
     },
     "vision": {
         "rpm": 30,
@@ -4106,8 +4096,6 @@ def _log_groq_request_result(
                 "cached": bool(result.cached),
                 "text_length": len(result.text or ""),
                 "usage": ensure_mapping(result.usage) or {},
-                "usage_breakdown": ensure_mapping_list(result.usage_breakdown),
-                "executed_tools": ensure_mapping_list(result.executed_tools),
                 "audio_seconds": result.audio_seconds,
                 "metadata": dict(result.metadata or {}),
                 "local_billing": {
@@ -4130,52 +4118,6 @@ def _extract_groq_usage_map(response: Any) -> Optional[Dict[str, Any]]:
     if isinstance(response, dict):
         return ensure_mapping(response.get("usage"))
     return ensure_mapping(getattr(response, "usage", None))
-
-
-def _extract_groq_usage_breakdown(response: Any) -> List[Dict[str, Any]]:
-    def _normalize(value: Any) -> List[Dict[str, Any]]:
-        usage_breakdown = ensure_mapping(value)
-        if usage_breakdown and isinstance(usage_breakdown.get("models"), Sequence):
-            return ensure_mapping_list(usage_breakdown.get("models"))
-        return ensure_mapping_list(value)
-
-    if isinstance(response, dict):
-        usage_breakdown = response.get("usage_breakdown")
-        if usage_breakdown is None and isinstance(response.get("usage"), Mapping):
-            usage_breakdown = cast(Mapping[str, Any], response["usage"]).get(
-                "usage_breakdown"
-            )
-        return _normalize(usage_breakdown)
-    usage_breakdown = getattr(response, "usage_breakdown", None)
-    if usage_breakdown is None:
-        usage = getattr(response, "usage", None)
-        usage_map = ensure_mapping(usage)
-        if usage_map:
-            usage_breakdown = usage_map.get("usage_breakdown")
-    return _normalize(usage_breakdown)
-
-
-def _extract_groq_executed_tools(response: Any) -> List[Dict[str, Any]]:
-    if isinstance(response, dict):
-        choices = response.get("choices")
-        if isinstance(choices, Sequence) and choices:
-            first_choice = choices[0]
-            if isinstance(first_choice, Mapping):
-                message = first_choice.get("message")
-                if isinstance(message, Mapping):
-                    tools = message.get("executed_tools")
-                    if tools is not None:
-                        return ensure_mapping_list(tools)
-        return ensure_mapping_list(response.get("executed_tools"))
-
-    choices = getattr(response, "choices", None)
-    if isinstance(choices, Sequence) and choices:
-        first_choice = choices[0]
-        message = getattr(first_choice, "message", None)
-        tools = getattr(message, "executed_tools", None)
-        if tools is not None:
-            return ensure_mapping_list(tools)
-    return ensure_mapping_list(getattr(response, "executed_tools", None))
 
 
 def _extract_latest_user_query_info(
@@ -4204,7 +4146,6 @@ def estimate_ai_base_reserve_credits(
     messages: List[Dict[str, Any]],
     *,
     extra_input_tokens: int = 0,
-    reserve_mode: str = "chat",
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
     try:
@@ -4279,8 +4220,6 @@ def _build_groq_usage_result(
         text=text,
         model=model,
         usage=_extract_groq_usage_map(response),
-        usage_breakdown=_extract_groq_usage_breakdown(response),
-        executed_tools=_extract_groq_executed_tools(response),
         audio_seconds=audio_seconds,
         cached=cached,
         metadata=dict(metadata or {}),
@@ -4316,7 +4255,8 @@ def _get_openrouter_ai_response_result(
             response = client.chat.completions.create(
                 **request_kwargs,
             )
-        except Exception:
+        except Exception as e:
+            print(f"OpenRouter chat error model={model}: {e}")
             continue
         if response and hasattr(response, "choices") and response.choices:
             if response.choices[0].finish_reason == "stop":

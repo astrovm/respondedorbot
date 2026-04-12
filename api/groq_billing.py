@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from api.credit_units import format_credit_units
 
@@ -19,36 +19,22 @@ CREDIT_UNIT_USD_MICROS = CREDIT_CEIL_DIVISOR_USD_MICROS // 10
 CHAT_OUTPUT_TOKEN_LIMIT = 256
 VISION_OUTPUT_TOKEN_LIMIT = 256
 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
+WEB_SEARCH_USD_MICROS_PER_REQUEST = 4_000
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     # Groq pricing
-    "moonshotai/kimi-k2-instruct-0905": {
-        "input_per_million": 1_000_000,
-        "cached_input_per_million": 500_000,
-        "output_per_million": 3_000_000,
-    },
     "meta-llama/llama-4-scout-17b-16e-instruct": {
         "input_per_million": 110_000,
         "output_per_million": 340_000,
     },
     # OpenRouter pricing
-    "moonshotai/kimi-k2-0905": {
-        "input_per_million": 400_000,
-        "cached_input_per_million": 150_000,
-        "output_per_million": 2_000_000,
-    },
     "meta-llama/llama-4-scout": {
         "input_per_million": 80_000,
         "output_per_million": 300_000,
     },
     "whisper-large-v3": {
         "audio_per_hour": 111_000,
-    },
-    "openai/gpt-oss-120b": {
-        "input_per_million": 150_000,
-        "cached_input_per_million": 75_000,
-        "output_per_million": 600_000,
     },
     "z-ai/glm-5.1": {
         "input_per_million": 950_000,
@@ -62,7 +48,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 
 
 MODEL_BILLING_ALIASES = {
-    "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-instruct-0905",
     "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
     "groq/whisper-large-v3": "whisper-large-v3",
     "qwen/qwen3.6-plus-04-02": "qwen/qwen3.6-plus",
@@ -82,8 +67,6 @@ class GroqUsageResult:
     text: str
     model: str
     usage: Optional[Dict[str, Any]] = None
-    usage_breakdown: List[Dict[str, Any]] = field(default_factory=list)
-    executed_tools: List[Dict[str, Any]] = field(default_factory=list)
     audio_seconds: Optional[float] = None
     cached: bool = False
     source: str = "groq"
@@ -344,6 +327,19 @@ def calculate_billing_for_segments(
         model_cost = _calculate_model_token_cost(model, usage)
         total_usd_micros += int(model_cost["usd_micros"])
         model_breakdown.append(model_cost)
+
+        metadata = ensure_mapping(segment.get("metadata")) or {}
+        web_search_requests = int(metadata.get("web_search_requests") or 0)
+        if web_search_requests > 0:
+            search_usd_micros = web_search_requests * WEB_SEARCH_USD_MICROS_PER_REQUEST
+            total_usd_micros += search_usd_micros
+            tool_breakdown.append(
+                {
+                    "tool": "web_search",
+                    "count": web_search_requests,
+                    "usd_micros": search_usd_micros,
+                }
+            )
 
     return {
         "pricing_version": PRICING_VERSION,

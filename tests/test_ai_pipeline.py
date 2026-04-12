@@ -133,10 +133,6 @@ def test_check_global_rate_limit_uses_scope_specific_accounts(monkeypatch):
     assert check_global_rate_limit(None, scope="chat") is True
     assert calls == [("test-account", "chat")]
 
-    calls.clear()
-    assert check_global_rate_limit(None, scope="compound") is True
-    assert calls == [("test-account", "compound")]
-
 
 def test_should_allow_openrouter_fallback_requires_openrouter_and_only_for_chat_vision(
     monkeypatch,
@@ -230,28 +226,6 @@ def test_build_ai_messages_includes_links_context():
     assert "descripcion: contenido" in content
 
 
-def test_extract_groq_executed_tools_reads_choice_message():
-    from api.index import _extract_groq_executed_tools
-
-    response = {
-        "choices": [
-            {
-                "message": {
-                    "executed_tools": [
-                        {"type": "search", "mode": "advanced"},
-                        {"type": "visit", "count": 1},
-                    ]
-                }
-            }
-        ]
-    }
-
-    assert _extract_groq_executed_tools(response) == [
-        {"type": "search", "mode": "advanced"},
-        {"type": "visit", "count": 1},
-    ]
-
-
 def test_log_groq_request_result_logs_local_billing_details():
     from api.index import GroqUsageResult, _log_groq_request_result
 
@@ -281,7 +255,6 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["request_scope"] == "chat"
     assert log_entry["default_headers"]["Groq-Model-Version"] == "latest"
     assert log_entry["usage"] == {"input_tokens": 100, "output_tokens": 50}
-    assert log_entry["executed_tools"] == []
     assert log_entry["local_billing"]["raw_usd_micros"] == 130
     assert log_entry["local_billing"]["charged_credit_units"] == 1
     assert log_entry["local_billing"]["charged_credits_display"] == "0.1"
@@ -359,8 +332,8 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
         ),
     ):
         result = _execute_groq_request_with_fallback(
-            scope="compound",
-            label="Groq Compound",
+            scope="vision",
+            label="Groq Vision",
             token_count=123,
             default_headers={"Groq-Model-Version": "latest"},
             attempt=fake_attempt,
@@ -786,7 +759,7 @@ def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypa
     openrouter_result = GroqUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="moonshotai/kimi-k2-0905",
+        model="qwen/qwen3.6-plus",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )

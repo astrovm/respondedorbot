@@ -579,11 +579,6 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 500_000,
         "tpm": 250_000,
     }
-    assert index.GROQ_PAID_RATE_LIMITS["compound"] == {
-        "rpm": 200,
-        "rpd": 20_000,
-        "tpm": 200_000,
-    }
     assert index.GROQ_PAID_RATE_LIMITS["vision"] == {
         "rpm": 1000,
         "rpd": 500_000,
@@ -600,11 +595,6 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-    }
-    assert index.GROQ_FREE_RATE_LIMITS["compound"] == {
-        "rpm": 30,
-        "rpd": 250,
-        "tpm": 70_000,
     }
     assert index.GROQ_FREE_RATE_LIMITS["vision"] == {
         "rpm": 30,
