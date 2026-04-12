@@ -93,7 +93,7 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     assert result is not None
     assert result.text == "respuesta con busqueda"
     assert result.metadata["provider"] == "openrouter"
-    assert result.metadata["web_search_requests"] == 2
+    assert result.metadata["web_search_requests"] == 1
     assert client.chat.completions.create.call_args.kwargs["tools"] == [
         {
             "type": "openrouter:web_search",
@@ -135,6 +135,39 @@ def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests()
     assert result is not None
     assert result.text == "respuesta final"
     assert result.metadata == {"provider": "openrouter"}
+
+
+def test_get_openrouter_ai_response_result_server_tool_use_takes_priority():
+    from api.index import _get_openrouter_ai_response_result
+
+    message = MagicMock(content="respuesta con busqueda")
+    message.annotations = [
+        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+    ]
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            finish_reason="stop",
+            message=message,
+        )
+    ]
+    response.usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "server_tool_use": {"web_search_requests": 3},
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+
+    with patch("api.index._get_openrouter_client", return_value=client):
+        result = _get_openrouter_ai_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "btc news"}],
+            enable_web_search=True,
+        )
+
+    assert result is not None
+    assert result.metadata["web_search_requests"] == 3
 
 
 def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():

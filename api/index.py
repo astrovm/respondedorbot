@@ -4153,28 +4153,23 @@ def _get_openrouter_ai_response_result(
         if finish_reason == "stop":
             metadata: Dict[str, Any] = {"provider": "openrouter"}
             message = response.choices[0].message
-            annotations = getattr(message, "annotations", None) or []
-            url_citation_count = sum(
-                1
-                for ann in annotations
-                if isinstance(ann, Mapping)
-                and str(ann.get("type") or "") == "url_citation"
-            )
-            if url_citation_count > 0:
-                metadata["web_search_requests"] = url_citation_count
-            else:
-                server_tool_use = (
-                    ensure_mapping(
-                        _extract_groq_usage_map(response).get("server_tool_use")
-                    )
-                    or {}
+            usage_map = _extract_groq_usage_map(response) or {}
+            server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
+            web_search_requests = server_tool_use.get("web_search_requests")
+            if web_search_requests is not None:
+                try:
+                    metadata["web_search_requests"] = int(web_search_requests)
+                except (TypeError, ValueError):
+                    pass
+            if "web_search_requests" not in metadata:
+                annotations = getattr(message, "annotations", None) or []
+                has_url_citation = any(
+                    isinstance(ann, Mapping)
+                    and str(ann.get("type") or "") == "url_citation"
+                    for ann in annotations
                 )
-                web_search_requests = server_tool_use.get("web_search_requests")
-                if web_search_requests is not None:
-                    try:
-                        metadata["web_search_requests"] = int(web_search_requests)
-                    except (TypeError, ValueError):
-                        pass
+                if has_url_citation:
+                    metadata["web_search_requests"] = 1
             return _build_groq_usage_result(
                 kind="chat",
                 text=str(message.content or ""),
