@@ -87,7 +87,73 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     assert client.chat.completions.create.call_args.kwargs["tools"] == [
         {
             "type": "openrouter:web_search",
-            "parameters": {"engine": "firecrawl"},
+            "parameters": {
+                "engine": "firecrawl",
+                "max_results": 5,
+                "max_total_results": 15,
+            },
+        }
+    ]
+
+
+def test_get_openrouter_ai_response_result_returns_text_when_completion_stops():
+    from api.index import _get_openrouter_ai_response_result
+
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="respuesta final"),
+        )
+    ]
+    response.usage = {"prompt_tokens": 7, "completion_tokens": 3}
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+
+    with patch("api.index._get_openrouter_client", return_value=client):
+        result = _get_openrouter_ai_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+        )
+
+    assert result is not None
+    assert result.text == "respuesta final"
+    assert result.metadata == {"provider": "openrouter"}
+
+
+def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
+    from api.index import _get_openrouter_ai_response_result
+
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="respuesta con busqueda"),
+        )
+    ]
+    response.usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "server_tool_use": {"web_search_requests": 1},
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+
+    with patch("api.index._get_openrouter_client", return_value=client):
+        _get_openrouter_ai_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "btc news"}],
+            enable_web_search=True,
+        )
+
+    assert client.chat.completions.create.call_args.kwargs["tools"] == [
+        {
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "firecrawl",
+                "max_results": 5,
+                "max_total_results": 15,
+            },
         }
     ]
 

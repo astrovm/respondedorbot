@@ -194,6 +194,11 @@ FALLBACK_CHAT_MODEL = "z-ai/glm-5.1"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
+AGENT_MAX_ITERATIONS = 4
+AGENT_MAX_TOOL_CALLS = 5
+AGENT_MAX_WEB_SEARCHES = 3
+OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
+OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 15
 OPENROUTER_MODEL_MAP = {
     GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
 }
@@ -619,6 +624,17 @@ def _get_openrouter_client(
     if headers:
         client_kwargs["default_headers"] = headers
     return OpenAI(**client_kwargs)
+
+
+def _build_openrouter_web_search_tool() -> Dict[str, Any]:
+    return {
+        "type": "openrouter:web_search",
+        "parameters": {
+            "engine": "firecrawl",
+            "max_results": OPENROUTER_WEB_SEARCH_MAX_RESULTS,
+            "max_total_results": OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+        },
+    }
 
 
 def _get_groq_accounts_for_scope() -> List[str]:
@@ -4260,12 +4276,7 @@ def _get_openrouter_ai_response_result(
                 "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
             }
             if enable_web_search:
-                request_kwargs["tools"] = [
-                    {
-                        "type": "openrouter:web_search",
-                        "parameters": {"engine": "firecrawl"},
-                    }
-                ]
+                request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
             response = client.chat.completions.create(
                 **request_kwargs,
             )
