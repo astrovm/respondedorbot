@@ -91,11 +91,13 @@ from api.groq_billing import (
     GroqUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
+    credit_units_from_usd_micros,
     estimate_chat_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
     ensure_mapping_list,
+    WEB_SEARCH_USD_MICROS_PER_REQUEST,
 )
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
@@ -4146,6 +4148,7 @@ def estimate_ai_base_reserve_credits(
     messages: List[Dict[str, Any]],
     *,
     extra_input_tokens: int = 0,
+    reserve_mode: str = "chat",
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
     try:
@@ -4171,6 +4174,17 @@ def estimate_ai_base_reserve_credits(
         max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         extra_input_tokens=extra_input_tokens,
     )
+
+    if reserve_mode == "search":
+        reserve += credit_units_from_usd_micros(WEB_SEARCH_USD_MICROS_PER_REQUEST)
+        return reserve, {
+            "reserve_mode": "search",
+            "reserve_reason": "web_search",
+            "reserve_model": "qwen/qwen3.6-plus",
+            "rate_limit_scope": "chat",
+            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
+        }
+
     return reserve, {
         "reserve_mode": "chat",
         "reserve_reason": "standard_chat",

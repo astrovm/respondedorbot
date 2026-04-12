@@ -516,6 +516,7 @@ def _run_ai_flow(
     deps: MessageHandlerDeps,
     *,
     chat_id: str,
+    command: str,
     message: Dict[str, Any],
     prepared_message: PreparedMessage,
     billing_helper: AIMessageBilling,
@@ -548,6 +549,7 @@ def _run_ai_flow(
             if prepared_message.resized_image_data and prepared_message.photo_file_id
             else 0
         ),
+        reserve_mode="search" if command in {"/buscar", "/search"} else "chat",
     )
     rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
     if not deps.check_global_rate_limit(
@@ -1308,6 +1310,7 @@ def _handle_known_command(
             response_msg, response_uses_ai = _run_ai_flow(
                 deps,
                 chat_id=chat_id,
+                command=command,
                 message=message,
                 prepared_message=prepared_message,
                 billing_helper=billing_helper,
@@ -1334,6 +1337,7 @@ def _handle_known_command(
     response_msg, response_uses_ai = _run_ai_flow(
         deps,
         chat_id=chat_id,
+        command=command,
         message=message,
         prepared_message=prepared_message,
         billing_helper=billing_helper,

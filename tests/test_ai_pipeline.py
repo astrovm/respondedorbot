@@ -369,6 +369,31 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     assert metadata["reserve_model"] == "qwen/qwen3.6-plus"
 
 
+def test_estimate_ai_base_reserve_credits_includes_web_search_overhead(monkeypatch):
+    from api.index import estimate_ai_base_reserve_credits
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+
+    chat_reserve, _ = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
+    )
+    search_reserve, metadata = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}],
+        reserve_mode="search",
+    )
+
+    assert search_reserve > chat_reserve
+    assert metadata["reserve_mode"] == "search"
+    assert metadata["reserve_reason"] == "web_search"
+
+
 def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 

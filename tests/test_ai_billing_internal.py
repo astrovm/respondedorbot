@@ -135,6 +135,44 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
     ]
 
 
+def test_calculate_billing_for_segments_keeps_legacy_chat_models_billable():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-instruct-0905",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+            {
+                "kind": "chat",
+                "model": "moonshotai/kimi-k2-0905",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] > 0
+    assert [item["model"] for item in breakdown["model_breakdown"]] == [
+        "moonshotai/kimi-k2-instruct-0905",
+        "moonshotai/kimi-k2-0905",
+    ]
+
+
+def test_calculate_billing_for_segments_bumps_pricing_version_for_qwen_search_billing():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "metadata": {"web_search_requests": 1},
+            }
+        ]
+    )
+
+    assert breakdown["pricing_version"] != "2026-03-06"
+
+
 def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_details():
     breakdown = calculate_billing_for_segments(
         [
