@@ -4151,18 +4151,33 @@ def _get_openrouter_ai_response_result(
     if response and hasattr(response, "choices") and response.choices:
         finish_reason = response.choices[0].finish_reason
         if finish_reason == "stop":
-            usage = _extract_groq_usage_map(response) or {}
-            server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
             metadata: Dict[str, Any] = {"provider": "openrouter"}
-            web_search_requests = server_tool_use.get("web_search_requests")
-            if web_search_requests is not None:
-                try:
-                    metadata["web_search_requests"] = int(web_search_requests)
-                except (TypeError, ValueError):
-                    pass
+            message = response.choices[0].message
+            annotations = getattr(message, "annotations", None) or []
+            url_citation_count = sum(
+                1
+                for ann in annotations
+                if isinstance(ann, Mapping)
+                and str(ann.get("type") or "") == "url_citation"
+            )
+            if url_citation_count > 0:
+                metadata["web_search_requests"] = url_citation_count
+            else:
+                server_tool_use = (
+                    ensure_mapping(
+                        _extract_groq_usage_map(response).get("server_tool_use")
+                    )
+                    or {}
+                )
+                web_search_requests = server_tool_use.get("web_search_requests")
+                if web_search_requests is not None:
+                    try:
+                        metadata["web_search_requests"] = int(web_search_requests)
+                    except (TypeError, ValueError):
+                        pass
             return _build_groq_usage_result(
                 kind="chat",
-                text=str(response.choices[0].message.content or ""),
+                text=str(message.content or ""),
                 model=PRIMARY_CHAT_MODEL,
                 response=response,
                 metadata=metadata,

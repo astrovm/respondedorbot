@@ -64,17 +64,21 @@ def test_api_index_does_not_expose_unused_agent_limits():
 def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     from api.index import _get_openrouter_ai_response_result
 
+    message = MagicMock(content="respuesta con busqueda")
+    message.annotations = [
+        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+        {"type": "url_citation", "url_citation": {"url": "https://example.com/2"}},
+    ]
     response = MagicMock()
     response.choices = [
         MagicMock(
             finish_reason="stop",
-            message=MagicMock(content="respuesta con busqueda"),
+            message=message,
         )
     ]
     response.usage = {
         "prompt_tokens": 10,
         "completion_tokens": 5,
-        "server_tool_use": {"web_search_requests": 2},
     }
     client = MagicMock()
     client.chat.completions.create.return_value = response
@@ -105,11 +109,13 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
 def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests():
     from api.index import _get_openrouter_ai_response_result
 
+    message = MagicMock(content="respuesta final")
+    message.annotations = []
     response = MagicMock()
     response.choices = [
         MagicMock(
             finish_reason="stop",
-            message=MagicMock(content="respuesta final"),
+            message=message,
         )
     ]
     response.usage = {
@@ -134,17 +140,20 @@ def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests()
 def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
     from api.index import _get_openrouter_ai_response_result
 
+    message = MagicMock(content="respuesta con busqueda")
+    message.annotations = [
+        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+    ]
     response = MagicMock()
     response.choices = [
         MagicMock(
             finish_reason="stop",
-            message=MagicMock(content="respuesta con busqueda"),
+            message=message,
         )
     ]
     response.usage = {
         "prompt_tokens": 10,
         "completion_tokens": 5,
-        "server_tool_use": {"web_search_requests": 1},
     }
     client = MagicMock()
     client.chat.completions.create.return_value = response
