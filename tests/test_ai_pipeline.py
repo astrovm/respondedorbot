@@ -97,8 +97,8 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
             "type": "openrouter:web_search",
             "parameters": {
                 "engine": "firecrawl",
-                "max_results": 5,
-                "max_total_results": 15,
+                "max_results": 10,
+                "max_total_results": 30,
             },
         }
     ]
@@ -163,8 +163,8 @@ def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
             "type": "openrouter:web_search",
             "parameters": {
                 "engine": "firecrawl",
-                "max_results": 5,
-                "max_total_results": 15,
+                "max_results": 10,
+                "max_total_results": 30,
             },
         }
     ]
