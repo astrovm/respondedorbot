@@ -55,6 +55,14 @@ def test_openrouter_config_helpers(monkeypatch):
     )
 
 
+def test_api_index_does_not_expose_unused_agent_limits():
+    from api import index
+
+    assert not hasattr(index, "AGENT_MAX_ITERATIONS")
+    assert not hasattr(index, "AGENT_MAX_TOOL_CALLS")
+    assert not hasattr(index, "AGENT_MAX_WEB_SEARCHES")
+
+
 def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     from api.index import _get_openrouter_ai_response_result
 
@@ -96,7 +104,7 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     ]
 
 
-def test_get_openrouter_ai_response_result_returns_text_when_completion_stops():
+def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests():
     from api.index import _get_openrouter_ai_response_result
 
     response = MagicMock()
@@ -106,7 +114,11 @@ def test_get_openrouter_ai_response_result_returns_text_when_completion_stops():
             message=MagicMock(content="respuesta final"),
         )
     ]
-    response.usage = {"prompt_tokens": 7, "completion_tokens": 3}
+    response.usage = {
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+        "server_tool_use": {"web_search_requests": "not-an-int"},
+    }
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
