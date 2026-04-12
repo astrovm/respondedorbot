@@ -251,33 +251,32 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
                         "settled_credit_units": 10,
                         "refunded_credit_units": 10,
                         "extra_charged_credit_units": 0,
-                        "raw_usd_micros": 2188,
+                        "raw_usd_micros": 390,
                         "model_breakdown": [
                             {
-                                "model": "moonshotai/kimi-k2-instruct-0905",
-                                "usd_micros": 2000,
+                                "model": "qwen/qwen3.6-plus",
+                                "usd_micros": 325,
                                 "input_tokens": 1000,
                                 "input_cached_tokens": 800,
                                 "input_non_cached_tokens": 200,
                             },
                             {
-                                "model": "moonshotai/kimi-k2-instruct-0905",
-                                "usd_micros": 188,
+                                "model": "qwen/qwen3.6-plus",
+                                "usd_micros": 65,
                                 "input_tokens": 200,
                                 "input_cached_tokens": 100,
                                 "input_non_cached_tokens": 100,
                             },
                         ],
                         "tool_breakdown": [
-                            {"tool": "search", "usd_micros": 8000, "count": 1},
-                            {"tool": "search", "usd_micros": 0, "count": 1},
+                            {"tool": "web_search", "usd_micros": 8000, "count": 2},
                             {"tool": "python", "usd_micros": 500, "count": 1},
                         ],
                         "billing_segments": [
                             {"kind": "chat"},
-                            {"kind": "compound"},
                             {"kind": "chat"},
-                            {"kind": "compound", "source": "cache"},
+                            {"kind": "chat"},
+                            {"kind": "chat", "source": "cache"},
                         ],
                     },
                 }
@@ -298,11 +297,11 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements():
     assert "últimas liquidaciones IA" in sent_text
     assert "cmd=/ask" in sent_text
     assert "reservado=2.0 cobrado=1.0 refund=1.0 extra=0.0 deuda=0.0" in sent_text
-    assert "requests: chat=2, compound=1" in sent_text
-    assert "cache_hits: compound=1" in sent_text
-    assert "cacheados=900 ahorro_cache=450" in sent_text
-    assert "moonshotai/kimi-k2-instruct-0905=2188" in sent_text
-    assert "search=8000 (2x)" in sent_text
+    assert "requests: chat=3" in sent_text
+    assert "cache_hits: chat=1" in sent_text
+    assert "cacheados=900 ahorro_cache=0" in sent_text
+    assert "qwen/qwen3.6-plus=390" in sent_text
+    assert "web_search=8000 (2x)" in sent_text
     assert "python=500 (1x)" in sent_text
 
 
@@ -1233,7 +1232,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1359,7 +1358,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1368,7 +1367,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1436,7 +1435,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 },
             ]
@@ -1501,12 +1500,12 @@ def test_handle_msg_search_command_uses_ai_billing():
         if isinstance(response_meta, dict):
             response_meta["billing_segments"] = [
                 {
-                    "kind": "compound",
-                    "model": "groq/compound",
+                    "kind": "chat",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             ]
-        return "resultado compound"
+        return "resultado web"
 
     with (
         patch("api.index.config_redis") as mock_config_redis,
@@ -1539,7 +1538,93 @@ def test_handle_msg_search_command_uses_ai_billing():
     assert result == "ok"
     mock_charge.assert_called_once()
     mock_send_msg.assert_called_once()
-    assert mock_send_msg.call_args[0][1] == "resultado compound"
+    assert mock_send_msg.call_args[0][1] == "resultado web"
+
+
+def test_handle_msg_search_command_uses_search_reserve_mode():
+    from api.index import handle_msg
+
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "btc news"}],
+        ),
+        patch(
+            "api.index.estimate_ai_base_reserve_credits",
+            return_value=(10, {"rate_limit_scope": "chat"}),
+        ) as mock_estimate,
+        patch("api.index.handle_ai_response", return_value="resultado web"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        result = handle_msg(
+            {
+                "message_id": 99,
+                "chat": {"id": 555, "type": "private"},
+                "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+                "text": "/buscar btc news",
+            }
+        )
+
+    assert result == "ok"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "search"
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_ask_command_uses_chat_reserve_mode():
+    from api.index import handle_msg
+
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch(
+            "api.index.estimate_ai_base_reserve_credits",
+            return_value=(10, {"rate_limit_scope": "chat"}),
+        ) as mock_estimate,
+        patch("api.index.handle_ai_response", return_value="respuesta ok"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        result = handle_msg(
+            {
+                "message_id": 199,
+                "chat": {"id": 555, "type": "private"},
+                "from": {"id": 2001, "first_name": "Ana", "username": "ana"},
+                "text": "/ask hola",
+            }
+        )
+
+    assert result == "ok"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "chat"
+    mock_send_msg.assert_called_once()
 
 
 def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch):
@@ -1612,7 +1697,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1621,7 +1706,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1721,7 +1806,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
             response_meta["billing_segments"] = [
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1730,7 +1815,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,
@@ -1739,7 +1824,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
                 },
                 {
                     "kind": "chat",
-                    "model": "moonshotai/kimi-k2-instruct-0905",
+                    "model": "qwen/qwen3.6-plus",
                     "usage": {
                         "input_tokens": 1,
                         "input_non_cached_tokens": 1,

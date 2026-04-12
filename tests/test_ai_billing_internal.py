@@ -8,9 +8,7 @@ from api.ai_billing import (
 )
 from api.credit_units import whole_credits_to_units
 from api.groq_billing import (
-    MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST,
     calculate_billing_for_segments,
-    estimate_compound_reserve_credits,
     estimate_vision_reserve_credits,
 )
 
@@ -70,7 +68,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 1_000,
                     "input_cached_tokens": 900,
@@ -81,13 +79,13 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 2_050
-    assert breakdown["charged_credit_units"] == 5
-    assert breakdown["charged_credits_display"] == "0.5"
+    assert breakdown["raw_usd_micros"] == 1_300
+    assert breakdown["charged_credit_units"] == 3
+    assert breakdown["charged_credits_display"] == "0.3"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 2_050,
+            "model": "qwen/qwen3.6-plus",
+            "usd_micros": 1_300,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -101,12 +99,12 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
         [
             {
                 "kind": "chat",
-                "model": "groq/moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
@@ -129,12 +127,27 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
 
     assert breakdown["raw_usd_micros"] > 0
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
-        "moonshotai/kimi-k2-instruct-0905",
-        "moonshotai/kimi-k2-0905",
+        "qwen/qwen3.6-plus",
+        "qwen/qwen3.6-plus",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "meta-llama/llama-4-scout",
         "whisper-large-v3",
     ]
+
+
+def test_calculate_billing_for_segments_bumps_pricing_version_for_qwen_search_billing():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "metadata": {"web_search_requests": 1},
+            }
+        ]
+    )
+
+    assert breakdown["pricing_version"] != "2026-03-06"
 
 
 def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_details():
@@ -142,7 +155,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "prompt_tokens": 2_000,
                     "completion_tokens": 100,
@@ -152,13 +165,13 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 1_550
-    assert breakdown["charged_credit_units"] == 4
-    assert breakdown["charged_credits_display"] == "0.4"
+    assert breakdown["raw_usd_micros"] == 845
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "usd_micros": 1_550,
+            "model": "qwen/qwen3.6-plus",
+            "usd_micros": 845,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -171,19 +184,13 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     breakdown = calculate_billing_for_segments(
         [
             {
-                "kind": "compound",
+                "kind": "chat",
                 "source": "cache",
-                "model": "groq/compound",
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 10_000,
+                    "output_tokens": 500,
                 },
-                "executed_tools": [{"type": "search", "mode": "basic", "count": 1}],
             }
         ]
     )
@@ -196,23 +203,36 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     assert breakdown["unsupported_notes"] == []
 
 
+def test_calculate_billing_for_segments_bills_web_search_requests():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "metadata": {"web_search_requests": 2},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 3_450
+    assert breakdown["charged_credit_units"] == 7
+    assert breakdown["tool_breakdown"] == [
+        {"tool": "web_search", "count": 2, "usd_micros": 3_320}
+    ]
+
+
 def test_calculate_billing_for_segments_refunds_cache_only_usage_to_zero():
     breakdown = calculate_billing_for_segments(
         [
             {
-                "kind": "compound",
-                "model": "groq/compound",
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
                 "source": "cache",
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
+                "usage": {
+                    "input_tokens": 10_000,
+                    "output_tokens": 500,
                 },
-                "executed_tools": [{"type": "search", "mode": "basic", "count": 1}],
             }
         ]
     )
@@ -220,210 +240,6 @@ def test_calculate_billing_for_segments_refunds_cache_only_usage_to_zero():
     assert breakdown["raw_usd_micros"] == 0
     assert breakdown["charged_credit_units"] == 0
     assert breakdown["charged_credits_display"] == "0.0"
-
-
-def test_calculate_billing_for_segments_reads_compound_usage_breakdown_models_and_tools():
-    breakdown = calculate_billing_for_segments(
-        [
-            {
-                "kind": "compound",
-                "model": "groq/compound",
-                "metadata": {"request_elapsed_seconds": 30},
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
-                },
-                "executed_tools": [
-                    {"type": "search", "mode": "basic", "count": 2},
-                    {"type": "visit", "count": 3},
-                    {"name": "python"},
-                    {"type": "browser"},
-                ],
-            }
-        ]
-    )
-
-    assert breakdown["raw_usd_micros"] == 16_300
-    assert breakdown["charged_credit_units"] == 33
-    assert breakdown["charged_credits_display"] == "3.3"
-    assert breakdown["model_breakdown"] == [
-        {
-            "model": "openai/gpt-oss-120b",
-            "usd_micros": 1_800,
-            "input_tokens": 10_000,
-            "input_cached_tokens": 0,
-            "input_non_cached_tokens": 10_000,
-            "output_tokens": 500,
-        }
-    ]
-    assert breakdown["tool_breakdown"] == [
-        {
-            "tool": "search",
-            "usd_micros": 10_000,
-            "count": 2,
-            "note": "",
-        },
-        {
-            "tool": "visit",
-            "usd_micros": 3_000,
-            "count": 3,
-            "note": "",
-        },
-        {
-            "tool": "python",
-            "usd_micros": 1_500,
-            "count": 1,
-            "note": "estimated_from_request_elapsed_seconds",
-        },
-        {
-            "tool": "browser",
-            "usd_micros": 0,
-            "count": 1,
-            "note": "estimated_shared_cap_from:estimated_from_request_elapsed_seconds",
-        },
-    ]
-    assert breakdown["unsupported_notes"] == []
-
-
-def test_calculate_billing_for_segments_uses_usage_total_time_for_browser_tools():
-    breakdown = calculate_billing_for_segments(
-        [
-            {
-                "kind": "compound",
-                "model": "groq/compound",
-                "usage": {"total_time": 30},
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
-                },
-                "executed_tools": [
-                    {"type": "browser"},
-                    {"type": "browser_automation"},
-                    {"type": "search", "mode": "basic", "count": 1},
-                ],
-            }
-        ]
-    )
-
-    assert breakdown["raw_usd_micros"] == 7_466
-    assert breakdown["charged_credit_units"] == 15
-    assert breakdown["charged_credits_display"] == "1.5"
-    assert breakdown["tool_breakdown"] == [
-        {
-            "tool": "browser",
-            "usd_micros": 666,
-            "count": 1,
-            "note": "estimated_from_usage_total_time",
-        },
-        {
-            "tool": "browser_automation",
-            "usd_micros": 0,
-            "count": 1,
-            "note": "estimated_shared_cap_from:estimated_from_usage_total_time",
-        },
-        {
-            "tool": "search",
-            "usd_micros": 5_000,
-            "count": 1,
-            "note": "",
-        },
-    ]
-    assert breakdown["unsupported_notes"] == []
-
-
-def test_calculate_billing_for_segments_falls_back_to_120_second_time_cap():
-    breakdown = calculate_billing_for_segments(
-        [
-            {
-                "kind": "compound",
-                "model": "groq/compound",
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
-                },
-                "executed_tools": [
-                    {"type": "browser"},
-                    {"type": "search", "mode": "basic", "count": 1},
-                ],
-            }
-        ]
-    )
-
-    assert breakdown["raw_usd_micros"] == 9_466
-    assert breakdown["charged_credit_units"] == 19
-    assert breakdown["charged_credits_display"] == "1.9"
-    assert breakdown["model_breakdown"] == [
-        {
-            "model": "openai/gpt-oss-120b",
-            "usd_micros": 1_800,
-            "input_tokens": 10_000,
-            "input_cached_tokens": 0,
-            "input_non_cached_tokens": 10_000,
-            "output_tokens": 500,
-        }
-    ]
-    assert breakdown["tool_breakdown"] == [
-        {
-            "tool": "browser",
-            "usd_micros": 2_666,
-            "count": 1,
-            "note": "estimated_max_120_second_request_cap",
-        },
-        {
-            "tool": "search",
-            "usd_micros": 5_000,
-            "count": 1,
-            "note": "",
-        },
-    ]
-    assert breakdown["unsupported_notes"] == []
-
-
-def test_calculate_billing_for_segments_clamps_measured_time_to_120_seconds():
-    breakdown = calculate_billing_for_segments(
-        [
-            {
-                "kind": "compound",
-                "model": "groq/compound",
-                "metadata": {"request_elapsed_seconds": 180},
-                "usage_breakdown": {
-                    "models": [
-                        {
-                            "model": "openai/gpt-oss-120b",
-                            "input_tokens": 10_000,
-                            "output_tokens": 500,
-                        }
-                    ]
-                },
-                "executed_tools": [{"name": "python"}],
-            }
-        ]
-    )
-
-    assert MAX_UNDOCUMENTED_TIME_BASED_TOOL_SECONDS_PER_REQUEST == 120.0
-    assert breakdown["tool_breakdown"] == [
-        {
-            "tool": "python",
-            "usd_micros": 6_000,
-            "count": 1,
-            "note": "estimated_from_request_elapsed_seconds",
-        }
-    ]
 
 
 def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
@@ -438,21 +254,6 @@ def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
 
     assert small == 1
     assert large > small
-
-
-def test_estimate_compound_reserve_credits_only_reserves_predictable_request_tools():
-    reserve = estimate_compound_reserve_credits(
-        system_message={"role": "system", "content": "search the web"},
-        messages=[{"role": "user", "content": "btc news"}],
-        enabled_tools=[
-            "web_search",
-            "visit_website",
-            "code_interpreter",
-            "browser_automation",
-        ],
-    )
-
-    assert reserve == 19
 
 
 def _build_billing_helper() -> AIMessageBilling:
@@ -484,7 +285,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -514,7 +315,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -525,7 +326,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 10
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 1
     assert (
         billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
         == "ai_settlement_charge"
@@ -608,7 +409,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -620,7 +421,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 10
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 1
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert (
         billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
@@ -651,7 +452,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -696,7 +497,7 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -810,7 +611,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
             },
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -821,7 +622,8 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
     )
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 9
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -838,7 +640,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -872,7 +674,7 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "prompt_tokens": 1_000,
                     "prompt_tokens_details": {"cached_tokens": 900},
@@ -884,14 +686,14 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
     )
 
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 28
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 29
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
     metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
         "metadata"
     ]
-    assert metadata["settled_credit_units"] == 2
-    assert metadata["refunded_credit_units"] == 28
+    assert metadata["settled_credit_units"] == 1
+    assert metadata["refunded_credit_units"] == 29
 
 
 def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is_zero():
@@ -915,7 +717,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
         [
             {
                 "kind": "chat",
-                "model": "moonshotai/kimi-k2-instruct-0905",
+                "model": "qwen/qwen3.6-plus",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -981,23 +783,17 @@ def test_settle_reserved_ai_credits_refunds_transcribe_partial_usage():
     assert metadata["refunded_credit_units"] == expected_refund
 
 
-def test_settle_reserved_ai_credits_refunds_compound_partial_usage():
+def test_settle_reserved_ai_credits_refunds_partial_chat_usage():
     billing = _build_billing_helper()
     reserved_credit_units = whole_credits_to_units(3)
     segments = [
         {
-            "kind": "compound",
-            "model": "groq/compound",
-            "usage_breakdown": {
-                "models": [
-                    {
-                        "model": "openai/gpt-oss-120b",
-                        "input_tokens": 1_000,
-                        "output_tokens": 100,
-                    }
-                ]
+            "kind": "chat",
+            "model": "qwen/qwen3.6-plus",
+            "usage": {
+                "input_tokens": 1_000,
+                "output_tokens": 100,
             },
-            "executed_tools": [{"type": "search", "mode": "basic", "count": 1}],
         }
     ]
     breakdown = calculate_billing_for_segments(segments)
@@ -1007,7 +803,7 @@ def test_settle_reserved_ai_credits_refunds_compound_partial_usage():
             "reserved_credit_units": reserved_credit_units,
             "chat_scope_id": 1,
             "source": "user",
-            "usage_tag": "ai_compound",
+            "usage_tag": "ai_response_base",
         },
         segments,
         reason="ok",

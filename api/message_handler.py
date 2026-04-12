@@ -121,6 +121,10 @@ def _billing_unavailable_command_response(
     return _BILLING_UNAVAILABLE_MESSAGE, None, False, command
 
 
+def _get_admin_chat_id() -> str:
+    return str(environ.get("ADMIN_CHAT_ID") or "").strip()
+
+
 def _require_billing_for_command(
     deps: MessageHandlerDeps,
     *,
@@ -524,6 +528,7 @@ def _run_ai_flow(
     user_identity: str,
     handler_func: Callable[..., str],
     redis_client: Any,
+    reserve_mode: str = "chat",
 ) -> Tuple[str, bool]:
     billing_unavailable = _degrade_when_billing_unavailable(
         deps,
@@ -548,9 +553,7 @@ def _run_ai_flow(
             if prepared_message.resized_image_data and prepared_message.photo_file_id
             else 0
         ),
-        reserve_mode="compound"
-        if getattr(handler_func, "__name__", "") == "search_command"
-        else "chat",
+        reserve_mode=reserve_mode,
     )
     rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
     if not deps.check_global_rate_limit(
@@ -751,7 +754,7 @@ def _handle_admin_printcredits_command(
     if command != "/printcredits":
         return None, None, False, None
 
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
@@ -992,7 +995,7 @@ def _handle_admin_creditlog_command(
     if command != "/creditlog":
         return None, None, False, None
 
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
@@ -1319,6 +1322,9 @@ def _handle_known_command(
                 user_identity=user_identity,
                 handler_func=handler_func,
                 redis_client=redis_client,
+                reserve_mode="search"
+                if getattr(handler_func, "__name__", "") == "search_command"
+                else "chat",
             )
             return response_msg, response_markup, response_uses_ai, response_command
 

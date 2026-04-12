@@ -147,17 +147,17 @@ def test_truncate_text_edge_cases():
     assert truncate_text(None) == ""
 
     # Test string with exactly max length
-    text = "a" * 512
+    text = "a" * 256
     assert truncate_text(text) == text
 
     # Test string with max length minus one
-    text = "a" * 511
+    text = "a" * 255
     assert truncate_text(text) == text
 
     # Test string with max length plus one
-    text = "a" * 513
+    text = "a" * 257
     truncated = truncate_text(text)
-    assert len(truncated) == 512
+    assert len(truncated) == 256
     assert truncated.endswith("...")
 
     # Test with very small max_length
