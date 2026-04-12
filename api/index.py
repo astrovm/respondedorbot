@@ -27,6 +27,7 @@ from typing import (
     Literal,
 )
 import base64
+import concurrent.futures
 import emoji
 import hashlib
 import io
@@ -669,9 +670,11 @@ def _fetch_urls_from_latest_message(
     if not urls:
         return ""
 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(urls)) as executor:
+        results = list(executor.map(fetch_url_content, urls))
+
     parts = []
-    for url in urls:
-        result = fetch_url_content(url)
+    for url, result in zip(urls, results):
         error = str(result.get("error") or "").strip()
         if error:
             parts.append(f"URL: {url}\nerror: {error}")
