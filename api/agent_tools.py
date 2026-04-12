@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from requests.exceptions import RequestException
 
@@ -14,6 +15,7 @@ from api.utils.http import request_with_ssl_fallback
 FETCH_TIMEOUT = 8
 FETCH_MAX_BYTES = 262144
 FETCH_MAX_CHARS = 12000
+FETCH_MAX_REDIRECTS = 5
 
 
 def _normalize_http_url(url: str) -> Optional[str]:
@@ -44,6 +46,38 @@ def _is_private_host(hostname: Optional[str]) -> bool:
         or address.is_reserved
         or address.is_unspecified
     )
+
+
+def _hostname_resolves_private(hostname: Optional[str]) -> bool:
+    host = str(hostname or "").strip()
+    if not host:
+        return True
+    try:
+        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for entry in addresses:
+        sockaddr = entry[4]
+        if not sockaddr:
+            continue
+        if _is_private_host(sockaddr[0]):
+            return True
+    return False
+
+
+def _is_blocked_url(url: str) -> bool:
+    hostname = urlparse(url).hostname
+    return _is_private_host(hostname) or _hostname_resolves_private(hostname)
+
+
+def _extract_redirect_url(base_url: str, response: Any) -> Optional[str]:
+    location = str(response.headers.get("Location", "") or "").strip()
+    if not location:
+        return None
+    redirected = _normalize_http_url(urljoin(base_url, location))
+    if not redirected:
+        return None
+    return redirected
 
 
 def _decode_response_body(
@@ -106,28 +140,46 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
     if not normalized_url:
         return {"url": str(url or "").strip(), "error": "url no permitida"}
 
-    if _is_private_host(urlparse(normalized_url).hostname):
+    if _is_blocked_url(normalized_url):
         return {"url": normalized_url, "error": "url no permitida"}
 
-    try:
-        response = request_with_ssl_fallback(
-            normalized_url,
-            allow_redirects=True,
-            timeout=FETCH_TIMEOUT,
-            stream=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                )
-            },
+    request_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
         )
-        response.raise_for_status()
-    except RequestException:
-        return {"url": normalized_url, "error": "no se pudo obtener la url"}
+    }
 
-    final_url = normalized_url
+    current_url = normalized_url
+    response = None
+    for _ in range(FETCH_MAX_REDIRECTS + 1):
+        try:
+            response = request_with_ssl_fallback(
+                current_url,
+                allow_redirects=False,
+                timeout=FETCH_TIMEOUT,
+                stream=True,
+                headers=request_headers,
+            )
+            response.raise_for_status()
+        except RequestException:
+            return {"url": current_url, "error": "no se pudo obtener la url"}
+
+        redirected_url = _extract_redirect_url(current_url, response)
+        if not redirected_url:
+            break
+        try:
+            response.close()
+        except Exception:
+            pass
+        if _is_blocked_url(redirected_url):
+            return {"url": redirected_url, "error": "url no permitida"}
+        current_url = redirected_url
+    else:
+        return {"url": current_url, "error": "no se pudo obtener la url"}
+
+    final_url = current_url
     content_type = ""
     status_code = getattr(response, "status_code", None)
     body = b""
@@ -136,7 +188,7 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
         maybe_url = _normalize_http_url(str(getattr(response, "url", "") or ""))
         if maybe_url:
             final_url = maybe_url
-        if _is_private_host(urlparse(final_url).hostname):
+        if _is_blocked_url(final_url):
             return {"url": final_url, "error": "url no permitida"}
 
         content_type = str(response.headers.get("Content-Type", "")).lower()

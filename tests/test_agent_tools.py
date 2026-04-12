@@ -79,6 +79,56 @@ def test_fetch_url_content_rejects_private_network_urls():
     }
 
 
+def test_fetch_url_content_rejects_redirect_to_private_network_url():
+    from api.agent_tools import fetch_url_content
+
+    redirect = _FakeResponse(
+        url="https://example.com/start",
+        status_code=302,
+        body=b"",
+    )
+    redirect.headers["Location"] = "http://127.0.0.1:8000/secret"
+
+    with patch(
+        "api.agent_tools.request_with_ssl_fallback",
+        return_value=redirect,
+    ) as mock_request:
+        result = fetch_url_content("https://example.com/start")
+
+    assert result == {
+        "url": "http://127.0.0.1:8000/secret",
+        "error": "url no permitida",
+    }
+    assert mock_request.call_count == 1
+
+
+def test_fetch_url_content_rejects_hostname_resolving_to_private_ip():
+    from api.agent_tools import fetch_url_content
+
+    with (
+        patch(
+            "api.agent_tools.socket.getaddrinfo",
+            return_value=[
+                (
+                    2,
+                    1,
+                    6,
+                    "",
+                    ("127.0.0.1", 443),
+                )
+            ],
+        ),
+        patch("api.agent_tools.request_with_ssl_fallback") as mock_request,
+    ):
+        result = fetch_url_content("https://internal.example.test/secret")
+
+    assert result == {
+        "url": "https://internal.example.test/secret",
+        "error": "url no permitida",
+    }
+    mock_request.assert_not_called()
+
+
 def test_fetch_url_content_truncates_large_pages():
     from api.agent_tools import fetch_url_content
 
