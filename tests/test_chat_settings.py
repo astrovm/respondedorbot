@@ -200,17 +200,22 @@ def test_load_bot_config_caches_and_parses(monkeypatch):
 
     config_module.reset_cache()
     monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
-    monkeypatch.setenv("BOT_TRIGGER_WORDS", "bot, amigo")
 
     cfg_first = index.load_bot_config()
     assert cfg_first == {
-        "trigger_words": ["bot", "amigo"],
+        "trigger_words": [
+            "gordo",
+            "respondedor",
+            "atendedor",
+            "gordito",
+            "dogor",
+            "bot",
+        ],
         "system_prompt": "hola",
     }
 
-    # Change env vars; function should return cached config
+    # Change env var; function should return cached config
     monkeypatch.setenv("BOT_SYSTEM_PROMPT", "changed")
-    monkeypatch.setenv("BOT_TRIGGER_WORDS", "foo,bar")
     cfg_second = index.load_bot_config()
     assert cfg_second is cfg_first
 
@@ -220,13 +225,6 @@ def test_load_bot_config_missing_env(monkeypatch):
 
     config_module.reset_cache()
     monkeypatch.delenv("BOT_SYSTEM_PROMPT", raising=False)
-    monkeypatch.setenv("BOT_TRIGGER_WORDS", "foo")
-
-    with pytest.raises(ValueError):
-        index.load_bot_config()
-
-    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
-    monkeypatch.delenv("BOT_TRIGGER_WORDS", raising=False)
 
     with pytest.raises(ValueError):
         index.load_bot_config()

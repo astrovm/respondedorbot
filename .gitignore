@@ -133,3 +133,6 @@ dmypy.json
 
 # Local git worktrees
 .worktrees/
+
+# Superpowers documentation
+docs/superpowers/

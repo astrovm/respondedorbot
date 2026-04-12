@@ -121,7 +121,6 @@ def handle_ai_response(
     reset_request_count_fn: Callable[[], Any],
     restore_request_count_fn: Callable[[Any], None],
     get_request_count_fn: Callable[[], int],
-    sanitize_tool_artifacts_fn: Callable[[str], str],
     strip_ai_fallback_marker_fn: Callable[[str], Any],
 ) -> str:
     """Handle AI API responses and apply the response cleanup pipeline."""
@@ -163,8 +162,7 @@ def handle_ai_response(
     if response_meta is not None:
         response_meta["ai_fallback"] = used_ai_fallback
 
-    sanitized_response = sanitize_tool_artifacts_fn(response_text)
-    persona_stripped_response = remove_gordo_prefix(sanitized_response)
+    persona_stripped_response = remove_gordo_prefix(response_text)
     context_stripped_response = strip_leading_context(
         persona_stripped_response, context_texts
     )
@@ -177,7 +175,7 @@ def handle_ai_response(
         print(
             "handle_ai_response: cleaned response empty after normalization "
             f"handler={handler_name or '<unknown>'} ai_fallback={used_ai_fallback} "
-            f"raw_len={len(response_text)} sanitized_len={len(sanitized_response)} "
+            f"raw_len={len(response_text)} "
             f"persona_len={len(persona_stripped_response)} "
             f"context_len={len(context_stripped_response)} "
             f"prefix_len={len(prefix_stripped_response)}"
@@ -185,7 +183,6 @@ def handle_ai_response(
         print(
             "handle_ai_response: previews "
             f"raw='{_preview_for_log(response_text)}' "
-            f"sanitized='{_preview_for_log(sanitized_response)}' "
             f"persona='{_preview_for_log(persona_stripped_response)}' "
             f"context='{_preview_for_log(context_stripped_response)}' "
             f"prefix='{_preview_for_log(prefix_stripped_response)}'"

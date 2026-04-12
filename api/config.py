@@ -31,22 +31,27 @@ def load_bot_config() -> Dict[str, Any]:
         return _bot_config
 
     system_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
-    trigger_words_str = os.environ.get("BOT_TRIGGER_WORDS")
-
     if not system_prompt:
         raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
 
-    if not trigger_words_str:
-        raise ValueError("BOT_TRIGGER_WORDS environment variable is required")
-
-    trigger_words = [word.strip() for word in trigger_words_str.split(",")]
-
-    _bot_config = {"trigger_words": trigger_words, "system_prompt": system_prompt}
+    _bot_config = {
+        "trigger_words": [
+            "gordo",
+            "respondedor",
+            "atendedor",
+            "gordito",
+            "dogor",
+            "bot",
+        ],
+        "system_prompt": system_prompt,
+    }
 
     return _bot_config
 
 
-def _admin_report(message: str, error: Optional[Exception], extra: Optional[Dict[str, Any]]) -> None:
+def _admin_report(
+    message: str, error: Optional[Exception], extra: Optional[Dict[str, Any]]
+) -> None:
     if _admin_reporter:
         _admin_reporter(message, error, extra)
 
