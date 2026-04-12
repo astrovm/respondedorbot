@@ -5,7 +5,7 @@ import re
 import socket
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from requests.exceptions import RequestException
@@ -18,14 +18,27 @@ FETCH_MAX_CHARS = 12000
 FETCH_MAX_REDIRECTS = 5
 
 
-def _normalize_http_url(url: str) -> Optional[str]:
-    raw = str(url or "").strip()
-    if not raw:
+def normalize_http_url(raw_url: str) -> Optional[str]:
+    """Normalize raw URL strings to HTTP/HTTPS form without fragments.
+
+    Prepends https:// for scheme-less inputs. Rejects URLs with spaces in
+    the netloc or non-HTTP/S schemes.
+    """
+    candidate = str(raw_url or "").strip()
+    if not candidate:
         return None
-    parsed = urlparse(raw)
+
+    parsed = urlparse(candidate)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{candidate}")
+
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    return urlunparse(parsed)
+
+    if any(char.isspace() for char in parsed.netloc):
+        return None
+
+    return urlunparse(parsed._replace(fragment=""))
 
 
 def _is_private_host(hostname: Optional[str]) -> bool:
@@ -74,7 +87,7 @@ def _extract_redirect_url(base_url: str, response: Any) -> Optional[str]:
     location = str(response.headers.get("Location", "") or "").strip()
     if not location:
         return None
-    redirected = _normalize_http_url(urljoin(base_url, location))
+    redirected = normalize_http_url(urljoin(base_url, location))
     if not redirected:
         return None
     return redirected
@@ -89,44 +102,91 @@ def _decode_response_body(
         return body.decode("utf-8", errors="replace")
 
 
-class _HtmlTextExtractor(HTMLParser):
+class HtmlTextExtractor(HTMLParser):
+    """Extract visible text and title from HTML documents."""
+
+    _BLOCK_TAGS = {
+        "p",
+        "div",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "li",
+        "br",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+    _SKIP_TAGS = {"script", "style", "noscript"}
+
     def __init__(self) -> None:
         super().__init__()
-        self.title_parts: list[str] = []
-        self.text_parts: list[str] = []
-        self._ignore_depth = 0
+        self._buffer: List[str] = []
+        self._skip_depth = 0
+        self._title_parts: List[str] = []
         self._in_title = False
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        if tag in {"script", "style"}:
-            self._ignore_depth += 1
-        elif tag == "title":
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        tag_lower = tag.lower()
+        if tag_lower in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if tag_lower == "title":
             self._in_title = True
+            return
+        if tag_lower in self._BLOCK_TAGS:
+            self._buffer.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style"} and self._ignore_depth > 0:
-            self._ignore_depth -= 1
-        elif tag == "title":
+        tag_lower = tag.lower()
+        if tag_lower in self._SKIP_TAGS:
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+            return
+        if tag_lower == "title":
             self._in_title = False
+            return
+        if tag_lower in self._BLOCK_TAGS:
+            self._buffer.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if self._ignore_depth > 0:
+        if self._skip_depth > 0:
             return
+        text = unescape(data)
         if self._in_title:
-            self.title_parts.append(data)
-        self.text_parts.append(data)
+            self._title_parts.append(text)
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        if self._buffer and not self._buffer[-1].endswith((" ", "\n")):
+            self._buffer.append(" ")
+        self._buffer.append(cleaned)
+
+    def get_text(self) -> str:
+        raw = "".join(self._buffer)
+        collapsed = re.sub(r"[ \t]+", " ", raw)
+        collapsed = re.sub(r"\n\s*", "\n", collapsed)
+        collapsed = re.sub(r"\n{3,}", "\n\n", collapsed)
+        return collapsed.strip()
+
+    def get_title(self) -> Optional[str]:
+        title = "".join(self._title_parts).strip()
+        return re.sub(r"\s+", " ", title) or None
 
 
-def _compress_whitespace(value: Optional[str]) -> str:
-    return re.sub(r"\s+", " ", unescape(str(value or ""))).strip()
-
-
-def _extract_html_content(html: str) -> tuple[Optional[str], str]:
-    parser = _HtmlTextExtractor()
-    parser.feed(html)
-    title = _compress_whitespace(" ".join(parser.title_parts)) or None
-    text = _compress_whitespace(" ".join(parser.text_parts))
-    return title, text
+def extract_text_from_html(html: str) -> Tuple[Optional[str], str]:
+    """Return (title, visible_text) extracted from an HTML string."""
+    parser = HtmlTextExtractor()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        pass
+    return parser.get_title(), parser.get_text()
 
 
 def _truncate_content(content: str) -> tuple[str, bool]:
@@ -136,7 +196,7 @@ def _truncate_content(content: str) -> tuple[str, bool]:
 
 
 def fetch_url_content(url: str) -> Dict[str, Any]:
-    normalized_url = _normalize_http_url(url)
+    normalized_url = normalize_http_url(url)
     if not normalized_url:
         return {"url": str(url or "").strip(), "error": "url no permitida"}
 
@@ -185,7 +245,7 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
     body = b""
     body_truncated = False
     try:
-        maybe_url = _normalize_http_url(str(getattr(response, "url", "") or ""))
+        maybe_url = normalize_http_url(str(getattr(response, "url", "") or ""))
         if maybe_url:
             final_url = maybe_url
         if _is_blocked_url(final_url):
@@ -222,10 +282,10 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
     )
     is_html = "html" in content_type or b"<html" in body[:400].lower()
     if is_html:
-        title, content = _extract_html_content(decoded)
+        title, content = extract_text_from_html(decoded)
     else:
         title = None
-        content = _compress_whitespace(decoded)
+        content = re.sub(r"\s+", " ", unescape(decoded)).strip()
 
     content, text_truncated = _truncate_content(content)
     return {

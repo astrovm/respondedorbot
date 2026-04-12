@@ -98,7 +98,7 @@ from api.groq_billing import (
     ensure_mapping,
     WEB_SEARCH_USD_MICROS_PER_REQUEST,
 )
-from api.agent_tools import fetch_url_content
+from api.agent_tools import fetch_url_content, normalize_http_url
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -641,6 +641,16 @@ def _extract_latest_user_message_text(messages: Sequence[Mapping[str, Any]]) -> 
         content = message.get("content")
         if isinstance(content, str):
             return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, Mapping) and block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            text = " ".join(parts).strip()
+            if text:
+                return text
     return ""
 
 
@@ -2931,7 +2941,7 @@ def _message_has_domain_link(message: str, domain: str) -> bool:
     )
     for candidate in candidates:
         cleaned_candidate = candidate.rstrip(".,!?;:)]}'\"")
-        normalized_url = _normalize_http_url(cleaned_candidate)
+        normalized_url = normalize_http_url(cleaned_candidate)
         if not normalized_url:
             continue
         hostname = (urlparse(normalized_url).hostname or "").lower()
@@ -3367,7 +3377,7 @@ def complete_with_providers(
     messages: List[Dict[str, Any]],
     *,
     response_meta: Optional[Dict[str, Any]] = None,
-    enable_web_search: bool = False,
+    enable_web_search: bool = True,
 ) -> Optional[str]:
     """Try OpenRouter chat models and return the first response."""
 
@@ -3382,133 +3392,6 @@ def complete_with_providers(
         print("complete_with_providers: got response from OpenRouter")
         return result.text
     return None
-
-
-def _normalize_http_url(raw_url: str) -> Optional[str]:
-    """Normalize raw URL strings to HTTP/HTTPS form without fragments."""
-
-    if not raw_url:
-        return None
-
-    candidate = str(raw_url).strip()
-    if not candidate:
-        return None
-
-    parsed = urlparse(candidate)
-    if not parsed.scheme:
-        parsed = urlparse(f"https://{candidate}")
-
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-
-    netloc = parsed.netloc
-    if any(char.isspace() for char in netloc):
-        return None
-
-    cleaned = parsed._replace(fragment="")
-    return urlunparse(cleaned)
-
-
-class _VisibleTextExtractor(HTMLParser):
-    """Extract visible text and title from HTML documents."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._buffer: List[str] = []
-        self._skip_depth = 0
-        self._title_parts: List[str] = []
-        self._in_title = False
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        tag_lower = tag.lower()
-        if tag_lower in {"script", "style", "noscript"}:
-            self._skip_depth += 1
-            return
-        if tag_lower == "title":
-            self._in_title = True
-            return
-        if tag_lower in {
-            "p",
-            "div",
-            "section",
-            "article",
-            "header",
-            "footer",
-            "li",
-            "br",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-        }:
-            self._buffer.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag_lower = tag.lower()
-        if tag_lower in {"script", "style", "noscript"}:
-            if self._skip_depth > 0:
-                self._skip_depth -= 1
-            return
-        if tag_lower == "title":
-            self._in_title = False
-            return
-        if tag_lower in {
-            "p",
-            "div",
-            "section",
-            "article",
-            "header",
-            "footer",
-            "li",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-        }:
-            self._buffer.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth > 0:
-            return
-
-        text = unescape(data)
-        if self._in_title:
-            self._title_parts.append(text)
-
-        cleaned = text.strip()
-        if not cleaned:
-            return
-
-        if self._buffer and not self._buffer[-1].endswith((" ", "\n")):
-            self._buffer.append(" ")
-
-        self._buffer.append(cleaned)
-
-    def get_text(self) -> str:
-        raw = "".join(self._buffer)
-        collapsed_spaces = re.sub(r"[ \t]+", " ", raw)
-        collapsed_lines = re.sub(r"\n\s*", "\n", collapsed_spaces)
-        collapsed_lines = re.sub(r"\n{3,}", "\n\n", collapsed_lines)
-        return collapsed_lines.strip()
-
-    def get_title(self) -> Optional[str]:
-        title = "".join(self._title_parts).strip()
-        title = re.sub(r"\s+", " ", title)
-        return title or None
-
-
-def _extract_text_from_html(html_text: str) -> Tuple[Optional[str], str]:
-    parser = _VisibleTextExtractor()
-    try:
-        parser.feed(html_text)
-        parser.close()
-    except Exception:
-        pass
-    return parser.get_title(), parser.get_text()
 
 
 class _HtmlMetadataExtractor(HTMLParser):
@@ -3604,11 +3487,11 @@ def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
     candidate = str(raw_url or "").strip().rstrip(".,;:!?)\"]}'")
     if not candidate:
         return None
-    return _normalize_http_url(candidate)
+    return normalize_http_url(candidate)
 
 
 def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
-    normalized = _normalize_http_url(raw_url)
+    normalized = normalize_http_url(raw_url)
     if not normalized:
         return
 
@@ -3693,7 +3576,7 @@ def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
 def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
     """Fetch preview metadata for a URL and cache the result."""
 
-    normalized = _normalize_http_url(raw_url)
+    normalized = normalize_http_url(raw_url)
     if not normalized:
         return {"url": str(raw_url or "").strip(), "error": "url inválida"}
 
@@ -3748,7 +3631,7 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
     apparent_encoding: Optional[str] = None
     content_bytes = b""
     try:
-        maybe_url = _normalize_http_url(str(getattr(response, "url", "") or ""))
+        maybe_url = normalize_http_url(str(getattr(response, "url", "") or ""))
         if maybe_url:
             final_url = maybe_url
         content_type = str(response.headers.get("Content-Type", "")).lower()
