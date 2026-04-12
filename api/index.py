@@ -194,7 +194,7 @@ GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
-OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 15
+OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 OPENROUTER_MODEL_MAP = {
     GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
 }
@@ -628,7 +628,8 @@ def _build_openrouter_web_search_tool() -> Dict[str, Any]:
         "parameters": {
             "engine": "firecrawl",
             "max_results": OPENROUTER_WEB_SEARCH_MAX_RESULTS,
-            "max_total_results": OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+            "max_total_results": OPENROUTER_WEB_SEARCH_MAX_RESULTS
+            * OPENROUTER_WEB_SEARCH_MAX_QUERIES,
         },
     }
 
@@ -4261,7 +4262,9 @@ def estimate_ai_base_reserve_credits(
         }
 
     if reserve_mode == "search":
-        reserve += credit_units_from_usd_micros(WEB_SEARCH_USD_MICROS_PER_REQUEST)
+        reserve += credit_units_from_usd_micros(
+            WEB_SEARCH_USD_MICROS_PER_REQUEST * OPENROUTER_WEB_SEARCH_MAX_QUERIES
+        )
         return reserve, {
             "reserve_mode": "search",
             "reserve_reason": "web_search",
