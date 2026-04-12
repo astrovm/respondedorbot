@@ -188,11 +188,9 @@ def estimate_vision_reserve_credits(
 
 
 def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
-    hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3"]["audio_per_hour"]
-    seconds = max(0.0, float(audio_seconds or 0.0))
-    if seconds <= 0:
+    usd_micros = _calculate_transcription_usd_micros(audio_seconds)
+    if usd_micros <= 0:
         return 1
-    usd_micros = math.ceil(seconds * hourly_rate / 3600)
     return max(1, credit_units_from_usd_micros(usd_micros))
 
 
@@ -203,6 +201,14 @@ def credit_units_from_usd_micros(usd_micros: int) -> int:
     if micros == 0:
         return 0
     return (micros + CREDIT_UNIT_USD_MICROS - 1) // CREDIT_UNIT_USD_MICROS
+
+
+def _calculate_transcription_usd_micros(audio_seconds: float) -> int:
+    hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3"]["audio_per_hour"]
+    seconds = max(0.0, float(audio_seconds or 0.0))
+    if seconds <= 0:
+        return 0
+    return math.ceil(seconds * hourly_rate / 3600)
 
 
 def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
@@ -281,8 +287,7 @@ def calculate_billing_for_segments(
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
 
         if kind == "transcribe":
-            hourly_rate = MODEL_PRICING_USD_MICROS["whisper-large-v3"]["audio_per_hour"]
-            usd_micros = int(audio_seconds * hourly_rate / 3600)
+            usd_micros = _calculate_transcription_usd_micros(audio_seconds)
             total_usd_micros += usd_micros
             model_breakdown.append(
                 {
@@ -312,14 +317,13 @@ def calculate_billing_for_segments(
                 }
             )
 
+    charged_credit_units = credit_units_from_usd_micros(int(total_usd_micros))
     return {
         "pricing_version": PRICING_VERSION,
         "markup_multiplier": BILLING_MARKUP_MULTIPLIER,
         "raw_usd_micros": int(total_usd_micros),
-        "charged_credit_units": credit_units_from_usd_micros(int(total_usd_micros)),
-        "charged_credits_display": format_credit_units(
-            credit_units_from_usd_micros(int(total_usd_micros))
-        ),
+        "charged_credit_units": charged_credit_units,
+        "charged_credits_display": format_credit_units(charged_credit_units),
         "model_breakdown": model_breakdown,
         "tool_breakdown": tool_breakdown,
         "unsupported_notes": unsupported_notes,

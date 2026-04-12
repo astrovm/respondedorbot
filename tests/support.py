@@ -60,8 +60,7 @@ get_rulo = index.get_rulo
 get_oil_price = index.get_oil_price
 
 
-def parse_command(message_text: str, bot_name: str):
-    return _parse_command(message_text, bot_name)
+parse_command = _parse_command
 
 
 def format_user_message(
@@ -102,8 +101,7 @@ def should_auto_process_media(commands, command, message_text, message):
     return _should_auto_process_media(commands, command, message_text, message)
 
 
-def truncate_text(text: Optional[str], max_length: int = 512) -> str:
-    return _truncate_text(text, max_length)
+truncate_text = _truncate_text
 
 
 def get_chat_config(redis_client: redis.Redis, chat_id: str):

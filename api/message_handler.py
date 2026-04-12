@@ -121,6 +121,10 @@ def _billing_unavailable_command_response(
     return _BILLING_UNAVAILABLE_MESSAGE, None, False, command
 
 
+def _get_admin_chat_id() -> str:
+    return str(environ.get("ADMIN_CHAT_ID") or "").strip()
+
+
 def _require_billing_for_command(
     deps: MessageHandlerDeps,
     *,
@@ -749,7 +753,7 @@ def _handle_admin_printcredits_command(
     if command != "/printcredits":
         return None, None, False, None
 
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 
@@ -990,7 +994,7 @@ def _handle_admin_creditlog_command(
     if command != "/creditlog":
         return None, None, False, None
 
-    admin_chat_id = str(environ.get("ADMIN_CHAT_ID") or "").strip()
+    admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
         return "este comando es solo para el admin", None, False, command
 

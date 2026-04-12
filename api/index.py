@@ -6218,12 +6218,8 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
     )
 
 
-def remove_gordo_prefix(text: Optional[str]) -> str:
-    return _ai_remove_gordo_prefix(text)
-
-
-def clean_duplicate_response(response: str) -> str:
-    return _ai_clean_duplicate_response(response)
+remove_gordo_prefix = _ai_remove_gordo_prefix
+clean_duplicate_response = _ai_clean_duplicate_response
 
 
 def handle_ai_response(
