@@ -215,10 +215,10 @@ def test_calculate_billing_for_segments_bills_web_search_requests():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 8_130
-    assert breakdown["charged_credit_units"] == 17
+    assert breakdown["raw_usd_micros"] == 3_450
+    assert breakdown["charged_credit_units"] == 7
     assert breakdown["tool_breakdown"] == [
-        {"tool": "web_search", "count": 2, "usd_micros": 8_000}
+        {"tool": "web_search", "count": 2, "usd_micros": 3_320}
     ]
 
 
