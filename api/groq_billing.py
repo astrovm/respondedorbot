@@ -57,6 +57,14 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "cached_input_per_million": 75_000,
         "output_per_million": 600_000,
     },
+    "z-ai/glm-5.1": {
+        "input_per_million": 950_000,
+        "output_per_million": 3_150_000,
+    },
+    "qwen/qwen3.6-plus": {
+        "input_per_million": 325_000,
+        "output_per_million": 1_950_000,
+    },
 }
 
 
@@ -64,6 +72,7 @@ MODEL_BILLING_ALIASES = {
     "groq/moonshotai/kimi-k2-instruct-0905": "moonshotai/kimi-k2-instruct-0905",
     "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
     "groq/whisper-large-v3": "whisper-large-v3",
+    "qwen/qwen3.6-plus-04-02": "qwen/qwen3.6-plus",
 }
 
 
