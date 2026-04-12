@@ -223,12 +223,15 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
                 stream=True,
                 headers=request_headers,
             )
-            response.raise_for_status()
         except RequestException:
             return {"url": current_url, "error": "no se pudo obtener la url"}
 
         redirected_url = _extract_redirect_url(current_url, response)
         if not redirected_url:
+            try:
+                response.raise_for_status()
+            except RequestException:
+                return {"url": current_url, "error": "no se pudo obtener la url"}
             break
         try:
             response.close()

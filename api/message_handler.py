@@ -528,6 +528,7 @@ def _run_ai_flow(
     user_identity: str,
     handler_func: Callable[..., str],
     redis_client: Any,
+    reserve_mode: str = "chat",
 ) -> Tuple[str, bool]:
     billing_unavailable = _degrade_when_billing_unavailable(
         deps,
@@ -552,7 +553,7 @@ def _run_ai_flow(
             if prepared_message.resized_image_data and prepared_message.photo_file_id
             else 0
         ),
-        reserve_mode="search",
+        reserve_mode=reserve_mode,
     )
     rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
     if not deps.check_global_rate_limit(
@@ -1321,6 +1322,9 @@ def _handle_known_command(
                 user_identity=user_identity,
                 handler_func=handler_func,
                 redis_client=redis_client,
+                reserve_mode="search"
+                if getattr(handler_func, "__name__", "") == "search_command"
+                else "chat",
             )
             return response_msg, response_markup, response_uses_ai, response_command
 

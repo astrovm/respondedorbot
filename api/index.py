@@ -196,7 +196,7 @@ GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 OPENROUTER_WEB_SEARCH_MAX_RESULTS = 10
 OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
-OPENROUTER_MODEL_MAP = {
+OPENROUTER_VISION_MODEL_MAP = {
     GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
 }
 
@@ -568,8 +568,8 @@ def _get_configured_groq_accounts() -> List[str]:
     return [account for account in GROQ_ACCOUNT_ORDER if _get_groq_api_key(account)]
 
 
-def _get_openrouter_model_for_groq_model(model: str) -> Optional[str]:
-    return OPENROUTER_MODEL_MAP.get(model)
+def _get_openrouter_vision_model(model: str) -> Optional[str]:
+    return OPENROUTER_VISION_MODEL_MAP.get(model)
 
 
 def _get_openrouter_api_key() -> Optional[str]:
@@ -3330,7 +3330,9 @@ def ask_ai(
             else:
                 print("Failed to describe image, continuing without description...")
 
-        fetched_contents = _fetch_urls_from_latest_message(messages)
+        fetched_contents = (
+            _fetch_urls_from_latest_message(messages) if enable_web_search else ""
+        )
         if fetched_contents:
             messages = list(messages) + [
                 {"role": "system", "content": fetched_contents}
@@ -4147,7 +4149,8 @@ def _get_openrouter_ai_response_result(
         return None
 
     if response and hasattr(response, "choices") and response.choices:
-        if response.choices[0].finish_reason == "stop":
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason == "stop":
             usage = _extract_groq_usage_map(response) or {}
             server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
             metadata: Dict[str, Any] = {"provider": "openrouter"}
@@ -4164,6 +4167,9 @@ def _get_openrouter_ai_response_result(
                 response=response,
                 metadata=metadata,
             )
+        print(
+            f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
+        )
     return None
 
 
@@ -5268,7 +5274,7 @@ def _describe_image_openrouter_result(
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
 ) -> Optional[GroqUsageResult]:
-    model = _get_openrouter_model_for_groq_model(GROQ_VISION_MODEL)
+    model = _get_openrouter_vision_model(GROQ_VISION_MODEL)
     if not model:
         return None
 

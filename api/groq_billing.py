@@ -305,7 +305,10 @@ def calculate_billing_for_segments(
         model_breakdown.append(model_cost)
 
         metadata = ensure_mapping(segment.get("metadata")) or {}
-        web_search_requests = int(metadata.get("web_search_requests") or 0)
+        try:
+            web_search_requests = int(metadata.get("web_search_requests") or 0)
+        except (TypeError, ValueError):
+            web_search_requests = 0
         if web_search_requests > 0:
             search_usd_micros = web_search_requests * WEB_SEARCH_USD_MICROS_PER_REQUEST
             total_usd_micros += search_usd_micros

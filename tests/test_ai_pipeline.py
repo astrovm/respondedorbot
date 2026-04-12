@@ -10,16 +10,14 @@ def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch
     assert _get_groq_accounts_for_scope() == ["free", "paid"]
 
 
-def test_get_openrouter_model_for_groq_model_maps_supported_models():
-    from api.index import _get_openrouter_model_for_groq_model
+def test_get_openrouter_vision_model_maps_supported_models():
+    from api.index import _get_openrouter_vision_model
 
     assert (
-        _get_openrouter_model_for_groq_model(
-            "groq/meta-llama/llama-4-scout-17b-16e-instruct"
-        )
+        _get_openrouter_vision_model("groq/meta-llama/llama-4-scout-17b-16e-instruct")
         == "meta-llama/llama-4-scout"
     )
-    assert _get_openrouter_model_for_groq_model("groq/whisper-large-v3") is None
+    assert _get_openrouter_vision_model("groq/whisper-large-v3") is None
 
 
 def test_openrouter_config_helpers(monkeypatch):

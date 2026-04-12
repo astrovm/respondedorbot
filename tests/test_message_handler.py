@@ -1541,7 +1541,7 @@ def test_handle_msg_search_command_uses_ai_billing():
     assert mock_send_msg.call_args[0][1] == "resultado web"
 
 
-def test_handle_msg_search_command_uses_agent_reserve_mode():
+def test_handle_msg_search_command_uses_search_reserve_mode():
     from api.index import handle_msg
 
     with (
@@ -1557,7 +1557,7 @@ def test_handle_msg_search_command_uses_agent_reserve_mode():
         ),
         patch(
             "api.index.estimate_ai_base_reserve_credits",
-            return_value=(10, {"reserve_mode": "agent", "rate_limit_scope": "chat"}),
+            return_value=(10, {"rate_limit_scope": "chat"}),
         ) as mock_estimate,
         patch("api.index.handle_ai_response", return_value="resultado web"),
         patch(
@@ -1584,7 +1584,7 @@ def test_handle_msg_search_command_uses_agent_reserve_mode():
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_ask_command_uses_agent_reserve_mode():
+def test_handle_msg_ask_command_uses_chat_reserve_mode():
     from api.index import handle_msg
 
     with (
@@ -1600,7 +1600,7 @@ def test_handle_msg_ask_command_uses_agent_reserve_mode():
         ),
         patch(
             "api.index.estimate_ai_base_reserve_credits",
-            return_value=(10, {"reserve_mode": "agent", "rate_limit_scope": "chat"}),
+            return_value=(10, {"rate_limit_scope": "chat"}),
         ) as mock_estimate,
         patch("api.index.handle_ai_response", return_value="respuesta ok"),
         patch(
@@ -1623,7 +1623,7 @@ def test_handle_msg_ask_command_uses_agent_reserve_mode():
         )
 
     assert result == "ok"
-    assert mock_estimate.call_args.kwargs["reserve_mode"] == "search"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "chat"
     mock_send_msg.assert_called_once()
 
 
