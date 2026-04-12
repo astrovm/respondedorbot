@@ -4137,7 +4137,7 @@ def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any],
     messages: List[Dict[str, Any]],
     *,
-    enable_web_search: bool = False,
+    enable_web_search: bool = True,
 ) -> Optional[GroqUsageResult]:
     client = _get_openrouter_client()
     if client is None:

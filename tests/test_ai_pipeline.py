@@ -170,7 +170,7 @@ def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
     ]
 
 
-def test_get_openrouter_ai_response_result_skips_web_search_by_default():
+def test_get_openrouter_ai_response_result_includes_web_search_by_default():
     from api.index import _get_openrouter_ai_response_result
 
     response = MagicMock()
@@ -191,7 +191,7 @@ def test_get_openrouter_ai_response_result_skips_web_search_by_default():
         )
 
     assert result is not None
-    assert "tools" not in client.chat.completions.create.call_args.kwargs
+    assert "tools" in client.chat.completions.create.call_args.kwargs
 
 
 def test_check_global_rate_limit_uses_scope_specific_accounts(monkeypatch):

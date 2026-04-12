@@ -240,6 +240,9 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
     else:
         return {"url": current_url, "error": "no se pudo obtener la url"}
 
+    if response is None or getattr(response, "status_code", 0) >= 300:
+        return {"url": current_url, "error": "no se pudo obtener la url"}
+
     final_url = current_url
     content_type = ""
     status_code = getattr(response, "status_code", None)
