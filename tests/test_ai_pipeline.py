@@ -834,20 +834,6 @@ def test_build_message_links_context_includes_url_when_metadata_fails():
     assert "descripcion:" not in context
 
 
-def test_handle_ai_response_sanitizes_tool_lines(monkeypatch):
-    """handle_ai_response should strip visible tool call lines"""
-    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
-    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
-
-    def fake_handler(_messages):
-        return 'Hola\n[TOOL] web_search {"query": "test"}\nChau'
-
-    result = handle_ai_response("123", fake_handler, [])
-
-    assert "[TOOL]" not in result
-    assert result == "Hola\nChau"
-
-
 def test_handle_ai_response_strips_internal_ai_fallback_marker(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
@@ -864,12 +850,12 @@ def test_handle_ai_response_strips_internal_ai_fallback_marker(monkeypatch):
 
 
 def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
-    """Empty sanitized responses should return a fallback message"""
+    """Empty responses should return a fallback message"""
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handler(_messages):
-        return '[TOOL] web_search {"query": "test"}'
+        return ""
 
     with patch("builtins.print") as mock_print:
         result = handle_ai_response("123", fake_handler, [])
@@ -880,7 +866,7 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
         "cleaned response empty after normalization"
         in mock_print.call_args_list[0].args[0]
     )
-    assert "previews raw='[TOOL] web_search" in mock_print.call_args_list[1].args[0]
+    assert "previews raw=''" in mock_print.call_args_list[1].args[0]
 
 
 def test_handle_ai_response_strips_context_echo(monkeypatch):

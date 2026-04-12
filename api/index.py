@@ -3390,38 +3390,6 @@ def complete_with_providers(
     return None
 
 
-class _ToolLine(NamedTuple):
-    raw: str
-    stripped: str
-    normalized: str
-    in_fence: bool
-    is_fence: bool
-
-
-def _prepare_tool_lines(text: str) -> List[_ToolLine]:
-    in_fence = False
-    prepared: List[_ToolLine] = []
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        is_fence = stripped.startswith("```")
-        normalized = re.sub(r"^(?:[-*+]|\d+\.)\s*", "", stripped)
-        normalized = normalized.strip().strip("`")
-        if is_fence:
-            normalized = ""
-        prepared.append(
-            _ToolLine(
-                raw=raw,
-                stripped=stripped,
-                normalized=normalized,
-                in_fence=in_fence,
-                is_fence=is_fence,
-            )
-        )
-        if is_fence:
-            in_fence = not in_fence
-    return prepared
-
-
 def _normalize_http_url(raw_url: str) -> Optional[str]:
     """Normalize raw URL strings to HTTP/HTTPS form without fragments."""
 
@@ -3867,46 +3835,6 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
         if description:
             lines.append(f"descripcion: {description}")
     return "\n".join(lines)
-
-
-def sanitize_tool_artifacts(text: Optional[str]) -> str:
-    """Remove any visible [TOOL] lines or code blocks that contain them from model output."""
-    if not text:
-        return ""
-    prepared = _prepare_tool_lines(text)
-    out_lines: List[str] = []
-    block_lines: List[str] = []
-    block_has_tool = False
-    inside_block = False
-
-    for line in prepared:
-        if line.is_fence:
-            if not line.in_fence:
-                inside_block = True
-                block_lines = [line.raw]
-                block_has_tool = False
-            else:
-                block_lines.append(line.raw)
-                if not block_has_tool:
-                    out_lines.extend(block_lines)
-                block_lines = []
-                block_has_tool = False
-                inside_block = False
-            continue
-
-        if inside_block:
-            block_lines.append(line.raw)
-            if "[TOOL]" in line.raw:
-                block_has_tool = True
-            continue
-
-        if "[TOOL]" not in line.raw:
-            out_lines.append(line.raw)
-
-    if inside_block and block_lines and not block_has_tool:
-        out_lines.extend(block_lines)
-
-    return "\n".join(out_lines).strip()
 
 
 def search_command(
@@ -6346,7 +6274,6 @@ def handle_ai_response(
         reset_request_count_fn=_reset_ai_provider_request_count,
         restore_request_count_fn=_restore_ai_provider_request_count,
         get_request_count_fn=_get_ai_provider_request_count,
-        sanitize_tool_artifacts_fn=sanitize_tool_artifacts,
         strip_ai_fallback_marker_fn=_strip_ai_fallback_marker,
     )
 
