@@ -66,7 +66,10 @@ def test_run_agent_loop_executes_tool_then_returns_final_answer():
             },
         },
     ]
-    assert result["transcript"][-2:] == model_calls[1][-2:]
+    assert result["transcript"][-3:] == [
+        *model_calls[1][-2:],
+        {"role": "assistant", "content": "Hace calor."},
+    ]
 
 
 def test_run_agent_loop_stops_when_iteration_limit_is_hit():
@@ -102,4 +105,56 @@ def test_run_agent_loop_stops_when_iteration_limit_is_hit():
             "tool_calls": [{"name": "ping", "arguments": {}}],
         },
         {"role": "tool", "name": "ping", "content": {"ok": True}},
+    ]
+
+
+def test_run_agent_loop_allows_final_turn_after_last_permitted_tool_call():
+    from api.agent_loop import run_agent_loop
+
+    model_outputs = [
+        {
+            "type": "tool_calls",
+            "tool_calls": [{"name": "ping", "arguments": {}}],
+            "billing_segment": {"provider": "test", "input_tokens": 1},
+        },
+        {
+            "type": "final",
+            "text": "listo",
+            "billing_segment": {"provider": "test", "output_tokens": 2},
+        },
+    ]
+    model_calls = []
+
+    def model_call_fn(transcript):
+        model_calls.append(transcript)
+        return model_outputs[len(model_calls) - 1]
+
+    result = run_agent_loop(
+        system_message={"role": "system", "content": "sos util"},
+        conversation=[{"role": "user", "content": "resolve"}],
+        model_call_fn=model_call_fn,
+        tools={"ping": lambda _arguments: {"ok": True}},
+        max_iterations=2,
+        max_tool_calls=1,
+    )
+
+    assert result["text"] == "listo"
+    assert result["iterations"] == 2
+    assert result["tool_calls"] == 1
+    assert result["final_reason"] == "final"
+    assert result["billing_segments"] == [
+        {"provider": "test", "input_tokens": 1},
+        {"provider": "test", "output_tokens": 2},
+    ]
+    assert model_calls[1][-2:] == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"name": "ping", "arguments": {}}],
+        },
+        {"role": "tool", "name": "ping", "content": {"ok": True}},
+    ]
+    assert result["transcript"][-3:] == [
+        *model_calls[1][-2:],
+        {"role": "assistant", "content": "listo"},
     ]

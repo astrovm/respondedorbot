@@ -15,7 +15,7 @@ def run_agent_loop(
     iterations = 0
     total_tool_calls = 0
 
-    while iterations < max_iterations and total_tool_calls < max_tool_calls:
+    while iterations < max_iterations:
         iterations += 1
         result = dict(model_call_fn(list(transcript)))
         billing_segment = result.get("billing_segment")
@@ -23,6 +23,7 @@ def run_agent_loop(
             billing_segments.append(billing_segment)
 
         if result.get("type") == "final":
+            transcript.append({"role": "assistant", "content": result.get("text", "")})
             return {
                 "text": result.get("text", ""),
                 "iterations": iterations,
@@ -33,21 +34,21 @@ def run_agent_loop(
             }
 
         tool_calls = list(result.get("tool_calls", []))
+        if total_tool_calls + len(tool_calls) > max_tool_calls:
+            return {
+                "text": "",
+                "iterations": iterations,
+                "tool_calls": total_tool_calls,
+                "final_reason": "max_tool_calls",
+                "billing_segments": billing_segments,
+                "transcript": transcript,
+            }
+
         transcript.append(
             {"role": "assistant", "content": None, "tool_calls": tool_calls}
         )
 
         for tool_call in tool_calls:
-            if total_tool_calls >= max_tool_calls:
-                return {
-                    "text": "",
-                    "iterations": iterations,
-                    "tool_calls": total_tool_calls,
-                    "final_reason": "max_tool_calls",
-                    "billing_segments": billing_segments,
-                    "transcript": transcript,
-                }
-
             tool_name = tool_call["name"]
             tool_result = tools[tool_name](tool_call.get("arguments", {}))
             transcript.append(
