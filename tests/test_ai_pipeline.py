@@ -170,6 +170,40 @@ def test_get_openrouter_ai_response_result_server_tool_use_takes_priority():
     assert result.metadata["web_search_requests"] == 3
 
 
+def test_get_openrouter_ai_response_result_detects_pydantic_annotation():
+    from api.index import _get_openrouter_ai_response_result
+
+    ann = MagicMock()
+    ann.type = "url_citation"
+    ann.url_citation = MagicMock(url="https://example.com/1")
+
+    message = MagicMock(content="respuesta con busqueda")
+    message.annotations = [ann]
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            finish_reason="stop",
+            message=message,
+        )
+    ]
+    response.usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+
+    with patch("api.index._get_openrouter_client", return_value=client):
+        result = _get_openrouter_ai_response_result(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "btc news"}],
+            enable_web_search=True,
+        )
+
+    assert result is not None
+    assert result.metadata["web_search_requests"] == 1
+
+
 def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
     from api.index import _get_openrouter_ai_response_result
 

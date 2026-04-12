@@ -658,6 +658,7 @@ def _fetch_urls_from_latest_message(
     if not latest_text:
         return ""
 
+    max_fetches = MAX_LINKS_IN_MESSAGE
     urls: List[str] = []
     seen: Set[str] = set()
     for match in MESSAGE_URL_PATTERN.finditer(latest_text):
@@ -666,6 +667,8 @@ def _fetch_urls_from_latest_message(
             continue
         seen.add(normalized)
         urls.append(normalized)
+        if len(urls) >= max_fetches:
+            break
 
     if not urls:
         return ""
@@ -4164,8 +4167,11 @@ def _get_openrouter_ai_response_result(
             if "web_search_requests" not in metadata:
                 annotations = getattr(message, "annotations", None) or []
                 has_url_citation = any(
-                    isinstance(ann, Mapping)
-                    and str(ann.get("type") or "") == "url_citation"
+                    getattr(ann, "type", None) == "url_citation"
+                    or (
+                        isinstance(ann, Mapping)
+                        and str(ann.get("type") or "") == "url_citation"
+                    )
                     for ann in annotations
                 )
                 if has_url_citation:
