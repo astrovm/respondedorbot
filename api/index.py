@@ -3359,7 +3359,7 @@ def ask_ai(
             print(
                 f"ask_ai: response len={len(response)} preview='{response[:160].replace(chr(10), ' ')}'"
             )
-            return response or get_fallback_response(messages)
+            return response
 
         return _mark_ai_fallback_response(get_fallback_response(messages))
 
