@@ -1541,6 +1541,92 @@ def test_handle_msg_search_command_uses_ai_billing():
     assert mock_send_msg.call_args[0][1] == "resultado web"
 
 
+def test_handle_msg_search_command_uses_agent_reserve_mode():
+    from api.index import handle_msg
+
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "btc news"}],
+        ),
+        patch(
+            "api.index.estimate_ai_base_reserve_credits",
+            return_value=(10, {"reserve_mode": "agent", "rate_limit_scope": "chat"}),
+        ) as mock_estimate,
+        patch("api.index.handle_ai_response", return_value="resultado web"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        result = handle_msg(
+            {
+                "message_id": 99,
+                "chat": {"id": 555, "type": "private"},
+                "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+                "text": "/buscar btc news",
+            }
+        )
+
+    assert result == "ok"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "agent"
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_ask_command_uses_agent_reserve_mode():
+    from api.index import handle_msg
+
+    with (
+        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.credits_db_service.is_configured", return_value=True),
+        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index._maybe_grant_onboarding_credits"),
+        patch("api.index.get_chat_history", return_value=[]),
+        patch(
+            "api.index.build_ai_messages",
+            return_value=[{"role": "user", "content": "hola"}],
+        ),
+        patch(
+            "api.index.estimate_ai_base_reserve_credits",
+            return_value=(10, {"reserve_mode": "agent", "rate_limit_scope": "chat"}),
+        ) as mock_estimate,
+        patch("api.index.handle_ai_response", return_value="respuesta ok"),
+        patch(
+            "api.index.credits_db_service.charge_ai_credits",
+            return_value={"ok": True, "source": "user"},
+        ),
+    ):
+        redis_client = MagicMock()
+        redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+        redis_client.lrange.return_value = []
+        mock_config_redis.return_value = redis_client
+
+        result = handle_msg(
+            {
+                "message_id": 199,
+                "chat": {"id": 555, "type": "private"},
+                "from": {"id": 2001, "first_name": "Ana", "username": "ana"},
+                "text": "/ask hola",
+            }
+        )
+
+    assert result == "ok"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "agent"
+    mock_send_msg.assert_called_once()
+
+
 def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch):
     from api import config as config_module
     from api.index import handle_msg

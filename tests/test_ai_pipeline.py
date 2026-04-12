@@ -58,9 +58,9 @@ def test_openrouter_config_helpers(monkeypatch):
 def test_api_index_does_not_expose_unused_agent_limits():
     from api import index
 
-    assert not hasattr(index, "AGENT_MAX_ITERATIONS")
-    assert not hasattr(index, "AGENT_MAX_TOOL_CALLS")
-    assert not hasattr(index, "AGENT_MAX_WEB_SEARCHES")
+    assert index.AGENT_MAX_ITERATIONS == 4
+    assert index.AGENT_MAX_TOOL_CALLS == 5
+    assert index.AGENT_MAX_WEB_SEARCHES == 3
 
 
 def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
@@ -472,6 +472,78 @@ def test_estimate_ai_base_reserve_credits_includes_web_search_overhead(monkeypat
     assert metadata["reserve_reason"] == "web_search"
 
 
+def test_estimate_ai_base_reserve_credits_includes_agent_headroom(monkeypatch):
+    from api.index import estimate_ai_base_reserve_credits
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+
+    chat_reserve, _ = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "hola"}],
+        reserve_mode="chat",
+    )
+    agent_reserve, metadata = estimate_ai_base_reserve_credits(
+        [{"role": "user", "content": "resumime https://example.com/post"}],
+        reserve_mode="agent",
+    )
+
+    assert agent_reserve > chat_reserve
+    assert metadata["reserve_mode"] == "agent"
+    assert metadata["reserve_reason"] == "bounded_agent"
+
+
+def test_ask_ai_prefers_url_fetch_for_summary_requests(monkeypatch):
+    from api.index import ask_ai
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+
+    captured = {}
+
+    def fake_fetch(url):
+        captured["url"] = url
+        return {"url": url, "title": "Demo", "content": "contenido limpio"}
+
+    def fake_run_agent_loop(**kwargs):
+        transcript = kwargs["conversation"]
+        captured["conversation"] = transcript
+        return {
+            "text": "resumen listo",
+            "billing_segments": [],
+            "tool_calls": 1,
+            "iterations": 1,
+            "final_reason": "final",
+            "transcript": transcript,
+        }
+
+    monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
+    monkeypatch.setattr("api.index.run_agent_loop", fake_run_agent_loop)
+
+    result = ask_ai(
+        [{"role": "user", "content": "resumime https://example.com/post"}],
+        response_meta={},
+    )
+
+    assert result == "resumen listo"
+    assert captured["url"] == "https://example.com/post"
+    assert any(
+        item.get("role") == "tool" and item.get("name") == "fetch_url_content"
+        for item in captured["conversation"]
+    )
+
+
 def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
@@ -578,7 +650,10 @@ def test_ask_ai_does_not_force_search_for_news_queries():
             "api.index.build_system_message",
             return_value={"role": "system", "content": "sys"},
         ),
-        patch("api.index.complete_with_providers", return_value="ok") as mock_complete,
+        patch(
+            "api.index._run_ai_agent",
+            return_value={"text": "ok", "billing_segments": []},
+        ) as mock_agent,
         patch("api.index.environ.get") as mock_env,
     ):
         mock_env.side_effect = lambda key, default=None: {
@@ -588,7 +663,7 @@ def test_ask_ai_does_not_force_search_for_news_queries():
         result = ask_ai([{"role": "user", "content": message_block}])
 
     assert result == "ok"
-    mock_complete.assert_called_once()
+    mock_agent.assert_called_once()
 
 
 def test_search_command_success():
