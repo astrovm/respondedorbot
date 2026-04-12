@@ -905,62 +905,45 @@ def test_handle_ai_response_strips_user_identity_prefix(monkeypatch):
 # Tests for complete_with_providers function
 
 
-def test_complete_with_providers_groq_success():
-    """Test complete_with_providers when Groq succeeds"""
+def test_complete_with_providers_openrouter_success():
+    """Test complete_with_providers when OpenRouter succeeds."""
+    from api.groq_billing import GroqUsageResult
+
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_groq_ai_response") as mock_groq:
-        mock_groq.return_value = "Groq response"
+    openrouter_result = GroqUsageResult(
+        kind="chat",
+        text="OpenRouter response",
+        model="qwen/qwen3.6-plus",
+        usage={"input_tokens": 100, "output_tokens": 50},
+        metadata={"provider": "openrouter"},
+    )
+
+    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
+        mock_openrouter.return_value = openrouter_result
 
         result = complete_with_providers(system_message, messages)
 
-        assert result == "Groq response"
-        mock_groq.assert_called_once()
+        assert result == "OpenRouter response"
+        mock_openrouter.assert_called_once()
 
 
-def test_complete_with_providers_returns_none_when_groq_fails():
-    """Test complete_with_providers returns None when Groq fails"""
+def test_complete_with_providers_returns_none_when_openrouter_fails():
+    """Test complete_with_providers returns None when OpenRouter fails."""
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with (
-        patch("api.index.get_groq_ai_response") as mock_groq,
-        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
-    ):
-        mock_groq.return_value = None
+    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
         mock_openrouter.return_value = None
 
         result = complete_with_providers(system_message, messages)
 
         assert result is None
-        assert mock_groq.call_count == 1
-        assert mock_openrouter.call_count == 0
+        mock_openrouter.assert_called_once()
 
 
-def test_complete_with_providers_does_not_call_openrouter_after_groq_chain(monkeypatch):
-    system_message = {"role": "system", "content": "test"}
-    messages = [{"role": "user", "content": "hello"}]
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
-
-    with (
-        patch("api.index.get_groq_ai_response") as mock_groq,
-        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
-    ):
-        mock_groq.return_value = "OpenRouter response"
-
-        result = complete_with_providers(system_message, messages)
-
-        assert result == "OpenRouter response"
-        assert mock_groq.call_count == 1
-        assert mock_openrouter.call_count == 0
-
-
-def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypatch):
+def test_complete_with_providers_records_openrouter_billing_on_success(monkeypatch):
     from api.groq_billing import GroqUsageResult
 
     system_message = {"role": "system", "content": "test"}
@@ -980,11 +963,7 @@ def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypa
         metadata={"provider": "openrouter"},
     )
 
-    with (
-        patch("api.index.get_groq_ai_response") as mock_groq,
-        patch("api.index._get_openrouter_ai_response_result") as mock_openrouter,
-    ):
-        mock_groq.return_value = None
+    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
         mock_openrouter.return_value = openrouter_result
 
         result = complete_with_providers(
@@ -995,44 +974,10 @@ def test_complete_with_providers_records_openrouter_billing_on_fallback(monkeypa
     assert response_meta["billing_segments"] == [openrouter_result.billing_segment()]
 
 
-def test_get_groq_ai_response_skips_call_during_backoff(monkeypatch):
-    """When Groq backoff is active we should skip provider API calls entirely."""
-
-    from api import index as index_module
-
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
-    index_module._provider_backoff_until[
-        index_module._get_groq_backoff_key(index_module.GROQ_FREE_ACCOUNT, "chat")
-    ] = time.time() + 30
-
-    with patch("api.index.OpenAI") as mock_openai:
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-    assert result is None
-    mock_openai.assert_not_called()
-
-
-def test_get_groq_ai_response_skips_call_when_local_rate_limit_hits(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "test_key")
-
-    with (
-        patch("api.index._reserve_groq_rate_limit", return_value=None),
-        patch("api.index.OpenAI") as mock_openai,
-    ):
-        result = get_groq_ai_response(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
-
-    assert result is None
-    mock_openai.assert_not_called()
-
-
-def test_get_groq_ai_response_returns_none_when_primary_model_fails(monkeypatch):
-    from api.index import PRIMARY_CHAT_MODEL, get_groq_ai_response
+def test_get_openrouter_ai_response_result_returns_none_when_primary_model_fails(
+    monkeypatch,
+):
+    from api.index import PRIMARY_CHAT_MODEL, _get_openrouter_ai_response_result
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
@@ -1048,7 +993,7 @@ def test_get_groq_ai_response_returns_none_when_primary_model_fails(monkeypatch)
     client.chat.completions.create.side_effect = create_side_effect
 
     with patch("api.index.OpenAI", return_value=client):
-        result = get_groq_ai_response(
+        result = _get_openrouter_ai_response_result(
             {"role": "system", "content": "system"},
             [{"role": "user", "content": "hola"}],
         )

@@ -3371,20 +3371,14 @@ def complete_with_providers(
 ) -> Optional[str]:
     """Try OpenRouter chat models and return the first response."""
 
-    if response_meta is None:
-        return get_groq_ai_response(
-            system_message,
-            messages,
-            enable_web_search=enable_web_search,
-        )
-
     result = _get_openrouter_ai_response_result(
         system_message,
         messages,
         enable_web_search=enable_web_search,
     )
     if result:
-        _append_billing_segment(response_meta, result)
+        if response_meta is not None:
+            _append_billing_segment(response_meta, result)
         print("complete_with_providers: got response from OpenRouter")
         return result.text
     return None
@@ -4299,22 +4293,6 @@ def _get_openrouter_ai_response_result(
                 response=response,
                 metadata=metadata,
             )
-    return None
-
-
-def get_groq_ai_response(
-    system_msg: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    *,
-    enable_web_search: bool = False,
-) -> Optional[str]:
-    result = _get_openrouter_ai_response_result(
-        system_msg,
-        messages,
-        enable_web_search=enable_web_search,
-    )
-    if result:
-        return result.text
     return None
 
 

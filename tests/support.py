@@ -49,7 +49,6 @@ fetch_link_metadata = index.fetch_link_metadata
 build_message_links_context = index.build_message_links_context
 search_command = index.search_command
 complete_with_providers = index.complete_with_providers
-get_groq_ai_response = index.get_groq_ai_response
 get_provider_backoff_remaining = index.get_provider_backoff_remaining
 handle_ai_response = index.handle_ai_response
 handle_msg = index.handle_msg
