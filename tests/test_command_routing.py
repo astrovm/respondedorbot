@@ -43,18 +43,6 @@ def test_convert_to_command():
     assert convert_to_command(msg_text8) == expected8
 
 
-def test_should_use_groq_compound_tools_truthy(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    assert should_use_groq_compound_tools() is True
-
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_test_key")
-    assert should_use_groq_compound_tools() is True
-
-    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
-    assert should_use_groq_compound_tools() is False
-
-
 def test_optional_redis_client_success():
     from api.index import _optional_redis_client
 
@@ -591,11 +579,6 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 500_000,
         "tpm": 250_000,
     }
-    assert index.GROQ_PAID_RATE_LIMITS["compound"] == {
-        "rpm": 200,
-        "rpd": 20_000,
-        "tpm": 200_000,
-    }
     assert index.GROQ_PAID_RATE_LIMITS["vision"] == {
         "rpm": 1000,
         "rpd": 500_000,
@@ -612,11 +595,6 @@ def test_groq_rate_limits_match_developer_plan_constants():
         "rpd": 1_000,
         "tpm": 10_000,
         "tpd": 300_000,
-    }
-    assert index.GROQ_FREE_RATE_LIMITS["compound"] == {
-        "rpm": 30,
-        "rpd": 250,
-        "tpm": 70_000,
     }
     assert index.GROQ_FREE_RATE_LIMITS["vision"] == {
         "rpm": 30,

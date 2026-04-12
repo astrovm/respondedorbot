@@ -56,7 +56,7 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/buscar", "/search"), "search_command", True, True),
     (("/instance",), "get_instance_name", False, False),
     (("/help",), "get_help", False, False),
-    (("/transcribe",), "handle_transcribe", False, False),
+    (("/transcribe", "/describe"), "handle_transcribe", False, False),
     (("/bcra", "/variables"), "handle_bcra_variables", False, False),
     (("/topup",), "topup_command", False, False),
     (("/balance",), "balance_command", False, False),
