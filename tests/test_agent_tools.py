@@ -63,7 +63,7 @@ def test_fetch_url_content_extracts_main_text_from_html():
         "status": 200,
         "content_type": "text/html; charset=utf-8",
         "title": "Example Title",
-        "content": "Example Title\nHola\nEste es el contenido principal.",
+        "content": "Hola\nEste es el contenido principal.",
         "truncated": False,
     }
 
@@ -154,4 +154,4 @@ def test_fetch_url_content_truncates_large_pages():
     assert result["title"] == "Largo"
     assert result["truncated"] is True
     assert len(result["content"]) <= 12003
-    assert result["content"].startswith("Largo\npalabra palabra palabra")
+    assert result["content"].startswith("palabra palabra palabra")

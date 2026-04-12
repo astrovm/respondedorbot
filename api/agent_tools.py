@@ -159,7 +159,7 @@ class HtmlTextExtractor(HTMLParser):
         text = unescape(data)
         if self._in_title:
             self._title_parts.append(text)
-            # Title text is intentionally also buffered so get_text() includes it.
+            return
         cleaned = text.strip()
         if not cleaned:
             return

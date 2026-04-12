@@ -634,42 +634,29 @@ def _build_openrouter_web_search_tool() -> Dict[str, Any]:
     }
 
 
-def _extract_latest_user_message_text(messages: Sequence[Mapping[str, Any]]) -> str:
+def _fetch_urls_from_latest_message(
+    messages: Sequence[Mapping[str, Any]],
+) -> str:
+    latest_text = ""
     for message in reversed(messages):
         if str(message.get("role") or "") != "user":
             continue
         content = message.get("content")
         if isinstance(content, str):
-            return content
-        if isinstance(content, list):
+            latest_text = content
+        elif isinstance(content, list):
             parts = []
             for block in content:
                 if isinstance(block, Mapping) and block.get("type") == "text":
                     parts.append(str(block.get("text") or ""))
                 elif isinstance(block, str):
                     parts.append(block)
-            text = " ".join(parts).strip()
-            if text:
-                return text
-    return ""
+            latest_text = " ".join(parts).strip()
+        break
 
-
-def _should_prioritize_url_fetch(text: str) -> bool:
-    lowered = str(text or "").lower()
-    if not lowered or not MESSAGE_URL_PATTERN.search(lowered):
-        return False
-    return any(
-        token in lowered
-        for token in ("resum", "explic", "analiz", "traduc", "lee", "leelo")
-    )
-
-
-def _extract_latest_urls_from_messages(
-    messages: Sequence[Mapping[str, Any]],
-) -> List[str]:
-    latest_text = _extract_latest_user_message_text(messages)
     if not latest_text:
-        return []
+        return ""
+
     urls: List[str] = []
     seen: Set[str] = set()
     for match in MESSAGE_URL_PATTERN.finditer(latest_text):
@@ -678,25 +665,29 @@ def _extract_latest_urls_from_messages(
             continue
         seen.add(normalized)
         urls.append(normalized)
-    return urls
 
+    if not urls:
+        return ""
 
-def _build_tool_result_content(tool_name: str, result: Any) -> str:
-    if tool_name == "fetch_url_content" and isinstance(result, Mapping):
+    parts = []
+    for url in urls:
+        result = fetch_url_content(url)
         error = str(result.get("error") or "").strip()
         if error:
-            return f"error: {error}"
+            parts.append(f"URL: {url}\nerror: {error}")
+            continue
         title = str(result.get("title") or "").strip()
         content = str(result.get("content") or "").strip()
-        parts = []
+        lines = [f"URL: {url}"]
         if title:
-            parts.append(f"titulo: {title}")
+            lines.append(f"titulo: {title}")
         if content:
-            parts.append(f"contenido: {content}")
-        if not parts:
-            parts.append("sin contenido")
-        return "\n".join(parts)
-    return json.dumps(result, ensure_ascii=False, default=str)
+            lines.append(f"contenido: {content}")
+        parts.append("\n".join(lines))
+
+    if not parts:
+        return ""
+    return "CONTENIDO DE URLs OBTENIDO:\n\n" + "\n\n---\n\n".join(parts)
 
 
 def _get_groq_accounts_for_scope() -> List[str]:
@@ -3334,18 +3325,10 @@ def ask_ai(
             else:
                 print("Failed to describe image, continuing without description...")
 
-        latest_text = _extract_latest_user_message_text(messages)
-        latest_urls = _extract_latest_urls_from_messages(messages)
-        if latest_urls and _should_prioritize_url_fetch(latest_text):
-            fetched = fetch_url_content(latest_urls[0])
+        fetched_contents = _fetch_urls_from_latest_message(messages)
+        if fetched_contents:
             messages = list(messages) + [
-                {
-                    "role": "user",
-                    "content": (
-                        "CONTENIDO DE URL OBTENIDO:\n"
-                        f"{_build_tool_result_content('fetch_url_content', fetched)}"
-                    ),
-                }
+                {"role": "system", "content": fetched_contents}
             ]
 
         response = complete_with_providers(

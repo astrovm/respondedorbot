@@ -498,7 +498,7 @@ def test_estimate_ai_base_reserve_credits_includes_agent_headroom(monkeypatch):
     assert metadata["reserve_reason"] == "bounded_agent"
 
 
-def test_ask_ai_prefers_url_fetch_for_summary_requests(monkeypatch):
+def test_ask_ai_fetches_url_unconditionally(monkeypatch):
     from api.index import ask_ai
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
@@ -518,20 +518,95 @@ def test_ask_ai_prefers_url_fetch_for_summary_requests(monkeypatch):
 
     def fake_complete(system_message, messages, **kwargs):
         captured["messages"] = messages
-        return "resumen listo"
+        return "respuesta"
 
     monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
     monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
 
     result = ask_ai(
-        [{"role": "user", "content": "resumime https://example.com/post"}],
+        [{"role": "user", "content": "mira esto https://example.com/post"}],
         response_meta={},
     )
 
-    assert result == "resumen listo"
+    assert result == "respuesta"
     assert captured["url"] == "https://example.com/post"
-    assert captured["messages"][-1]["role"] == "user"
-    assert "contenido limpio" in captured["messages"][-1]["content"]
+    last = captured["messages"][-1]
+    assert last["role"] == "system"
+    assert "contenido limpio" in last["content"]
+
+
+def test_ask_ai_fetches_multiple_urls(monkeypatch):
+    from api.index import ask_ai
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+
+    fetched_urls = []
+
+    def fake_fetch(url):
+        fetched_urls.append(url)
+        return {"url": url, "title": f"Title {url}", "content": f"content of {url}"}
+
+    captured = {}
+
+    def fake_complete(system_message, messages, **kwargs):
+        captured["messages"] = messages
+        return "ok"
+
+    monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
+    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+
+    ask_ai(
+        [{"role": "user", "content": "https://example.com/a y https://example.com/b"}],
+        response_meta={},
+    )
+
+    assert fetched_urls == ["https://example.com/a", "https://example.com/b"]
+    last = captured["messages"][-1]
+    assert last["role"] == "system"
+    assert "content of https://example.com/a" in last["content"]
+    assert "content of https://example.com/b" in last["content"]
+
+
+def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
+    from api.index import ask_ai
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data: {"role": "system", "content": "sys"},
+    )
+    monkeypatch.setattr(
+        "api.index.fetch_url_content",
+        lambda url: {"url": url, "error": "url no permitida"},
+    )
+
+    captured = {}
+
+    def fake_complete(system_message, messages, **kwargs):
+        captured["messages"] = messages
+        return "ok"
+
+    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+
+    ask_ai(
+        [{"role": "user", "content": "mira https://example.com/post"}],
+        response_meta={},
+    )
+
+    # Error result is still injected as context (with the error message)
+    last = captured["messages"][-1]
+    assert last["role"] == "system"
+    assert "url no permitida" in last["content"]
 
 
 def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
@@ -563,7 +638,7 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
     monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
 
     result = ask_ai(
-        [{"role": "user", "content": "resumime https://example.com/post"}],
+        [{"role": "user", "content": "https://example.com/post"}],
         response_meta={},
     )
 
