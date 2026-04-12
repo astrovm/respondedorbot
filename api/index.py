@@ -4266,41 +4266,39 @@ def _get_openrouter_ai_response_result(
     if client is None:
         return None
 
-    for model in (PRIMARY_CHAT_MODEL,):
-        print(f"Trying OpenRouter chat with model={model}...")
-        _increment_ai_provider_request_count()
-        try:
-            request_kwargs: Dict[str, Any] = {
-                "model": model,
-                "messages": cast(Any, [system_msg] + messages),
-                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-            }
-            if enable_web_search:
-                request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
-            response = client.chat.completions.create(
-                **request_kwargs,
+    print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
+    _increment_ai_provider_request_count()
+    try:
+        request_kwargs: Dict[str, Any] = {
+            "model": PRIMARY_CHAT_MODEL,
+            "messages": cast(Any, [system_msg] + messages),
+            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+        }
+        if enable_web_search:
+            request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
+        response = client.chat.completions.create(**request_kwargs)
+    except Exception as e:
+        print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
+        return None
+
+    if response and hasattr(response, "choices") and response.choices:
+        if response.choices[0].finish_reason == "stop":
+            usage = _extract_groq_usage_map(response) or {}
+            server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
+            metadata: Dict[str, Any] = {"provider": "openrouter"}
+            web_search_requests = server_tool_use.get("web_search_requests")
+            if web_search_requests is not None:
+                try:
+                    metadata["web_search_requests"] = int(web_search_requests)
+                except (TypeError, ValueError):
+                    pass
+            return _build_groq_usage_result(
+                kind="chat",
+                text=str(response.choices[0].message.content or ""),
+                model=PRIMARY_CHAT_MODEL,
+                response=response,
+                metadata=metadata,
             )
-        except Exception as e:
-            print(f"OpenRouter chat error model={model}: {e}")
-            continue
-        if response and hasattr(response, "choices") and response.choices:
-            if response.choices[0].finish_reason == "stop":
-                usage = _extract_groq_usage_map(response) or {}
-                server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
-                metadata: Dict[str, Any] = {"provider": "openrouter"}
-                web_search_requests = server_tool_use.get("web_search_requests")
-                if web_search_requests is not None:
-                    try:
-                        metadata["web_search_requests"] = int(web_search_requests)
-                    except (TypeError, ValueError):
-                        pass
-                return _build_groq_usage_result(
-                    kind="chat",
-                    text=str(response.choices[0].message.content or ""),
-                    model=model,
-                    response=response,
-                    metadata=metadata,
-                )
     return None
 
 
@@ -4323,7 +4321,7 @@ def get_groq_ai_response(
 def get_fallback_response(messages: List[Dict]) -> str:
     """Generate fallback random response"""
     display_name = ""
-    if messages and len(messages) > 0:
+    if messages:
         last_message = messages[-1]["content"]
         if "Usuario: " in last_message:
             display_name = last_message.split("Usuario: ")[1].split(" ")[0]
