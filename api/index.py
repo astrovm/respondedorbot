@@ -96,7 +96,6 @@ from api.groq_billing import (
     estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
-    ensure_mapping_list,
     WEB_SEARCH_USD_MICROS_PER_REQUEST,
 )
 from api.agent_tools import fetch_url_content

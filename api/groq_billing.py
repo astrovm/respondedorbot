@@ -102,31 +102,6 @@ def ensure_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def ensure_mapping_list(value: Any) -> List[Dict[str, Any]]:
-    """Normalize list-like SDK fragments into a list of plain dicts."""
-
-    if value is None:
-        return []
-    if isinstance(value, Mapping):
-        normalized_items: List[Dict[str, Any]] = []
-        for key, item in value.items():
-            item_map = ensure_mapping(item)
-            if item_map is None:
-                item_map = {"value": item}
-            item_map.setdefault("model", key)
-            normalized_items.append(item_map)
-        return normalized_items
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        normalized_items = []
-        for item in value:
-            item_map = ensure_mapping(item)
-            if item_map is not None:
-                normalized_items.append(item_map)
-        return normalized_items
-    item_map = ensure_mapping(value)
-    return [item_map] if item_map is not None else []
-
-
 def estimate_text_tokens(text: Optional[str]) -> int:
     """Approximate token count from text length."""
 
