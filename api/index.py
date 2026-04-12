@@ -3279,7 +3279,7 @@ def ask_ai(
     image_data: Optional[bytes] = None,
     image_file_id: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
-    enable_web_search: bool = False,
+    enable_web_search: bool = True,
 ) -> str:
     try:
         messages = list(messages or [])

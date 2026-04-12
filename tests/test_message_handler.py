@@ -1623,7 +1623,7 @@ def test_handle_msg_ask_command_uses_agent_reserve_mode():
         )
 
     assert result == "ok"
-    assert mock_estimate.call_args.kwargs["reserve_mode"] == "chat"
+    assert mock_estimate.call_args.kwargs["reserve_mode"] == "search"
     mock_send_msg.assert_called_once()
 
 
