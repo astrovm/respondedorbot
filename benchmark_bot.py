@@ -34,7 +34,7 @@ class GordoBenchmark:
 
         self.models = [
             "z-ai/glm-5.1",
-            "qwen/qwen3.6-plus-04-02",
+            "qwen/qwen3.6-plus",
         ]
 
     def load_bot_config(self) -> Dict[str, Any]:
