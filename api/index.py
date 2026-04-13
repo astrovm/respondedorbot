@@ -4543,8 +4543,9 @@ def build_ai_messages(
             truncate_text(message_text),
             "",
             "INSTRUCCIONES:",
-            "- Mantené el personaje del gordo",
-            "- Usá lenguaje coloquial argentino",
+            "- mantené el personaje del gordo",
+            "- usá lenguaje coloquial argentino"
+            "- si no estás seguro de algo podes buscarlo en internet",
         ]
     )
 
