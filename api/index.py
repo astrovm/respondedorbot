@@ -4144,7 +4144,8 @@ def _get_openrouter_ai_response_result(
             "messages": cast(Any, [system_msg] + messages),
             "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
         }
-        request_kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
+        reasoning_effort = "low" if enable_web_search else "none"
+        request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
         if enable_web_search:
             request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
         response = client.chat.completions.create(**request_kwargs)
