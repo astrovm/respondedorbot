@@ -26,7 +26,7 @@ from api.credit_units import (
     parse_credit_units,
     whole_credits_to_units,
 )
-from api.groq_billing import calculate_billing_for_segments
+from api.ai_pricing import calculate_billing_for_segments
 from api.random_replies import build_random_reply
 
 

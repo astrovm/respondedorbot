@@ -7,9 +7,11 @@ from api.ai_billing import (
     parse_topup_payload,
 )
 from api.credit_units import whole_credits_to_units
-from api.groq_billing import (
+from api.ai_pricing import (
     calculate_billing_for_segments,
+    estimate_chat_reserve_credits,
     estimate_vision_reserve_credits,
+    REASONING_TOKEN_ESTIMATE,
 )
 
 
@@ -931,3 +933,21 @@ def test_calculate_billing_without_gateway_cost_uses_local():
 
     assert breakdown["raw_usd_micros"] == 130
     assert breakdown["model_breakdown"][0]["usd_micros"] == 130
+
+
+def test_estimate_chat_reserve_credits_reasoning_adds_headroom():
+    messages = [{"role": "user", "content": "hello"}]
+    system_message = {"role": "system", "content": "sys"}
+
+    without_reasoning = estimate_chat_reserve_credits(
+        system_message=system_message,
+        messages=messages,
+        reasoning=False,
+    )
+    with_reasoning = estimate_chat_reserve_credits(
+        system_message=system_message,
+        messages=messages,
+        reasoning=True,
+    )
+
+    assert with_reasoning > without_reasoning

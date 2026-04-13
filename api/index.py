@@ -87,9 +87,9 @@ from api.ai_billing import (
     maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
     parse_topup_payload as _billing_parse_topup_payload,
 )
-from api.groq_billing import (
+from api.ai_pricing import (
     CHAT_OUTPUT_TOKEN_LIMIT,
-    GroqUsageResult,
+    AIUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
     credit_units_from_usd_micros,
@@ -1095,7 +1095,7 @@ def _extract_groq_usage_token_count(usage: Optional[Mapping[str, Any]]) -> int:
     return max(0, input_tokens) + max(0, output_tokens)
 
 
-def _extract_result_token_count(result: Optional[GroqUsageResult]) -> int:
+def _extract_result_token_count(result: Optional[AIUsageResult]) -> int:
     if result is None:
         return 0
     return _extract_groq_usage_token_count(result.usage)
@@ -3935,7 +3935,7 @@ def _should_try_next_groq_account_after_error(error: Exception) -> bool:
 
 def _append_billing_segment(
     response_meta: Optional[Dict[str, Any]],
-    result: Optional[GroqUsageResult],
+    result: Optional[AIUsageResult],
 ) -> None:
     if response_meta is None or result is None:
         return
@@ -3950,7 +3950,7 @@ def _log_groq_request_result(
     token_count: int,
     audio_seconds: float,
     default_headers: Optional[Mapping[str, str]],
-    result: Optional[GroqUsageResult],
+    result: Optional[AIUsageResult],
 ) -> None:
     log_entry: Dict[str, Any] = {
         "scope": "groq_request",
@@ -4047,17 +4047,8 @@ def estimate_ai_base_reserve_credits(
         messages=messages,
         max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         extra_input_tokens=extra_input_tokens,
+        reasoning=True,
     )
-
-    if reserve_mode == "agent":
-        reserve = reserve * 4
-        return reserve, {
-            "reserve_mode": "agent",
-            "reserve_reason": "bounded_agent",
-            "reserve_model": "qwen/qwen3.6-plus",
-            "rate_limit_scope": "chat",
-            "estimated_rate_limit_tokens": estimated_rate_limit_tokens * 4,
-        }
 
     if reserve_mode == "search":
         reserve += credit_units_from_usd_micros(
@@ -4114,8 +4105,8 @@ def _build_groq_usage_result(
     audio_seconds: Optional[float] = None,
     cached: bool = False,
     metadata: Optional[Mapping[str, Any]] = None,
-) -> GroqUsageResult:
-    return GroqUsageResult(
+) -> AIUsageResult:
+    return AIUsageResult(
         kind=kind,
         text=text,
         model=model,
@@ -4131,7 +4122,7 @@ def _get_openrouter_ai_response_result(
     messages: List[Dict[str, Any]],
     *,
     enable_web_search: bool = True,
-) -> Optional[GroqUsageResult]:
+) -> Optional[AIUsageResult]:
     client = _get_openrouter_client()
     if client is None:
         return None
@@ -4994,8 +4985,8 @@ def _execute_groq_request_with_fallback(
     token_count: int = 0,
     audio_seconds: float = 0.0,
     default_headers: Optional[Mapping[str, str]] = None,
-    attempt: Callable[[str, OpenAI], Optional[GroqUsageResult]],
-) -> Optional[GroqUsageResult]:
+    attempt: Callable[[str, OpenAI], Optional[AIUsageResult]],
+) -> Optional[AIUsageResult]:
     configured_accounts = list(_get_groq_accounts_for_scope())
     if not configured_accounts:
         print("Groq API key not configured")
@@ -5028,7 +5019,7 @@ def _execute_groq_request_with_fallback(
 
         last_error: Optional[Exception] = None
 
-        def _wrapped_attempt() -> Optional[GroqUsageResult]:
+        def _wrapped_attempt() -> Optional[AIUsageResult]:
             nonlocal last_error
             try:
                 return attempt(account, groq_client)
@@ -5038,7 +5029,7 @@ def _execute_groq_request_with_fallback(
 
         request_started_at = time.monotonic()
         result = cast(
-            Optional[GroqUsageResult],
+            Optional[AIUsageResult],
             _invoke_provider(
                 "groq",
                 attempt=_wrapped_attempt,
@@ -5215,13 +5206,13 @@ def _describe_image_groq_result(
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
-) -> Optional[GroqUsageResult]:
+) -> Optional[AIUsageResult]:
     """Describe image using Groq vision models."""
 
     if file_id and use_cache:
         cached = get_cached_description(file_id)
         if cached:
-            return GroqUsageResult(
+            return AIUsageResult(
                 kind="vision",
                 text=str(cached),
                 model=GROQ_VISION_MODEL,
@@ -5246,7 +5237,7 @@ def _describe_image_groq_result(
         + VISION_OUTPUT_TOKEN_LIMIT
     )
 
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
+    def _attempt(account: str, groq_client: OpenAI) -> Optional[AIUsageResult]:
         print(f"Describing image with Groq vision model using account={account}...")
         input_payload = cast(
             ResponseInputParam,
@@ -5302,7 +5293,7 @@ def _describe_image_openrouter_result(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
-) -> Optional[GroqUsageResult]:
+) -> Optional[AIUsageResult]:
     model = _get_openrouter_vision_model(GROQ_VISION_MODEL)
     if not model:
         return None
@@ -5370,13 +5361,13 @@ def _transcribe_audio_groq_result(
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
-) -> Optional[GroqUsageResult]:
+) -> Optional[AIUsageResult]:
     """Transcribe audio using Groq Whisper."""
 
     if file_id and use_cache:
         cached = get_cached_transcription(file_id)
         if cached:
-            return GroqUsageResult(
+            return AIUsageResult(
                 kind="transcribe",
                 text=str(cached),
                 model=GROQ_TRANSCRIBE_MODEL,
@@ -5386,7 +5377,7 @@ def _transcribe_audio_groq_result(
 
     measured_audio_seconds = measure_audio_duration_seconds(audio_data)
 
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[GroqUsageResult]:
+    def _attempt(account: str, groq_client: OpenAI) -> Optional[AIUsageResult]:
         print(f"Transcribing audio with Groq Whisper using account={account}...")
         audio_file = io.BytesIO(audio_data)
         audio_file.name = "audio.webm"
@@ -5449,7 +5440,7 @@ def _process_media_with_cache(
     file_id: str,
     use_cache: bool,
     cache_lookup: Optional[Callable[[str], Optional[str]]],
-    processor: Callable[[bytes], Optional[GroqUsageResult]],
+    processor: Callable[[bytes], Optional[AIUsageResult]],
     downloader: Optional[Callable[[str], Optional[bytes]]] = None,
     failure_code: str,
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
@@ -5532,7 +5523,7 @@ def describe_media_by_id(
     - If description failed: (None, "describe")
     """
 
-    def _processor(media: bytes) -> Optional[GroqUsageResult]:
+    def _processor(media: bytes) -> Optional[AIUsageResult]:
         resized = resize_image_if_needed(media)
         return _describe_image_groq_result(resized, prompt, file_id)
 
