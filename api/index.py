@@ -4528,7 +4528,10 @@ def build_ai_messages(
         f"- Hora: {current_time.strftime('%H:%M')}",
     ]
 
-    if reply_context:
+    last_in_history_is_assistant = (
+        bool(messages) and messages[-1].get("role") == "assistant"
+    )
+    if reply_context and not last_in_history_is_assistant:
         context_parts.extend(
             [
                 "",
