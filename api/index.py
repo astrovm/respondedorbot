@@ -4475,13 +4475,17 @@ def format_market_info(market: Dict) -> str:
 
 def format_weather_info(weather: Dict) -> str:
     """Format weather data for context"""
-    return f"""
-- Temperatura aparente: {weather["apparent_temperature"]}°C
-- Probabilidad de lluvia: {weather["precipitation_probability"]}%
-- Estado: {weather["description"]}
-- Nubosidad: {weather["cloud_cover"]}%
-- Visibilidad: {weather["visibility"] / 1000:.1f}km
-"""
+    visibility_km = weather.get("visibility")
+    visibility_str = (
+        f"{visibility_km / 1000:.1f}km" if visibility_km is not None else "sin datos"
+    )
+    return (
+        f"- Temperatura aparente: {weather.get('apparent_temperature', '?')}°C\n"
+        f"- Probabilidad de lluvia: {weather.get('precipitation_probability', '?')}%\n"
+        f"- Estado: {weather.get('description', 'sin datos')}\n"
+        f"- Nubosidad: {weather.get('cloud_cover', '?')}%\n"
+        f"- Visibilidad: {visibility_str}"
+    )
 
 
 def build_ai_messages(
@@ -4489,6 +4493,7 @@ def build_ai_messages(
     chat_history: List[Dict],
     message_text: str,
     reply_context: Optional[str] = None,
+    enable_web_search: bool = True,
 ) -> List[Dict]:
     messages = []
 
@@ -4536,17 +4541,22 @@ def build_ai_messages(
     if link_context:
         context_parts.extend(["", link_context])
 
+    instructions = [
+        "",
+        "INSTRUCCIONES:",
+        "- mantené el personaje del gordo",
+        "- usá lenguaje coloquial argentino",
+    ]
+    if enable_web_search:
+        instructions.append("- si no estás seguro de algo podes buscarlo en internet")
+
     context_parts.extend(
         [
             "",
             "MENSAJE:",
             truncate_text(message_text),
-            "",
-            "INSTRUCCIONES:",
-            "- mantené el personaje del gordo",
-            "- usá lenguaje coloquial argentino",
-            "- si no estás seguro de algo podes buscarlo en internet",
         ]
+        + instructions
     )
 
     messages.append(
