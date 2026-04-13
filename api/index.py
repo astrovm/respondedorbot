@@ -92,12 +92,10 @@ from api.ai_pricing import (
     AIUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
-    credit_units_from_usd_micros,
     estimate_chat_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
-    WEB_SEARCH_USD_MICROS_PER_REQUEST,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.ai_pipeline import (
@@ -2690,8 +2688,6 @@ esto es lo que sé hacer, boludo:
 
 - /convertbase 101, 2, 10: te paso números entre bases
 
-- /buscar algo: te busco en la web
-
 - /eleccion: odds actuales de Polymarket para Diputados 2025
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto
@@ -3707,19 +3703,6 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def search_command(
-    messages: List[Dict[str, Any]],
-    response_meta: Optional[Dict[str, Any]] = None,
-) -> str:
-    """/buscar command: run the standard AI flow with web search enabled."""
-
-    _, query_text, _ = _extract_latest_user_query_info(messages)
-    q = query_text.strip()
-    if not q:
-        return "decime qué querés buscar capo"
-    return ask_ai(messages, response_meta=response_meta, enable_web_search=True)
-
-
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
     """Return top Hacker News stories from the best RSS feed (cached)."""
 
@@ -4022,7 +4005,6 @@ def estimate_ai_base_reserve_credits(
     messages: List[Dict[str, Any]],
     *,
     extra_input_tokens: int = 0,
-    reserve_mode: str = "chat",
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
     try:
@@ -4050,22 +4032,7 @@ def estimate_ai_base_reserve_credits(
         reasoning=True,
     )
 
-    if reserve_mode == "search":
-        reserve += credit_units_from_usd_micros(
-            WEB_SEARCH_USD_MICROS_PER_REQUEST * OPENROUTER_WEB_SEARCH_MAX_QUERIES
-        )
-        return reserve, {
-            "reserve_mode": "search",
-            "reserve_reason": "web_search",
-            "reserve_model": "qwen/qwen3.6-plus",
-            "rate_limit_scope": "chat",
-            "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
-        }
-
     return reserve, {
-        "reserve_mode": "chat",
-        "reserve_reason": "standard_chat",
-        "reserve_model": "qwen/qwen3.6-plus",
         "rate_limit_scope": "chat",
         "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
     }
@@ -4591,7 +4558,6 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "satoshi": satoshi,
             "get_timestamp": get_timestamp,
             "convert_to_command": convert_to_command,
-            "search_command": search_command,
             "get_instance_name": get_instance_name,
             "get_help": get_help,
             "handle_transcribe": handle_transcribe,

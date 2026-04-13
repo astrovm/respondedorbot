@@ -801,15 +801,6 @@ def test_initialize_commands():
     assert commands["/brecios"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
-    # Test search commands
-    assert "/buscar" in commands
-    assert "/search" in commands
-    from api.index import search_command as _search_command
-
-    assert commands["/buscar"][0] == _search_command
-    assert commands["/search"][0] == _search_command
-    assert commands["/buscar"][1] is True
-    assert commands["/search"][1] is True
 
 
 def test_price_alias_command_dispatches_to_get_prices():

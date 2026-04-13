@@ -22,7 +22,6 @@ def test_build_command_registry_reuses_alias_metadata():
             "satoshi": lambda: "satoshi",
             "get_timestamp": lambda: "time",
             "convert_to_command": prices,
-            "search_command": prices,
             "get_instance_name": lambda: "instance",
             "get_help": lambda: "help",
             "handle_transcribe": lambda: "transcribe",
