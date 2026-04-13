@@ -1,4 +1,4 @@
-"""Groq pricing, usage normalization, and credit calculations."""
+"""AI pricing, usage normalization, and credit calculations."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ CREDIT_UNIT_USD_MICROS = CREDIT_CEIL_DIVISOR_USD_MICROS // 10
 
 CHAT_OUTPUT_TOKEN_LIMIT = 256
 VISION_OUTPUT_TOKEN_LIMIT = 256
+REASONING_TOKEN_ESTIMATE = 2_048
 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
 WEB_SEARCH_USD_MICROS_PER_REQUEST = 1_660
 
@@ -56,8 +57,8 @@ def normalize_model_id_for_billing(model: str) -> str:
 
 
 @dataclass
-class GroqUsageResult:
-    """Structured Groq response with billing metadata."""
+class AIUsageResult:
+    """Structured AI response with billing metadata."""
 
     kind: str
     text: str
@@ -147,14 +148,18 @@ def estimate_chat_reserve_credits(
     messages: Sequence[Mapping[str, Any]],
     max_output_tokens: int = CHAT_OUTPUT_TOKEN_LIMIT,
     extra_input_tokens: int = 0,
+    reasoning: bool = True,
 ) -> int:
     pricing = MODEL_PRICING_USD_MICROS["qwen/qwen3.6-plus"]
     input_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
         input_tokens += estimate_message_tokens([system_message])
+    effective_output_tokens = max_output_tokens + (
+        REASONING_TOKEN_ESTIMATE if reasoning else 0
+    )
     usd_micros = (
         input_tokens * pricing["input_per_million"]
-        + max_output_tokens * pricing["output_per_million"]
+        + effective_output_tokens * pricing["output_per_million"]
     ) // 1_000_000
     return credit_units_from_usd_micros(usd_micros)
 

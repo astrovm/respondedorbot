@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
-from api.groq_billing import (
+from api.ai_pricing import (
     IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
@@ -183,7 +183,9 @@ def _send_response_and_store_metadata(
         message_id,
         reply_markup=response_markup,
     )
-    key = f"bot_{sent_message_id}" if sent_message_id is not None else f"bot_{message_id}"
+    key = (
+        f"bot_{sent_message_id}" if sent_message_id is not None else f"bot_{message_id}"
+    )
     deps.save_message_to_redis(
         chat_id,
         key,
