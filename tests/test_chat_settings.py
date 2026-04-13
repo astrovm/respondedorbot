@@ -195,39 +195,32 @@ def test_config_redis():
             assert str(e) == "Connection failed"
 
 
-def test_load_bot_config_caches_and_parses(monkeypatch):
+def test_load_bot_config_returns_hardcoded_prompt(monkeypatch):
     from api import index
 
     config_module.reset_cache()
-    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "hola")
+
+    cfg = index.load_bot_config()
+    assert cfg["trigger_words"] == [
+        "gordo",
+        "respondedor",
+        "atendedor",
+        "gordito",
+        "dogor",
+        "bot",
+    ]
+    assert "Sos el gordo" in cfg["system_prompt"]
+    assert "REGLAS:" in cfg["system_prompt"]
+
+
+def test_load_bot_config_caches_result(monkeypatch):
+    from api import index
+
+    config_module.reset_cache()
 
     cfg_first = index.load_bot_config()
-    assert cfg_first == {
-        "trigger_words": [
-            "gordo",
-            "respondedor",
-            "atendedor",
-            "gordito",
-            "dogor",
-            "bot",
-        ],
-        "system_prompt": "hola",
-    }
-
-    # Change env var; function should return cached config
-    monkeypatch.setenv("BOT_SYSTEM_PROMPT", "changed")
     cfg_second = index.load_bot_config()
     assert cfg_second is cfg_first
-
-
-def test_load_bot_config_missing_env(monkeypatch):
-    from api import index
-
-    config_module.reset_cache()
-    monkeypatch.delenv("BOT_SYSTEM_PROMPT", raising=False)
-
-    with pytest.raises(ValueError):
-        index.load_bot_config()
 
 
 def test_handle_callback_query_topup_sends_invoice():
