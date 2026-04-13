@@ -6,11 +6,10 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 
 ## Features
 
-- **AI chat**: configurable personality powered by Groq with OpenRouter fallback for chat/vision when local Groq is exhausted
+- **AI chat**: configurable personality with web search, powered by Groq with OpenRouter fallback for chat/vision
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`
 - **BCRA economic data**: `/bcra`, `/variables`
 - **Media**: audio transcription (Whisper) tries Groq free then paid; image description also falls back to OpenRouter
-- **Web search**: `/buscar` / `/search` using free Groq first, then paid Groq
 - **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context
