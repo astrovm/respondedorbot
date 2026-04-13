@@ -4144,6 +4144,7 @@ def _get_openrouter_ai_response_result(
             "messages": cast(Any, [system_msg] + messages),
             "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
         }
+        request_kwargs["extra_body"] = {"reasoning": {"effort": "none"}}
         if enable_web_search:
             request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
         response = client.chat.completions.create(**request_kwargs)
@@ -4309,6 +4310,8 @@ NOTICIAS DE HACKER NEWS:
 
 CONTEXTO POLITICO:
 - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
+
+IMPORTANTE RECORDATORIO DE ESTILO: responde siempre en minusculas, sin emojis, sin punto final, sin comillas. una sola frase por defecto.
 """
 
     return {
