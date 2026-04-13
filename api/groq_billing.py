@@ -260,6 +260,13 @@ def _calculate_model_token_cost(
         + tokens["input_cached_tokens"] * cached_input_per_million
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
     ) // 1_000_000
+    try:
+        gateway_cost_usd = float(usage.get("cost") or 0)
+        gateway_usd_micros = int(gateway_cost_usd * 1_000_000)
+        if gateway_usd_micros > usd_micros:
+            usd_micros = gateway_usd_micros
+    except (TypeError, ValueError):
+        pass
     return {
         "model": normalized_model,
         "usd_micros": int(usd_micros),
