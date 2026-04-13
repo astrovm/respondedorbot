@@ -4308,9 +4308,6 @@ CLIMA EN BUENOS AIRES:
 
 NOTICIAS DE HACKER NEWS:
 {news_info}
-
-CONTEXTO POLITICO:
-- Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
 """
 
     return {
