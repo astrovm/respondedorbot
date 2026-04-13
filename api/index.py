@@ -4292,7 +4292,7 @@ def build_system_message(context: Dict) -> Dict[str, Any]:
     formatted_time = str(time_context.get("formatted", "")).strip()
 
     # Build the complete system prompt with context
-    base_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
+    base_prompt = config.get("system_prompt", "")
 
     contextual_info = f"""
 

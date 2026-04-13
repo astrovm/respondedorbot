@@ -22,17 +22,16 @@ def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
     _admin_reporter = admin_reporter
 
 
+_SYSTEM_PROMPT = """[historical bot personality removed]"""
+
+
 def load_bot_config() -> Dict[str, Any]:
-    """Load bot configuration from environment variables."""
+    """Load bot configuration."""
 
     global _bot_config
 
     if _bot_config is not None:
         return _bot_config
-
-    system_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
-    if not system_prompt:
-        raise ValueError("BOT_SYSTEM_PROMPT environment variable is required")
 
     _bot_config = {
         "trigger_words": [
@@ -43,7 +42,7 @@ def load_bot_config() -> Dict[str, Any]:
             "dogor",
             "bot",
         ],
-        "system_prompt": system_prompt,
+        "system_prompt": _SYSTEM_PROMPT,
     }
 
     return _bot_config
