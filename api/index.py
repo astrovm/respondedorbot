@@ -4310,8 +4310,6 @@ NOTICIAS DE HACKER NEWS:
 
 CONTEXTO POLITICO:
 - Javier Milei (alias miller, javo, javito, javeto) le gano a Sergio Massa y es el presidente de Argentina desde el 10/12/2023 hasta el 10/12/2027
-
-IMPORTANTE RECORDATORIO DE ESTILO: responde siempre en minusculas, sin emojis, sin punto final, sin comillas. una sola frase por defecto.
 """
 
     return {
