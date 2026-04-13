@@ -869,3 +869,65 @@ def test_settle_reserved_ai_credits_without_billing_segments_keeps_reserved_char
             "reserved_credit_units": 20,
         },
     )
+
+
+def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
+    # Local pricing for 100 input + 50 output qwen tokens:
+    # (100 * 325_000 + 50 * 1_950_000) // 1_000_000 = 130 usd_micros
+    # Gateway cost of $0.005 USD = 5_000 usd_micros -> should win
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": 0.005,
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 5_000
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 5_000
+
+
+def test_calculate_billing_keeps_local_cost_when_higher_than_gateway():
+    # Local pricing for 4000 input + 2000 output qwen tokens:
+    # (4000 * 325_000 + 2000 * 1_950_000) // 1_000_000 = 5_200 usd_micros
+    # Gateway cost of $0.001 USD = 1_000 usd_micros -> local wins
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "prompt_tokens": 4_000,
+                    "completion_tokens": 2_000,
+                    "cost": 0.001,
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 5_200
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 5_200
+
+
+def test_calculate_billing_without_gateway_cost_uses_local():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 130
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 130
