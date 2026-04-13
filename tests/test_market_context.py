@@ -922,11 +922,9 @@ def test_format_weather_info():
 
 def test_format_weather_info_empty():
     from api.index import format_weather_info
-    import pytest
 
-    # Function doesn't handle empty data gracefully - should raise KeyError
-    with pytest.raises(KeyError):
-        format_weather_info({})
+    result = format_weather_info({})
+    assert "?" in result or "sin datos" in result
 
 
 def test_sort_dollar_rates_success():
