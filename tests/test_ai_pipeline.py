@@ -379,9 +379,9 @@ def test_build_ai_messages_includes_links_context():
 
 
 def test_log_groq_request_result_logs_local_billing_details():
-    from api.index import GroqUsageResult, _log_groq_request_result
+    from api.index import AIUsageResult, _log_groq_request_result
 
-    result = GroqUsageResult(
+    result = AIUsageResult(
         kind="chat",
         text="respuesta",
         model="qwen/qwen3.6-plus",
@@ -441,7 +441,7 @@ def test_log_groq_request_result_logs_empty_requests():
 
 
 def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_large():
-    from api.index import GroqUsageResult, _execute_groq_request_with_fallback
+    from api.index import AIUsageResult, _execute_groq_request_with_fallback
 
     class Fake413Error(Exception):
         def __init__(self) -> None:
@@ -459,7 +459,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
     def fake_attempt(account, _client):
         if account == "free":
             raise Fake413Error()
-        return GroqUsageResult(
+        return AIUsageResult(
             kind="chat",
             text="respuesta chat",
             model="qwen/qwen3.6-plus",
@@ -515,7 +515,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 2
+    assert reserve == 9
     assert metadata["reserve_mode"] == "chat"
     assert metadata["reserve_reason"] == "standard_chat"
     assert metadata["reserve_model"] == "qwen/qwen3.6-plus"
@@ -546,7 +546,8 @@ def test_estimate_ai_base_reserve_credits_includes_web_search_overhead(monkeypat
     assert metadata["reserve_reason"] == "web_search"
 
 
-def test_estimate_ai_base_reserve_credits_includes_agent_headroom(monkeypatch):
+def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatch):
+    from api.ai_pricing import estimate_chat_reserve_credits
     from api.index import estimate_ai_base_reserve_credits
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
@@ -558,18 +559,19 @@ def test_estimate_ai_base_reserve_credits_includes_agent_headroom(monkeypatch):
         lambda _context_data: {"role": "system", "content": "sys"},
     )
 
-    chat_reserve, _ = estimate_ai_base_reserve_credits(
+    reserve_without_reasoning = estimate_chat_reserve_credits(
+        system_message={"role": "system", "content": "sys"},
+        messages=[{"role": "user", "content": "hola"}],
+        reasoning=False,
+    )
+    reserve, metadata = estimate_ai_base_reserve_credits(
         [{"role": "user", "content": "hola"}],
         reserve_mode="chat",
     )
-    agent_reserve, metadata = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "resumime https://example.com/post"}],
-        reserve_mode="agent",
-    )
 
-    assert agent_reserve > chat_reserve
-    assert metadata["reserve_mode"] == "agent"
-    assert metadata["reserve_reason"] == "bounded_agent"
+    assert metadata["reserve_mode"] == "chat"
+    assert metadata["reserve_reason"] == "standard_chat"
+    assert reserve > reserve_without_reasoning
 
 
 def test_ask_ai_fetches_url_unconditionally(monkeypatch):
@@ -720,7 +722,7 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
     assert len(calls) == 1
 
 
-def test_estimate_ai_base_reserve_credits_agent_mode_without_search_overhead(
+def test_estimate_ai_base_reserve_credits_search_mode_adds_search_overhead(
     monkeypatch,
 ):
     from api.index import estimate_ai_base_reserve_credits
@@ -738,14 +740,14 @@ def test_estimate_ai_base_reserve_credits_agent_mode_without_search_overhead(
         [{"role": "user", "content": "hola"}],
         reserve_mode="chat",
     )
-    agent_reserve, metadata = estimate_ai_base_reserve_credits(
+    search_reserve, metadata = estimate_ai_base_reserve_credits(
         [{"role": "user", "content": "hola"}],
-        reserve_mode="agent",
+        reserve_mode="search",
     )
 
-    assert agent_reserve == chat_reserve * 4
-    assert metadata["reserve_mode"] == "agent"
-    assert metadata["reserve_reason"] == "bounded_agent"
+    assert search_reserve > chat_reserve
+    assert metadata["reserve_mode"] == "search"
+    assert metadata["reserve_reason"] == "web_search"
 
 
 def test_ask_ai_with_provider_success():
@@ -1056,12 +1058,12 @@ def test_handle_ai_response_strips_user_identity_prefix(monkeypatch):
 
 def test_complete_with_providers_openrouter_success():
     """Test complete_with_providers when OpenRouter succeeds."""
-    from api.groq_billing import GroqUsageResult
+    from api.ai_pricing import AIUsageResult
 
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    openrouter_result = GroqUsageResult(
+    openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
         model="qwen/qwen3.6-plus",
@@ -1093,7 +1095,7 @@ def test_complete_with_providers_returns_none_when_openrouter_fails():
 
 
 def test_complete_with_providers_records_openrouter_billing_on_success(monkeypatch):
-    from api.groq_billing import GroqUsageResult
+    from api.ai_pricing import AIUsageResult
 
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
@@ -1104,7 +1106,7 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
     )
 
-    openrouter_result = GroqUsageResult(
+    openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
         model="qwen/qwen3.6-plus",
