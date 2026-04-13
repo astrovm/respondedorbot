@@ -516,34 +516,8 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     )
 
     assert reserve == 9
-    assert metadata["reserve_mode"] == "chat"
-    assert metadata["reserve_reason"] == "standard_chat"
-    assert metadata["reserve_model"] == "qwen/qwen3.6-plus"
-
-
-def test_estimate_ai_base_reserve_credits_includes_web_search_overhead(monkeypatch):
-    from api.index import estimate_ai_base_reserve_credits
-
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
-    monkeypatch.setattr(
-        "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
-    )
-
-    chat_reserve, _ = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
-    )
-    search_reserve, metadata = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}],
-        reserve_mode="search",
-    )
-
-    assert search_reserve > chat_reserve
-    assert metadata["reserve_mode"] == "search"
-    assert metadata["reserve_reason"] == "web_search"
+    assert metadata["rate_limit_scope"] == "chat"
+    assert "estimated_rate_limit_tokens" in metadata
 
 
 def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatch):
@@ -566,11 +540,9 @@ def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatc
     )
     reserve, metadata = estimate_ai_base_reserve_credits(
         [{"role": "user", "content": "hola"}],
-        reserve_mode="chat",
     )
 
-    assert metadata["reserve_mode"] == "chat"
-    assert metadata["reserve_reason"] == "standard_chat"
+    assert metadata["rate_limit_scope"] == "chat"
     assert reserve > reserve_without_reasoning
 
 
@@ -722,34 +694,6 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
     assert len(calls) == 1
 
 
-def test_estimate_ai_base_reserve_credits_search_mode_adds_search_overhead(
-    monkeypatch,
-):
-    from api.index import estimate_ai_base_reserve_credits
-
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
-    monkeypatch.setattr(
-        "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
-    )
-
-    chat_reserve, _ = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "hola"}],
-        reserve_mode="chat",
-    )
-    search_reserve, metadata = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "hola"}],
-        reserve_mode="search",
-    )
-
-    assert search_reserve > chat_reserve
-    assert metadata["reserve_mode"] == "search"
-    assert metadata["reserve_reason"] == "web_search"
-
-
 def test_ask_ai_with_provider_success():
     from api.index import ask_ai
 
@@ -867,41 +811,6 @@ def test_ask_ai_does_not_force_search_for_news_queries():
 
     assert result == "ok"
     mock_complete.assert_called_once()
-
-
-def test_search_command_success():
-    response_meta = {}
-
-    with patch("api.index.ask_ai", return_value="respuesta web") as mock_ask_ai:
-        result = search_command(
-            [
-                {
-                    "role": "user",
-                    "content": "CONTEXTO:\n\nMENSAJE:\npython programming\n\nINSTRUCCIONES:",
-                }
-            ],
-            response_meta=response_meta,
-        )
-
-    assert result == "respuesta web"
-    mock_ask_ai.assert_called_once_with(
-        [
-            {
-                "role": "user",
-                "content": "CONTEXTO:\n\nMENSAJE:\npython programming\n\nINSTRUCCIONES:",
-            }
-        ],
-        enable_web_search=True,
-        response_meta=response_meta,
-    )
-
-
-def test_search_command_empty_query():
-    result = search_command([])
-    assert result == "decime qué querés buscar capo"
-
-    result = search_command([{"role": "user", "content": ""}])
-    assert result == "decime qué querés buscar capo"
 
 
 def test_fetch_link_metadata_success():

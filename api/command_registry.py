@@ -53,7 +53,6 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/satoshi", "/sat", "/sats"), "satoshi", False, False),
     (("/time",), "get_timestamp", False, False),
     (("/comando", "/command"), "convert_to_command", False, True),
-    (("/buscar", "/search"), "search_command", True, True),
     (("/instance",), "get_instance_name", False, False),
     (("/help",), "get_help", False, False),
     (("/transcribe", "/describe"), "handle_transcribe", False, False),
