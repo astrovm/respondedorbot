@@ -4544,7 +4544,7 @@ def build_ai_messages(
             "",
             "INSTRUCCIONES:",
             "- mantené el personaje del gordo",
-            "- usá lenguaje coloquial argentino"
+            "- usá lenguaje coloquial argentino",
             "- si no estás seguro de algo podes buscarlo en internet",
         ]
     )
