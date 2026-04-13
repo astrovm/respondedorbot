@@ -177,17 +177,18 @@ def _send_response_and_store_metadata(
     response_uses_ai: bool,
     redis_client: Any,
 ) -> None:
-    deps.save_message_to_redis(
-        chat_id,
-        f"bot_{message_id}",
-        response_msg,
-        redis_client,
-    )
     sent_message_id = deps.send_msg(
         chat_id,
         response_msg,
         message_id,
         reply_markup=response_markup,
+    )
+    key = f"bot_{sent_message_id}" if sent_message_id is not None else f"bot_{message_id}"
+    deps.save_message_to_redis(
+        chat_id,
+        key,
+        response_msg,
+        redis_client,
     )
     if sent_message_id is None:
         return
