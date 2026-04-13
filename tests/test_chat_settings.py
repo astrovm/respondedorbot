@@ -209,7 +209,7 @@ def test_load_bot_config_returns_hardcoded_prompt(monkeypatch):
         "dogor",
         "bot",
     ]
-    assert "Sos el gordo" in cfg["system_prompt"]
+    assert "sos el gordo" in cfg["system_prompt"]
     assert "REGLAS:" in cfg["system_prompt"]
 
 

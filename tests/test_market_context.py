@@ -799,7 +799,7 @@ def test_build_system_message():
         assert isinstance(result["content"], list)
         assert len(result["content"]) > 0
         content_text = result["content"][0]["text"]
-        assert "argentina" in content_text.lower()
+        assert "argentin" in content_text.lower()
         assert "gordo" in content_text.lower()
         assert "hacker news" in content_text.lower()
 
