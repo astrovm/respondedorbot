@@ -42,7 +42,7 @@ from api.services import bcra as bcra_service
 
 convert_to_command = index.convert_to_command
 config_redis = index.config_redis
-check_global_rate_limit = index.check_global_rate_limit
+check_provider_available = index.check_provider_available
 extract_message_text = index.extract_message_text
 extract_message_urls = index.extract_message_urls
 fetch_link_metadata = index.fetch_link_metadata
