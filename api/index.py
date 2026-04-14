@@ -2237,95 +2237,49 @@ def convert_to_command(msg_text: str) -> str:
     return command
 
 
-def recordame_command(msg_text: str, chat_id: str = "", user_name: str = "") -> str:
-    if not msg_text.strip():
-        return "decime que te acuerdo y cuando, ej: /recordame comprar pizza en 30 min"
-
-    from api.tools.reminder_scheduler import parse_delay, schedule_reminder
-
-    words = msg_text.strip().split()
-    if len(words) < 2:
-        return "no entendi el tiempo, ponelo al final, ej: /recordame comprar pizza en 30 min"
-
-    delay_seconds = None
-    text = None
-    for tail_len in range(1, min(4, len(words))):
-        candidate = " ".join(words[-tail_len:])
-        parsed = parse_delay(candidate)
-        if parsed is not None:
-            delay_seconds = parsed
-            text = " ".join(words[:-tail_len])
-            break
-
-    if delay_seconds is None or not text:
-        return (
-            f"no entendi el tiempo en '{msg_text}', "
-            "proba: /recordame comprar pizza en 30 min"
-        )
-
-    if not chat_id:
-        return "no se en que chat estoy, no puedo crear el recordatorio"
-
-    reminder_id = schedule_reminder(chat_id, text, delay_seconds, user_name)
-    if reminder_id is None:
-        return "no se pudo crear el recordatorio"
-
-    minutes = delay_seconds // 60
-    if minutes < 60:
-        time_desc = f"{minutes} minuto{'s' if minutes != 1 else ''}"
-    elif minutes < 1440:
-        hours = minutes // 60
-        time_desc = f"{hours} hora{'s' if hours != 1 else ''}"
+def _format_schedule_interval(seconds: int) -> str:
+    if seconds >= 86400:
+        return f"cada {seconds // 86400}d"
+    elif seconds >= 3600:
+        return f"cada {seconds // 3600}h"
     else:
-        days = minutes // 1440
-        time_desc = f"{days} dia{'s' if days != 1 else ''}"
-
-    return f"listo, te acuerdo en {time_desc}: {text}"
+        return f"cada {seconds // 60}m"
 
 
-def tareas_command(chat_id: str = "") -> str:
+def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
 
     if not chat_id:
-        return "no se en que chat estoy"
+        return "no se en que chat estoy", None
 
     reminders = list_reminders(chat_id)
     tasks = list_scheduled_tasks(chat_id)
 
     if not reminders and not tasks:
-        return "no hay recordatorios ni tareas programadas"
+        return "no hay recordatorios ni tareas", None
 
     lines = []
+    rows: List[List[Dict[str, str]]] = []
+
     if reminders:
         lines.append("recordatorios:")
         for r in reminders:
-            lines.append(f"  [{r['id']}] {r['text']} ({r['next_run']})")
+            lines.append(f"• {r['text']} ({r['next_run']})")
+            rows.append(
+                [{"text": f"borrar {r['id']}", "callback_data": f"rem:del:{r['id']}"}]
+            )
+
     if tasks:
         lines.append("tareas recurrentes:")
         for t in tasks:
-            interval = t.get("interval_seconds", 0)
-            if interval >= 86400:
-                freq = f"cada {interval // 86400}d"
-            elif interval >= 3600:
-                freq = f"cada {interval // 3600}h"
-            else:
-                freq = f"cada {interval // 60}m"
-            lines.append(f"  [{t['id']}] {t['prompt']} ({freq})")
+            freq = _format_schedule_interval(t.get("interval_seconds", 0))
+            lines.append(f"• {t['prompt']} ({freq})")
+            rows.append(
+                [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
+            )
 
-    return "\n".join(lines)
-
-
-def borrartarea_command(msg_text: str = "") -> str:
-    from api.tools.reminder_scheduler import cancel_scheduled_task
-
-    task_id = msg_text.strip()
-    if not task_id:
-        return "necesito el id, ej: /borrartarea abc12345"
-
-    success = cancel_scheduled_task(task_id)
-    if success:
-        return f"tarea {task_id} cancelada"
-    return f"no se pudo cancelar {task_id}"
+    keyboard: Optional[Dict[str, Any]] = {"inline_keyboard": rows}
+    return "\n".join(lines), keyboard
 
 
 def get_help() -> str:
@@ -2386,9 +2340,7 @@ esto es lo que sé hacer, boludo:
 - /gm: te mando un gif de buenos días random
 - /gn: te mando un gif de buenas noches random
 
-- /recordame, /remindme algo en 30 min: te acuerdo cuando me pediste
-- /tareas, /tasks, /reminders: listar recordatorios y tareas recurrentes
-- /borrartarea, /deletetask, /cancelreminder <id>: cancelar una tarea (usar /tareas para ver ids)
+- /tareas, /tasks, /reminders: recordatorios y tareas recurrentes (con botones para borrar)
 """
 
 
@@ -4022,15 +3974,16 @@ def build_system_message(
             "- dollar_lookup: obtener cotizaciones del dolar en Argentina\n"
             "- calculate: evaluar expresiones matematicas\n"
             "- web_fetch: obtener contenido de una URL\n"
-            "- reminder_set: crear un recordatorio (el usuario te dice cuando)\n"
+            "- reminder_set: crear un recordatorio (pasale text y delay_seconds en segundos)\n"
             "- reminder_list: listar recordatorios pendientes\n"
-            "- scheduled_task_set: crear una tarea recurrente (ej: noticias cada dia)\n"
+            "- scheduled_task_set: crear una tarea recurrente (pasale prompt e interval_seconds en segundos)\n"
             "- scheduled_task_list: listar tareas recurrentes\n"
-            "- scheduled_task_cancel: cancelar una tarea recurrente (necesita el id)\n"
+            "- scheduled_task_cancel: cancelar una tarea por id\n"
+            "\n"
+            "Para delay_seconds: 60=1min, 1800=30min, 3600=1h, 86400=1dia\n"
+            "Para interval_seconds: 300=5min, 3600=1h, 86400=1dia, 604800=1semana\n"
             "\n"
             "Cuando uses herramientas, podes responder con mas de una frase para dar informacion util.\n"
-            "Si el usuario pide un recordatorio, usa reminder_set. Si pregunta precios, usa price_lookup.\n"
-            "Si el usuario pide algo recurrente (ej: 'mandame noticias cada dia', 'todos los dias X'), usa scheduled_task_set.\n"
             "Si pregunta por el dolar, usa dollar_lookup.\n"
         )
 
@@ -4351,9 +4304,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
-            "recordame_command": recordame_command,
             "tareas_command": tareas_command,
-            "borrartarea_command": borrartarea_command,
         }
     )
 
@@ -5608,6 +5559,95 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
     return "ok"
 
 
+def handle_reminder_callback(callback_query: Dict[str, Any]) -> None:
+    callback_data = callback_query.get("data")
+    callback_id = callback_query.get("id")
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not callback_data or chat_id is None:
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    parts = str(callback_data).split(":", 2)
+    if len(parts) != 3 or parts[0] not in ("rem", "task"):
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    action, _, item_id = parts
+
+    if action == "rem":
+        redis_client = config_redis()
+        key = f"reminder:data:{item_id}"
+        redis_client.delete(key)
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        try:
+            scheduler = BackgroundScheduler()
+            scheduler.remove_job(f"reminder_{item_id}", jobstore="default")
+        except Exception:
+            pass
+        feedback = f"recordatorio {item_id} borrado"
+    else:
+        from api.tools.reminder_scheduler import cancel_scheduled_task
+
+        cancel_scheduled_task(item_id)
+        feedback = f"tarea {item_id} borrada"
+
+    if callback_id:
+        _answer_callback_query(callback_id, text=feedback)
+
+    if message_id:
+        reminders, tasks = [], []
+        from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
+
+        reminders = list_reminders(str(chat_id))
+        tasks = list_scheduled_tasks(str(chat_id))
+
+        if not reminders and not tasks:
+            new_text = "no hay recordatorios ni tareas"
+            new_keyboard: Optional[Dict[str, Any]] = None
+        else:
+            lines = []
+            rows: List[List[Dict[str, str]]] = []
+            if reminders:
+                lines.append("recordatorios:")
+                for r in reminders:
+                    lines.append(f"• {r['text']} ({r['next_run']})")
+                    rows.append(
+                        [
+                            {
+                                "text": f"borrar {r['id']}",
+                                "callback_data": f"rem:del:{r['id']}",
+                            }
+                        ]
+                    )
+            if tasks:
+                lines.append("tareas recurrentes:")
+                for t in tasks:
+                    freq = _format_schedule_interval(t.get("interval_seconds", 0))
+                    lines.append(f"• {t['prompt']} ({freq})")
+                    rows.append(
+                        [
+                            {
+                                "text": f"borrar {t['id']}",
+                                "callback_data": f"task:del:{t['id']}",
+                            }
+                        ]
+                    )
+            new_text = "\n".join(lines)
+            new_keyboard = {"inline_keyboard": rows}
+
+        try:
+            edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
+        except Exception:
+            pass
+
+
 def edit_message(
     chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
 ) -> bool:
@@ -5639,6 +5679,10 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
 
     if str(callback_data).startswith("topup:"):
         handle_topup_callback(callback_query)
+        return
+
+    if str(callback_data).startswith("rem:") or str(callback_data).startswith("task:"):
+        handle_reminder_callback(callback_query)
         return
 
     redis_client = config_redis()
