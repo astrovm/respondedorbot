@@ -2242,23 +2242,25 @@ def recordame_command(msg_text: str, chat_id: str = "", user_name: str = "") -> 
 
     from api.tools.reminder_scheduler import parse_delay, schedule_reminder
 
-    parts = msg_text.strip().rsplit(None, 1)
-    if len(parts) < 2:
+    words = msg_text.strip().split()
+    if len(words) < 2:
         return "no entendi el tiempo, ponelo al final, ej: /recordame comprar pizza en 30 min"
 
-    delay_str = parts[-1]
-    text = parts[0] if len(parts) == 2 else " ".join(parts[:-1])
+    delay_seconds = None
+    text = None
+    for tail_len in range(1, min(4, len(words))):
+        candidate = " ".join(words[-tail_len:])
+        parsed = parse_delay(candidate)
+        if parsed is not None:
+            delay_seconds = parsed
+            text = " ".join(words[:-tail_len])
+            break
 
-    delay_seconds = parse_delay(delay_str)
-    if delay_seconds is None:
-        delay_str = " ".join(parts[-2:])
-        text = " ".join(parts[:-2]) if len(parts) > 2 else parts[0]
-        delay_seconds = parse_delay(delay_str)
-        if delay_seconds is None:
-            return (
-                f"no entendi el tiempo en '{msg_text}', "
-                "proba: /recordame comprar pizza en 30 min"
-            )
+    if delay_seconds is None or not text:
+        return (
+            f"no entendi el tiempo en '{msg_text}', "
+            "proba: /recordame comprar pizza en 30 min"
+        )
 
     if not chat_id:
         return "no se en que chat estoy, no puedo crear el recordatorio"

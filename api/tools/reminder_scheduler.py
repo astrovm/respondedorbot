@@ -107,7 +107,7 @@ def _fire_reminder(reminder_id: str) -> None:
     from api.index import send_msg
 
     display = f"@{user_name}" if user_name else "che"
-    message = f"{display}, te acorduerdo: {text}"
+    message = f"{display}, te acuerdo: {text}"
     try:
         send_msg(chat_id, message)
     except Exception as e:
@@ -213,7 +213,7 @@ def list_reminders(chat_id: str) -> List[Dict[str, Any]]:
         return []
 
     results = []
-    prefix = f"{REMINDER_REDIS_PREFIX}"
+    prefix = REMINDER_REDIS_PREFIX
     try:
         for key_bytes in redis_client.scan_iter(f"{prefix}*"):
             key = key_bytes if isinstance(key_bytes, str) else key_bytes.decode("utf-8")
@@ -304,7 +304,7 @@ def list_scheduled_tasks(chat_id: str) -> List[Dict[str, Any]]:
         return []
 
     results = []
-    prefix = f"{TASK_REDIS_PREFIX}"
+    prefix = TASK_REDIS_PREFIX
     try:
         for key_bytes in redis_client.scan_iter(f"{prefix}*"):
             key = key_bytes if isinstance(key_bytes, str) else key_bytes.decode("utf-8")

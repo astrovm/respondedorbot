@@ -55,7 +55,7 @@ class TestCalculateTool:
 
 class TestPriceLookupTool:
     def test_price_lookup_calls_get_prices(self):
-        mock_gp = __import__("unittest.mock").MagicMock(return_value="BTC: $50000")
+        mock_gp = MagicMock(return_value="BTC: $50000")
         result = execute_tool(
             "price_lookup",
             {"symbols": "BTC"},
@@ -69,7 +69,7 @@ class TestPriceLookupTool:
         assert "not available" in result.output
 
     def test_price_lookup_none_result(self):
-        mock_gp = __import__("unittest.mock").MagicMock(return_value=None)
+        mock_gp = MagicMock(return_value=None)
         result = execute_tool(
             "price_lookup",
             {"symbols": "BTC"},
@@ -80,7 +80,7 @@ class TestPriceLookupTool:
 
 class TestDollarLookupTool:
     def test_dollar_lookup(self):
-        mock_gd = __import__("unittest.mock").MagicMock(return_value="Blue: 1200")
+        mock_gd = MagicMock(return_value="Blue: 1200")
         result = execute_tool(
             "dollar_lookup",
             {},
