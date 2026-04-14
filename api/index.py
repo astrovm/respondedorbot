@@ -3806,6 +3806,11 @@ def _get_openrouter_ai_response_result(
         response = client.chat.completions.create(**request_kwargs)
     except Exception as e:
         print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
+        admin_report(
+            f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
+            e,
+            {"finish_reason": "error", "enable_web_search": enable_web_search},
+        )
         return None
 
     if response and hasattr(response, "choices") and response.choices:
@@ -3842,6 +3847,13 @@ def _get_openrouter_ai_response_result(
             )
         print(
             f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
+        )
+        admin_report(
+            f"OpenRouter unexpected finish_reason={finish_reason!r}",
+            extra_context={
+                "model": PRIMARY_CHAT_MODEL,
+                "enable_web_search": enable_web_search,
+            },
         )
     return None
 
