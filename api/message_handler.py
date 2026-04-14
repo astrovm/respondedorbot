@@ -73,8 +73,8 @@ class MessageHandlerDeps:
     handle_transcribe_with_message_result: Callable[
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
     ]
-    check_global_rate_limit: Callable[..., bool]
-    should_allow_openrouter_fallback: Callable[[str], bool]
+    check_provider_available: Callable[..., bool]
+    has_openrouter_fallback: Callable[[], bool]
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
     handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
@@ -83,7 +83,6 @@ class MessageHandlerDeps:
     handle_transcribe: Callable[[], str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
-    estimate_image_context_rate_limit_tokens: Callable[[bytes, str], int]
     _transcribe_audio_file: Callable[
         ..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]
     ]
@@ -284,10 +283,11 @@ def _prepare_message_content(
                 early_response="ok",
             )
         audio_duration_seconds = resolved_audio_duration
-        if not deps.check_global_rate_limit(
-            redis_client,
-            scope="transcribe",
-            audio_seconds=audio_duration_seconds,
+        if (
+            not deps.check_provider_available(
+                scope="transcribe",
+            )
+            and not deps.has_openrouter_fallback()
         ):
             rate_limited_chat_id = str(
                 cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
@@ -556,12 +556,12 @@ def _run_ai_flow(
             else 0
         ),
     )
-    rate_limit_scope = str(reserve_meta.get("rate_limit_scope") or "chat")
-    if not deps.check_global_rate_limit(
-        redis_client,
-        scope=rate_limit_scope,
-        token_count=int(reserve_meta.get("estimated_rate_limit_tokens") or 0),
-    ) and not deps.should_allow_openrouter_fallback(rate_limit_scope):
+    if (
+        not deps.check_provider_available(
+            scope="chat",
+        )
+        and not deps.has_openrouter_fallback()
+    ):
         return deps.handle_rate_limit(chat_id, message), False
     base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
         "ai_response_base",
@@ -577,14 +577,12 @@ def _run_ai_flow(
     media_charge_meta: Optional[Dict[str, Any]] = None
     if prepared_message.resized_image_data and prepared_message.photo_file_id:
         image_prompt = "Describe what you see in this image in detail."
-        if not deps.check_global_rate_limit(
-            redis_client,
-            scope="vision",
-            token_count=deps.estimate_image_context_rate_limit_tokens(
-                prepared_message.resized_image_data,
-                image_prompt,
-            ),
-        ) and not deps.should_allow_openrouter_fallback("vision"):
+        if (
+            not deps.check_provider_available(
+                scope="vision",
+            )
+            and not deps.has_openrouter_fallback()
+        ):
             billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="image_context_local_rate_limit"
             )
@@ -1144,10 +1142,11 @@ def _handle_non_ai_command(
             )
             if audio_duration_seconds is None:
                 return "ok", None, False, None
-            if not deps.check_global_rate_limit(
-                redis_client,
-                scope="transcribe",
-                audio_seconds=audio_duration_seconds,
+            if (
+                not deps.check_provider_available(
+                    scope="transcribe",
+                )
+                and not deps.has_openrouter_fallback()
             ):
                 return deps.handle_rate_limit(chat_id, message), None, False, command
             reserve_credits = estimate_transcribe_reserve_credits(
@@ -1165,14 +1164,12 @@ def _handle_non_ai_command(
                 and replied_image_data
             ):
                 resized_image = deps.resize_image_if_needed(bytes(replied_image_data))
-                if not deps.check_global_rate_limit(
-                    redis_client,
-                    scope="vision",
-                    token_count=deps.estimate_image_context_rate_limit_tokens(
-                        resized_image,
-                        "Describe what you see in this image in detail.",
-                    ),
-                ) and not deps.should_allow_openrouter_fallback("vision"):
+                if (
+                    not deps.check_provider_available(
+                        scope="vision",
+                    )
+                    and not deps.has_openrouter_fallback()
+                ):
                     return (
                         deps.handle_rate_limit(chat_id, message),
                         None,

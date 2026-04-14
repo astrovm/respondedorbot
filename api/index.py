@@ -440,15 +440,12 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
 
 
 # Provider backoff windows (seconds)
-GROQ_RATE_LIMIT_BACKOFF_SECONDS = (
-    600  # fallback when Groq does not expose reset headers
-)
+GROQ_BACKOFF_DEFAULT_SECONDS = 60
 
 GROQ_FREE_ACCOUNT = "free"
 GROQ_PAID_ACCOUNT = "paid"
 GROQ_ACCOUNT_ORDER: Tuple[str, ...] = (GROQ_FREE_ACCOUNT, GROQ_PAID_ACCOUNT)
 
-_provider_backoff_until: Dict[str, float] = {}
 _ai_provider_request_count: ContextVar[int] = ContextVar(
     "ai_provider_request_count", default=0
 )
@@ -472,8 +469,6 @@ def _get_ai_provider_request_count() -> int:
 
 
 def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
-    """Set or extend the backoff window for a provider."""
-
     if not provider:
         return
 
@@ -481,76 +476,30 @@ def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
     if duration == 0:
         return
 
-    provider_key = provider.lower()
-    new_until = time.time() + duration
-    current_until = _provider_backoff_until.get(provider_key, 0.0)
-    if new_until > current_until:
-        _provider_backoff_until[provider_key] = new_until
+    from api.provider_backoff import mark_provider_cooldown
+
+    mark_provider_cooldown(provider.lower(), float(duration))
 
 
 def get_provider_backoff_remaining(provider: str) -> float:
-    """Return seconds remaining on the provider backoff window."""
-
     if not provider:
         return 0.0
 
-    provider_key = provider.lower()
-    return max(0.0, _provider_backoff_until.get(provider_key, 0.0) - time.time())
+    from api.provider_backoff import get_provider_cooldown_remaining
+
+    remaining = get_provider_cooldown_remaining(provider.lower())
+    return remaining
 
 
 def is_provider_backoff_active(provider: str) -> bool:
-    """Check whether calls should be skipped for the provider due to rate limiting."""
+    from api.provider_backoff import is_provider_cooled_down
 
-    return get_provider_backoff_remaining(provider) > 0
+    return is_provider_cooled_down(provider.lower()) if provider else False
 
 
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
 HACKER_NEWS_MAX_ITEMS = 5
-
-TTL_RATE_GROQ_MINUTE = 120
-TTL_RATE_GROQ_HOUR = 2 * 60 * 60
-TTL_RATE_GROQ_DAY = 2 * 24 * 60 * 60
-
-GROQ_PAID_RATE_LIMITS = {
-    "chat": {
-        "rpm": 1000,
-        "rpd": 500_000,
-        "tpm": 250_000,
-    },
-    "vision": {
-        "rpm": 1000,
-        "rpd": 500_000,
-        "tpm": 300_000,
-    },
-    "transcribe": {
-        "rpm": 300,
-        "rpd": 200_000,
-        "ash": 200_000,
-        "asd": 4_000_000,
-    },
-}
-
-GROQ_FREE_RATE_LIMITS = {
-    "chat": {
-        "rpm": 60,
-        "rpd": 1_000,
-        "tpm": 10_000,
-        "tpd": 300_000,
-    },
-    "vision": {
-        "rpm": 30,
-        "rpd": 1_000,
-        "tpm": 30_000,
-        "tpd": 500_000,
-    },
-    "transcribe": {
-        "rpm": 20,
-        "rpd": 2_000,
-        "ash": 7_200,
-        "asd": 28_800,
-    },
-}
 
 
 def _get_groq_api_key(account: str) -> Optional[str]:
@@ -702,401 +651,6 @@ def _get_groq_accounts_for_scope() -> List[str]:
 
 def _get_groq_backoff_key(account: str, scope: str) -> str:
     return f"groq:{account}:{scope}".lower()
-
-
-def _groq_rate_limit_table(account: str) -> Dict[str, Dict[str, Any]]:
-    if account == GROQ_FREE_ACCOUNT:
-        return GROQ_FREE_RATE_LIMITS
-    return GROQ_PAID_RATE_LIMITS
-
-
-def _groq_rate_limit_minute_key(
-    account: str,
-    scope: str,
-    bucket: Optional[int] = None,
-) -> str:
-    minute_bucket = int(bucket if bucket is not None else time.time() // 60)
-    return f"rate_limit:groq:{account}:{scope}:minute:{minute_bucket}"
-
-
-def _groq_rate_limit_day_key(
-    account: str,
-    scope: str,
-    day_bucket: Optional[str] = None,
-) -> str:
-    utc_day = day_bucket or datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"rate_limit:groq:{account}:{scope}:day:{utc_day}"
-
-
-def _groq_rate_limit_metric_minute_key(
-    account: str,
-    scope: str,
-    metric: str,
-    bucket: Optional[int] = None,
-) -> str:
-    minute_bucket = int(bucket if bucket is not None else time.time() // 60)
-    return f"rate_limit:groq:{account}:{scope}:{metric}:minute:{minute_bucket}"
-
-
-def _groq_rate_limit_metric_hour_key(
-    account: str,
-    scope: str,
-    metric: str,
-    bucket: Optional[int] = None,
-) -> str:
-    hour_bucket = int(bucket if bucket is not None else time.time() // 3600)
-    return f"rate_limit:groq:{account}:{scope}:{metric}:hour:{hour_bucket}"
-
-
-def _groq_rate_limit_metric_day_key(
-    account: str,
-    scope: str,
-    metric: str,
-    day_bucket: Optional[str] = None,
-) -> str:
-    utc_day = day_bucket or datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"rate_limit:groq:{account}:{scope}:{metric}:day:{utc_day}"
-
-
-def _decode_rate_counter(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, (bytes, bytearray)):
-        value = value.decode("utf-8", errors="replace")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _get_groq_rate_limit_config(account: str, scope: str) -> Dict[str, Any]:
-    limit_table = _groq_rate_limit_table(account)
-    return dict(limit_table.get(scope, limit_table["chat"]))
-
-
-def _is_groq_scope_backoff_active(account: str, scope: str) -> bool:
-    return bool(scope) and is_provider_backoff_active(
-        _get_groq_backoff_key(account, scope)
-    )
-
-
-def _peek_groq_rate_limit(
-    account: str,
-    scope: str,
-    *,
-    request_count: int = 1,
-    token_count: int = 0,
-    audio_seconds: float = 0.0,
-    redis_client: Optional[redis.Redis] = None,
-) -> bool:
-    if _is_groq_scope_backoff_active(account, scope):
-        return False
-
-    redis_client = redis_client or _optional_redis_client()
-    if redis_client is None:
-        return True
-
-    config = _get_groq_rate_limit_config(account, scope)
-    try:
-        minute_count = _decode_rate_counter(
-            redis_client.get(_groq_rate_limit_minute_key(account, scope))
-        )
-        day_count = _decode_rate_counter(
-            redis_client.get(_groq_rate_limit_day_key(account, scope))
-        )
-        token_minute_count = 0
-        token_day_count = 0
-        if "tpm" in config and token_count > 0:
-            token_minute_count = _decode_rate_counter(
-                redis_client.get(
-                    _groq_rate_limit_metric_minute_key(account, scope, "tokens")
-                )
-            )
-        if "tpd" in config and token_count > 0:
-            token_day_count = _decode_rate_counter(
-                redis_client.get(
-                    _groq_rate_limit_metric_day_key(account, scope, "tokens")
-                )
-            )
-        audio_hour_count = 0
-        audio_day_count = 0
-        if "ash" in config and audio_seconds > 0:
-            audio_hour_count = _decode_rate_counter(
-                redis_client.get(
-                    _groq_rate_limit_metric_hour_key(account, scope, "audio_seconds")
-                )
-            )
-        if "asd" in config and audio_seconds > 0:
-            audio_day_count = _decode_rate_counter(
-                redis_client.get(
-                    _groq_rate_limit_metric_day_key(account, scope, "audio_seconds")
-                )
-            )
-    except redis.RedisError:
-        return True
-
-    if minute_count + max(0, int(request_count)) > int(config["rpm"]):
-        return False
-    if day_count + max(0, int(request_count)) > int(config["rpd"]):
-        return False
-    if "tpm" in config and token_minute_count + max(0, int(token_count)) > int(
-        config["tpm"]
-    ):
-        return False
-    if "tpd" in config and token_day_count + max(0, int(token_count)) > int(
-        config["tpd"]
-    ):
-        return False
-    if "ash" in config and audio_hour_count + max(0, int(round(audio_seconds))) > int(
-        config["ash"]
-    ):
-        return False
-    if "asd" in config and audio_day_count + max(0, int(round(audio_seconds))) > int(
-        config["asd"]
-    ):
-        return False
-    return True
-
-
-def _apply_rate_counter_delta(
-    redis_client: redis.Redis,
-    *,
-    key: str,
-    ttl_seconds: int,
-    delta: int,
-) -> int:
-    pipe = redis_client.pipeline()
-    pipe.incrby(key, int(delta))
-    pipe.expire(key, ttl_seconds, nx=True)
-    results = pipe.execute()
-    return _decode_rate_counter(results[0] if results else 0)
-
-
-def _build_groq_rate_limit_reservation(
-    *,
-    account: str,
-    scope: str,
-    request_count: int = 1,
-    token_count: int = 0,
-    audio_seconds: float = 0.0,
-) -> Dict[str, Any]:
-    return {
-        "account": account,
-        "scope": scope,
-        "request_count": max(0, int(request_count)),
-        "token_count": max(0, int(token_count)),
-        "audio_seconds": max(0, int(round(audio_seconds))),
-    }
-
-
-def _reserve_groq_rate_limit(
-    account: str,
-    scope: str,
-    *,
-    request_count: int = 1,
-    token_count: int = 0,
-    audio_seconds: float = 0.0,
-    redis_client: Optional[redis.Redis] = None,
-) -> Optional[Dict[str, Any]]:
-    if _is_groq_scope_backoff_active(account, scope):
-        return None
-
-    redis_client = redis_client or _optional_redis_client()
-    if redis_client is None:
-        return _build_groq_rate_limit_reservation(
-            account=account,
-            scope=scope,
-            request_count=request_count,
-            token_count=token_count,
-            audio_seconds=audio_seconds,
-        )
-
-    config = _get_groq_rate_limit_config(account, scope)
-    request_count = max(0, int(request_count))
-    token_count = max(0, int(token_count))
-    audio_seconds_int = max(0, int(round(audio_seconds)))
-
-    try:
-        minute_count = _apply_rate_counter_delta(
-            redis_client,
-            key=_groq_rate_limit_minute_key(account, scope),
-            ttl_seconds=TTL_RATE_GROQ_MINUTE,
-            delta=request_count,
-        )
-        day_count = _apply_rate_counter_delta(
-            redis_client,
-            key=_groq_rate_limit_day_key(account, scope),
-            ttl_seconds=TTL_RATE_GROQ_DAY,
-            delta=request_count,
-        )
-        token_minute_count = 0
-        token_day_count = 0
-        if token_count > 0:
-            token_minute_count = _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_minute_key(account, scope, "tokens"),
-                ttl_seconds=TTL_RATE_GROQ_MINUTE,
-                delta=token_count,
-            )
-            if "tpd" in config:
-                token_day_count = _apply_rate_counter_delta(
-                    redis_client,
-                    key=_groq_rate_limit_metric_day_key(account, scope, "tokens"),
-                    ttl_seconds=TTL_RATE_GROQ_DAY,
-                    delta=token_count,
-                )
-        audio_hour_count = 0
-        audio_day_count = 0
-        if audio_seconds_int > 0:
-            audio_hour_count = _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_hour_key(account, scope, "audio_seconds"),
-                ttl_seconds=TTL_RATE_GROQ_HOUR,
-                delta=audio_seconds_int,
-            )
-            audio_day_count = _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_day_key(account, scope, "audio_seconds"),
-                ttl_seconds=TTL_RATE_GROQ_DAY,
-                delta=audio_seconds_int,
-            )
-    except redis.RedisError:
-        return _build_groq_rate_limit_reservation(
-            account=account,
-            scope=scope,
-            request_count=request_count,
-            token_count=token_count,
-            audio_seconds=audio_seconds_int,
-        )
-
-    exceeded = (
-        minute_count > int(config["rpm"])
-        or day_count > int(config["rpd"])
-        or ("tpm" in config and token_minute_count > int(config["tpm"]))
-        or ("tpd" in config and token_day_count > int(config["tpd"]))
-        or ("ash" in config and audio_hour_count > int(config["ash"]))
-        or ("asd" in config and audio_day_count > int(config["asd"]))
-    )
-    if exceeded:
-        _reconcile_groq_rate_limit(
-            _build_groq_rate_limit_reservation(
-                account=account,
-                scope=scope,
-                request_count=request_count,
-                token_count=token_count,
-                audio_seconds=audio_seconds_int,
-            ),
-            actual_request_count=0,
-            actual_token_count=0,
-            actual_audio_seconds=0.0,
-            redis_client=redis_client,
-        )
-        return None
-
-    return _build_groq_rate_limit_reservation(
-        account=account,
-        scope=scope,
-        request_count=request_count,
-        token_count=token_count,
-        audio_seconds=audio_seconds_int,
-    )
-
-
-def _reconcile_groq_rate_limit(
-    reservation: Optional[Mapping[str, Any]],
-    *,
-    actual_request_count: int = 1,
-    actual_token_count: int = 0,
-    actual_audio_seconds: float = 0.0,
-    redis_client: Optional[redis.Redis] = None,
-) -> None:
-    if not reservation:
-        return
-
-    redis_client = redis_client or _optional_redis_client()
-    if redis_client is None:
-        return
-
-    account = str(reservation.get("account") or GROQ_PAID_ACCOUNT)
-    scope = str(reservation.get("scope") or "")
-    reserved_requests = max(0, int(reservation.get("request_count") or 0))
-    reserved_tokens = max(0, int(reservation.get("token_count") or 0))
-    reserved_audio = max(0, int(reservation.get("audio_seconds") or 0))
-    actual_requests = max(0, int(actual_request_count))
-    actual_tokens = max(0, int(actual_token_count))
-    actual_audio = max(0, int(round(actual_audio_seconds)))
-
-    request_delta = actual_requests - reserved_requests
-    token_delta = actual_tokens - reserved_tokens
-    audio_delta = actual_audio - reserved_audio
-
-    try:
-        if request_delta != 0:
-            _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_minute_key(account, scope),
-                ttl_seconds=TTL_RATE_GROQ_MINUTE,
-                delta=request_delta,
-            )
-            _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_day_key(account, scope),
-                ttl_seconds=TTL_RATE_GROQ_DAY,
-                delta=request_delta,
-            )
-        if token_delta != 0:
-            config = _get_groq_rate_limit_config(account, scope)
-            _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_minute_key(account, scope, "tokens"),
-                ttl_seconds=TTL_RATE_GROQ_MINUTE,
-                delta=token_delta,
-            )
-            if "tpd" in config:
-                _apply_rate_counter_delta(
-                    redis_client,
-                    key=_groq_rate_limit_metric_day_key(account, scope, "tokens"),
-                    ttl_seconds=TTL_RATE_GROQ_DAY,
-                    delta=token_delta,
-                )
-        if audio_delta != 0:
-            _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_hour_key(account, scope, "audio_seconds"),
-                ttl_seconds=TTL_RATE_GROQ_HOUR,
-                delta=audio_delta,
-            )
-            _apply_rate_counter_delta(
-                redis_client,
-                key=_groq_rate_limit_metric_day_key(account, scope, "audio_seconds"),
-                ttl_seconds=TTL_RATE_GROQ_DAY,
-                delta=audio_delta,
-            )
-    except redis.RedisError:
-        return
-
-
-def _extract_groq_usage_token_count(usage: Optional[Mapping[str, Any]]) -> int:
-    usage_map = ensure_mapping(usage) or {}
-    try:
-        input_tokens = int(
-            usage_map.get("input_tokens") or usage_map.get("prompt_tokens") or 0
-        )
-    except (TypeError, ValueError):
-        input_tokens = 0
-    try:
-        output_tokens = int(
-            usage_map.get("output_tokens") or usage_map.get("completion_tokens") or 0
-        )
-    except (TypeError, ValueError):
-        output_tokens = 0
-    return max(0, input_tokens) + max(0, output_tokens)
-
-
-def _extract_result_token_count(result: Optional[AIUsageResult]) -> int:
-    if result is None:
-        return 0
-    return _extract_groq_usage_token_count(result.usage)
 
 
 def _extract_error_headers(error: Exception) -> Dict[str, str]:
@@ -3866,14 +3420,18 @@ def _invoke_provider(
     except Exception as error:
         print(f"{display_name} error: {error}")
         if _is_rate_limit_error(error):
+            backoff_seconds = _extract_rate_limit_backoff_seconds(
+                error, rate_limit_backoff or GROQ_BACKOFF_DEFAULT_SECONDS
+            )
             _set_provider_backoff(
                 normalized_backoff_key or provider_name,
-                _extract_rate_limit_backoff_seconds(error, rate_limit_backoff),
+                backoff_seconds,
             )
             remaining = int(
                 get_provider_backoff_remaining(normalized_backoff_key or provider_name)
             )
             print(f"{display_name} rate limit detected; backing off for {remaining}s")
+        return None
         return None
 
 
@@ -4020,10 +3578,6 @@ def estimate_ai_base_reserve_credits(
             f"estimate_ai_base_reserve_credits: failed to build system message: {error}"
         )
 
-    estimated_rate_limit_tokens = estimate_message_tokens(messages) + extra_input_tokens
-    if system_message:
-        estimated_rate_limit_tokens += estimate_message_tokens([system_message])
-    estimated_rate_limit_tokens += CHAT_OUTPUT_TOKEN_LIMIT
     reserve = estimate_chat_reserve_credits(
         system_message=system_message,
         messages=messages,
@@ -4032,10 +3586,7 @@ def estimate_ai_base_reserve_credits(
         reasoning=True,
     )
 
-    return reserve, {
-        "rate_limit_scope": "chat",
-        "estimated_rate_limit_tokens": estimated_rate_limit_tokens,
-    }
+    return reserve, {}
 
 
 def estimate_image_context_reserve_credits(image_data: bytes, prompt_text: str) -> int:
@@ -4675,36 +4226,26 @@ def should_auto_process_media(
     )
 
 
-def check_global_rate_limit(
-    redis_client: Optional[redis.Redis],
-    *,
-    scope: str = "chat",
-    request_count: int = 1,
-    token_count: int = 0,
-    audio_seconds: float = 0.0,
-) -> bool:
-    """Check whether a Groq scope still has local budget available."""
+def check_provider_available(scope: str) -> bool:
+    """Check whether at least one Groq account for the scope is not in cooldown.
+
+    Always returns True if no Groq accounts are configured (allowing the call
+    to proceed so OpenRouter or other fallbacks can handle it). Returns True
+    even when all accounts are in cooldown — cooldown is advisory and the
+    provider might accept the request after all.
+    """
 
     configured_accounts = _get_groq_accounts_for_scope()
     if not configured_accounts:
         return True
 
     for account in configured_accounts:
-        if _peek_groq_rate_limit(
-            account,
-            scope,
-            request_count=request_count,
-            token_count=token_count,
-            audio_seconds=audio_seconds,
-            redis_client=redis_client,
-        ):
+        if not is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
             return True
-    return False
+    return True
 
 
-def should_allow_openrouter_fallback(scope: str) -> bool:
-    if scope not in {"chat", "vision"}:
-        return False
+def has_openrouter_fallback() -> bool:
     return _get_openrouter_api_key() is not None
 
 
@@ -4958,29 +4499,9 @@ def _execute_groq_request_with_fallback(
         print("Groq API key not configured")
         return None
 
-    for index, account in enumerate(configured_accounts):
-        remaining_accounts = configured_accounts[index + 1 :]
-        has_paid_fallback = GROQ_PAID_ACCOUNT in remaining_accounts
-        reservation = _reserve_groq_rate_limit(
-            account,
-            scope,
-            token_count=token_count,
-            audio_seconds=audio_seconds,
-        )
-        if reservation is None:
-            print(
-                f"{label} local rate limit reached for account={account} scope={scope}, skipping API call"
-            )
-            continue
-
+    for account in configured_accounts:
         groq_client = _get_groq_client(account, default_headers=default_headers)
         if groq_client is None:
-            _reconcile_groq_rate_limit(
-                reservation,
-                actual_request_count=0,
-                actual_token_count=0,
-                actual_audio_seconds=0.0,
-            )
             continue
 
         last_error: Optional[Exception] = None
@@ -4999,7 +4520,7 @@ def _execute_groq_request_with_fallback(
             _invoke_provider(
                 "groq",
                 attempt=_wrapped_attempt,
-                rate_limit_backoff=GROQ_RATE_LIMIT_BACKOFF_SECONDS,
+                rate_limit_backoff=GROQ_BACKOFF_DEFAULT_SECONDS,
                 label=f"{label} ({account})",
                 backoff_key=_get_groq_backoff_key(account, scope),
             ),
@@ -5009,14 +4530,6 @@ def _execute_groq_request_with_fallback(
             result.metadata.setdefault(
                 "request_elapsed_seconds", request_elapsed_seconds
             )
-        _reconcile_groq_rate_limit(
-            reservation,
-            actual_request_count=1 if result else 0,
-            actual_token_count=_extract_result_token_count(result),
-            actual_audio_seconds=result.audio_seconds
-            if result and result.audio_seconds
-            else 0.0,
-        )
         _log_groq_request_result(
             label=label,
             scope=scope,
@@ -6042,8 +5555,8 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         format_balance_command=_message_handler_format_balance_command,
         handle_transcribe_with_message=handle_transcribe_with_message,
         handle_transcribe_with_message_result=handle_transcribe_with_message_result,
-        check_global_rate_limit=check_global_rate_limit,
-        should_allow_openrouter_fallback=should_allow_openrouter_fallback,
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=has_openrouter_fallback,
         handle_rate_limit=handle_rate_limit,
         handle_successful_payment_message=handle_successful_payment_message,
         handle_config_command=handle_config_command,
@@ -6052,7 +5565,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         handle_transcribe=handle_transcribe,
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
-        estimate_image_context_rate_limit_tokens=estimate_image_context_rate_limit_tokens,
         _transcribe_audio_file=_transcribe_audio_file,
         _transcription_error_message=_transcription_error_message,
         download_telegram_file=download_telegram_file,

@@ -401,7 +401,7 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     with (
         patch("api.index.config_redis", return_value=redis_client),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -450,7 +450,7 @@ def test_handle_msg_refunds_all_charges_when_fallback_after_multiple_provider_re
     with (
         patch("api.index.config_redis", return_value=redis_client),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -489,7 +489,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     with (
         patch("api.index.config_redis", return_value=redis_client),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -604,7 +604,7 @@ def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
     with (
         patch("api.index.config_redis", return_value=redis_client),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=False),
+        patch("api.index.check_provider_available", return_value=False),
         patch("api.index.handle_rate_limit", return_value="tranqui"),
         patch("api.index.credits_db_service.charge_ai_credits") as mock_charge,
         patch("api.index.send_msg", return_value=999) as mock_send,
@@ -633,7 +633,7 @@ def test_handle_msg():
         patch("api.index.ask_ai") as mock_ask_ai,
         patch("api.index.send_typing") as mock_send_typing,
         patch(
-            "api.index.check_global_rate_limit", side_effect=[True, False]
+            "api.index.check_provider_available", side_effect=[True, False]
         ) as mock_global_rate_limit,
         patch("api.index.admin_report"),
         patch("api.index.credits_db_service.is_configured", return_value=True),
@@ -700,7 +700,7 @@ def test_handle_msg_with_crypto_command():
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("os.environ.get") as mock_env,
-        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch("api.index.check_provider_available") as mock_rate_limit,
         patch("api.index.get_prices") as mock_get_prices,
     ):
         mock_env.return_value = "testbot"
@@ -745,7 +745,7 @@ def test_handle_msg_with_image():
         patch("api.index.cached_requests") as mock_requests,
         patch("api.index.send_typing") as mock_send_typing,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
             return_value={"ok": True, "source": "user"},
@@ -776,7 +776,6 @@ def test_handle_msg_with_image():
         result = handle_msg(message)
         assert result == "ok"
         mock_download.assert_called_once()
-        mock_encode.assert_called_once()
         mock_send_msg.assert_called_once()
         mock_send_typing.assert_called()
 
@@ -790,7 +789,7 @@ def test_handle_msg_with_audio():
         patch("os.environ.get") as mock_env,
         patch("api.index._transcribe_audio_file") as mock_transcribe,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
             return_value={"ok": True, "source": "user"},
@@ -933,7 +932,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits():
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("os.environ.get") as mock_env,
-        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch("api.index.check_provider_available") as mock_rate_limit,
         patch(
             "api.index.handle_transcribe_with_message_result"
         ) as mock_handle_transcribe,
@@ -1260,7 +1259,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests():
         ),
         patch("api.index.should_gordo_respond", return_value=True),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1310,7 +1309,7 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits():
         patch("api.index.encode_image_to_base64", return_value="abc"),
         patch("api.index.should_gordo_respond", return_value=True),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1387,7 +1386,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
         patch("api.index.encode_image_to_base64", return_value="abc"),
         patch("api.index.should_gordo_respond", return_value=True),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1449,7 +1448,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch():
         patch("api.index.encode_image_to_base64", return_value="abc"),
         patch("api.index.should_gordo_respond", return_value=True),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1515,7 +1514,7 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
         patch("api.index.get_bot_message_metadata", return_value=None),
         patch("api.index.send_msg") as mock_send_msg,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1585,7 +1584,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1624,8 +1623,8 @@ def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_bloc
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=False),
-        patch("api.index.should_allow_openrouter_fallback", return_value=True),
+        patch("api.index.check_provider_available", return_value=False),
+        patch("api.index.has_openrouter_fallback", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1703,7 +1702,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments():
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index._maybe_grant_onboarding_credits"),
         patch(
             "api.index.credits_db_service.charge_ai_credits",
@@ -1795,11 +1794,10 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
     deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
     deps.estimate_ai_base_reserve_credits.return_value = (
         1,
-        {"rate_limit_scope": "chat", "estimated_rate_limit_tokens": 1},
+        {},
     )
-    deps.check_global_rate_limit.return_value = False
-    deps.should_allow_openrouter_fallback.return_value = True
-    deps.estimate_image_context_rate_limit_tokens.return_value = 1
+    deps.check_provider_available.return_value = False
+    deps.has_openrouter_fallback.return_value = True
     deps.estimate_image_context_reserve_credits.return_value = 1
     deps.handle_ai_response.return_value = "respuesta ok"
 
@@ -1849,11 +1847,10 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
     deps.estimate_ai_base_reserve_credits.return_value = (
         1,
-        {"rate_limit_scope": "chat", "estimated_rate_limit_tokens": 1},
+        {},
     )
-    deps.check_global_rate_limit.return_value = False
-    deps.should_allow_openrouter_fallback.return_value = True
-    deps.estimate_image_context_rate_limit_tokens.return_value = 1
+    deps.check_provider_available.return_value = False
+    deps.has_openrouter_fallback.return_value = True
     deps.estimate_image_context_reserve_credits.return_value = 1
     deps.handle_ai_response.return_value = "🖼️ en la imagen veo: todo piola"
 
@@ -1901,7 +1898,7 @@ def test_handle_msg_with_unknown_command():
         patch("api.index.config_redis") as mock_config_redis,
         patch("api.index.send_msg") as mock_send_msg,
         patch("os.environ.get") as mock_env,
-        patch("api.index.check_global_rate_limit") as mock_rate_limit,
+        patch("api.index.check_provider_available") as mock_rate_limit,
         patch("api.index.should_gordo_respond") as mock_should_respond,
     ):
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)
@@ -1960,7 +1957,7 @@ def test_handle_msg_edge_cases():
         patch("api.index.admin_report") as mock_admin_report,
         patch("api.index.ask_ai") as mock_ask_ai,
         patch("api.index.should_gordo_respond") as mock_should_respond,
-        patch("api.index.check_global_rate_limit", return_value=True),
+        patch("api.index.check_provider_available", return_value=True),
         patch("api.index.credits_db_service.is_configured", return_value=True),
         patch(
             "api.index.credits_db_service.charge_ai_credits",

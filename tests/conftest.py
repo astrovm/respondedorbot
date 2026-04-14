@@ -5,6 +5,7 @@ import redis as redis_module
 
 from api import config as config_module
 from api import index as index_module
+from api.provider_backoff import clear_all_cooldowns
 from api.services import bcra as bcra_service
 
 
@@ -31,7 +32,7 @@ def cleanup_test_artifacts():
 @pytest.fixture(autouse=True)
 def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
-    index_module._provider_backoff_until.clear()
+    clear_all_cooldowns()
     monkeypatch.setattr(
         index_module.chat_config_db_service,
         "is_configured",
