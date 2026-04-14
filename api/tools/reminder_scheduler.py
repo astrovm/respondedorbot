@@ -1,6 +1,6 @@
 """Reminder scheduler using APScheduler with Redis job store.
 
-Manages per-chat reminders that fire and send messages via the bot.
+Manages per-chat reminders and recurring scheduled tasks.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 _scheduler_instance: Optional[Any] = None
 
 REMINDER_REDIS_PREFIX = "reminder:data:"
+TASK_REDIS_PREFIX = "task:data:"
 
 
 def _get_redis_url() -> str:
@@ -118,6 +119,54 @@ def _fire_reminder(reminder_id: str) -> None:
             pass
 
 
+def _fire_scheduled_task(task_id: str) -> None:
+    redis_client = _get_redis()
+    if redis_client is None:
+        print(f"scheduled_task: no redis, cannot fire {task_id}")
+        return
+
+    key = f"{TASK_REDIS_PREFIX}{task_id}"
+    raw = redis_client.get(key)
+    if not raw:
+        print(f"scheduled_task: no data for {task_id}")
+        return
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    chat_id = str(data.get("chat_id", ""))
+    prompt = str(data.get("prompt", ""))
+    user_name = str(data.get("user_name", ""))
+
+    if not chat_id or not prompt:
+        return
+
+    try:
+        from api.index import ask_ai, send_msg
+
+        messages = [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ]
+        response = ask_ai(
+            messages,
+            response_meta={},
+            enable_web_search=True,
+            chat_id=chat_id,
+            user_name=user_name,
+        )
+        if response:
+            display = f"@{user_name}" if user_name else "che"
+            msg = f"{display}, tarea programada: {response}"
+            send_msg(chat_id, msg)
+    except Exception as e:
+        print(f"scheduled_task: failed to execute {task_id}: {e}")
+
+
 def schedule_reminder(
     chat_id: str,
     text: str,
@@ -200,6 +249,171 @@ def list_reminders(chat_id: str) -> List[Dict[str, Any]]:
         print(f"list_reminders error: {e}")
 
     return results
+
+
+def schedule_recurring_task(
+    chat_id: str,
+    prompt: str,
+    interval_seconds: int,
+    user_name: str = "",
+) -> Optional[str]:
+    if interval_seconds < 300:
+        return None
+    if interval_seconds > 86400 * 7:
+        return None
+
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return None
+
+    task_id = str(uuid.uuid4())[:8]
+
+    redis_client = _get_redis()
+    if redis_client is not None:
+        key = f"{TASK_REDIS_PREFIX}{task_id}"
+        data = json.dumps(
+            {
+                "id": task_id,
+                "chat_id": str(chat_id),
+                "prompt": prompt,
+                "user_name": user_name,
+                "interval_seconds": interval_seconds,
+            }
+        )
+        redis_client.setex(key, 86400 * 90, data)
+
+    scheduler.add_job(
+        _fire_scheduled_task,
+        "interval",
+        seconds=interval_seconds,
+        id=f"task_{task_id}",
+        args=[task_id],
+        replace_existing=True,
+    )
+
+    return task_id
+
+
+def list_scheduled_tasks(chat_id: str) -> List[Dict[str, Any]]:
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return []
+
+    redis_client = _get_redis()
+    if redis_client is None:
+        return []
+
+    results = []
+    prefix = f"{TASK_REDIS_PREFIX}"
+    try:
+        for key_bytes in redis_client.scan_iter(f"{prefix}*"):
+            key = key_bytes if isinstance(key_bytes, str) else key_bytes.decode("utf-8")
+            raw = redis_client.get(key)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if str(data.get("chat_id")) != str(chat_id):
+                continue
+
+            task_id = data.get("id", "")
+            job_id = f"task_{task_id}"
+            try:
+                job = scheduler.get_job(job_id)
+            except Exception:
+                job = None
+            if job is None:
+                continue
+
+            next_run = job.next_run_time
+            interval = data.get("interval_seconds", 0)
+            results.append(
+                {
+                    "id": task_id,
+                    "prompt": data.get("prompt", ""),
+                    "user_name": data.get("user_name", ""),
+                    "interval_seconds": interval,
+                    "next_run": str(next_run) if next_run else "unknown",
+                }
+            )
+    except Exception as e:
+        print(f"list_scheduled_tasks error: {e}")
+
+    return results
+
+
+def cancel_scheduled_task(task_id: str) -> bool:
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return False
+
+    try:
+        scheduler.remove_job(f"task_{task_id}")
+    except Exception:
+        pass
+
+    redis_client = _get_redis()
+    if redis_client is not None:
+        try:
+            redis_client.delete(f"{TASK_REDIS_PREFIX}{task_id}")
+        except Exception:
+            pass
+
+    return True
+
+
+def parse_interval(text: str) -> Optional[int]:
+    """Parse a natural language interval string into seconds.
+
+    Supports: 'cada 30 min', 'every 2 hours', 'diario', 'semanal',
+    'todas las horas', 'cada 6 horas', etc.
+    """
+    import re
+
+    text = text.lower().strip()
+    if not text:
+        return None
+
+    if text in (
+        "diario",
+        "daily",
+        "cada dia",
+        "todos los dias",
+        "todos los días",
+        "cada día",
+        "cada 1 dia",
+        "cada 1 día",
+    ):
+        return 86400
+
+    if text in ("semanal", "weekly", "cada semana", "todas las semanas"):
+        return 86400 * 7
+
+    if text in ("cada hora", "hourly", "todas las horas", "cada 1 hora"):
+        return 3600
+
+    patterns = [
+        (r"(\d+)\s*(?:dia|dias|días|día)\b", 86400),
+        (r"(\d+)\s*(?:hora|horas|h)\b", 3600),
+        (r"(\d+)\s*(?:minuto|minutos|min|m)\b", 60),
+    ]
+
+    total = 0
+    matched = False
+    for pattern, multiplier in patterns:
+        for match in re.finditer(pattern, text):
+            try:
+                total += int(match.group(1)) * multiplier
+                matched = True
+            except (ValueError, TypeError):
+                pass
+
+    if matched and total > 0:
+        return total
+
+    return None
 
 
 def parse_delay(text: str) -> Optional[int]:

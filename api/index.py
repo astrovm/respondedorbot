@@ -109,6 +109,8 @@ import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.reminder_set
 import api.tools.reminder_list
+import api.tools.scheduled_task_set
+import api.tools.scheduled_task_list
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -2234,6 +2236,50 @@ def convert_to_command(msg_text: str) -> str:
     return command
 
 
+def recordame_command(msg_text: str, chat_id: str = "", user_name: str = "") -> str:
+    if not msg_text.strip():
+        return "decime que te acuerdo y cuando, ej: /recordame comprar pizza en 30 min"
+
+    from api.tools.reminder_scheduler import parse_delay, schedule_reminder
+
+    parts = msg_text.strip().rsplit(None, 1)
+    if len(parts) < 2:
+        return "no entendi el tiempo, ponelo al final, ej: /recordame comprar pizza en 30 min"
+
+    delay_str = parts[-1]
+    text = parts[0] if len(parts) == 2 else " ".join(parts[:-1])
+
+    delay_seconds = parse_delay(delay_str)
+    if delay_seconds is None:
+        delay_str = " ".join(parts[-2:])
+        text = " ".join(parts[:-2]) if len(parts) > 2 else parts[0]
+        delay_seconds = parse_delay(delay_str)
+        if delay_seconds is None:
+            return (
+                f"no entendi el tiempo en '{msg_text}', "
+                "proba: /recordame comprar pizza en 30 min"
+            )
+
+    if not chat_id:
+        return "no se en que chat estoy, no puedo crear el recordatorio"
+
+    reminder_id = schedule_reminder(chat_id, text, delay_seconds, user_name)
+    if reminder_id is None:
+        return "no se pudo crear el recordatorio"
+
+    minutes = delay_seconds // 60
+    if minutes < 60:
+        time_desc = f"{minutes} minuto{'s' if minutes != 1 else ''}"
+    elif minutes < 1440:
+        hours = minutes // 60
+        time_desc = f"{hours} hora{'s' if hours != 1 else ''}"
+    else:
+        days = minutes // 1440
+        time_desc = f"{days} dia{'s' if days != 1 else ''}"
+
+    return f"listo, te acuerdo en {time_desc}: {text}"
+
+
 def get_help() -> str:
     return """
 esto es lo que sé hacer, boludo:
@@ -2291,6 +2337,8 @@ esto es lo que sé hacer, boludo:
 
 - /gm: te mando un gif de buenos días random
 - /gn: te mando un gif de buenas noches random
+
+- /recordame, /remindme algo en 30 min: te acuerdo cuando me pediste
 """
 
 
@@ -3696,6 +3744,15 @@ def _get_openrouter_ai_response_result(
             response = client.chat.completions.create(**request_kwargs)
         except Exception as e:
             print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
+            admin_report(
+                f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
+                e,
+                {
+                    "finish_reason": "error",
+                    "enable_web_search": enable_web_search,
+                    "tool_round": round_idx,
+                },
+            )
             return None
 
         if not response or not hasattr(response, "choices") or not response.choices:
@@ -3787,67 +3844,6 @@ def _get_openrouter_ai_response_result(
         print(
             f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
         )
-        break
-
-    return None
-
-    print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
-    _increment_ai_provider_request_count()
-    try:
-        request_kwargs: Dict[str, Any] = {
-            "model": PRIMARY_CHAT_MODEL,
-            "messages": cast(Any, [system_msg] + messages),
-            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-        }
-        reasoning_effort = "low" if enable_web_search else "none"
-        request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
-        if enable_web_search:
-            request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
-        response = client.chat.completions.create(**request_kwargs)
-    except Exception as e:
-        print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
-        admin_report(
-            f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
-            e,
-            {"finish_reason": "error", "enable_web_search": enable_web_search},
-        )
-        return None
-
-    if response and hasattr(response, "choices") and response.choices:
-        finish_reason = response.choices[0].finish_reason
-        if finish_reason == "stop":
-            metadata: Dict[str, Any] = {"provider": "openrouter"}
-            message = response.choices[0].message
-            usage_map = _extract_groq_usage_map(response) or {}
-            server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
-            web_search_requests = server_tool_use.get("web_search_requests")
-            if web_search_requests is not None:
-                try:
-                    metadata["web_search_requests"] = int(web_search_requests)
-                except (TypeError, ValueError):
-                    pass
-            if "web_search_requests" not in metadata:
-                annotations = getattr(message, "annotations", None) or []
-                has_url_citation = any(
-                    getattr(ann, "type", None) == "url_citation"
-                    or (
-                        isinstance(ann, Mapping)
-                        and str(ann.get("type") or "") == "url_citation"
-                    )
-                    for ann in annotations
-                )
-                if has_url_citation:
-                    metadata["web_search_requests"] = 1
-            return _build_groq_usage_result(
-                kind="chat",
-                text=str(message.content or ""),
-                model=PRIMARY_CHAT_MODEL,
-                response=response,
-                metadata=metadata,
-            )
-        print(
-            f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
-        )
         admin_report(
             f"OpenRouter unexpected finish_reason={finish_reason!r}",
             extra_context={
@@ -3855,6 +3851,8 @@ def _get_openrouter_ai_response_result(
                 "enable_web_search": enable_web_search,
             },
         )
+        break
+
     return None
 
 
@@ -3976,9 +3974,12 @@ def build_system_message(
             "- web_fetch: obtener contenido de una URL\n"
             "- reminder_set: crear un recordatorio (el usuario te dice cuando)\n"
             "- reminder_list: listar recordatorios pendientes\n"
+            "- scheduled_task_set: crear una tarea recurrente (ej: noticias cada dia)\n"
+            "- scheduled_task_list: listar tareas recurrentes\n"
             "\n"
             "Cuando uses herramientas, podes responder con mas de una frase para dar informacion util.\n"
             "Si el usuario pide un recordatorio, usa reminder_set. Si pregunta precios, usa price_lookup.\n"
+            "Si el usuario pide algo recurrente (ej: 'mandame noticias cada dia', 'todos los dias X'), usa scheduled_task_set.\n"
             "Si pregunta por el dolar, usa dollar_lookup.\n"
         )
 
@@ -4299,6 +4300,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
+            "recordame_command": recordame_command,
         }
     )
 

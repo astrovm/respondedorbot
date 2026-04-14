@@ -1216,6 +1216,12 @@ def _handle_non_ai_command(
             return None, None, False, command
         return gif_url, None, False, command
 
+    if command in ("/recordame", "/remindme"):
+        from_user = message.get("from") or {}
+        user_name = str(from_user.get("username", ""))
+        response_msg = handler_func(sanitized_message_text, chat_id, user_name)
+        return response_msg, None, False, command
+
     response_msg = (
         handler_func(sanitized_message_text) if takes_params else handler_func()
     )

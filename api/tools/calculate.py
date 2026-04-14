@@ -13,7 +13,6 @@ _SAFE_NODES = (
     ast.BinOp,
     ast.UnaryOp,
     ast.Constant,
-    ast.Num,
     ast.Add,
     ast.Sub,
     ast.Mult,
@@ -23,7 +22,6 @@ _SAFE_NODES = (
     ast.Pow,
     ast.USub,
     ast.UAdd,
-    ast.Paren,
 )
 
 

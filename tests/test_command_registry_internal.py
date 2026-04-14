@@ -33,6 +33,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "transfer_command": prices,
             "get_good_morning": lambda: "gm",
             "get_good_night": lambda: "gn",
+            "recordame_command": prices,
         }
     )
 

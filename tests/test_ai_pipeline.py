@@ -134,7 +134,7 @@ def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests()
 
     assert result is not None
     assert result.text == "respuesta final"
-    assert result.metadata == {"provider": "openrouter"}
+    assert result.metadata["provider"] == "openrouter"
 
 
 def test_get_openrouter_ai_response_result_server_tool_use_takes_priority():
@@ -481,7 +481,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
     reserve, metadata = estimate_ai_base_reserve_credits(
@@ -502,7 +502,7 @@ def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatc
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
     reserve_without_reasoning = estimate_chat_reserve_credits(
@@ -527,7 +527,7 @@ def test_ask_ai_fetches_url_unconditionally(monkeypatch):
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
     captured = {}
@@ -564,7 +564,7 @@ def test_ask_ai_fetches_multiple_urls(monkeypatch):
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
     fetched_urls = []
@@ -603,7 +603,7 @@ def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
     monkeypatch.setattr(
         "api.index.fetch_url_content",
@@ -638,7 +638,7 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
-        lambda _context_data: {"role": "system", "content": "sys"},
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
     monkeypatch.setattr(
         "api.index.fetch_url_content",
