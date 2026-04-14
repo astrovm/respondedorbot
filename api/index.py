@@ -103,6 +103,12 @@ from api.ai_pricing import (
     ensure_mapping,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
+import api.tools.price_lookup
+import api.tools.dollar_lookup
+import api.tools.calculate
+import api.tools.web_fetch
+import api.tools.reminder_set
+import api.tools.reminder_list
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -2837,11 +2843,12 @@ def ask_ai(
     image_file_id: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
     enable_web_search: bool = True,
+    chat_id: Optional[str] = None,
+    user_name: Optional[str] = None,
 ) -> str:
     try:
         messages = list(messages or [])
 
-        # Build context with market and weather data
         context_data = {
             "market": get_market_context(),
             "weather": get_weather_context(),
@@ -2849,16 +2856,28 @@ def ask_ai(
             "hacker_news": get_hacker_news_context(),
         }
 
-        system_message = build_system_message(context_data)
+        from api.tools import get_all_tool_schemas
 
-        # If we have an image, first describe it with the vision model then continue normal flow
+        extra_tools = get_all_tool_schemas()
+        tool_context: Dict[str, Any] = {
+            "get_prices": get_prices,
+            "get_dollar_rates": get_dollar_rates,
+        }
+        if chat_id:
+            tool_context["chat_id"] = chat_id
+        if user_name:
+            tool_context["user_name"] = user_name
+
+        system_message = build_system_message(
+            context_data,
+            tools_active=bool(extra_tools),
+        )
+
         if image_data:
             print("Processing image with Groq vision model...")
 
-            # Always use a description prompt for the vision model, not the user's question
             user_text = "Describe what you see in this image in detail."
 
-            # Describe the image using Groq
             image_result = _describe_image_groq_result(
                 image_data, user_text, image_file_id
             )
@@ -2866,10 +2885,8 @@ def ask_ai(
 
             if image_description:
                 _append_billing_segment(response_meta, image_result)
-                # Add image description to the conversation context
                 image_context = f"[Imagen: {image_description}]"
 
-                # Modify the last message to include the image description
                 if messages:
                     last_message = messages[-1]
                     if isinstance(last_message.get("content"), str):
@@ -2894,6 +2911,8 @@ def ask_ai(
             messages,
             response_meta=response_meta,
             enable_web_search=enable_web_search,
+            extra_tools=extra_tools or None,
+            tool_context=tool_context,
         )
         response = str(response or "")
         if response:
@@ -2919,6 +2938,8 @@ def complete_with_providers(
     *,
     response_meta: Optional[Dict[str, Any]] = None,
     enable_web_search: bool = True,
+    extra_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Try OpenRouter chat models and return the first response."""
 
@@ -2926,6 +2947,8 @@ def complete_with_providers(
         system_message,
         messages,
         enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
     )
     if result:
         if response_meta is not None:
@@ -3633,15 +3656,140 @@ def _build_groq_usage_result(
     )
 
 
+_MAX_TOOL_ROUNDS = 5
+
+
 def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any],
     messages: List[Dict[str, Any]],
     *,
     enable_web_search: bool = True,
+    extra_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[AIUsageResult]:
     client = _get_openrouter_client()
     if client is None:
         return None
+
+    print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
+    _increment_ai_provider_request_count()
+
+    current_messages = list(messages)
+    for round_idx in range(_MAX_TOOL_ROUNDS):
+        try:
+            request_kwargs: Dict[str, Any] = {
+                "model": PRIMARY_CHAT_MODEL,
+                "messages": cast(Any, [system_msg] + current_messages),
+                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+            }
+            reasoning_effort = "low" if enable_web_search else "none"
+            request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
+
+            tools_list: List[Dict[str, Any]] = []
+            if enable_web_search:
+                tools_list.append(_build_openrouter_web_search_tool())
+            if extra_tools:
+                tools_list.extend(extra_tools)
+            if tools_list:
+                request_kwargs["tools"] = tools_list
+
+            response = client.chat.completions.create(**request_kwargs)
+        except Exception as e:
+            print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
+            return None
+
+        if not response or not hasattr(response, "choices") or not response.choices:
+            return None
+
+        choice = response.choices[0]
+        finish_reason = choice.finish_reason
+
+        if finish_reason == "tool_calls" and extra_tools:
+            message = choice.message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            assistant_msg: Dict[str, Any] = {"role": "assistant"}
+            if message.content:
+                assistant_msg["content"] = str(message.content)
+            assistant_msg["tool_calls"] = []
+            current_messages.append(assistant_msg)
+
+            from api.tools.registry import execute_tool, parse_tool_call_arguments
+
+            for tc in tool_calls:
+                tc_id = getattr(tc, "id", "") or ""
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                tool_name = getattr(fn, "name", "")
+                raw_args = getattr(fn, "arguments", "{}")
+                tool_params = parse_tool_call_arguments(raw_args)
+
+                print(f"Tool call: {tool_name}({tool_params})")
+                result = execute_tool(tool_name, tool_params, tool_context or {})
+                print(f"Tool result: {result.output[:200]}")
+
+                assistant_msg["tool_calls"].append(
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": raw_args,
+                        },
+                    }
+                )
+                current_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result.output,
+                    }
+                )
+
+            _increment_ai_provider_request_count()
+            continue
+
+        if finish_reason == "stop":
+            metadata: Dict[str, Any] = {"provider": "openrouter"}
+            message = choice.message
+            usage_map = _extract_groq_usage_map(response) or {}
+            server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
+            web_search_requests = server_tool_use.get("web_search_requests")
+            if web_search_requests is not None:
+                try:
+                    metadata["web_search_requests"] = int(web_search_requests)
+                except (TypeError, ValueError):
+                    pass
+            if "web_search_requests" not in metadata:
+                annotations = getattr(message, "annotations", None) or []
+                has_url_citation = any(
+                    getattr(ann, "type", None) == "url_citation"
+                    or (
+                        isinstance(ann, Mapping)
+                        and str(ann.get("type") or "") == "url_citation"
+                    )
+                    for ann in annotations
+                )
+                if has_url_citation:
+                    metadata["web_search_requests"] = 1
+            metadata["tool_rounds"] = round_idx + 1
+            return _build_groq_usage_result(
+                kind="chat",
+                text=str(message.content or ""),
+                model=PRIMARY_CHAT_MODEL,
+                response=response,
+                metadata=metadata,
+            )
+
+        print(
+            f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
+        )
+        break
+
+    return None
 
     print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
     _increment_ai_provider_request_count()
@@ -3789,7 +3937,11 @@ def get_weather_description(code: int) -> str:
     return descriptions.get(code, "clima raro")
 
 
-def build_system_message(context: Dict) -> Dict[str, Any]:
+def build_system_message(
+    context: Dict,
+    *,
+    tools_active: bool = False,
+) -> Dict[str, Any]:
     """Build system message with personality and context."""
     config = load_bot_config()
     market_info = format_market_info(context.get("market") or {})
@@ -3799,8 +3951,24 @@ def build_system_message(context: Dict) -> Dict[str, Any]:
     time_context = context.get("time") or {}
     formatted_time = str(time_context.get("formatted", "")).strip()
 
-    # Build the complete system prompt with context
     base_prompt = config.get("system_prompt", "")
+
+    tool_instruction = ""
+    if tools_active:
+        tool_instruction = (
+            "\n\nHERRAMIENTAS DISPONIBLES:\n"
+            "Tenes herramientas que podes usar para ayudar al usuario:\n"
+            "- price_lookup: obtener precios de crypto y acciones\n"
+            "- dollar_lookup: obtener cotizaciones del dolar en Argentina\n"
+            "- calculate: evaluar expresiones matematicas\n"
+            "- web_fetch: obtener contenido de una URL\n"
+            "- reminder_set: crear un recordatorio (el usuario te dice cuando)\n"
+            "- reminder_list: listar recordatorios pendientes\n"
+            "\n"
+            "Cuando uses herramientas, podes responder con mas de una frase para dar informacion util.\n"
+            "Si el usuario pide un recordatorio, usa reminder_set. Si pregunta precios, usa price_lookup.\n"
+            "Si pregunta por el dolar, usa dollar_lookup.\n"
+        )
 
     contextual_info = f"""
 
@@ -3815,6 +3983,7 @@ CLIMA EN BUENOS AIRES:
 
 NOTICIAS DE HACKER NEWS:
 {news_info}
+{tool_instruction}
 """
 
     return {

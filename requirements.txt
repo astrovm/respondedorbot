@@ -8,3 +8,4 @@ pykakasi>=2.3.0
 psycopg[binary]>=3.3.3
 mutagen>=1.47.0
 python-telegram-bot>=22.7,<23.0
+APScheduler>=3.10.4
