@@ -111,6 +111,7 @@ import api.tools.reminder_set
 import api.tools.reminder_list
 import api.tools.scheduled_task_set
 import api.tools.scheduled_task_list
+import api.tools.scheduled_task_cancel
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -2282,6 +2283,51 @@ def recordame_command(msg_text: str, chat_id: str = "", user_name: str = "") -> 
     return f"listo, te acuerdo en {time_desc}: {text}"
 
 
+def tareas_command(chat_id: str = "") -> str:
+    from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
+
+    if not chat_id:
+        return "no se en que chat estoy"
+
+    reminders = list_reminders(chat_id)
+    tasks = list_scheduled_tasks(chat_id)
+
+    if not reminders and not tasks:
+        return "no hay recordatorios ni tareas programadas"
+
+    lines = []
+    if reminders:
+        lines.append("recordatorios:")
+        for r in reminders:
+            lines.append(f"  [{r['id']}] {r['text']} ({r['next_run']})")
+    if tasks:
+        lines.append("tareas recurrentes:")
+        for t in tasks:
+            interval = t.get("interval_seconds", 0)
+            if interval >= 86400:
+                freq = f"cada {interval // 86400}d"
+            elif interval >= 3600:
+                freq = f"cada {interval // 3600}h"
+            else:
+                freq = f"cada {interval // 60}m"
+            lines.append(f"  [{t['id']}] {t['prompt']} ({freq})")
+
+    return "\n".join(lines)
+
+
+def borrartarea_command(msg_text: str = "") -> str:
+    from api.tools.reminder_scheduler import cancel_scheduled_task
+
+    task_id = msg_text.strip()
+    if not task_id:
+        return "necesito el id, ej: /borrartarea abc12345"
+
+    success = cancel_scheduled_task(task_id)
+    if success:
+        return f"tarea {task_id} cancelada"
+    return f"no se pudo cancelar {task_id}"
+
+
 def get_help() -> str:
     return """
 esto es lo que sé hacer, boludo:
@@ -2341,6 +2387,8 @@ esto es lo que sé hacer, boludo:
 - /gn: te mando un gif de buenas noches random
 
 - /recordame, /remindme algo en 30 min: te acuerdo cuando me pediste
+- /tareas, /tasks, /reminders: listar recordatorios y tareas recurrentes
+- /borrartarea, /deletetask, /cancelreminder <id>: cancelar una tarea (usar /tareas para ver ids)
 """
 
 
@@ -3978,6 +4026,7 @@ def build_system_message(
             "- reminder_list: listar recordatorios pendientes\n"
             "- scheduled_task_set: crear una tarea recurrente (ej: noticias cada dia)\n"
             "- scheduled_task_list: listar tareas recurrentes\n"
+            "- scheduled_task_cancel: cancelar una tarea recurrente (necesita el id)\n"
             "\n"
             "Cuando uses herramientas, podes responder con mas de una frase para dar informacion util.\n"
             "Si el usuario pide un recordatorio, usa reminder_set. Si pregunta precios, usa price_lookup.\n"
@@ -4303,6 +4352,8 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
             "recordame_command": recordame_command,
+            "tareas_command": tareas_command,
+            "borrartarea_command": borrartarea_command,
         }
     )
 

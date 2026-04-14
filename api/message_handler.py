@@ -1222,6 +1222,10 @@ def _handle_non_ai_command(
         response_msg = handler_func(sanitized_message_text, chat_id, user_name)
         return response_msg, None, False, command
 
+    if command == "/tareas":
+        response_msg = handler_func(chat_id)
+        return response_msg, None, False, command
+
     response_msg = (
         handler_func(sanitized_message_text) if takes_params else handler_func()
     )
