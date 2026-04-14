@@ -1,4 +1,4 @@
-"""Simple RAM-based provider backoff with exponential fallback.
+"""Simple RAM-based provider backoff.
 
 When a provider returns HTTP 429, we mark it as cooled down for a period
 extracted from retry-after headers (or a default). Calls always fall through
@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, Optional
-
-_DEFAULT_BACKOFF_SECONDS: float = 60.0
+from typing import Dict
 
 _cooldowns: Dict[str, float] = {}
 _lock = threading.Lock()

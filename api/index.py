@@ -41,6 +41,12 @@ import tempfile
 import time
 import traceback
 import wave
+from api.provider_backoff import (
+    mark_provider_cooldown,
+    get_provider_cooldown_remaining as _get_cooldown_remaining,
+    is_provider_cooled_down,
+    clear_all_cooldowns,
+)
 from pykakasi import kakasi
 from mutagen import File as MutagenFile
 import unicodedata
@@ -476,8 +482,6 @@ def _set_provider_backoff(provider: str, duration: Optional[int]) -> None:
     if duration == 0:
         return
 
-    from api.provider_backoff import mark_provider_cooldown
-
     mark_provider_cooldown(provider.lower(), float(duration))
 
 
@@ -485,15 +489,10 @@ def get_provider_backoff_remaining(provider: str) -> float:
     if not provider:
         return 0.0
 
-    from api.provider_backoff import get_provider_cooldown_remaining
-
-    remaining = get_provider_cooldown_remaining(provider.lower())
-    return remaining
+    return _get_cooldown_remaining(provider.lower())
 
 
 def is_provider_backoff_active(provider: str) -> bool:
-    from api.provider_backoff import is_provider_cooled_down
-
     return is_provider_cooled_down(provider.lower()) if provider else False
 
 
@@ -4229,10 +4228,9 @@ def should_auto_process_media(
 def check_provider_available(scope: str) -> bool:
     """Check whether at least one Groq account for the scope is not in cooldown.
 
-    Always returns True if no Groq accounts are configured (allowing the call
-    to proceed so OpenRouter or other fallbacks can handle it). Returns True
-    even when all accounts are in cooldown — cooldown is advisory and the
-    provider might accept the request after all.
+    Returns True if any account is available. Returns True if no accounts are
+    configured (allowing the call to proceed to OpenRouter). Returns False only
+    when all configured accounts are in active cooldown.
     """
 
     configured_accounts = _get_groq_accounts_for_scope()
@@ -4242,7 +4240,7 @@ def check_provider_available(scope: str) -> bool:
     for account in configured_accounts:
         if not is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
             return True
-    return True
+    return False
 
 
 def has_openrouter_fallback() -> bool:

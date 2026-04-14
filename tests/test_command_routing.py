@@ -547,14 +547,84 @@ def test_groq_backoff_is_marked_and_cleared():
         mark_provider_cooldown,
         is_provider_cooled_down,
         clear_all_cooldowns,
+        get_provider_cooldown_remaining,
+        clear_provider_cooldown,
     )
 
     clear_all_cooldowns()
     assert is_provider_cooled_down("groq:free:chat") is False
     mark_provider_cooldown("groq:free:chat", 60)
     assert is_provider_cooled_down("groq:free:chat") is True
+    remaining = get_provider_cooldown_remaining("groq:free:chat")
+    assert 55 < remaining <= 60
     clear_all_cooldowns()
     assert is_provider_cooled_down("groq:free:chat") is False
+
+
+def test_groq_backoff_only_extends_not_shortens():
+    from api.provider_backoff import (
+        mark_provider_cooldown,
+        is_provider_cooled_down,
+        get_provider_cooldown_remaining,
+        clear_all_cooldowns,
+    )
+
+    clear_all_cooldowns()
+    mark_provider_cooldown("groq:paid:vision", 300)
+    remaining_before = get_provider_cooldown_remaining("groq:paid:vision")
+    mark_provider_cooldown("groq:paid:vision", 10)
+    remaining_after = get_provider_cooldown_remaining("groq:paid:vision")
+    assert remaining_after >= remaining_before - 1
+    clear_all_cooldowns()
+
+
+def test_check_provider_available_returns_false_when_all_in_cooldown(monkeypatch):
+    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+
+    clear_all_cooldowns()
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    mark_provider_cooldown("groq:free:chat", 300)
+    mark_provider_cooldown("groq:paid:chat", 300)
+    assert check_provider_available("chat") is False
+    clear_all_cooldowns()
+
+
+def test_check_provider_available_returns_true_when_one_account_free(monkeypatch):
+    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+
+    clear_all_cooldowns()
+    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
+    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
+    mark_provider_cooldown("groq:free:chat", 300)
+    assert check_provider_available("chat") is True
+    clear_all_cooldowns()
+
+
+def test_check_provider_available_ignores_empty_key(monkeypatch):
+    from api.provider_backoff import clear_all_cooldowns
+
+    clear_all_cooldowns()
+    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert check_provider_available("chat") is True
+
+
+def test_clear_single_provider_cooldown():
+    from api.provider_backoff import (
+        mark_provider_cooldown,
+        is_provider_cooled_down,
+        clear_provider_cooldown,
+        clear_all_cooldowns,
+    )
+
+    clear_all_cooldowns()
+    mark_provider_cooldown("groq:free:chat", 300)
+    mark_provider_cooldown("groq:paid:chat", 300)
+    clear_provider_cooldown("groq:free:chat")
+    assert is_provider_cooled_down("groq:free:chat") is False
+    assert is_provider_cooled_down("groq:paid:chat") is True
+    clear_all_cooldowns()
 
 
 def test_initialize_commands():
