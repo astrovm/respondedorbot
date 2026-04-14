@@ -3992,7 +3992,7 @@ def build_system_message(
         )
 
     contextual_info = f"""
-
+{tool_instruction}
 FECHA ACTUAL:
 {formatted_time}
 
@@ -4004,7 +4004,6 @@ CLIMA EN BUENOS AIRES:
 
 NOTICIAS DE HACKER NEWS:
 {news_info}
-{tool_instruction}
 """
 
     return {
@@ -5606,8 +5605,8 @@ def handle_reminder_callback(callback_query: Dict[str, Any]) -> None:
         new_text, new_keyboard = _build_tareas_message(reminders, tasks)
         try:
             edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"handle_reminder_callback: edit_message failed: {exc}")
 
 
 def edit_message(

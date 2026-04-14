@@ -1218,6 +1218,7 @@ def _handle_non_ai_command(
 
     if command in ("/tareas", "/tasks", "/reminders"):
         result = handler_func(chat_id)
+        response_markup = None
         if isinstance(result, tuple):
             response_msg, response_markup = result
         else:

@@ -11,6 +11,7 @@ def _execute_web_fetch(
     params: Dict[str, Any],
     context: Dict[str, Any],
 ) -> ToolResult:
+    # Lazy import to avoid circular dependency: agent_tools imports from tools/.
     from api.agent_tools import fetch_url_content
 
     url = params.get("url", "")

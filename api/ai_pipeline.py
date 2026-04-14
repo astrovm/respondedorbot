@@ -159,6 +159,7 @@ def handle_ai_response(
                         user_name=user_name,
                     )
                 except TypeError:
+                    # Compat shim: older handler variants don't accept chat_id/user_name.
                     response = handler_func(messages, response_meta=response_meta)
             else:
                 response = handler_func(
@@ -171,6 +172,7 @@ def handle_ai_response(
                 try:
                     response = handler_func(messages, response_meta=response_meta)
                 except TypeError:
+                    # Compat shim: older handler variants don't accept response_meta.
                     response = handler_func(messages)
             else:
                 response = handler_func(messages)

@@ -30,6 +30,8 @@ def _safe_eval(expr: str) -> Union[float, int, str]:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError:
         return f"expresion invalida: {expr}"
+    if sum(1 for _ in ast.walk(tree)) > 200:
+        return "expresion demasiado larga"
     for node in ast.walk(tree):
         if not isinstance(node, _SAFE_NODES):
             return f"expresion no permitida: {expr}"
