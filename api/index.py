@@ -45,7 +45,6 @@ from api.provider_backoff import (
     mark_provider_cooldown,
     get_provider_cooldown_remaining as _get_cooldown_remaining,
     is_provider_cooled_down,
-    clear_all_cooldowns,
 )
 from pykakasi import kakasi
 from mutagen import File as MutagenFile
