@@ -362,3 +362,21 @@ def cancel_scheduled_task(task_id: str) -> bool:
             pass
 
     return True
+
+
+def cancel_reminder(reminder_id: str) -> bool:
+    scheduler = get_scheduler()
+    if scheduler is not None:
+        try:
+            scheduler.remove_job(f"reminder_{reminder_id}")
+        except Exception:
+            pass
+
+    redis_client = _get_redis()
+    if redis_client is not None:
+        try:
+            redis_client.delete(f"{REMINDER_REDIS_PREFIX}{reminder_id}")
+        except Exception:
+            pass
+
+    return True

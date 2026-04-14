@@ -2246,15 +2246,9 @@ def _format_schedule_interval(seconds: int) -> str:
         return f"cada {seconds // 60}m"
 
 
-def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-    from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
-
-    if not chat_id:
-        return "no se en que chat estoy", None
-
-    reminders = list_reminders(chat_id)
-    tasks = list_scheduled_tasks(chat_id)
-
+def _build_tareas_message(
+    reminders: List[Dict[str, Any]], tasks: List[Dict[str, Any]]
+) -> Tuple[str, Optional[Dict[str, Any]]]:
     if not reminders and not tasks:
         return "no hay recordatorios ni tareas", None
 
@@ -2278,8 +2272,18 @@ def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
                 [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
             )
 
-    keyboard: Optional[Dict[str, Any]] = {"inline_keyboard": rows}
-    return "\n".join(lines), keyboard
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
+
+    if not chat_id:
+        return "no se en que chat estoy", None
+
+    reminders = list_reminders(chat_id)
+    tasks = list_scheduled_tasks(chat_id)
+    return _build_tareas_message(reminders, tasks)
 
 
 def get_help() -> str:
@@ -5581,16 +5585,9 @@ def handle_reminder_callback(callback_query: Dict[str, Any]) -> None:
     action, _, item_id = parts
 
     if action == "rem":
-        redis_client = config_redis()
-        key = f"reminder:data:{item_id}"
-        redis_client.delete(key)
-        from apscheduler.schedulers.background import BackgroundScheduler
+        from api.tools.reminder_scheduler import cancel_reminder
 
-        try:
-            scheduler = BackgroundScheduler()
-            scheduler.remove_job(f"reminder_{item_id}", jobstore="default")
-        except Exception:
-            pass
+        cancel_reminder(item_id)
         feedback = f"recordatorio {item_id} borrado"
     else:
         from api.tools.reminder_scheduler import cancel_scheduled_task
@@ -5602,46 +5599,11 @@ def handle_reminder_callback(callback_query: Dict[str, Any]) -> None:
         _answer_callback_query(callback_id, text=feedback)
 
     if message_id:
-        reminders, tasks = [], []
         from api.tools.reminder_scheduler import list_reminders, list_scheduled_tasks
 
         reminders = list_reminders(str(chat_id))
         tasks = list_scheduled_tasks(str(chat_id))
-
-        if not reminders and not tasks:
-            new_text = "no hay recordatorios ni tareas"
-            new_keyboard: Optional[Dict[str, Any]] = None
-        else:
-            lines = []
-            rows: List[List[Dict[str, str]]] = []
-            if reminders:
-                lines.append("recordatorios:")
-                for r in reminders:
-                    lines.append(f"• {r['text']} ({r['next_run']})")
-                    rows.append(
-                        [
-                            {
-                                "text": f"borrar {r['id']}",
-                                "callback_data": f"rem:del:{r['id']}",
-                            }
-                        ]
-                    )
-            if tasks:
-                lines.append("tareas recurrentes:")
-                for t in tasks:
-                    freq = _format_schedule_interval(t.get("interval_seconds", 0))
-                    lines.append(f"• {t['prompt']} ({freq})")
-                    rows.append(
-                        [
-                            {
-                                "text": f"borrar {t['id']}",
-                                "callback_data": f"task:del:{t['id']}",
-                            }
-                        ]
-                    )
-            new_text = "\n".join(lines)
-            new_keyboard = {"inline_keyboard": rows}
-
+        new_text, new_keyboard = _build_tareas_message(reminders, tasks)
         try:
             edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
         except Exception:
@@ -5649,14 +5611,18 @@ def handle_reminder_callback(callback_query: Dict[str, Any]) -> None:
 
 
 def edit_message(
-    chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
+    chat_id: str,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[Dict[str, Any]] = None,
 ) -> bool:
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "reply_markup": reply_markup,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     payload_response, error = _telegram_request(
         "editMessageText", method="POST", json_payload=payload
     )
