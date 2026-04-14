@@ -83,19 +83,18 @@ def test_hash_cache_key_is_stable():
     assert key_one != other_key
 
 
-def test_check_global_rate_limit(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"0", b"0"]
-    assert check_global_rate_limit(redis_client) is True
+def test_check_provider_available_returns_true_when_no_accounts(monkeypatch):
+    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert check_provider_available("chat") is True
 
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
-    assert check_global_rate_limit(redis_client) is False
 
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"1", b"500000"]
-    assert check_global_rate_limit(redis_client) is False
+def test_check_provider_available_returns_true_by_default(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test_key")
+    from api.provider_backoff import clear_all_cooldowns
+
+    clear_all_cooldowns()
+    assert check_provider_available("chat") is True
 
 
 def test_extract_message_text():
@@ -543,196 +542,19 @@ def test_extract_message_text_edge_cases():
     assert extract_message_text(msg) == ""
 
 
-def test_check_global_rate_limit_edge_cases(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"-1", b"-1"]
-    assert check_global_rate_limit(redis_client) is True
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [None, None]
-    assert check_global_rate_limit(redis_client) is True
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = redis.RedisError
-    assert check_global_rate_limit(redis_client) is True
-
-
-def test_check_global_rate_limit_uses_groq_chat_budget(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"0", b"0"]
-    assert check_global_rate_limit(redis_client) is True
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
-    assert check_global_rate_limit(redis_client) is False
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"1", b"500000"]
-    assert check_global_rate_limit(redis_client) is False
-
-
-def test_groq_rate_limits_match_developer_plan_constants():
-    assert index.GROQ_PAID_RATE_LIMITS["chat"] == {
-        "rpm": 1000,
-        "rpd": 500_000,
-        "tpm": 250_000,
-    }
-    assert index.GROQ_PAID_RATE_LIMITS["vision"] == {
-        "rpm": 1000,
-        "rpd": 500_000,
-        "tpm": 300_000,
-    }
-    assert index.GROQ_PAID_RATE_LIMITS["transcribe"] == {
-        "rpm": 300,
-        "rpd": 200_000,
-        "ash": 200_000,
-        "asd": 4_000_000,
-    }
-    assert index.GROQ_FREE_RATE_LIMITS["chat"] == {
-        "rpm": 60,
-        "rpd": 1_000,
-        "tpm": 10_000,
-        "tpd": 300_000,
-    }
-    assert index.GROQ_FREE_RATE_LIMITS["vision"] == {
-        "rpm": 30,
-        "rpd": 1_000,
-        "tpm": 30_000,
-        "tpd": 500_000,
-    }
-    assert index.GROQ_FREE_RATE_LIMITS["transcribe"] == {
-        "rpm": 20,
-        "rpd": 2_000,
-        "ash": 7_200,
-        "asd": 28_800,
-    }
-
-
-def test_check_global_rate_limit_enforces_chat_tpm(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    redis_client = MagicMock()
-    monkeypatch.setattr(
-        "api.index._peek_groq_rate_limit", lambda *args, **kwargs: False
+def test_groq_backoff_is_marked_and_cleared():
+    from api.provider_backoff import (
+        mark_provider_cooldown,
+        is_provider_cooled_down,
+        clear_all_cooldowns,
     )
 
-    assert (
-        check_global_rate_limit(
-            redis_client,
-            scope="chat",
-            token_count=2,
-        )
-        is False
-    )
-
-
-def test_check_global_rate_limit_enforces_transcribe_audio_limits(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    redis_client = MagicMock()
-    monkeypatch.setattr(
-        "api.index._peek_groq_rate_limit", lambda *args, **kwargs: False
-    )
-
-    assert (
-        check_global_rate_limit(
-            redis_client,
-            scope="transcribe",
-            audio_seconds=2.0,
-        )
-        is False
-    )
-
-
-def test_check_global_rate_limit_skips_paid_for_chat(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-    monkeypatch.setenv("GROQ_API_KEY", "paid_key")
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"60", b"1000", b"10000", b"300000"]
-
-    assert check_global_rate_limit(redis_client) is False
-
-
-def test_check_global_rate_limit_enforces_free_daily_token_budget(monkeypatch):
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
-
-    redis_client = MagicMock()
-    redis_client.get.side_effect = [b"0", b"0", b"0", b"299999"]
-
-    assert (
-        check_global_rate_limit(
-            redis_client,
-            scope="chat",
-            token_count=2,
-        )
-        is False
-    )
-
-
-def test_reserve_and_reconcile_groq_rate_limit_releases_unused_tokens():
-    class FakePipeline:
-        def __init__(self, store):
-            self.store = store
-            self.ops = []
-
-        def incrby(self, key, delta):
-            self.ops.append(("incrby", key, int(delta)))
-            return self
-
-        def expire(self, key, ttl, nx=True):
-            self.ops.append(("expire", key, int(ttl), bool(nx)))
-            return self
-
-        def execute(self):
-            results = []
-            for op in self.ops:
-                if op[0] == "incrby":
-                    _, key, delta = op
-                    self.store[key] = int(self.store.get(key, 0)) + delta
-                    results.append(self.store[key])
-                else:
-                    results.append(True)
-            self.ops = []
-            return results
-
-    class FakeRedis:
-        def __init__(self):
-            self.store = {}
-
-        def get(self, key):
-            value = self.store.get(key)
-            return str(value).encode("utf-8") if value is not None else None
-
-        def pipeline(self):
-            return FakePipeline(self.store)
-
-    fake_redis = FakeRedis()
-    reservation = index._reserve_groq_rate_limit(
-        index.GROQ_PAID_ACCOUNT,
-        "chat",
-        request_count=1,
-        token_count=1000,
-        redis_client=fake_redis,
-    )
-
-    assert reservation is not None
-
-    token_key = index._groq_rate_limit_metric_minute_key(
-        index.GROQ_PAID_ACCOUNT,
-        "chat",
-        "tokens",
-    )
-    assert fake_redis.store[token_key] == 1000
-
-    index._reconcile_groq_rate_limit(
-        reservation,
-        actual_request_count=1,
-        actual_token_count=400,
-        redis_client=fake_redis,
-    )
-
-    assert fake_redis.store[token_key] == 400
+    clear_all_cooldowns()
+    assert is_provider_cooled_down("groq:free:chat") is False
+    mark_provider_cooldown("groq:free:chat", 60)
+    assert is_provider_cooled_down("groq:free:chat") is True
+    clear_all_cooldowns()
+    assert is_provider_cooled_down("groq:free:chat") is False
 
 
 def test_initialize_commands():

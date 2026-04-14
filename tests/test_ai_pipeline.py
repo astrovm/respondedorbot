@@ -268,43 +268,29 @@ def test_get_openrouter_ai_response_result_includes_web_search_by_default():
     assert "tools" in client.chat.completions.create.call_args.kwargs
 
 
-def test_check_global_rate_limit_uses_scope_specific_accounts(monkeypatch):
-    from api.index import check_global_rate_limit
+def test_check_provider_available_returns_true_by_default(monkeypatch):
+    from api.index import check_provider_available
+    from api.provider_backoff import clear_all_cooldowns
 
-    calls = []
-
-    def fake_peek(account, scope, **kwargs):
-        calls.append((account, scope))
-        return True
-
-    monkeypatch.setattr(
-        "api.index._get_groq_accounts_for_scope", lambda: ["test-account"]
-    )
-    monkeypatch.setattr("api.index._peek_groq_rate_limit", fake_peek)
-
-    assert check_global_rate_limit(None, scope="chat") is True
-    assert calls == [("test-account", "chat")]
+    clear_all_cooldowns()
+    monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert check_provider_available("chat") is True
 
 
-def test_should_allow_openrouter_fallback_requires_openrouter_and_only_for_chat_vision(
-    monkeypatch,
-):
-    from api.index import should_allow_openrouter_fallback
+def test_has_openrouter_fallback_requires_openrouter_key(monkeypatch):
+    from api.index import has_openrouter_fallback
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
-    assert should_allow_openrouter_fallback("chat") is False
-    assert should_allow_openrouter_fallback("vision") is False
-    assert should_allow_openrouter_fallback("compound") is False
+    assert has_openrouter_fallback() is False
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
     )
     monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
-    assert should_allow_openrouter_fallback("chat") is True
-    assert should_allow_openrouter_fallback("vision") is True
-    assert should_allow_openrouter_fallback("compound") is False
+    assert has_openrouter_fallback() is True
 
 
 def test_build_ai_messages():
@@ -449,13 +435,6 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
             self.status_code = 413
             self.code = "request_too_large"
 
-    reservations = []
-
-    def fake_reserve(*args, **kwargs):
-        token = object()
-        reservations.append(token)
-        return token
-
     def fake_attempt(account, _client):
         if account == "free":
             raise Fake413Error()
@@ -469,14 +448,9 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
     with (
         patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]),
         patch(
-            "api.index._reserve_groq_rate_limit",
-            side_effect=fake_reserve,
-        ),
-        patch(
             "api.index._get_groq_client",
             side_effect=lambda account, default_headers=None: object(),
         ),
-        patch("api.index._reconcile_groq_rate_limit") as mock_reconcile,
         patch("api.index._log_groq_request_result"),
         patch(
             "api.index.is_provider_backoff_active",
@@ -494,7 +468,6 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
     assert result is not None
     assert result.text == "respuesta chat"
     assert result.metadata["groq_account"] == "paid"
-    assert mock_reconcile.call_count == 2
 
 
 def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_search(
@@ -516,8 +489,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     )
 
     assert reserve == 9
-    assert metadata["rate_limit_scope"] == "chat"
-    assert "estimated_rate_limit_tokens" in metadata
+    assert metadata == {}
 
 
 def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatch):
@@ -542,7 +514,7 @@ def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatc
         [{"role": "user", "content": "hola"}],
     )
 
-    assert metadata["rate_limit_scope"] == "chat"
+    assert metadata == {}
     assert reserve > reserve_without_reasoning
 
 

@@ -1404,13 +1404,17 @@ def test_describe_image_groq_api_error():
         assert result is None
 
 
-def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
+def test_describe_image_groq_skips_call_when_provider_in_cooldown():
     from api.index import describe_image_groq
+    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+
+    clear_all_cooldowns()
+    mark_provider_cooldown("groq:free:vision", 300)
+    mark_provider_cooldown("groq:paid:vision", 300)
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index._reserve_groq_rate_limit", return_value=None),
-        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index._get_groq_client", return_value=None),
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1419,7 +1423,8 @@ def test_describe_image_groq_skips_call_when_local_rate_limit_hits():
         result = describe_image_groq(b"image_data")
 
         assert result is None
-        mock_openai.assert_not_called()
+
+    clear_all_cooldowns()
 
 
 def test_describe_image_groq_falls_back_to_openrouter_after_free_429(monkeypatch):
@@ -1503,13 +1508,17 @@ def test_transcribe_audio_groq_network_error():
         assert result is None
 
 
-def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
+def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
     from api.index import transcribe_audio_groq
+    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+
+    clear_all_cooldowns()
+    mark_provider_cooldown("groq:free:transcribe", 300)
+    mark_provider_cooldown("groq:paid:transcribe", 300)
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index._reserve_groq_rate_limit", return_value=None),
-        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index._get_groq_client", return_value=None),
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1518,7 +1527,8 @@ def test_transcribe_audio_groq_skips_call_when_local_rate_limit_hits():
         result = transcribe_audio_groq(b"audio_data")
 
         assert result is None
-        mock_openai.assert_not_called()
+
+    clear_all_cooldowns()
 
 
 def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
