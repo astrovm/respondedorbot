@@ -15,9 +15,20 @@ class _FakeResponse:
         self.url = url
         self.status_code = status_code
         self.headers = {"Content-Type": content_type}
-        self.encoding = encoding
-        self.apparent_encoding = apparent_encoding
+        self._encoding = encoding
+        self._apparent_encoding = apparent_encoding
         self._body = body
+        self._consumed = False
+
+    @property
+    def encoding(self):
+        return self._encoding
+
+    @property
+    def apparent_encoding(self):
+        if self._consumed:
+            raise RuntimeError("The content for this response was already consumed")
+        return self._apparent_encoding
 
     def raise_for_status(self) -> None:
         return None
@@ -27,7 +38,7 @@ class _FakeResponse:
             yield self._body[index : index + chunk_size]
 
     def close(self) -> None:
-        return None
+        self._consumed = True
 
 
 def test_fetch_url_content_extracts_main_text_from_html():
