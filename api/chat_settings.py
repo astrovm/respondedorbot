@@ -217,7 +217,10 @@ def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
         ),
         timezone_offset=int(config.get("timezone_offset", -3)),
         creditless_limit=int(
-            config.get("creditless_user_hourly_limit", config.get("creditless_user_daily_limit", 2))
+            config.get(
+                "creditless_user_hourly_limit",
+                config.get("creditless_user_daily_limit", 2),
+            )
         ),
     )
 
@@ -261,25 +264,31 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
     ]
 
     if is_group:
-        lines.extend([
-            "",
-            "5. ia random",
-            "si está activado, a veces me meto solo en la charla aunque nadie me llame",
-            f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
-            "",
-            "6. limite ia gratis por usuario por hora",
-            "cuantas veces puede usar ia del grupo un usuario sin creditos propios por hora",
-            creditless_label,
-        ])
+        lines.extend(
+            [
+                "",
+                "5. ia random",
+                "si está activado, a veces me meto solo en la charla aunque nadie me llame",
+                f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
+                "",
+                "6. limite ia gratis por usuario por hora",
+                "cuantas veces puede usar ia del grupo un usuario sin creditos propios por hora",
+                creditless_label,
+            ]
+        )
 
-    lines.extend([
-        "",
-        "tocá los botones de abajo y dejalo como se te cante",
-    ])
+    lines.extend(
+        [
+            "",
+            "tocá los botones de abajo y dejalo como se te cante",
+        ]
+    )
     return "\n".join(lines)
 
 
-def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -> Dict[str, Any]:
+def build_config_keyboard(
+    config: Mapping[str, Any], chat_type: str = "group"
+) -> Dict[str, Any]:
     """Build the inline keyboard to toggle chat config values."""
 
     parsed = parse_chat_config(config)
@@ -329,23 +338,30 @@ def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -
         ],
         [
             {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
-            {"text": f"🌍 {_format_utc_offset(parsed.timezone_offset)}", "callback_data": f"cfg:timezone:{parsed.timezone_offset}"},
+            {"text": f"🌍 {_format_utc_offset(parsed.timezone_offset)}"},
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
         ],
     ]
 
     if is_group:
-        keyboard.extend([
-            [toggle_button("me meto en la charla", parsed.random_enabled, action="random")],
+        keyboard.extend(
             [
-                creditless_button("ninguno", 0),
-                creditless_button("1", 1),
-                creditless_button("2", 2),
-                creditless_button("5", 5),
-                creditless_button("∞", -1),
-            ],
-        ])
+                [
+                    toggle_button(
+                        "me meto en la charla", parsed.random_enabled, action="random"
+                    )
+                ],
+                [
+                    creditless_button("ninguno", 0),
+                    creditless_button("1", 1),
+                    creditless_button("2", 2),
+                    creditless_button("5", 5),
+                    creditless_button("∞", -1),
+                ],
+            ]
+        )
     return {"inline_keyboard": keyboard}
+
 
 def chat_admin_cache_key(chat_id: str, user_id: Union[str, int]) -> str:
     return f"chat_admin:{chat_id}:{user_id}"
