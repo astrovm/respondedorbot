@@ -207,7 +207,9 @@ class AIMessageBilling:
     def _resolve_ai_charge_context(self) -> Tuple[Optional[int], Optional[str]]:
         if not self.credits_db_service.is_configured():
             return None, self.billing_not_configured_message
-        if self.user_id is None or self.numeric_chat_id is None:
+        if self.user_id is None:
+            return None, self.billing_missing_scope_message
+        if is_group_chat_type(self.chat_type) and self.numeric_chat_id is None:
             return None, self.billing_missing_scope_message
         return (
             self.numeric_chat_id if is_group_chat_type(self.chat_type) else None,
