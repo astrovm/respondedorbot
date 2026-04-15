@@ -625,7 +625,7 @@ class TestHandleTaskCallback:
         }
 
         with (
-            patch("api.tools.task_scheduler.cancel_task") as mock_cancel,
+            patch("api.index._task_cancel_task") as mock_cancel,
             patch("api.index._answer_callback_query") as mock_answer,
             patch("api.index.edit_message") as mock_edit,
         ):
