@@ -13,6 +13,8 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Utilities**: `/random`, `/convertbase`, `/time`, `/gm`, `/gn`
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context
+- **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) during conversations
+- **Scheduled tasks**: `/tareas`, `/tasks` — create, list, and delete one-shot or recurring reminders via AI or inline buttons
 
 ## Quick Start
 
@@ -54,6 +56,11 @@ python run_polling.py
 ## Project layout
 
 - `api/` - application code
+  - `api/tools/` - agentic tool registry and implementations (price lookup, calculator, web fetch, task scheduling)
+  - `api/ai_pipeline.py` - AI response handling and cleanup
+  - `api/ai_billing.py` - AI credits billing system
+  - `api/message_handler.py` - message routing and processing
+  - `api/index.py` - core bot logic, commands, provider integration
 - `quadlets/` - Podman Quadlet container definitions
 - `systemd/` - systemd service and timer units
 - `run_polling.py` - bot entrypoint
