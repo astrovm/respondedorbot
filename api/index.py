@@ -104,7 +104,6 @@ from api.ai_pricing import (
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 import api.tools.price_lookup
-import api.tools.dollar_lookup
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
@@ -3963,7 +3962,7 @@ def build_system_message(
     tool_instruction = ""
     if tools_active:
         tool_instruction = (
-            "\n\nHERRAMIENTAS: price_lookup, dollar_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
+            "\n\nHERRAMIENTAS: price_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
             "task_set: text + delay_seconds (una vez) o interval_seconds (repetir). 60=1min 3600=1h 86400=1d.\n"
             "Usa herramientas cuando sean utiles, sino responde normal.\n"
         )

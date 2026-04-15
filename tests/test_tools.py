@@ -78,21 +78,6 @@ class TestPriceLookupTool:
         assert "no se pudieron" in result.output
 
 
-class TestDollarLookupTool:
-    def test_dollar_lookup(self):
-        mock_gd = MagicMock(return_value="Blue: 1200")
-        result = execute_tool(
-            "dollar_lookup",
-            {},
-            {"get_dollar_rates": mock_gd},
-        )
-        assert result.output == "Blue: 1200"
-
-    def test_dollar_lookup_no_context(self):
-        result = execute_tool("dollar_lookup", {}, {})
-        assert "not available" in result.output
-
-
 class TestWebFetchTool:
     @patch("api.agent_tools.fetch_url_content")
     def test_web_fetch(self, mock_fetch):
