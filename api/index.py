@@ -5808,7 +5808,9 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
         )
     elif action == "timezone":
         if value == "current":
-            pass
+            if callback_id:
+                _answer_callback_query(callback_id)
+            return
         else:
             try:
                 offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
