@@ -17,6 +17,9 @@ from api.utils.links import (
     is_social_frontend,
     replace_links,
     url_is_embedable,
+    extract_tweet_urls,
+    fetch_tweet_via_oembed,
+    fetch_tweet_text,
 )
 
 __all__ = [
@@ -36,4 +39,7 @@ __all__ = [
     "is_social_frontend",
     "replace_links",
     "url_is_embedable",
+    "extract_tweet_urls",
+    "fetch_tweet_via_oembed",
+    "fetch_tweet_text",
 ]
