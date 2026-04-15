@@ -5807,15 +5807,18 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             ignore_link_fix_followups=not current,
         )
     elif action == "timezone":
-        try:
-            offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
-            config = set_chat_config(
-                redis_client,
-                chat_id_str,
-                timezone_offset=offset,
-            )
-        except ValueError:
+        if value == "current":
             pass
+        else:
+            try:
+                offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
+                config = set_chat_config(
+                    redis_client,
+                    chat_id_str,
+                    timezone_offset=offset,
+                )
+            except ValueError:
+                pass
     elif action == "creditless":
         try:
             limit = max(0, int(value))
