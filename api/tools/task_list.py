@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import list_tasks
+from api.tools.task_scheduler import list_tasks, format_interval
 
 
 def _execute_task_list(
@@ -24,12 +24,7 @@ def _execute_task_list(
     for t in tasks:
         interval = t.get("interval_seconds")
         if interval:
-            if interval >= 86400:
-                freq = f"cada {interval // 86400}d"
-            elif interval >= 3600:
-                freq = f"cada {interval // 3600}h"
-            else:
-                freq = f"cada {interval // 60}m"
+            freq = format_interval(interval)
             lines.append(f"- [{t['id']}] {t['text']} ({freq})")
         else:
             lines.append(f"- [{t['id']}] {t['text']} ({t['next_run']})")

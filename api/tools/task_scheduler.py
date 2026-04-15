@@ -17,6 +17,23 @@ _scheduler_instance: Optional[Any] = None
 
 TASK_REDIS_PREFIX = "task:data:"
 
+_MINUTE = 60
+_HOUR = 3600
+_DAY = 86400
+
+
+def format_interval(seconds: int, prefix: str = "cada ") -> str:
+    if seconds >= _DAY:
+        val = seconds // _DAY
+        unit = f"dia{'s' if val != 1 else ''}"
+    elif seconds >= _HOUR:
+        val = seconds // _HOUR
+        unit = f"hora{'s' if val != 1 else ''}"
+    else:
+        val = seconds // _MINUTE
+        unit = f"minuto{'s' if val != 1 else ''}"
+    return f"{prefix}{val} {unit}"
+
 
 def get_scheduler() -> Any:
     global _scheduler_instance
@@ -166,8 +183,8 @@ def _fire_task(task_id: str) -> None:
     except Exception as e:
         print(f"task_scheduler: {task_id} ask_ai failed: {e}")
         admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
-        is_fallback = True
-    finally:
+        billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
+    else:
         if is_fallback:
             billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
         else:
@@ -190,7 +207,7 @@ def schedule_task(
     user_name: str = "",
     user_id: Optional[int] = None,
 ) -> Optional[str]:
-    if not delay_seconds and not interval_seconds:
+    if delay_seconds is None and interval_seconds is None:
         return None
 
     scheduler = get_scheduler()
@@ -200,7 +217,7 @@ def schedule_task(
     task_id = str(uuid.uuid4())[:8]
 
     run_date = None
-    if delay_seconds:
+    if delay_seconds is not None:
         run_date = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + delay_seconds,
             tz=timezone.utc,
