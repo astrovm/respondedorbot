@@ -694,11 +694,12 @@ class TestTimezoneConfig:
             r for r in rows
             if any("cfg:timezone:" in btn["callback_data"] for btn in r)
         )
+        assert any("🌍" in btn["text"] for btn in tz_row)
         assert any("UTC" in btn["text"] for btn in tz_row)
         assert any("UTC-3" in btn["text"] for btn in tz_row)
         assert any("cfg:timezone:" in btn["callback_data"] for btn in tz_row)
-        assert any(btn["text"] == "-1" for btn in tz_row)
-        assert any(btn["text"] == "+1" for btn in tz_row)
+        assert any("➖" in btn["text"] for btn in tz_row)
+        assert any("➕" in btn["text"] for btn in tz_row)
 
     def test_config_keyboard_current_timezone_checked(self):
         from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
@@ -713,7 +714,7 @@ class TestTimezoneConfig:
             if any("cfg:timezone:" in btn["callback_data"] for btn in r)
         )
         utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
-        assert utc3_btn["text"].startswith("✅")
+        assert "🌍" in utc3_btn["text"]
 
     def test_handle_callback_query_updates_timezone(self):
         from api.index import handle_callback_query
