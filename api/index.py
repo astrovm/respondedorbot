@@ -5662,6 +5662,7 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     message_id = message.get("message_id")
+    user = callback_query.get("from") or {}
 
     if not callback_data or chat_id is None:
         if callback_id:
