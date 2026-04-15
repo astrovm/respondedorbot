@@ -6,6 +6,7 @@ Unified scheduler for one-shot and recurring tasks per chat.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -21,8 +22,6 @@ def get_scheduler() -> Any:
         return _scheduler_instance
 
     try:
-        import os
-
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.jobstores.redis import RedisJobStore
 
@@ -107,7 +106,7 @@ def _fire_task(task_id: str) -> None:
             print(f"task_scheduler: recurring task {task_id} failed: {e}")
     else:
         try:
-            send_msg(chat_id, f"{display}, te acorduerdo: {text}")
+            send_msg(chat_id, f"{display}, te recuerdo: {text}")
         except Exception as e:
             print(f"task_scheduler: one-shot task {task_id} failed: {e}")
         finally:
