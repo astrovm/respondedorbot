@@ -15,27 +15,29 @@ _scheduler_instance: Optional[Any] = None
 TASK_REDIS_PREFIX = "task:data:"
 
 
-def _get_redis_url() -> str:
-    import os
-
-    host = os.environ.get("REDIS_HOST", "localhost")
-    port = os.environ.get("REDIS_PORT", "6379")
-    password = os.environ.get("REDIS_PASSWORD", "")
-    if password:
-        return f"redis://:{password}@{host}:{port}/1"
-    return f"redis://{host}:{port}/1"
-
-
 def get_scheduler() -> Any:
     global _scheduler_instance
     if _scheduler_instance is not None:
         return _scheduler_instance
 
     try:
+        import os
+
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.jobstores.redis import RedisJobStore
 
-        jobstores = {"default": RedisJobStore(url=_get_redis_url())}
+        host = os.environ.get("REDIS_HOST", "localhost")
+        port = int(os.environ.get("REDIS_PORT", "6379"))
+        password = os.environ.get("REDIS_PASSWORD", "")
+
+        jobstores = {
+            "default": RedisJobStore(
+                host=host,
+                port=port,
+                db=1,
+                password=password or None,
+            )
+        }
         _scheduler_instance = BackgroundScheduler(jobstores=jobstores)
         _scheduler_instance.start()
         return _scheduler_instance
