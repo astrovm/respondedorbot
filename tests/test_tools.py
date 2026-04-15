@@ -170,6 +170,129 @@ class TestTaskSetTool:
         )
         assert "no se pudo" in result.output
 
+    @patch("api.index.credits_db_service")
+    def test_no_credits(self, mock_credits):
+        mock_credits.is_configured.return_value = True
+        mock_credits.get_balance.return_value = 0
+        result = execute_tool(
+            "task_set",
+            {"text": "algo", "delay_seconds": 1800},
+            {"chat_id": "123", "user_id": 42},
+        )
+        assert "creditos" in result.output
+        mock_credits.get_balance.assert_called_once_with("user", 42)
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_trigger_config_interval(self, mock_schedule):
+        mock_schedule.return_value = "interval123"
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "cada 3 dias",
+                "trigger_config": {"type": "interval", "days": 3},
+            },
+            {"chat_id": "123"},
+        )
+        assert "listo" in result.output
+        assert "cada 3 dias" in result.output
+        mock_schedule.assert_called_once()
+        call_kwargs = mock_schedule.call_args.kwargs
+        assert call_kwargs["trigger_config"]["type"] == "interval"
+        assert call_kwargs["trigger_config"]["days"] == 3
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_trigger_config_cron_daily(self, mock_schedule):
+        mock_schedule.return_value = "cron123"
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "a las 4:20",
+                "trigger_config": {"type": "cron", "hour": 4, "minute": 20},
+            },
+            {"chat_id": "123"},
+        )
+        assert "listo" in result.output
+        assert "04:20" in result.output
+        mock_schedule.assert_called_once()
+        call_kwargs = mock_schedule.call_args.kwargs
+        assert call_kwargs["trigger_config"]["type"] == "cron"
+        assert call_kwargs["trigger_config"]["hour"] == 4
+        assert call_kwargs["trigger_config"]["minute"] == 20
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_trigger_config_cron_weekdays(self, mock_schedule):
+        mock_schedule.return_value = "weekdays123"
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "recordar los lunes",
+                "trigger_config": {
+                    "type": "cron",
+                    "hour": 9,
+                    "minute": 0,
+                    "day_of_week": "mon",
+                },
+            },
+            {"chat_id": "123"},
+        )
+        assert "listo" in result.output
+        mock_schedule.assert_called_once()
+
+    def test_trigger_config_invalid_type(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "invalid"},
+            },
+            {"chat_id": "123"},
+        )
+        assert "interval" in result.output.lower() or "cron" in result.output.lower()
+
+    def test_trigger_config_invalid_hour(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "cron", "hour": 25},
+            },
+            {"chat_id": "123"},
+        )
+        assert "0-23" in result.output
+
+    def test_trigger_config_invalid_days(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "interval", "days": -1},
+            },
+            {"chat_id": "123"},
+        )
+        assert "positivo" in result.output.lower()
+
+    def test_trigger_config_missing_days(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "interval"},
+            },
+            {"chat_id": "123"},
+        )
+        assert "requerido" in result.output.lower()
+
+    def test_trigger_config_days_too_large(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "interval", "days": 91},
+            },
+            {"chat_id": "123"},
+        )
+        assert "maximo" in result.output.lower()
+
 
 class TestTaskListTool:
     @patch("api.tools.task_list.list_tasks")

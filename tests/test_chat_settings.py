@@ -634,3 +634,96 @@ class TestHandleTaskCallback:
         mock_cancel.assert_called_once_with("abc123")
         mock_answer.assert_called_once_with("cbq1", text="tarea abc123 borrada")
         mock_edit.assert_called_once()
+
+
+class TestTimezoneConfig:
+    def test_config_text_includes_timezone(self):
+        from api.chat_settings import build_config_text, CHAT_CONFIG_DEFAULTS
+
+        config = dict(CHAT_CONFIG_DEFAULTS)
+        config["timezone_offset"] = -3
+        text = build_config_text(config)
+        assert "zona horaria" in text
+        assert "UTC-3" in text
+
+    def test_config_text_different_timezone(self):
+        from api.chat_settings import build_config_text
+
+        config = {
+            "link_mode": "reply",
+            "ai_random_replies": True,
+            "ai_command_followups": True,
+            "ignore_link_fix_followups": True,
+            "timezone_offset": 0,
+        }
+        text = build_config_text(config)
+        assert "UTC" in text
+
+    def test_config_keyboard_includes_timezone_buttons(self):
+        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+
+        config = dict(CHAT_CONFIG_DEFAULTS)
+        config["timezone_offset"] = -3
+        keyboard = build_config_keyboard(config)
+        rows = keyboard["inline_keyboard"]
+
+        tz_row = rows[-1]
+        assert any("UTC" in btn["text"] for btn in tz_row)
+        assert any("UTC-3" in btn["text"] for btn in tz_row)
+        assert any("cfg:timezone:" in btn["callback_data"] for btn in tz_row)
+        assert any(btn["text"] == "-1" for btn in tz_row)
+        assert any(btn["text"] == "+1" for btn in tz_row)
+
+    def test_config_keyboard_current_timezone_checked(self):
+        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+
+        config = dict(CHAT_CONFIG_DEFAULTS)
+        config["timezone_offset"] = -3
+        keyboard = build_config_keyboard(config)
+
+        tz_row = keyboard["inline_keyboard"][-1]
+        utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
+        assert utc3_btn["text"].startswith("✅")
+
+    def test_handle_callback_query_updates_timezone(self):
+        from api.index import handle_callback_query
+
+        callback = {
+            "id": "cbq",
+            "data": "cfg:timezone:-5",
+            "message": {"chat": {"id": 1}, "message_id": 99},
+        }
+        with (
+            patch("api.index.config_redis") as mock_redis,
+            patch(
+                "api.index.get_chat_config",
+                return_value={
+                    "link_mode": "reply",
+                    "ai_random_replies": True,
+                    "ai_command_followups": True,
+                    "ignore_link_fix_followups": True,
+                    "timezone_offset": -3,
+                },
+            ) as mock_get,
+            patch(
+                "api.index.set_chat_config",
+                return_value={
+                    "link_mode": "reply",
+                    "ai_random_replies": True,
+                    "ai_command_followups": True,
+                    "ignore_link_fix_followups": True,
+                    "timezone_offset": -5,
+                },
+            ) as mock_set,
+            patch("api.index.build_config_text", return_value="text") as mock_text,
+            patch(
+                "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
+            ) as mock_keyboard,
+            patch("api.index.edit_message", return_value=True) as mock_edit,
+            patch("api.index._answer_callback_query") as mock_answer,
+        ):
+            handle_callback_query(callback)
+
+        mock_set.assert_called_once()
+        call_kwargs = mock_set.call_args.kwargs
+        assert call_kwargs.get("timezone_offset") == -5

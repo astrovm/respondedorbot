@@ -20,7 +20,12 @@ CHAT_CONFIG_DEFAULTS = {
     "ai_random_replies": True,
     "ai_command_followups": True,
     "ignore_link_fix_followups": True,
+    "timezone_offset": -3,
 }
+
+TIMEZONE_OFFSET_MIN = -12
+TIMEZONE_OFFSET_MAX = 14
+
 CHAT_ADMIN_STATUS_TTL = 300
 
 
@@ -182,6 +187,14 @@ def coerce_bool(value: Any, *, default: bool) -> bool:
     return default if value is None else default
 
 
+def _format_gmt_offset(offset: int) -> str:
+    """Format UTC offset for display."""
+    if offset == 0:
+        return "UTC"
+    sign = "+" if offset > 0 else ""
+    return f"UTC{sign}{offset}"
+
+
 def build_config_text(config: Mapping[str, Any]) -> str:
     """Build the user-facing config summary text."""
 
@@ -191,6 +204,7 @@ def build_config_text(config: Mapping[str, Any]) -> str:
     ignore_link_fix_followups = coerce_bool(
         config.get("ignore_link_fix_followups"), default=True
     )
+    timezone_offset = int(config.get("timezone_offset", -3))
 
     link_labels = {
         "delete": "borra el mensaje original y repostea el link arreglado",
@@ -216,6 +230,9 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares",
         f"{'✅ activado' if ignore_link_fix_followups else '▫️ desactivado'}",
         "",
+        "5. zona horaria",
+        _format_gmt_offset(timezone_offset),
+        "",
         "tocá los botones de abajo y dejalo como se te cante",
     ]
     return "\n".join(lines)
@@ -230,6 +247,7 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     ignore_link_fix_followups = coerce_bool(
         config.get("ignore_link_fix_followups"), default=True
     )
+    current_offset = int(config.get("timezone_offset", -3))
 
     def choice_button(
         label: str, value: str, current: str, *, action: str
@@ -240,6 +258,13 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     def toggle_button(label: str, enabled: bool, action: str) -> Dict[str, str]:
         prefix = "✅" if enabled else "▫️"
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:toggle"}
+
+    def timezone_button(label: str, offset: int) -> Dict[str, str]:
+        prefix = "✅ " if offset == current_offset else ""
+        return {"text": f"{prefix}{label}", "callback_data": f"cfg:timezone:{offset}"}
+
+    dec_offset = max(current_offset - 1, TIMEZONE_OFFSET_MIN)
+    inc_offset = min(current_offset + 1, TIMEZONE_OFFSET_MAX)
 
     return {
         "inline_keyboard": [
@@ -262,6 +287,13 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
                     ignore_link_fix_followups,
                     action="linkfixfollowups",
                 )
+            ],
+            [
+                {"text": "-1", "callback_data": f"cfg:timezone:{dec_offset}"},
+                timezone_button("UTC", 0),
+                timezone_button("UTC-3", -3),
+                timezone_button("UTC-5", -5),
+                {"text": "+1", "callback_data": f"cfg:timezone:{inc_offset}"},
             ],
         ]
     }
@@ -361,6 +393,8 @@ def report_unauthorized_config_attempt(
 __all__ = [
     "CHAT_ADMIN_STATUS_TTL",
     "CHAT_CONFIG_DEFAULTS",
+    "TIMEZONE_OFFSET_MAX",
+    "TIMEZONE_OFFSET_MIN",
     "build_config_keyboard",
     "build_config_text",
     "coerce_bool",
