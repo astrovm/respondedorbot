@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from api.ai_billing import AIMessageBilling
@@ -43,6 +43,19 @@ def _owner_display(user_name: str) -> str:
     if not user_name:
         return ""
     return f" ({_no_mention(user_name)})"
+
+
+def _format_run_time(raw: str) -> str:
+    if not raw or raw == "unknown":
+        return raw
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(timezone(timedelta(hours=-3)))
+        return local.strftime("%d/%m %H:%M")
+    except (ValueError, TypeError):
+        return raw
 
 
 def get_scheduler() -> Any:
@@ -321,7 +334,7 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
                     "text": data.get("text", ""),
                     "user_name": data.get("user_name", ""),
                     "interval_seconds": interval,
-                    "next_run": next_run,
+                    "next_run": _format_run_time(next_run),
                 }
             )
     except Exception as e:
