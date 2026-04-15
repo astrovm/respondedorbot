@@ -5,19 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import schedule_task
-
-
-def _describe_time(seconds: int, prefix: str = "") -> str:
-    if seconds >= 86400:
-        days = seconds // 86400
-        return f"{prefix}{days} dia{'s' if days != 1 else ''}"
-    elif seconds >= 3600:
-        hours = seconds // 3600
-        return f"{prefix}{hours} hora{'s' if hours != 1 else ''}"
-    else:
-        minutes = seconds // 60
-        return f"{prefix}{minutes} minuto{'s' if minutes != 1 else ''}"
+from api.tools.task_scheduler import schedule_task, format_interval
 
 
 def _execute_task_set(
@@ -27,8 +15,8 @@ def _execute_task_set(
     text = params.get("text", "")
     delay_seconds = params.get("delay_seconds")
     interval_seconds = params.get("interval_seconds")
-    chat_id = str(context.get("chat_id", ""))
-    user_name = str(context.get("user_name", ""))
+    chat_id = context.get("chat_id", "")
+    user_name = context.get("user_name", "")
     user_id = context.get("user_id")
 
     if not text:
@@ -64,9 +52,9 @@ def _execute_task_set(
         return ToolResult(output="no se pudo crear la tarea")
 
     if interval_seconds:
-        desc = _describe_time(interval_seconds, "cada ")
+        desc = format_interval(interval_seconds)
     else:
-        desc = _describe_time(delay_seconds, "en ")
+        desc = format_interval(delay_seconds, "en ")
 
     return ToolResult(
         output=f"listo, tarea programada {desc}: {text}",
