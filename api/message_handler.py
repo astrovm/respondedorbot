@@ -77,7 +77,7 @@ class MessageHandlerDeps:
     has_openrouter_fallback: Callable[[], bool]
     handle_rate_limit: Callable[[str, Dict[str, Any]], str]
     handle_successful_payment_message: Callable[[Dict[str, Any]], str]
-    handle_config_command: Callable[[str], Tuple[str, Dict[str, Any]]]
+    handle_config_command: Callable[[str, str], Tuple[str, Dict[str, Any]]]
     is_chat_admin: Callable[..., bool]
     report_unauthorized_config_attempt: Callable[..., None]
     handle_transcribe: Callable[[], str]
@@ -680,7 +680,7 @@ def _handle_config_command(
         )
         return "ok", None, False, None
 
-    response_msg, response_markup = deps.handle_config_command(chat_id)
+    response_msg, response_markup = deps.handle_config_command(chat_id, chat_type)
     return response_msg, response_markup, False, command
 
 

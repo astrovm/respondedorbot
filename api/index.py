@@ -5387,18 +5387,18 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     return _chat_coerce_bool(value, default=default)
 
 
-def build_config_text(config: Mapping[str, Any]) -> str:
-    return _chat_build_config_text(config)
+def build_config_text(config: Mapping[str, Any], chat_type: str = "") -> str:
+    return _chat_build_config_text(config, chat_type)
 
 
-def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
-    return _chat_build_config_keyboard(config)
+def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "") -> Dict[str, Any]:
+    return _chat_build_config_keyboard(config, chat_type)
 
 
-def handle_config_command(chat_id: str) -> Tuple[str, Dict[str, Any]]:
+def handle_config_command(chat_id: str, chat_type: str = "") -> Tuple[str, Dict[str, Any]]:
     redis_client = config_redis()
     config = get_chat_config(redis_client, chat_id)
-    return build_config_text(config), build_config_keyboard(config)
+    return build_config_text(config, chat_type), build_config_keyboard(config, chat_type)
 
 
 def _answer_callback_query(
@@ -5829,8 +5829,8 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
         except ValueError:
             pass
 
-    text = build_config_text(config)
-    keyboard = build_config_keyboard(config)
+    text = build_config_text(config, chat_type)
+    keyboard = build_config_keyboard(config, chat_type)
     try:
         edit_succeeded = edit_message(chat_id_str, int(message_id), text, keyboard)
         if not edit_succeeded:
