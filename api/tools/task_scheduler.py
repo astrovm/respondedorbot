@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from api.ai_billing import AIMessageBilling
+
 _scheduler_instance: Optional[Any] = None
 
 TASK_REDIS_PREFIX = "task:data:"
@@ -61,14 +63,38 @@ def _get_redis() -> Any:
         return None
 
 
+def _delete_task(redis_key: str, task_id: str) -> None:
+    redis_client = _get_redis()
+    if redis_client is not None:
+        try:
+            redis_client.delete(redis_key)
+        except Exception:
+            pass
+    scheduler = get_scheduler()
+    if scheduler is not None:
+        try:
+            scheduler.remove_job(f"task_{task_id}")
+        except Exception:
+            pass
+
+
 def _strip_response_marker(response: str) -> str:
     marker = "[[AI_FALLBACK]]"
     if response.startswith(marker):
-        return response[len(marker):].lstrip()
+        return response[len(marker) :].lstrip()
     return response
 
 
 def _fire_task(task_id: str) -> None:
+    from api.index import (
+        ask_ai,
+        admin_report,
+        build_insufficient_credits_message,
+        credits_db_service,
+        gen_random,
+        send_msg,
+    )
+
     redis_client = _get_redis()
     if redis_client is None:
         print(f"task_scheduler: no redis, cannot fire {task_id}")
@@ -88,51 +114,72 @@ def _fire_task(task_id: str) -> None:
     text = str(data.get("text", ""))
     user_name = str(data.get("user_name", ""))
     interval = data.get("interval_seconds")
+    user_id = data.get("user_id")
 
     if not chat_id or not text:
         return
 
-    from api.index import send_msg
-
     display = f"@{user_name}" if user_name else "che"
 
-    if interval:
-        try:
-            from api.index import ask_ai
+    task_message = {"from": {"id": user_id}} if user_id else {}
+    billing = AIMessageBilling(
+        credits_db_service=credits_db_service,
+        admin_reporter=admin_report,
+        gen_random_fn=gen_random,
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        maybe_grant_onboarding_credits_fn=lambda uid: None,
+        command="task",
+        chat_id=chat_id,
+        chat_type="private",
+        user_id=user_id,
+        numeric_chat_id=None,
+        message=task_message,
+    )
 
-            response = ask_ai(
-                [{"role": "user", "content": text}],
-                response_meta={},
-                enable_web_search=True,
-                chat_id=chat_id,
-                user_name=user_name,
-            )
-            if response:
-                response = _strip_response_marker(response)
-                send_msg(chat_id, f"{display}, tarea programada: {response}")
-        except Exception as e:
-            print(f"task_scheduler: recurring task {task_id} failed: {e}")
-    else:
-        try:
-            from api.index import ask_ai
+    messages = [{"role": "user", "content": text}]
+    response_meta: Dict[str, Any] = {}
+    is_fallback = False
 
-            response = ask_ai(
-                [{"role": "user", "content": text}],
-                response_meta={},
-                enable_web_search=True,
-                chat_id=chat_id,
-                user_name=user_name,
+    reserve_meta, reserve_error = billing.reserve_ai_credits(
+        "task_ai",
+        1000,
+        metadata={"task_id": task_id, "chat_id": chat_id},
+    )
+    if reserve_error:
+        print(f"task_scheduler: {task_id} no credits, deleting: {reserve_error}")
+        _delete_task(key, task_id)
+        return
+
+    try:
+        response = ask_ai(
+            messages,
+            response_meta=response_meta,
+            enable_web_search=True,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+        )
+        is_fallback = response.startswith("[[AI_FALLBACK]]")
+        if response:
+            response = _strip_response_marker(response)
+            send_msg(chat_id, f"{display}, tarea programada: {response}")
+    except Exception as e:
+        print(f"task_scheduler: {task_id} ask_ai failed: {e}")
+        admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
+        is_fallback = True
+    finally:
+        if is_fallback:
+            billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
+        else:
+            segments = list(response_meta.get("billing_segments") or [])
+            billing.settle_reserved_ai_credits(
+                reserve_meta,
+                segments,
+                reason="task_success",
             )
-            if response:
-                response = _strip_response_marker(response)
-                send_msg(chat_id, f"{display}, {response}")
-        except Exception as e:
-            print(f"task_scheduler: one-shot task {task_id} failed: {e}")
-        finally:
-            try:
-                redis_client.delete(key)
-            except Exception:
-                pass
+
+    if not interval:
+        _delete_task(key, task_id)
 
 
 def schedule_task(
@@ -141,6 +188,7 @@ def schedule_task(
     delay_seconds: Optional[int] = None,
     interval_seconds: Optional[int] = None,
     user_name: str = "",
+    user_id: Optional[int] = None,
 ) -> Optional[str]:
     if not delay_seconds and not interval_seconds:
         return None
@@ -158,6 +206,7 @@ def schedule_task(
             tz=timezone.utc,
         )
 
+    redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
     redis_client = _get_redis()
     if redis_client is not None:
         data = json.dumps(
@@ -166,31 +215,41 @@ def schedule_task(
                 "chat_id": str(chat_id),
                 "text": text,
                 "user_name": user_name,
+                "user_id": user_id,
                 "interval_seconds": interval_seconds,
                 "run_date": run_date.isoformat() if run_date else None,
             }
         )
         ttl = 86400 * 90 if interval_seconds else 86400 * 30
-        redis_client.setex(f"{TASK_REDIS_PREFIX}{task_id}", ttl, data)
+        redis_client.setex(redis_key, ttl, data)
 
-    if interval_seconds:
-        scheduler.add_job(
-            _fire_task,
-            "interval",
-            seconds=interval_seconds,
-            id=f"task_{task_id}",
-            args=[task_id],
-            replace_existing=True,
-        )
-    elif run_date:
-        scheduler.add_job(
-            _fire_task,
-            "date",
-            run_date=run_date,
-            id=f"task_{task_id}",
-            args=[task_id],
-            replace_existing=True,
-        )
+    try:
+        if interval_seconds:
+            scheduler.add_job(
+                _fire_task,
+                "interval",
+                seconds=interval_seconds,
+                id=f"task_{task_id}",
+                args=[task_id],
+                replace_existing=True,
+            )
+        elif run_date:
+            scheduler.add_job(
+                _fire_task,
+                "date",
+                run_date=run_date,
+                id=f"task_{task_id}",
+                args=[task_id],
+                replace_existing=True,
+            )
+    except Exception as e:
+        print(f"task_scheduler: add_job failed for {task_id}: {e}")
+        if redis_client is not None:
+            try:
+                redis_client.delete(redis_key)
+            except Exception:
+                pass
+        return None
 
     return task_id
 
