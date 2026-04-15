@@ -15,7 +15,8 @@
 
 - Remove unused imports, variables, parameters, dead branches, dead functions in files you edit.
 - No error handling for impossible scenarios.
-- New imports at top of file.
+- All imports at top of file. No imports inside functions unless strictly required to break circular dependencies.
+- Code and comments in English. User-facing strings stay in their original language.
 
 ## Debugging
 
