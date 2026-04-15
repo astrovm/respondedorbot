@@ -421,13 +421,13 @@ def test_build_config_text_and_keyboard_reflect_values():
     keyboard = build_config_keyboard(config)
     assert keyboard["inline_keyboard"][0][1]["text"] == "✅ borrar link"
     assert keyboard["inline_keyboard"][0][2]["text"] == "▫️ apagado"
-    assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ me meto en la charla"
-    assert keyboard["inline_keyboard"][2][0]["text"] == "▫️ seguir charla en comandos"
+    assert keyboard["inline_keyboard"][4][0]["text"] == "▫️ me meto en la charla"
+    assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ seguir charla en comandos"
     assert (
-        keyboard["inline_keyboard"][3][0]["text"]
+        keyboard["inline_keyboard"][2][0]["text"]
         == "✅ ignorar replies a links arreglados"
     )
-    assert keyboard["inline_keyboard"][1][0]["callback_data"] == "cfg:random:toggle"
+    assert keyboard["inline_keyboard"][4][0]["callback_data"] == "cfg:random:toggle"
 
 
 def test_handle_config_command_loads_config():
@@ -519,8 +519,8 @@ def test_handle_callback_query_falls_back_when_edit_fails():
 
     mock_get.assert_called_once_with(redis_client, "9")
     mock_set.assert_called_once_with(redis_client, "9", link_mode="reply")
-    mock_text.assert_called_once_with(updated_config)
-    mock_keyboard.assert_called_once_with(updated_config)
+    mock_text.assert_called_once_with(updated_config, "")
+    mock_keyboard.assert_called_once_with(updated_config, "")
     mock_edit.assert_called_once_with("9", 42, "new text", {"inline_keyboard": ["btn"]})
     mock_log.assert_any_call(
         "Falling back to new config message", {"chat_id": "9", "message_id": 42}
