@@ -537,6 +537,7 @@ def _run_ai_flow(
     handler_func: Callable[..., str],
     redis_client: Any,
     timezone_offset: int = -3,
+    is_spontaneous: bool = False,
 ) -> Tuple[str, bool]:
     billing_unavailable = _degrade_when_billing_unavailable(
         deps,
@@ -544,7 +545,7 @@ def _run_ai_flow(
         message=message,
     )
     if billing_unavailable is not None:
-        return billing_unavailable
+        return ("ok", False) if is_spontaneous else billing_unavailable
 
     chat_history = deps.get_chat_history(chat_id, redis_client)
     ai_messages = deps.build_ai_messages(
@@ -568,7 +569,8 @@ def _run_ai_flow(
         )
         and not deps.has_openrouter_fallback()
     ):
-        return deps.handle_rate_limit(chat_id, message), False
+        rate_limit_msg = deps.handle_rate_limit(chat_id, message)
+        return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
     base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
         "ai_response_base",
         main_reserve_credits,
@@ -578,7 +580,7 @@ def _run_ai_flow(
         },
     )
     if base_charge_error:
-        return base_charge_error, False
+        return ("ok", False) if is_spontaneous else (base_charge_error, False)
 
     media_charge_meta: Optional[Dict[str, Any]] = None
     if prepared_message.resized_image_data and prepared_message.photo_file_id:
@@ -592,7 +594,8 @@ def _run_ai_flow(
             billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="image_context_local_rate_limit"
             )
-            return deps.handle_rate_limit(chat_id, message), False
+            rate_limit_msg = deps.handle_rate_limit(chat_id, message)
+            return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
         media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
             "image_context_media",
             deps.estimate_image_context_reserve_credits(
@@ -605,7 +608,7 @@ def _run_ai_flow(
             billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="image_context_reserve_failed"
             )
-            return media_charge_error, False
+            return ("ok", False) if is_spontaneous else (media_charge_error, False)
 
     ai_response_meta: Dict[str, Any] = {}
     response_msg = deps.handle_ai_response(
@@ -1368,6 +1371,7 @@ def _handle_known_command(
         handler_func=deps.ask_ai,
         redis_client=redis_client,
         timezone_offset=timezone_offset,
+        is_spontaneous=True,
     )
     return response_msg, response_markup, response_uses_ai, response_command
 
