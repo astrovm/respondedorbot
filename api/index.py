@@ -126,13 +126,13 @@ from api.ai_pipeline import (
 from api.chat_settings import (
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
-    build_config_keyboard as _chat_build_config_keyboard,
-    build_config_text as _chat_build_config_text,
-    coerce_bool as _chat_coerce_bool,
-    decode_redis_value as _chat_decode_redis_value,
+    build_config_keyboard,
+    build_config_text,
+    coerce_bool,
+    decode_redis_value,
     get_chat_config as _chat_get_chat_config,
     is_chat_admin as _chat_is_chat_admin,
-    is_group_chat_type as _chat_is_group_chat_type,
+    is_group_chat_type,
     report_unauthorized_config_attempt as _chat_report_unauthorized_config_attempt,
     set_chat_config as _chat_set_chat_config,
 )
@@ -4483,7 +4483,7 @@ def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
         return True
 
     chat = cast(Mapping[str, Any], message.get("chat") or {})
-    if not _is_group_chat_type(str(chat.get("type") or "")):
+    if not is_group_chat_type(str(chat.get("type") or "")):
         return False
 
     chat_id = _extract_numeric_chat_id(str(chat.get("id") or ""))
@@ -5352,14 +5352,6 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
-def _decode_redis_value(value: Any) -> Optional[str]:
-    return _chat_decode_redis_value(value)
-
-
-def _is_group_chat_type(chat_type: Optional[str]) -> bool:
-    return _chat_is_group_chat_type(chat_type)
-
-
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     return _chat_get_chat_config(
         redis_client,
@@ -5381,18 +5373,6 @@ def set_chat_config(
         log_event=_log_config_event,
         **updates,
     )
-
-
-def _coerce_bool(value: Any, *, default: bool) -> bool:
-    return _chat_coerce_bool(value, default=default)
-
-
-def build_config_text(config: Mapping[str, Any], chat_type: str = "") -> str:
-    return _chat_build_config_text(config, chat_type)
-
-
-def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "") -> Dict[str, Any]:
-    return _chat_build_config_keyboard(config, chat_type)
 
 
 def handle_config_command(chat_id: str, chat_type: str = "") -> Tuple[str, Dict[str, Any]]:
@@ -5690,7 +5670,7 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
 
     chat_type = str(chat.get("type", ""))
     is_admin = False
-    if _is_group_chat_type(chat_type):
+    if is_group_chat_type(chat_type):
         redis_client = config_redis()
         is_admin = is_chat_admin(str(chat_id), request_user_id, redis_client=redis_client)
     else:
@@ -5761,7 +5741,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     chat_type = str(chat.get("type", ""))
 
     is_config_callback = str(callback_data).startswith("cfg:")
-    if is_config_callback and _is_group_chat_type(chat_type):
+    if is_config_callback and is_group_chat_type(chat_type):
         if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
             denial_message = "solo los admins pueden tocar esta config, maestro"
             if callback_id:
@@ -5788,21 +5768,21 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     if action == "link" and value in {"reply", "delete", "off"}:
         config = set_chat_config(redis_client, chat_id_str, link_mode=value)
     elif action == "random":
-        current = _coerce_bool(config.get("ai_random_replies"), default=True)
+        current = coerce_bool(config.get("ai_random_replies"), default=True)
         config = set_chat_config(
             redis_client,
             chat_id_str,
             ai_random_replies=not current,
         )
     elif action == "followups":
-        current = _coerce_bool(config.get("ai_command_followups"), default=True)
+        current = coerce_bool(config.get("ai_command_followups"), default=True)
         config = set_chat_config(
             redis_client,
             chat_id_str,
             ai_command_followups=not current,
         )
     elif action == "linkfixfollowups":
-        current = _coerce_bool(config.get("ignore_link_fix_followups"), default=True)
+        current = coerce_bool(config.get("ignore_link_fix_followups"), default=True)
         config = set_chat_config(
             redis_client,
             chat_id_str,
@@ -5869,7 +5849,7 @@ def get_bot_message_metadata(
         chat_id,
         message_id,
         admin_reporter=admin_report,
-        decode_redis_value=_decode_redis_value,
+        decode_redis_value=decode_redis_value,
     )
 
 
@@ -5916,7 +5896,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         build_insufficient_credits_message=build_insufficient_credits_message,
         build_topup_keyboard=build_topup_keyboard,
         credits_db_service=credits_db_service,
-        is_group_chat_type=_is_group_chat_type,
+        is_group_chat_type=is_group_chat_type,
         extract_user_id=_extract_user_id,
         extract_numeric_chat_id=_extract_numeric_chat_id,
         maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
