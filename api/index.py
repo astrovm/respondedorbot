@@ -3839,19 +3839,48 @@ def _get_openrouter_ai_response_result(
             if not tool_calls:
                 break
 
+            from api.tools.registry import (
+                TOOL_REGISTRY,
+                execute_tool,
+                parse_tool_call_arguments,
+            )
+
+            known_calls = []
+            for tc in tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                tool_name = getattr(fn, "name", "")
+                if tool_name not in TOOL_REGISTRY:
+                    print(
+                        f"Tool call skipped (not registered): {tool_name}"
+                    )
+                    continue
+                known_calls.append(tc)
+
+            if not known_calls:
+                text = str(message.content or "").strip()
+                if text:
+                    metadata_msg: Dict[str, Any] = {"provider": "openrouter"}
+                    metadata_msg["tool_rounds"] = round_idx + 1
+                    return _build_groq_usage_result(
+                        kind="chat",
+                        text=text,
+                        model=PRIMARY_CHAT_MODEL,
+                        response=response,
+                        metadata=metadata_msg,
+                    )
+                break
+
             assistant_msg: Dict[str, Any] = {"role": "assistant"}
             if message.content:
                 assistant_msg["content"] = str(message.content)
             assistant_msg["tool_calls"] = []
             current_messages.append(assistant_msg)
 
-            from api.tools.registry import execute_tool, parse_tool_call_arguments
-
-            for tc in tool_calls:
+            for tc in known_calls:
                 tc_id = getattr(tc, "id", "") or ""
                 fn = getattr(tc, "function", None)
-                if fn is None:
-                    continue
                 tool_name = getattr(fn, "name", "")
                 raw_args = getattr(fn, "arguments", "{}")
                 tool_params = parse_tool_call_arguments(raw_args)
