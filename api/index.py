@@ -3791,7 +3791,24 @@ def _get_openrouter_ai_response_result(
             if tools_list:
                 request_kwargs["tools"] = tools_list
 
-            response = client.chat.completions.create(**request_kwargs)
+            response = None
+            for _attempt in range(3):
+                try:
+                    response = client.chat.completions.create(**request_kwargs)
+                    break
+                except Exception as e:
+                    is_json_error = isinstance(e, json.JSONDecodeError) or (
+                        "JSONDecodeError" in type(e).__name__
+                    )
+                    if is_json_error and _attempt < 2:
+                        wait = 2**_attempt
+                        print(
+                            f"OpenRouter JSONDecodeError, retrying in {wait}s "
+                            f"(attempt {_attempt + 1}/3) model={PRIMARY_CHAT_MODEL}"
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise
         except Exception as e:
             print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
             admin_report(
