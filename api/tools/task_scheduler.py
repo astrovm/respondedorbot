@@ -106,7 +106,17 @@ def _fire_task(task_id: str) -> None:
             print(f"task_scheduler: recurring task {task_id} failed: {e}")
     else:
         try:
-            send_msg(chat_id, f"{display}, te recuerdo: {text}")
+            from api.index import ask_ai
+
+            response = ask_ai(
+                [{"role": "user", "content": text}],
+                response_meta={},
+                enable_web_search=True,
+                chat_id=chat_id,
+                user_name=user_name,
+            )
+            if response:
+                send_msg(chat_id, f"{display}, {response}")
         except Exception as e:
             print(f"task_scheduler: one-shot task {task_id} failed: {e}")
         finally:
