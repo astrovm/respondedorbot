@@ -951,6 +951,41 @@ def get_api_or_cache_prices(
     return response["data"] if response else None
 
 
+def _fetch_cmc_quotes(
+    identifiers: List[str],
+    convert_to: str = "USD",
+    by_slug: bool = False,
+) -> Optional[Dict[str, Any]]:
+    api_url = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest"
+    param_key = "slug" if by_slug else "symbol"
+    parameters = {param_key: ",".join(identifiers), "convert": convert_to}
+    headers = {
+        "Accepts": "application/json",
+        "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
+    }
+    response = cached_requests(api_url, parameters, headers, TTL_PRICE)
+    return response["data"] if response else None
+
+
+def _format_cmc_quote(
+    coin_data: Dict[str, Any],
+    convert_to: str = "USD",
+    tf_label: str = "24h",
+    cmc_change_field: str = "percent_change_24h",
+) -> str:
+    quote = coin_data.get("quote", {}).get(convert_to, {})
+    price = quote.get("price")
+    if price is None:
+        return ""
+    pct = quote.get(cmc_change_field, 0) or 0
+    ticker = coin_data.get("symbol", "?")
+    decimals = f"{price:.12f}".split(".")[-1]
+    zeros = len(decimals) - len(decimals.lstrip("0"))
+    price_str = f"{price:.{zeros + 4}f}".rstrip("0").rstrip(".")
+    pct_str = f"{pct:+.2f}".rstrip("0").rstrip(".")
+    return f"{ticker}: {price_str} {convert_to} ({pct_str}% {tf_label})"
+
+
 def refresh_price_caches() -> None:
     """Refresh all price caches and store hourly snapshots for change calculations."""
     _fetch_criptoya_dollar_data(hourly_cache=True)
@@ -1379,7 +1414,49 @@ def get_prices(msg_text: str) -> Optional[str]:
                 new_prices.append(coin)
 
         if not new_prices:
-            return "no laburo con esos ponzis boludo"
+            found = []
+            not_found = []
+            for coin_token in coins:
+                token = coin_token.upper().replace(" ", "")
+                quote_data = _fetch_cmc_quotes([token], convert_to_parameter)
+                if quote_data:
+                    for cid, cdata in quote_data.items():
+                        price = (
+                            cdata.get("quote", {})
+                            .get(convert_to_parameter, {})
+                            .get("price")
+                        )
+                        if price:
+                            found.append(cdata)
+                            break
+                    else:
+                        quote_by_slug = _fetch_cmc_quotes(
+                            [token.lower()], convert_to_parameter, by_slug=True
+                        )
+                        if quote_by_slug:
+                            for cid, cdata in quote_by_slug.items():
+                                price = (
+                                    cdata.get("quote", {})
+                                    .get(convert_to_parameter, {})
+                                    .get("price")
+                                )
+                                if price:
+                                    found.append(cdata)
+                                    break
+                            else:
+                                not_found.append(token)
+                        else:
+                            not_found.append(token)
+                else:
+                    not_found.append(token)
+
+            if not found and not_found:
+                return f"no encontre esos ponzis: {', '.join(not_found)}"
+
+            if not found:
+                return "no pude traer precios de crypto boludo"
+
+            new_prices = found
 
         prices_number = len(new_prices)
         prices["data"] = new_prices
