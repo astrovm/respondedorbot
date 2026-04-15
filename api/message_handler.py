@@ -413,7 +413,7 @@ def _handle_link_replacement(
 
     fixed_text, changed, original_links = deps.replace_links(message_text)
     if not changed:
-        return "http://" in message_text or "https://" in message_text
+        return False
 
     user_info = message.get("from", {})
     username = user_info.get("username")
