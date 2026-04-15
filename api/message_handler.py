@@ -536,6 +536,7 @@ def _run_ai_flow(
     user_identity: str,
     handler_func: Callable[..., str],
     redis_client: Any,
+    timezone_offset: int = -3,
 ) -> Tuple[str, bool]:
     billing_unavailable = _degrade_when_billing_unavailable(
         deps,
@@ -619,6 +620,7 @@ def _run_ai_flow(
         user_identity=user_identity,
         response_meta=ai_response_meta,
         user_id=user_id,
+        timezone_offset=timezone_offset,
     )
 
     billing_segments = list(ai_response_meta.get("billing_segments") or [])
@@ -1253,6 +1255,7 @@ def _handle_known_command(
     reply_context_text: Optional[str],
     user_identity: str,
     redis_client: Any,
+    timezone_offset: int = -3,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
@@ -1336,6 +1339,7 @@ def _handle_known_command(
                 user_identity=user_identity,
                 handler_func=handler_func,
                 redis_client=redis_client,
+                timezone_offset=timezone_offset,
             )
             return response_msg, response_markup, response_uses_ai, response_command
 
@@ -1363,6 +1367,7 @@ def _handle_known_command(
         user_identity=user_identity,
         handler_func=deps.ask_ai,
         redis_client=redis_client,
+        timezone_offset=timezone_offset,
     )
     return response_msg, response_markup, response_uses_ai, response_command
 
@@ -1498,6 +1503,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
                 reply_context_text=reply_context_text,
                 user_identity=user_identity,
                 redis_client=redis_client,
+                timezone_offset=int(chat_config.get("timezone_offset", -3)),
             )
         )
 

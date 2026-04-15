@@ -2951,6 +2951,7 @@ def ask_ai(
     chat_id: Optional[str] = None,
     user_name: Optional[str] = None,
     user_id: Optional[int] = None,
+    timezone_offset: int = -3,
 ) -> str:
     try:
         messages = list(messages or [])
@@ -2968,15 +2969,7 @@ def ask_ai(
         }
         if chat_id:
             tool_context["chat_id"] = chat_id
-            try:
-                r = config_redis()
-                if r:
-                    cfg = get_chat_config(r, str(chat_id))
-                    tool_context["timezone_offset"] = int(
-                        cfg.get("timezone_offset", -3)
-                    )
-            except Exception:
-                pass
+        tool_context["timezone_offset"] = timezone_offset
         if user_name:
             tool_context["user_name"] = user_name
         if user_id is not None:
@@ -5957,6 +5950,7 @@ def handle_ai_response(
     user_identity: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
     user_id: Optional[int] = None,
+    timezone_offset: int = -3,
 ) -> str:
     return _ai_handle_response(
         chat_id,
@@ -5968,6 +5962,7 @@ def handle_ai_response(
         user_identity=user_identity,
         response_meta=response_meta,
         user_id=user_id,
+        timezone_offset=timezone_offset,
         send_typing_fn=send_typing,
         telegram_token=environ.get("TELEGRAM_TOKEN"),
         reset_request_count_fn=_reset_ai_provider_request_count,
