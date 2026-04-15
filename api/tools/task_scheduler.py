@@ -35,6 +35,16 @@ def format_interval(seconds: int, prefix: str = "cada ") -> str:
     return f"{prefix}{val} {unit}"
 
 
+def _no_mention(text: str) -> str:
+    return text.replace("@", "@\u200b")
+
+
+def _owner_display(user_name: str) -> str:
+    if not user_name:
+        return ""
+    return f" ({_no_mention(user_name)})"
+
+
 def get_scheduler() -> Any:
     global _scheduler_instance
     if _scheduler_instance is not None:
@@ -136,7 +146,7 @@ def _fire_task(task_id: str) -> None:
     if not chat_id or not text:
         return
 
-    display = f"@{user_name}" if user_name else "che"
+    display = _no_mention(f"@{user_name}") if user_name else "che"
 
     task_message = {"from": {"id": user_id}} if user_id else {}
     billing = AIMessageBilling(
