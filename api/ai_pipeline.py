@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import random
 import re
 import time
@@ -141,6 +142,11 @@ def handle_ai_response(
         user_name = user_identity.strip().split()[0] if user_identity.strip() else ""
 
     try:
+        sig_params = set(inspect.signature(handler_func).parameters)
+    except (ValueError, TypeError):
+        sig_params = set()
+
+    try:
         if image_data and is_ask_ai_handler:
             response = handler_func(
                 messages,
@@ -152,39 +158,17 @@ def handle_ai_response(
                 user_id=user_id,
             )
         elif is_ask_ai_handler:
-            if response_meta is not None:
-                try:
-                    response = handler_func(
-                        messages,
-                        response_meta=response_meta,
-                        chat_id=chat_id,
-                        user_name=user_name,
-                        user_id=user_id,
-                    )
-                except TypeError:
-                    try:
-                        response = handler_func(
-                            messages,
-                            response_meta=response_meta,
-                            chat_id=chat_id,
-                            user_name=user_name,
-                        )
-                    except TypeError:
-                        response = handler_func(messages, response_meta=response_meta)
-            else:
-                try:
-                    response = handler_func(
-                        messages,
-                        chat_id=chat_id,
-                        user_name=user_name,
-                        user_id=user_id,
-                    )
-                except TypeError:
-                    response = handler_func(
-                        messages, chat_id=chat_id, user_name=user_name
-                    )
+            kwargs: Dict[str, Any] = {}
+            if "response_meta" in sig_params and response_meta is not None:
+                kwargs["response_meta"] = response_meta
+            if "chat_id" in sig_params:
+                kwargs["chat_id"] = chat_id
+                kwargs["user_name"] = user_name
+            if "user_id" in sig_params:
+                kwargs["user_id"] = user_id
+            response = handler_func(messages, **kwargs)
         else:
-            if response_meta is not None:
+            if "response_meta" in sig_params and response_meta is not None:
                 try:
                     response = handler_func(messages, response_meta=response_meta)
                 except TypeError:

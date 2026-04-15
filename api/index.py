@@ -2990,7 +2990,7 @@ def ask_ai(
             tool_context["chat_id"] = chat_id
         if user_name:
             tool_context["user_name"] = user_name
-        if user_id:
+        if user_id is not None:
             tool_context["user_id"] = user_id
 
         system_message = build_system_message(

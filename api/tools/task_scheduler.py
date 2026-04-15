@@ -63,11 +63,11 @@ def _get_redis() -> Any:
         return None
 
 
-def _delete_task(redis_key: str, task_id: str) -> None:
-    redis_client = _get_redis()
-    if redis_client is not None:
+def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None:
+    client = redis_client if redis_client is not None else _get_redis()
+    if client is not None:
         try:
-            redis_client.delete(redis_key)
+            client.delete(redis_key)
         except Exception:
             pass
     scheduler = get_scheduler()
@@ -147,7 +147,7 @@ def _fire_task(task_id: str) -> None:
     )
     if reserve_error:
         print(f"task_scheduler: {task_id} no credits, deleting: {reserve_error}")
-        _delete_task(key, task_id)
+        _delete_task(key, task_id, redis_client)
         return
 
     try:
@@ -179,7 +179,7 @@ def _fire_task(task_id: str) -> None:
             )
 
     if not interval:
-        _delete_task(key, task_id)
+        _delete_task(key, task_id, redis_client)
 
 
 def schedule_task(
