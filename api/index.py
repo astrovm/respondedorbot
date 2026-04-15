@@ -2310,11 +2310,17 @@ def _build_tareas_message(
 
     for t in tasks:
         interval = t.get("interval_seconds")
+        owner = f"@{t['user_name']}" if t.get("user_name") else ""
+        owner_bit = f" ({owner})" if owner else ""
+        next_run = t.get("next_run", "")
+        task_text = t["text"].replace("@", "@\u200b")
         if interval:
             freq = format_interval(interval)
-            lines.append(f"• {t['text']} ({freq})")
+            lines.append(
+                f"• [{t['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+            )
         else:
-            lines.append(f"• {t['text']} ({t['next_run']})")
+            lines.append(f"• [{t['id']}] {task_text}{owner_bit} - {next_run}")
         rows.append(
             [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
         )

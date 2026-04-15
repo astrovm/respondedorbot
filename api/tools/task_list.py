@@ -23,11 +23,16 @@ def _execute_task_list(
     lines = []
     for t in tasks:
         interval = t.get("interval_seconds")
+        owner = f"@{t['user_name']}" if t.get("user_name") else ""
+        owner_bit = f" ({owner})" if owner else ""
+        next_run = t.get("next_run", "")
         if interval:
             freq = format_interval(interval)
-            lines.append(f"- [{t['id']}] {t['text']} ({freq})")
+            lines.append(
+                f"[{t['id']}] {t['text']}{owner_bit} - {freq}, prox: {next_run}"
+            )
         else:
-            lines.append(f"- [{t['id']}] {t['text']} ({t['next_run']})")
+            lines.append(f"[{t['id']}] {t['text']}{owner_bit} - {next_run}")
 
     return ToolResult(output="\n".join(lines))
 
