@@ -30,7 +30,7 @@
 
 ## Git
 
-- Never push, force push, or hard reset without explicit user approval.
+- Ask before pushing every time, even if previously approved. No batch commit+push. No force push or hard reset without approval.
 - Merge to `main` with a single squashed commit. Commit messages in English.
 
 ## Formatting
