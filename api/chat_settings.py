@@ -22,7 +22,7 @@ CHAT_CONFIG_DEFAULTS = {
     "ai_command_followups": True,
     "ignore_link_fix_followups": True,
     "timezone_offset": -3,
-    "creditless_user_daily_limit": 5,
+    "creditless_user_hourly_limit": 2,
 }
 
 TIMEZONE_OFFSET_MIN = -12
@@ -189,7 +189,7 @@ def coerce_bool(value: Any, *, default: bool) -> bool:
     return default if value is None else default
 
 
-def _format_gmt_offset(offset: int) -> str:
+def _format_utc_offset(offset: int) -> str:
     """Format UTC offset for display."""
     if offset == 0:
         return "UTC"
@@ -216,7 +216,9 @@ def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
             config.get("ignore_link_fix_followups"), default=True
         ),
         timezone_offset=int(config.get("timezone_offset", -3)),
-        creditless_limit=int(config.get("creditless_user_daily_limit", 5)),
+        creditless_limit=int(
+            config.get("creditless_user_hourly_limit", config.get("creditless_user_daily_limit", 2))
+        ),
     )
 
 
@@ -255,7 +257,7 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         f"{'✅ activado' if parsed.ignore_link_fix_followups else '▫️ desactivado'}",
         "",
         "4. zona horaria",
-        _format_gmt_offset(parsed.timezone_offset),
+        _format_utc_offset(parsed.timezone_offset),
     ]
 
     if is_group:
@@ -265,8 +267,8 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
             "si está activado, a veces me meto solo en la charla aunque nadie me llame",
             f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
             "",
-            "6. limite ia gratis por usuario por dia",
-            "cuantas veces puede usar ia del grupo un usuario sin creditos propios",
+            "6. limite ia gratis por usuario por hora",
+            "cuantas veces puede usar ia del grupo un usuario sin creditos propios por hora",
             creditless_label,
         ])
 
@@ -327,7 +329,7 @@ def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -
         ],
         [
             {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
-            {"text": f"🌍 {_format_gmt_offset(parsed.timezone_offset)}", "callback_data": f"cfg:timezone:{parsed.timezone_offset}"},
+            {"text": f"🌍 {_format_utc_offset(parsed.timezone_offset)}", "callback_data": f"cfg:timezone:{parsed.timezone_offset}"},
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
         ],
     ]
@@ -337,9 +339,9 @@ def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -
             [toggle_button("me meto en la charla", parsed.random_enabled, action="random")],
             [
                 creditless_button("ninguno", 0),
-                creditless_button("3", 3),
+                creditless_button("1", 1),
+                creditless_button("2", 2),
                 creditless_button("5", 5),
-                creditless_button("10", 10),
                 creditless_button("∞", -1),
             ],
         ])

@@ -188,7 +188,7 @@ class AIMessageBilling:
     numeric_chat_id: Optional[int]
     message: Mapping[str, Any]
     redis_client: Any = None
-    creditless_user_daily_limit: int = 0
+    creditless_user_hourly_limit: int = 0
     onboarding_checked: bool = False
     billing_not_configured_message: str = (
         "el cobro de ia no está andando, avisale al admin"
@@ -230,7 +230,7 @@ class AIMessageBilling:
         Returns an error string if the cap was hit (charge already refunded), else None.
         """
         if (
-            self.creditless_user_daily_limit < 0
+            self.creditless_user_hourly_limit < 0
             or self.redis_client is None
             or self.user_id is None
             or chat_scope_id is None
@@ -240,9 +240,9 @@ class AIMessageBilling:
         key = f"creditless_cap:{self.chat_id}:{self.user_id}"
         count = self.redis_client.incr(key)
         if count == 1:
-            self.redis_client.expire(key, 86400)
+            self.redis_client.expire(key, 3600)
 
-        if count > self.creditless_user_daily_limit:
+        if count > self.creditless_user_hourly_limit:
             try:
                 self.credits_db_service.refund_ai_charge(
                     user_id=self.user_id,
@@ -262,8 +262,8 @@ class AIMessageBilling:
                     {"chat_id": self.chat_id, "user_id": self.user_id},
                 )
             return (
-                f"llegaste al limite de {self.creditless_user_daily_limit} "
-                "ia gratis por dia en este grupo, boludo. "
+                f"llegaste al limite de {self.creditless_user_hourly_limit} "
+                "ia gratis por hora en este grupo, boludo. "
                 "cargá créditos con /topup si querés seguir"
             )
         return None

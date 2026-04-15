@@ -5804,7 +5804,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             config = set_chat_config(
                 redis_client,
                 chat_id_str,
-                creditless_user_daily_limit=limit,
+                creditless_user_hourly_limit=limit,
             )
         except ValueError:
             pass

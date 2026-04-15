@@ -220,7 +220,7 @@ def _build_billing_helper(
     command: str,
     message: Mapping[str, Any],
     redis_client: Any = None,
-    creditless_user_daily_limit: int = 0,
+    creditless_user_hourly_limit: int = 0,
 ) -> AIMessageBilling:
     return AIMessageBilling(
         credits_db_service=deps.credits_db_service,
@@ -241,7 +241,7 @@ def _build_billing_helper(
         numeric_chat_id=numeric_chat_id,
         message=message,
         redis_client=redis_client,
-        creditless_user_daily_limit=creditless_user_daily_limit,
+        creditless_user_hourly_limit=creditless_user_hourly_limit,
         load_persisted_reservation_fn=deps.load_persisted_reservation,
         persist_reservation_fn=deps.persist_reservation,
         clear_persisted_reservation_fn=deps.clear_persisted_reservation,
@@ -1418,8 +1418,8 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             command=command,
             message=message,
             redis_client=redis_client,
-            creditless_user_daily_limit=int(
-                chat_config.get("creditless_user_daily_limit", 0)
+            creditless_user_hourly_limit=int(
+                chat_config.get("creditless_user_hourly_limit", chat_config.get("creditless_user_daily_limit", 0))
             ),
         )
         prepared_message = _prepare_message_content(
