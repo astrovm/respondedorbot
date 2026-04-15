@@ -230,7 +230,7 @@ class AIMessageBilling:
         Returns an error string if the cap was hit (charge already refunded), else None.
         """
         if (
-            self.creditless_user_daily_limit <= 0
+            self.creditless_user_daily_limit < 0
             or self.redis_client is None
             or self.user_id is None
             or chat_scope_id is None

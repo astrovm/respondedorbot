@@ -214,7 +214,12 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         "off": "no toca los links",
     }
 
-    creditless_label = "desactivado" if creditless_limit == 0 else str(creditless_limit)
+    if creditless_limit < 0:
+        creditless_label = "ilimitados"
+    elif creditless_limit == 0:
+        creditless_label = "ninguno"
+    else:
+        creditless_label = str(creditless_limit)
 
     lines = [
         "config del gordo",
@@ -238,7 +243,7 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         _format_gmt_offset(timezone_offset),
         "",
         "6. limite ia gratis por usuario por dia",
-        "cuantas veces puede usar ia del grupo un usuario sin creditos propios (0 = sin limite)",
+        "cuantas veces puede usar ia del grupo un usuario sin creditos propios",
         creditless_label,
         "",
         "tocá los botones de abajo y dejalo como se te cante",
@@ -302,18 +307,16 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
                 )
             ],
             [
-                {"text": "-1", "callback_data": f"cfg:timezone:{dec_offset}"},
-                timezone_button("UTC", 0),
-                timezone_button("UTC-3", -3),
-                timezone_button("UTC-5", -5),
-                {"text": "+1", "callback_data": f"cfg:timezone:{inc_offset}"},
+                {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
+                {"text": f"🌍 {_format_gmt_offset(current_offset)}", "callback_data": f"cfg:timezone:{current_offset}"},
+                {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
             ],
             [
-                creditless_button("∞ off", 0),
+                creditless_button("ninguno", 0),
                 creditless_button("3", 3),
                 creditless_button("5", 5),
                 creditless_button("10", 10),
-                creditless_button("20", 20),
+                creditless_button("∞", -1),
             ],
         ]
     }
