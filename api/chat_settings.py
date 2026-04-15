@@ -196,7 +196,7 @@ def _format_gmt_offset(offset: int) -> str:
     return f"UTC{sign}{offset}"
 
 
-def build_config_text(config: Mapping[str, Any]) -> str:
+def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> str:
     """Build the user-facing config summary text."""
 
     link_mode = str(config.get("link_mode", "reply"))
@@ -221,37 +221,46 @@ def build_config_text(config: Mapping[str, Any]) -> str:
     else:
         creditless_label = str(creditless_limit)
 
+    is_group = is_group_chat_type(chat_type) if chat_type else True
+
     lines = [
         "config del gordo",
         "",
         "1. links arreglados",
         link_labels.get(link_mode, link_mode),
         "",
-        "2. ia random",
-        "si está activado, a veces me meto solo en la charla aunque nadie me llame",
-        f"{'✅ activado' if random_enabled else '▫️ desactivado'}",
-        "",
-        "3. seguir charla",
+        "2. seguir charla",
         "si está activado, me contestás después de un comando y sigo el hilo como si nada",
         f"{'✅ activado' if followups_enabled else '▫️ desactivado'}",
         "",
-        "4. ignorar replies a links arreglados",
+        "3. ignorar replies a links arreglados",
         "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares",
         f"{'✅ activado' if ignore_link_fix_followups else '▫️ desactivado'}",
         "",
-        "5. zona horaria",
+        "4. zona horaria",
         _format_gmt_offset(timezone_offset),
-        "",
-        "6. limite ia gratis por usuario por dia",
-        "cuantas veces puede usar ia del grupo un usuario sin creditos propios",
-        creditless_label,
+    ]
+
+    if is_group:
+        lines.extend([
+            "",
+            "5. ia random",
+            "si está activado, a veces me meto solo en la charla aunque nadie me llame",
+            f"{'✅ activado' if random_enabled else '▫️ desactivado'}",
+            "",
+            "6. limite ia gratis por usuario por dia",
+            "cuantas veces puede usar ia del grupo un usuario sin creditos propios",
+            creditless_label,
+        ])
+
+    lines.extend([
         "",
         "tocá los botones de abajo y dejalo como se te cante",
-    ]
+    ])
     return "\n".join(lines)
 
 
-def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
+def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -> Dict[str, Any]:
     """Build the inline keyboard to toggle chat config values."""
 
     link_mode = str(config.get("link_mode", "reply"))
@@ -284,33 +293,38 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     dec_offset = max(current_offset - 1, TIMEZONE_OFFSET_MIN)
     inc_offset = min(current_offset + 1, TIMEZONE_OFFSET_MAX)
 
-    return {
-        "inline_keyboard": [
-            [
-                choice_button("responder link", "reply", link_mode, action="link"),
-                choice_button("borrar link", "delete", link_mode, action="link"),
-                choice_button("apagado", "off", link_mode, action="link"),
-            ],
+    is_group = is_group_chat_type(chat_type) if chat_type else True
+
+    keyboard = [
+        [
+            choice_button("responder link", "reply", link_mode, action="link"),
+            choice_button("borrar link", "delete", link_mode, action="link"),
+            choice_button("apagado", "off", link_mode, action="link"),
+        ],
+        [
+            toggle_button(
+                "seguir charla en comandos",
+                followups_enabled,
+                action="followups",
+            )
+        ],
+        [
+            toggle_button(
+                "ignorar replies a links arreglados",
+                ignore_link_fix_followups,
+                action="linkfixfollowups",
+            )
+        ],
+        [
+            {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
+            {"text": f"🌍 {_format_gmt_offset(current_offset)}", "callback_data": f"cfg:timezone:{current_offset}"},
+            {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
+        ],
+    ]
+
+    if is_group:
+        keyboard.extend([
             [toggle_button("me meto en la charla", random_enabled, action="random")],
-            [
-                toggle_button(
-                    "seguir charla en comandos",
-                    followups_enabled,
-                    action="followups",
-                )
-            ],
-            [
-                toggle_button(
-                    "ignorar replies a links arreglados",
-                    ignore_link_fix_followups,
-                    action="linkfixfollowups",
-                )
-            ],
-            [
-                {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
-                {"text": f"🌍 {_format_gmt_offset(current_offset)}", "callback_data": f"cfg:timezone:{current_offset}"},
-                {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
-            ],
             [
                 creditless_button("ninguno", 0),
                 creditless_button("3", 3),
@@ -318,9 +332,8 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
                 creditless_button("10", 10),
                 creditless_button("∞", -1),
             ],
-        ]
-    }
-
+        ])
+    return {"inline_keyboard": keyboard}
 
 def chat_admin_cache_key(chat_id: str, user_id: Union[str, int]) -> str:
     return f"chat_admin:{chat_id}:{user_id}"
