@@ -594,84 +594,43 @@ def test_save_and_get_bot_message_metadata():
 
 
 class TestReminderCallback:
-    def test_reminder_delete(self):
+    def test_task_delete_routes(self):
         from api.index import handle_callback_query
 
         callback = {
             "id": "cbq1",
-            "data": "rem:del:abc123",
+            "data": "task:del:abc123",
             "from": {"id": 42},
             "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
         }
 
         with (
             patch("api.index._answer_callback_query") as mock_answer,
-            patch("api.index.handle_reminder_callback") as mock_handler,
-        ):
-            handle_callback_query(callback)
-            mock_handler.assert_called_once_with(callback)
-        mock_answer.assert_not_called()
-
-    def test_task_delete(self):
-        from api.index import handle_callback_query
-
-        callback = {
-            "id": "cbq2",
-            "data": "task:del:xyz789",
-            "from": {"id": 42},
-            "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
-        }
-
-        with (
-            patch("api.index._answer_callback_query") as mock_answer,
-            patch("api.index.handle_reminder_callback") as mock_handler,
+            patch("api.index.handle_task_callback") as mock_handler,
         ):
             handle_callback_query(callback)
             mock_handler.assert_called_once_with(callback)
         mock_answer.assert_not_called()
 
 
-class TestHandleReminderCallback:
-    def test_delete_reminder(self):
-        from api.index import handle_reminder_callback
+class TestHandleTaskCallback:
+    def test_delete_task(self):
+        from api.index import handle_task_callback
 
         callback = {
             "id": "cbq1",
-            "data": "rem:del:abc123",
+            "data": "task:del:abc123",
             "from": {"id": 42},
             "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
         }
 
         with (
-            patch("api.tools.reminder_scheduler.cancel_reminder") as mock_cancel,
+            patch("api.tools.task_scheduler.cancel_task") as mock_cancel,
             patch("api.index._answer_callback_query") as mock_answer,
             patch("api.index.edit_message") as mock_edit,
         ):
-            mock_cancel.return_value = True
-            handle_reminder_callback(callback)
+            handle_task_callback(callback)
 
         mock_cancel.assert_called_once_with("abc123")
-        mock_answer.assert_called_once_with("cbq1", text="recordatorio abc123 borrado")
-        mock_edit.assert_called_once()
-
-    def test_delete_task(self):
-        from api.index import handle_reminder_callback
-
-        callback = {
-            "id": "cbq2",
-            "data": "task:del:xyz789",
-            "from": {"id": 42},
-            "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
-        }
-
-        with (
-            patch("api.tools.reminder_scheduler.cancel_scheduled_task") as mock_cancel,
-            patch("api.index._answer_callback_query") as mock_answer,
-            patch("api.index.edit_message") as mock_edit,
-        ):
-            mock_cancel.return_value = True
-            handle_reminder_callback(callback)
-
-        mock_cancel.assert_called_once_with("xyz789")
-        mock_answer.assert_called_once_with("cbq2", text="tarea xyz789 borrada")
+        mock_answer.assert_called_once_with("cbq1", text="tarea abc123 borrada")
         mock_edit.assert_called_once()

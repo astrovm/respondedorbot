@@ -116,193 +116,116 @@ class TestWebFetchTool:
         assert "error" in result.output.lower()
 
 
-class TestReminderSetTool:
-    @patch("api.tools.reminder_set.schedule_reminder")
-    def test_reminder_set(self, mock_schedule):
+class TestTaskSetTool:
+    @patch("api.tools.task_set.schedule_task")
+    def test_one_shot(self, mock_schedule):
         mock_schedule.return_value = "abc123"
         result = execute_tool(
-            "reminder_set",
+            "task_set",
             {"text": "comprar pizza", "delay_seconds": 1800},
-            {"chat_id": "123", "user_name": "testuser"},
+            {"chat_id": "123", "user_name": "u"},
         )
         assert "listo" in result.output
-        assert result.metadata["reminder_id"] == "abc123"
+        assert result.metadata["task_id"] == "abc123"
 
-    def test_reminder_set_no_text(self):
+    @patch("api.tools.task_set.schedule_task")
+    def test_recurring(self, mock_schedule):
+        mock_schedule.return_value = "def456"
         result = execute_tool(
-            "reminder_set",
-            {"delay_seconds": 1800},
+            "task_set",
+            {"text": "noticias de sonic", "interval_seconds": 86400},
             {"chat_id": "123"},
         )
+        assert "listo" in result.output
+        assert result.metadata["task_id"] == "def456"
+
+    def test_no_text(self):
+        result = execute_tool("task_set", {"delay_seconds": 1800}, {"chat_id": "123"})
         assert "texto" in result.output.lower()
 
-    def test_reminder_set_no_delay(self):
-        result = execute_tool(
-            "reminder_set",
-            {"text": "algo"},
-            {"chat_id": "123"},
-        )
-        assert "delay_seconds" in result.output
+    def test_no_time_params(self):
+        result = execute_tool("task_set", {"text": "algo"}, {"chat_id": "123"})
+        assert "delay_seconds" in result.output or "interval_seconds" in result.output
 
-    def test_reminder_set_invalid_delay(self):
-        result = execute_tool(
-            "reminder_set",
-            {"text": "algo", "delay_seconds": "abc"},
-            {"chat_id": "123"},
-        )
-        assert "delay_seconds" in result.output
-
-    def test_reminder_set_no_chat(self):
-        result = execute_tool(
-            "reminder_set",
-            {"text": "algo", "delay_seconds": 1800},
-            {},
-        )
+    def test_no_chat(self):
+        result = execute_tool("task_set", {"text": "algo", "delay_seconds": 1800}, {})
         assert "chat" in result.output.lower()
 
-    def test_reminder_set_too_long(self):
+    def test_delay_too_long(self):
         result = execute_tool(
-            "reminder_set",
+            "task_set",
             {"text": "algo", "delay_seconds": 86400 * 31},
             {"chat_id": "123"},
         )
         assert "maximo" in result.output.lower()
 
-    @patch("api.tools.reminder_set.schedule_reminder")
-    def test_reminder_set_schedule_fails(self, mock_schedule):
+    def test_interval_too_short(self):
+        result = execute_tool(
+            "task_set",
+            {"text": "algo", "interval_seconds": 60},
+            {"chat_id": "123"},
+        )
+        assert "minimo" in result.output.lower()
+
+    def test_interval_too_long(self):
+        result = execute_tool(
+            "task_set",
+            {"text": "algo", "interval_seconds": 86400 * 8},
+            {"chat_id": "123"},
+        )
+        assert "maximo" in result.output.lower()
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_schedule_fails(self, mock_schedule):
         mock_schedule.return_value = None
         result = execute_tool(
-            "reminder_set",
+            "task_set",
             {"text": "algo", "delay_seconds": 1800},
             {"chat_id": "123"},
         )
         assert "no se pudo" in result.output
 
 
-class TestReminderListTool:
-    @patch("api.tools.reminder_list.list_reminders")
-    def test_reminder_list_empty(self, mock_list):
+class TestTaskListTool:
+    @patch("api.tools.task_list.list_tasks")
+    def test_empty(self, mock_list):
         mock_list.return_value = []
-        result = execute_tool("reminder_list", {}, {"chat_id": "123"})
+        result = execute_tool("task_list", {}, {"chat_id": "123"})
         assert "no hay" in result.output.lower()
 
-    @patch("api.tools.reminder_list.list_reminders")
-    def test_reminder_list_with_items(self, mock_list):
+    @patch("api.tools.task_list.list_tasks")
+    def test_with_one_shot(self, mock_list):
         mock_list.return_value = [
-            {"text": "comprar", "next_run": "2026-01-01", "user_name": "u"},
+            {
+                "id": "r1",
+                "text": "comprar",
+                "next_run": "2026-01-01",
+                "interval_seconds": None,
+            },
         ]
-        result = execute_tool("reminder_list", {}, {"chat_id": "123"})
+        result = execute_tool("task_list", {}, {"chat_id": "123"})
         assert "comprar" in result.output
 
-    def test_reminder_list_no_chat(self):
-        result = execute_tool("reminder_list", {}, {})
-        assert "chat" in result.output.lower()
-
-
-class TestScheduledTaskSetTool:
-    @patch("api.tools.scheduled_task_set.schedule_recurring_task")
-    def test_scheduled_task_set(self, mock_schedule):
-        mock_schedule.return_value = "t1"
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "noticias de sonic", "interval_seconds": 86400},
-            {"chat_id": "123", "user_name": "u"},
-        )
-        assert "listo" in result.output
-        assert result.metadata["task_id"] == "t1"
-
-    def test_scheduled_task_set_no_prompt(self):
-        result = execute_tool(
-            "scheduled_task_set",
-            {"interval_seconds": 86400},
-            {"chat_id": "123"},
-        )
-        assert "prompt" in result.output.lower()
-
-    def test_scheduled_task_set_no_interval(self):
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "algo"},
-            {"chat_id": "123"},
-        )
-        assert "interval_seconds" in result.output
-
-    def test_scheduled_task_set_too_frequent(self):
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "algo", "interval_seconds": 60},
-            {"chat_id": "123"},
-        )
-        assert "minimo" in result.output.lower()
-
-    def test_scheduled_task_set_too_long(self):
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "algo", "interval_seconds": 86400 * 8},
-            {"chat_id": "123"},
-        )
-        assert "maximo" in result.output.lower()
-
-    def test_scheduled_task_set_no_chat(self):
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "algo", "interval_seconds": 86400},
-            {},
-        )
-        assert "chat" in result.output.lower()
-
-    @patch("api.tools.scheduled_task_set.schedule_recurring_task")
-    def test_scheduled_task_set_schedule_fails(self, mock_schedule):
-        mock_schedule.return_value = None
-        result = execute_tool(
-            "scheduled_task_set",
-            {"prompt": "algo", "interval_seconds": 86400},
-            {"chat_id": "123"},
-        )
-        assert "no se pudo" in result.output
-
-
-class TestScheduledTaskListTool:
-    @patch("api.tools.scheduled_task_list.list_scheduled_tasks")
-    def test_scheduled_task_list_empty(self, mock_list):
-        mock_list.return_value = []
-        result = execute_tool("scheduled_task_list", {}, {"chat_id": "123"})
-        assert "no hay" in result.output.lower()
-
-    @patch("api.tools.scheduled_task_list.list_scheduled_tasks")
-    def test_scheduled_task_list_with_items(self, mock_list):
+    @patch("api.tools.task_list.list_tasks")
+    def test_with_recurring(self, mock_list):
         mock_list.return_value = [
-            {"prompt": "noticias sonic", "interval_seconds": 86400, "id": "t1"},
+            {"text": "noticias sonic", "interval_seconds": 86400, "id": "t1"},
         ]
-        result = execute_tool("scheduled_task_list", {}, {"chat_id": "123"})
+        result = execute_tool("task_list", {}, {"chat_id": "123"})
         assert "noticias sonic" in result.output
 
-    def test_scheduled_task_list_no_chat(self):
-        result = execute_tool("scheduled_task_list", {}, {})
+    def test_no_chat(self):
+        result = execute_tool("task_list", {}, {})
         assert "chat" in result.output.lower()
 
 
-class TestScheduledTaskCancelTool:
-    @patch("api.tools.scheduled_task_cancel.cancel_scheduled_task")
+class TestTaskCancelTool:
+    @patch("api.tools.task_cancel.cancel_task")
     def test_cancel_success(self, mock_cancel):
         mock_cancel.return_value = True
-        result = execute_tool(
-            "scheduled_task_cancel",
-            {"task_id": "abc123"},
-            {},
-        )
+        result = execute_tool("task_cancel", {"task_id": "abc123"}, {})
         assert "cancelada" in result.output
 
-    @patch("api.tools.scheduled_task_cancel.cancel_scheduled_task")
-    def test_cancel_fail(self, mock_cancel):
-        mock_cancel.return_value = False
-        result = execute_tool(
-            "scheduled_task_cancel",
-            {"task_id": "abc123"},
-            {},
-        )
-        assert "no se pudo" in result.output
-
     def test_cancel_no_id(self):
-        result = execute_tool("scheduled_task_cancel", {}, {})
+        result = execute_tool("task_cancel", {}, {})
         assert "id" in result.output.lower()
