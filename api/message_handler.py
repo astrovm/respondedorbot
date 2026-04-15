@@ -31,6 +31,7 @@ class MessageHandlerDeps:
         [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
     ]
     replace_links: Callable[[str], Tuple[str, bool, List[str]]]
+    fetch_tweet_text: Callable[[str], Tuple[str, List[Dict[str, Any]]]]
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
@@ -415,9 +416,17 @@ def _handle_link_replacement(
     if link_mode == "off" or not message_text or message_text.startswith("/"):
         return False
 
+    tweet_summary, tweets = deps.fetch_tweet_text(message_text)
+
     fixed_text, changed, original_links = deps.replace_links(message_text)
-    if not changed:
+    if not changed and not tweets:
         return False
+
+    if tweets and tweet_summary:
+        if fixed_text:
+            fixed_text = f"{fixed_text}\n\n{tweet_summary}"
+        else:
+            fixed_text = tweet_summary
 
     user_info = message.get("from", {})
     username = user_info.get("username")
@@ -1419,7 +1428,10 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             message=message,
             redis_client=redis_client,
             creditless_user_hourly_limit=int(
-                chat_config.get("creditless_user_hourly_limit", chat_config.get("creditless_user_daily_limit", 0))
+                chat_config.get(
+                    "creditless_user_hourly_limit",
+                    chat_config.get("creditless_user_daily_limit", 0),
+                )
             ),
         )
         prepared_message = _prepare_message_content(

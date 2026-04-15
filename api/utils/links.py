@@ -43,6 +43,9 @@ __all__ = [
     "can_embed_url",
     "url_is_embedable",
     "replace_links",
+    "extract_tweet_urls",
+    "fetch_tweet_via_oembed",
+    "fetch_tweet_text",
 ]
 
 
@@ -205,7 +208,9 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             super().__init__()
             self.tags: Dict[str, str] = {}
 
-        def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        def handle_starttag(
+            self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+        ) -> None:
             if tag != "meta":
                 return
             attrs_dict: Dict[str, Optional[str]] = dict(attrs)
@@ -222,7 +227,9 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     parser.feed(html)
     meta_tags = parser.tags
     title = meta_tags.get("og:title") or meta_tags.get("twitter:title")
-    description = meta_tags.get("og:description") or meta_tags.get("twitter:description")
+    description = meta_tags.get("og:description") or meta_tags.get(
+        "twitter:description"
+    )
     host = parsed.netloc.lower().split(":", 1)[0]
     if host.startswith("www."):
         host = host[4:]
@@ -246,13 +253,10 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     has_preview_media = has_image or has_video
     has_eeinstagram_media = has_og_image or has_og_video
 
-    if (
-        (has_preview_text and (has_preview_media or has_card))
-        or (is_eeinstagram_host and has_eeinstagram_media)
+    if (has_preview_text and (has_preview_media or has_card)) or (
+        is_eeinstagram_host and has_eeinstagram_media
     ):
-        detail = ", ".join(
-            f"{key}={value[:80]}" for key, value in meta_tags.items()
-        )
+        detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags.items())
         print(f"[EMBED] {url} has embed metadata: {detail}")
         return {
             "embeddable": True,
@@ -299,9 +303,7 @@ def can_embed_url(
     return bool(metadata.get("embeddable"))
 
 
-def _eeinstagram_preview_check(
-    parsed: ParseResult, url: str
-) -> Optional[bool]:
+def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
     """Return embed eligibility from the eeinstagram HEAD response when available."""
 
     host = parsed.netloc.lower().split(":", 1)[0]
@@ -430,3 +432,191 @@ def replace_links(
     new_text = url_pattern.sub(strip_tracking, new_text)
 
     return new_text, changed, original_links
+
+
+TWITTER_STATUS_REGEX = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com|fixupx\.com|fxtwitter\.com|xcancel\.com)/(\w+)/status/(\d+)"
+)
+
+
+def extract_tweet_urls(text: str) -> List[Tuple[str, str, str]]:
+    """Extract tweet URLs from text and return list of (username, status_id, original_url)."""
+    matches = TWITTER_STATUS_REGEX.findall(text.lower())
+    results = []
+    for username, status_id in matches:
+        full_url = f"https://x.com/{username}/status/{status_id}"
+        results.append((username, status_id, full_url))
+    return results
+
+
+def _resolve_tco_redirect(url: str) -> Optional[str]:
+    """Resolve a t.co short URL to see if it points to a tweet."""
+    headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
+    try:
+        response = request_with_ssl_fallback(
+            url,
+            allow_redirects=False,
+            timeout=5,
+            headers=headers,
+        )
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("Location", "")
+            if location:
+                return location
+    except RequestException:
+        pass
+    return None
+
+
+def fetch_tweet_via_oembed(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch tweet content via Twitter oEmbed API."""
+    normalized_url = url
+    if "fixupx.com" in url.lower() or "fxtwitter.com" in url.lower():
+        match = TWITTER_STATUS_REGEX.search(url.lower())
+        if match:
+            username, status_id = match.groups()
+            normalized_url = f"https://x.com/{username}/status/{status_id}"
+    elif "twitter.com" in url.lower():
+        match = TWITTER_STATUS_REGEX.search(url.lower())
+        if match:
+            username, status_id = match.groups()
+            normalized_url = f"https://x.com/{username}/status/{status_id}"
+
+    oembed_url = (
+        f"https://publish.twitter.com/oembed?url={normalized_url}&omit_script=true"
+    )
+    headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
+    try:
+        response = request_with_ssl_fallback(
+            oembed_url,
+            allow_redirects=True,
+            timeout=10,
+            headers=headers,
+        )
+        if response.status_code == 200:
+            return response.json()
+    except RequestException:
+        pass
+    return None
+
+
+def fetch_tweet_text(text: str) -> Tuple[str, List[Dict[str, str]]]:
+    """Extract tweet URLs from text and fetch their content via oEmbed.
+
+    Returns a tuple of (summary_text, tweets_list) where tweets_list contains
+    dicts with 'username', 'text', 'date', and optionally 'quoted' (quote tweet).
+    """
+    tweet_urls = extract_tweet_urls(text)
+    if not tweet_urls:
+        return "", []
+
+    tweets_data = []
+    for username, status_id, original_url in tweet_urls:
+        oembed_data = fetch_tweet_via_oembed(original_url)
+        if not oembed_data:
+            continue
+
+        html = oembed_data.get("html", "")
+        tweet_text = _extract_text_from_oembed_html(html)
+        author_name = oembed_data.get("author_name", username)
+        date = _extract_date_from_oembed_html(html)
+
+        tweets_data.append(
+            {
+                "username": username,
+                "author": author_name,
+                "text": tweet_text,
+                "date": date,
+                "url": original_url,
+                "quoted": None,
+            }
+        )
+
+    if not tweets_data:
+        return "", []
+
+    for i, tweet in enumerate(tweets_data):
+        links = _extract_links_from_oembed_html(tweet["text"])
+        for link in links:
+            resolved = _resolve_tco_redirect(link)
+            if resolved and (
+                "twitter.com" in resolved.lower() or "x.com" in resolved.lower()
+            ):
+                quote_match = TWITTER_STATUS_REGEX.search(resolved.lower())
+                if quote_match:
+                    quote_username, quote_status_id = quote_match.groups()
+                    quote_url = (
+                        f"https://x.com/{quote_username}/status/{quote_status_id}"
+                    )
+                    quote_oembed = fetch_tweet_via_oembed(quote_url)
+                    if quote_oembed:
+                        quote_html = quote_oembed.get("html", "")
+                        quote_text = _extract_text_from_oembed_html(quote_html)
+                        quote_author = quote_oembed.get("author_name", quote_username)
+                        quote_date = _extract_date_from_oembed_html(quote_html)
+                        tweets_data[i]["quoted"] = {
+                            "username": quote_username,
+                            "author": quote_author,
+                            "text": quote_text,
+                            "date": quote_date,
+                            "url": quote_url,
+                        }
+                    break
+
+    summary = _format_tweets_summary(tweets_data)
+    return summary, tweets_data
+
+
+def _extract_text_from_oembed_html(html: str) -> str:
+    """Extract readable text from oEmbed HTML blockquote."""
+    p_match = re.search(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
+    if p_match:
+        text = p_match.group(1)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+    return ""
+
+
+def _extract_date_from_oembed_html(html: str) -> str:
+    """Extract date from oEmbed HTML."""
+    date_match = re.search(r">(\w+\s+\d+,\s+\d{4})<", html)
+    if date_match:
+        return date_match.group(1)
+    return ""
+
+
+def _extract_links_from_oembed_html(text: str) -> List[str]:
+    """Extract all links from oEmbed tweet text."""
+    url_pattern = re.compile(r"https?://[^\s<]+")
+    return url_pattern.findall(text)
+
+
+def _format_tweets_summary(tweets: List[Dict[str, Any]]) -> str:
+    """Format tweets into a readable summary."""
+    if not tweets:
+        return ""
+
+    lines = []
+    for tweet in tweets:
+        author = tweet.get("author", tweet.get("username", ""))
+        text = tweet.get("text", "")
+        date = tweet.get("date", "")
+        quote = tweet.get("quoted")
+
+        line = f"📱 @{author}"
+        if date:
+            line += f" · {date}"
+        lines.append(line)
+        lines.append(f'"{text}"')
+
+        if quote:
+            lines.append("")
+            lines.append(
+                f"↪️ Quote de @{quote.get('author', quote.get('username', ''))}:"
+            )
+            lines.append(f'"{quote.get("text", "")}"')
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
