@@ -303,10 +303,6 @@ def build_config_keyboard(
         prefix = "✅" if enabled else "▫️"
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:toggle"}
 
-    def timezone_button(label: str, offset: int) -> Dict[str, str]:
-        prefix = "✅ " if offset == parsed.timezone_offset else ""
-        return {"text": f"{prefix}{label}", "callback_data": f"cfg:timezone:{offset}"}
-
     def creditless_button(label: str, value: int) -> Dict[str, str]:
         prefix = "✅ " if value == parsed.creditless_limit else ""
         return {"text": f"{prefix}{label}", "callback_data": f"cfg:creditless:{value}"}
