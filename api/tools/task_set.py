@@ -15,8 +15,8 @@ def _execute_task_set(
     text = params.get("text", "")
     delay_seconds = params.get("delay_seconds")
     interval_seconds = params.get("interval_seconds")
-    chat_id = context.get("chat_id", "")
-    user_name = context.get("user_name", "")
+    chat_id = str(context.get("chat_id", ""))
+    user_name = str(context.get("user_name", ""))
     user_id = context.get("user_id")
 
     if not text:

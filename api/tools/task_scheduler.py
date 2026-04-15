@@ -183,7 +183,7 @@ def _fire_task(task_id: str) -> None:
     except Exception as e:
         print(f"task_scheduler: {task_id} ask_ai failed: {e}")
         admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
-        billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
+        is_fallback = True
     else:
         if is_fallback:
             billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
