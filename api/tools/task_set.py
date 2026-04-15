@@ -29,6 +29,7 @@ def _execute_task_set(
     interval_seconds = params.get("interval_seconds")
     chat_id = str(context.get("chat_id", ""))
     user_name = str(context.get("user_name", ""))
+    user_id = context.get("user_id")
 
     if not text:
         return ToolResult(output="no se que tarea crear, pasame el texto")
@@ -57,6 +58,7 @@ def _execute_task_set(
         delay_seconds=delay_seconds,
         interval_seconds=interval_seconds,
         user_name=user_name,
+        user_id=user_id,
     )
     if task_id is None:
         return ToolResult(output="no se pudo crear la tarea")

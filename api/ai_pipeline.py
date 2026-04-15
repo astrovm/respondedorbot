@@ -116,6 +116,7 @@ def handle_ai_response(
     context_texts: Optional[Sequence[Optional[str]]] = None,
     user_identity: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
+    user_id: Optional[int] = None,
     send_typing_fn: Callable[[str, str], None],
     telegram_token: Optional[str],
     reset_request_count_fn: Callable[[], Any],
@@ -148,6 +149,7 @@ def handle_ai_response(
                 response_meta=response_meta,
                 chat_id=chat_id,
                 user_name=user_name,
+                user_id=user_id,
             )
         elif is_ask_ai_handler:
             if response_meta is not None:
@@ -157,16 +159,30 @@ def handle_ai_response(
                         response_meta=response_meta,
                         chat_id=chat_id,
                         user_name=user_name,
+                        user_id=user_id,
                     )
                 except TypeError:
-                    # Compat shim: older handler variants don't accept chat_id/user_name.
-                    response = handler_func(messages, response_meta=response_meta)
+                    try:
+                        response = handler_func(
+                            messages,
+                            response_meta=response_meta,
+                            chat_id=chat_id,
+                            user_name=user_name,
+                        )
+                    except TypeError:
+                        response = handler_func(messages, response_meta=response_meta)
             else:
-                response = handler_func(
-                    messages,
-                    chat_id=chat_id,
-                    user_name=user_name,
-                )
+                try:
+                    response = handler_func(
+                        messages,
+                        chat_id=chat_id,
+                        user_name=user_name,
+                        user_id=user_id,
+                    )
+                except TypeError:
+                    response = handler_func(
+                        messages, chat_id=chat_id, user_name=user_name
+                    )
         else:
             if response_meta is not None:
                 try:

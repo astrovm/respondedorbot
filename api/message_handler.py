@@ -524,6 +524,7 @@ def _run_ai_flow(
     *,
     chat_id: str,
     message: Dict[str, Any],
+    user_id: Optional[int],
     prepared_message: PreparedMessage,
     billing_helper: AIMessageBilling,
     prompt_text: str,
@@ -613,6 +614,7 @@ def _run_ai_flow(
         context_texts=[reply_context_text],
         user_identity=user_identity,
         response_meta=ai_response_meta,
+        user_id=user_id,
     )
 
     billing_segments = list(ai_response_meta.get("billing_segments") or [])
@@ -1322,6 +1324,7 @@ def _handle_known_command(
                 deps,
                 chat_id=chat_id,
                 message=message,
+                user_id=user_id,
                 prepared_message=prepared_message,
                 billing_helper=billing_helper,
                 prompt_text=sanitized_message_text,
@@ -1348,6 +1351,7 @@ def _handle_known_command(
         deps,
         chat_id=chat_id,
         message=message,
+        user_id=user_id,
         prepared_message=prepared_message,
         billing_helper=billing_helper,
         prompt_text=prepared_message.message_text,

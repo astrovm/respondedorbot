@@ -1819,6 +1819,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
         deps,
         chat_id="557",
         message={"chat": {"id": 557, "type": "private"}},
+        user_id=None,
         prepared_message=PreparedMessage(
             message_text="/ask describe",
             photo_file_id="img_1",
@@ -1872,6 +1873,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
         deps,
         chat_id="558",
         message={"chat": {"id": 558, "type": "private"}},
+        user_id=None,
         prepared_message=PreparedMessage(
             message_text="/transcribe",
             photo_file_id="img_reply",

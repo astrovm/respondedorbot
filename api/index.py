@@ -111,7 +111,10 @@ import api.tools.task_list
 import api.tools.task_cancel
 from api.tools import get_all_tool_schemas, execute_tool, TOOL_REGISTRY
 from api.tools.registry import parse_tool_call_arguments
-from api.tools.task_scheduler import list_tasks as _task_list_tasks, cancel_task as _task_cancel_task
+from api.tools.task_scheduler import (
+    list_tasks as _task_list_tasks,
+    cancel_task as _task_cancel_task,
+)
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -2967,6 +2970,7 @@ def ask_ai(
     enable_web_search: bool = True,
     chat_id: Optional[str] = None,
     user_name: Optional[str] = None,
+    user_id: Optional[int] = None,
 ) -> str:
     try:
         messages = list(messages or [])
@@ -2986,6 +2990,8 @@ def ask_ai(
             tool_context["chat_id"] = chat_id
         if user_name:
             tool_context["user_name"] = user_name
+        if user_id:
+            tool_context["user_id"] = user_id
 
         system_message = build_system_message(
             context_data,
@@ -3845,9 +3851,7 @@ def _get_openrouter_ai_response_result(
                     continue
                 tool_name = getattr(fn, "name", "")
                 if tool_name not in TOOL_REGISTRY:
-                    print(
-                        f"Tool call skipped (not registered): {tool_name}"
-                    )
+                    print(f"Tool call skipped (not registered): {tool_name}")
                     continue
                 known_calls.append(tc)
 
@@ -5910,6 +5914,7 @@ def handle_ai_response(
     context_texts: Optional[Sequence[Optional[str]]] = None,
     user_identity: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
+    user_id: Optional[int] = None,
 ) -> str:
     return _ai_handle_response(
         chat_id,
@@ -5920,6 +5925,7 @@ def handle_ai_response(
         context_texts=context_texts,
         user_identity=user_identity,
         response_meta=response_meta,
+        user_id=user_id,
         send_typing_fn=send_typing,
         telegram_token=environ.get("TELEGRAM_TOKEN"),
         reset_request_count_fn=_reset_ai_provider_request_count,
