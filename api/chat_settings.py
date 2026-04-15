@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import redis
@@ -196,17 +197,33 @@ def _format_gmt_offset(offset: int) -> str:
     return f"UTC{sign}{offset}"
 
 
+@dataclass
+class ChatConfigData:
+    link_mode: str
+    random_enabled: bool
+    followups_enabled: bool
+    ignore_link_fix_followups: bool
+    timezone_offset: int
+    creditless_limit: int
+
+
+def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
+    return ChatConfigData(
+        link_mode=str(config.get("link_mode", "reply")),
+        random_enabled=coerce_bool(config.get("ai_random_replies"), default=True),
+        followups_enabled=coerce_bool(config.get("ai_command_followups"), default=True),
+        ignore_link_fix_followups=coerce_bool(
+            config.get("ignore_link_fix_followups"), default=True
+        ),
+        timezone_offset=int(config.get("timezone_offset", -3)),
+        creditless_limit=int(config.get("creditless_user_daily_limit", 5)),
+    )
+
+
 def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> str:
     """Build the user-facing config summary text."""
 
-    link_mode = str(config.get("link_mode", "reply"))
-    random_enabled = coerce_bool(config.get("ai_random_replies"), default=True)
-    followups_enabled = coerce_bool(config.get("ai_command_followups"), default=True)
-    ignore_link_fix_followups = coerce_bool(
-        config.get("ignore_link_fix_followups"), default=True
-    )
-    timezone_offset = int(config.get("timezone_offset", -3))
-    creditless_limit = int(config.get("creditless_user_daily_limit", 5))
+    parsed = parse_chat_config(config)
 
     link_labels = {
         "delete": "borra el mensaje original y repostea el link arreglado",
@@ -214,12 +231,12 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         "off": "no toca los links",
     }
 
-    if creditless_limit < 0:
+    if parsed.creditless_limit < 0:
         creditless_label = "ilimitados"
-    elif creditless_limit == 0:
+    elif parsed.creditless_limit == 0:
         creditless_label = "ninguno"
     else:
-        creditless_label = str(creditless_limit)
+        creditless_label = str(parsed.creditless_limit)
 
     is_group = is_group_chat_type(chat_type) if chat_type else True
 
@@ -227,18 +244,18 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         "config del gordo",
         "",
         "1. links arreglados",
-        link_labels.get(link_mode, link_mode),
+        link_labels.get(parsed.link_mode, parsed.link_mode),
         "",
         "2. seguir charla",
         "si está activado, me contestás después de un comando y sigo el hilo como si nada",
-        f"{'✅ activado' if followups_enabled else '▫️ desactivado'}",
+        f"{'✅ activado' if parsed.followups_enabled else '▫️ desactivado'}",
         "",
         "3. ignorar replies a links arreglados",
         "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares",
-        f"{'✅ activado' if ignore_link_fix_followups else '▫️ desactivado'}",
+        f"{'✅ activado' if parsed.ignore_link_fix_followups else '▫️ desactivado'}",
         "",
         "4. zona horaria",
-        _format_gmt_offset(timezone_offset),
+        _format_gmt_offset(parsed.timezone_offset),
     ]
 
     if is_group:
@@ -246,7 +263,7 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
             "",
             "5. ia random",
             "si está activado, a veces me meto solo en la charla aunque nadie me llame",
-            f"{'✅ activado' if random_enabled else '▫️ desactivado'}",
+            f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
             "",
             "6. limite ia gratis por usuario por dia",
             "cuantas veces puede usar ia del grupo un usuario sin creditos propios",
@@ -263,14 +280,7 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
 def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -> Dict[str, Any]:
     """Build the inline keyboard to toggle chat config values."""
 
-    link_mode = str(config.get("link_mode", "reply"))
-    random_enabled = coerce_bool(config.get("ai_random_replies"), default=True)
-    followups_enabled = coerce_bool(config.get("ai_command_followups"), default=True)
-    ignore_link_fix_followups = coerce_bool(
-        config.get("ignore_link_fix_followups"), default=True
-    )
-    current_offset = int(config.get("timezone_offset", -3))
-    creditless_limit = int(config.get("creditless_user_daily_limit", 5))
+    parsed = parse_chat_config(config)
 
     def choice_button(
         label: str, value: str, current: str, *, action: str
@@ -283,48 +293,48 @@ def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:toggle"}
 
     def timezone_button(label: str, offset: int) -> Dict[str, str]:
-        prefix = "✅ " if offset == current_offset else ""
+        prefix = "✅ " if offset == parsed.timezone_offset else ""
         return {"text": f"{prefix}{label}", "callback_data": f"cfg:timezone:{offset}"}
 
     def creditless_button(label: str, value: int) -> Dict[str, str]:
-        prefix = "✅ " if value == creditless_limit else ""
+        prefix = "✅ " if value == parsed.creditless_limit else ""
         return {"text": f"{prefix}{label}", "callback_data": f"cfg:creditless:{value}"}
 
-    dec_offset = max(current_offset - 1, TIMEZONE_OFFSET_MIN)
-    inc_offset = min(current_offset + 1, TIMEZONE_OFFSET_MAX)
+    dec_offset = max(parsed.timezone_offset - 1, TIMEZONE_OFFSET_MIN)
+    inc_offset = min(parsed.timezone_offset + 1, TIMEZONE_OFFSET_MAX)
 
     is_group = is_group_chat_type(chat_type) if chat_type else True
 
     keyboard = [
         [
-            choice_button("responder link", "reply", link_mode, action="link"),
-            choice_button("borrar link", "delete", link_mode, action="link"),
-            choice_button("apagado", "off", link_mode, action="link"),
+            choice_button("responder link", "reply", parsed.link_mode, action="link"),
+            choice_button("borrar link", "delete", parsed.link_mode, action="link"),
+            choice_button("apagado", "off", parsed.link_mode, action="link"),
         ],
         [
             toggle_button(
                 "seguir charla en comandos",
-                followups_enabled,
+                parsed.followups_enabled,
                 action="followups",
             )
         ],
         [
             toggle_button(
                 "ignorar replies a links arreglados",
-                ignore_link_fix_followups,
+                parsed.ignore_link_fix_followups,
                 action="linkfixfollowups",
             )
         ],
         [
             {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
-            {"text": f"🌍 {_format_gmt_offset(current_offset)}", "callback_data": f"cfg:timezone:{current_offset}"},
+            {"text": f"🌍 {_format_gmt_offset(parsed.timezone_offset)}", "callback_data": f"cfg:timezone:{parsed.timezone_offset}"},
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
         ],
     ]
 
     if is_group:
         keyboard.extend([
-            [toggle_button("me meto en la charla", random_enabled, action="random")],
+            [toggle_button("me meto en la charla", parsed.random_enabled, action="random")],
             [
                 creditless_button("ninguno", 0),
                 creditless_button("3", 3),
@@ -429,6 +439,7 @@ def report_unauthorized_config_attempt(
 __all__ = [
     "CHAT_ADMIN_STATUS_TTL",
     "CHAT_CONFIG_DEFAULTS",
+    "ChatConfigData",
     "TIMEZONE_OFFSET_MAX",
     "TIMEZONE_OFFSET_MIN",
     "build_config_keyboard",
@@ -438,6 +449,7 @@ __all__ = [
     "get_chat_config",
     "is_chat_admin",
     "is_group_chat_type",
+    "parse_chat_config",
     "report_unauthorized_config_attempt",
     "set_chat_config",
 ]
