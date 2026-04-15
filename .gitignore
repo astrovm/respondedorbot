@@ -134,5 +134,6 @@ dmypy.json
 # Local git worktrees
 .worktrees/
 
-# Superpowers documentation
+# AI generated files
 docs/superpowers/
+.survey/

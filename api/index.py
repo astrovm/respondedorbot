@@ -124,6 +124,8 @@ from api.ai_pipeline import (
     remove_gordo_prefix as _ai_remove_gordo_prefix,
 )
 from api.chat_settings import (
+    TIMEZONE_OFFSET_MAX,
+    TIMEZONE_OFFSET_MIN,
     build_config_keyboard as _chat_build_config_keyboard,
     build_config_text as _chat_build_config_text,
     coerce_bool as _chat_coerce_bool,
@@ -2966,6 +2968,15 @@ def ask_ai(
         }
         if chat_id:
             tool_context["chat_id"] = chat_id
+            try:
+                r = config_redis()
+                if r:
+                    cfg = get_chat_config(r, str(chat_id))
+                    tool_context["timezone_offset"] = int(
+                        cfg.get("timezone_offset", -3)
+                    )
+            except Exception:
+                pass
         if user_name:
             tool_context["user_name"] = user_name
         if user_id is not None:
@@ -4072,7 +4083,11 @@ def build_system_message(
     if tools_active:
         tool_instruction = (
             "\n\nHERRAMIENTAS: price_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
-            "task_set: text + delay_seconds (una vez) o interval_seconds (repetir). 60=1min 3600=1h 86400=1d.\n"
+            "task_set: create scheduled tasks. params: text, y opcionalmente delay_seconds/interval_seconds o trigger_config.\n"
+            "- trigger_config con type='interval' y days=N para cada N dias.\n"
+            "- trigger_config con type='cron', hour, minute para horarios especificos.\n"
+            "- cron puede tener day_of_week='lun,mie,vie' o day=1 para primer dia del mes.\n"
+            "- si no especificas hora para cron, elegi una hora razonable segun el contexto.\n"
             "Usa herramientas cuando sean utiles, sino responde normal.\n"
         )
 
@@ -5775,6 +5790,16 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             chat_id_str,
             ignore_link_fix_followups=not current,
         )
+    elif action == "timezone":
+        try:
+            offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
+            config = set_chat_config(
+                redis_client,
+                chat_id_str,
+                timezone_offset=offset,
+            )
+        except ValueError:
+            pass
 
     text = build_config_text(config)
     keyboard = build_config_keyboard(config)

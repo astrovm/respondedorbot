@@ -58,6 +58,7 @@ def _format_run_time(raw: str) -> str:
         return raw
 
 
+
 def get_scheduler() -> Any:
     global _scheduler_instance
     if _scheduler_instance is not None:
@@ -154,6 +155,7 @@ def _fire_task(task_id: str) -> None:
     text = str(data.get("text", ""))
     user_name = str(data.get("user_name", ""))
     interval = data.get("interval_seconds")
+    trigger_cfg = data.get("trigger_config")
     user_id = data.get("user_id")
 
     if not chat_id or not text:
@@ -218,7 +220,7 @@ def _fire_task(task_id: str) -> None:
                 reason="task_success",
             )
 
-    if not interval:
+    if not interval and not trigger_cfg:
         _delete_task(key, task_id, redis_client)
 
 
@@ -229,8 +231,10 @@ def schedule_task(
     interval_seconds: Optional[int] = None,
     user_name: str = "",
     user_id: Optional[int] = None,
+    trigger_config: Optional[Dict[str, Any]] = None,
+    timezone_offset: int = -3,
 ) -> Optional[str]:
-    if delay_seconds is None and interval_seconds is None:
+    if delay_seconds is None and interval_seconds is None and not trigger_config:
         return None
 
     scheduler = get_scheduler()
@@ -240,6 +244,8 @@ def schedule_task(
     task_id = str(uuid.uuid4())[:8]
 
     run_date = None
+    is_recurring = bool(interval_seconds or trigger_config)
+
     if delay_seconds is not None:
         run_date = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + delay_seconds,
@@ -249,22 +255,47 @@ def schedule_task(
     redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
     redis_client = _get_redis()
     if redis_client is not None:
-        data = json.dumps(
-            {
-                "id": task_id,
-                "chat_id": str(chat_id),
-                "text": text,
-                "user_name": user_name,
-                "user_id": user_id,
-                "interval_seconds": interval_seconds,
-                "run_date": run_date.isoformat() if run_date else None,
-            }
-        )
-        ttl = 86400 * 90 if interval_seconds else 86400 * 30
-        redis_client.setex(redis_key, ttl, data)
+        data = {
+            "id": task_id,
+            "chat_id": str(chat_id),
+            "text": text,
+            "user_name": user_name,
+            "user_id": user_id,
+            "interval_seconds": interval_seconds,
+            "run_date": run_date.isoformat() if run_date else None,
+            "trigger_config": trigger_config,
+        }
+        ttl = 86400 * 90 if is_recurring else 86400 * 30
+        redis_client.setex(redis_key, ttl, json.dumps(data))
 
     try:
-        if interval_seconds:
+        if trigger_config and trigger_config.get("type") == "cron":
+            tz = timezone(timedelta(hours=timezone_offset))
+
+            cron_kwargs: Dict[str, Any] = {"timezone": tz}
+            for key, conv in (("hour", int), ("minute", int), ("day", int), ("day_of_week", str)):
+                if key in trigger_config:
+                    cron_kwargs[key] = conv(trigger_config[key])
+
+            scheduler.add_job(
+                _fire_task,
+                "cron",
+                id=f"task_{task_id}",
+                args=[task_id],
+                replace_existing=True,
+                **cron_kwargs,
+            )
+        elif trigger_config and trigger_config.get("type") == "interval":
+            days = int(trigger_config.get("days", 1))
+            scheduler.add_job(
+                _fire_task,
+                "interval",
+                days=max(days, 1),
+                id=f"task_{task_id}",
+                args=[task_id],
+                replace_existing=True,
+            )
+        elif interval_seconds:
             scheduler.add_job(
                 _fire_task,
                 "interval",
