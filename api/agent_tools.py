@@ -249,6 +249,8 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
     final_url = current_url
     content_type = ""
     status_code = getattr(response, "status_code", None)
+    resp_encoding = getattr(response, "encoding", None)
+    resp_apparent_encoding = getattr(response, "apparent_encoding", None)
     body = b""
     body_truncated = False
     try:
@@ -284,8 +286,8 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
 
     decoded = _decode_response_body(
         body,
-        getattr(response, "encoding", None),
-        getattr(response, "apparent_encoding", None),
+        resp_encoding,
+        resp_apparent_encoding,
     )
     is_html = "html" in content_type or b"<html" in body[:400].lower()
     if is_html:
