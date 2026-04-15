@@ -2982,7 +2982,6 @@ def ask_ai(
         extra_tools = get_all_tool_schemas()
         tool_context: Dict[str, Any] = {
             "get_prices": get_prices,
-            "get_dollar_rates": get_dollar_rates,
         }
         if chat_id:
             tool_context["chat_id"] = chat_id
