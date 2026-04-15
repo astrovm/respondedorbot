@@ -2342,33 +2342,6 @@ esto es lo que sé hacer, boludo:
 
 - /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
-- /bcra, /variables: te tiro las variables económicas del bcra
-
-- /comando, /command algo: te convierto eso en comando de telegram
-
-- /convertbase 101, 2, 10: te paso números entre bases
-
-- /eleccion: odds actuales de Polymarket para Diputados 2025
-
-- /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto
-
-- /rulo: te armo los rulos desde el oficial
-
-- /dolar, /dollar, /usd: te tiro la posta del blue y todos los dólares
-- /usd 1h: variacion de la ultima hora (acepta 1h, 6h, 12h, 24h, 48h)
-
-- /petroleo, /oil: te paso el precio del Brent y del WTI
-
-- /instance: te digo donde estoy corriendo
-
-- /config: tocás la config del gordo y de los links
-
-- /topup: cargás créditos ia con telegram stars por privado
-
-- /balance: te muestro cuántos créditos ia te quedan
-
-- /transfer 1.5: le pasás 1.5 créditos tuyos al grupo
-
 - /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
 - /prices 20: top 20 en usd
@@ -2379,13 +2352,30 @@ esto es lo que sé hacer, boludo:
 - /prices btc 7d: variacion de 7 dias (acepta 1h, 24h, 7d, 30d)
 - /prices 10 1h: top 10 con variacion de 1 hora
 
-- /random pizza, carne, sushi: elijo por vos
-- /random 1-10: numero random del 1 al 10
+- /dolar, /dollar, /usd: te tiro la posta del blue y todos los dólares
+- /usd 1h: variacion de la ultima hora (acepta 1h, 6h, 12h, 24h, 48h)
+
+- /petroleo, /oil: te paso el precio del Brent y del WTI
+
+- /bcra, /variables: te tiro las variables económicas del bcra
+
+- /eleccion: odds actuales de Polymarket para Diputados 2025
+
+- /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto
+
+- /rulo: te armo los rulos desde el oficial
 
 - /powerlaw: te tiro el precio justo de btc según power law y si está caro o barato
 - /rainbow: idem pero con el rainbow chart
 
 - /satoshi, /sat, /sats: te digo cuanto vale un satoshi
+
+- /random pizza, carne, sushi: elijo por vos
+- /random 1-10: numero random del 1 al 10
+
+- /convertbase 101, 2, 10: te paso números entre bases
+
+- /comando, /command algo: te convierto eso en comando de telegram
 
 - /time: timestamp unix actual
 
@@ -2394,7 +2384,15 @@ esto es lo que sé hacer, boludo:
 - /gm: te mando un gif de buenos días random
 - /gn: te mando un gif de buenas noches random
 
-- /tareas, /tasks: tareas programadas (con botones para borrar)
+- /config: tocás la config del gordo y de los links
+
+- /topup: cargás créditos ia con telegram stars por privado
+
+- /balance: te muestro cuántos créditos ia te quedan
+
+- /transfer 1.5: le pasás 1.5 créditos tuyos al grupo
+
+- /tareas, /tasks: listado de tareas programadas con botones para borrar (el gordo agenda recordatorios y tareas recurrentes cuando le pedis)
 """
 
 

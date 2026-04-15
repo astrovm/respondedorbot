@@ -1,5 +1,6 @@
 from tests.support import *  # noqa: F401,F403
 
+
 def test_is_social_frontend():
     from api.index import is_social_frontend
 
@@ -125,23 +126,23 @@ def test_handle_msg_link_reply():
         "from": {"first_name": "John", "username": "john"},
         "text": "check https://twitter.com/foo/status/1",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg", return_value=901) as mock_send, patch(
-        "api.index.delete_msg"
-    ) as mock_delete, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
-    ) as mock_links_context, patch(
-        "api.index.save_message_to_redis"
-    ) as mock_save, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg", return_value=901) as mock_send,
+        patch("api.index.delete_msg") as mock_delete,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch(
+            "api.index.build_message_links_context",
+            return_value="LINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
+        ) as mock_links_context,
+        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
@@ -177,23 +178,23 @@ def test_handle_msg_link_reply_instagram():
         "from": {"first_name": "Lu", "username": "lu"},
         "text": "mirá https://www.instagram.com/qux?igsh=abc",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg", return_value=903) as mock_send, patch(
-        "api.index.delete_msg"
-    ) as mock_delete, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://kksave.com/qux\ntitulo: foo",
-    ) as mock_links_context, patch(
-        "api.index.save_message_to_redis"
-    ) as mock_save, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg", return_value=903) as mock_send,
+        patch("api.index.delete_msg") as mock_delete,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch(
+            "api.index.build_message_links_context",
+            return_value="LINKS DEL MENSAJE:\n1. https://kksave.com/qux\ntitulo: foo",
+        ) as mock_links_context,
+        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
@@ -229,23 +230,23 @@ def test_handle_msg_link_delete():
         "from": {"first_name": "Ana", "username": "ana"},
         "text": "look https://x.com/bar/status/1",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg", return_value=902) as mock_send, patch(
-        "api.index.delete_msg"
-    ) as mock_delete, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.build_message_links_context",
-        return_value="LINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
-    ) as mock_links_context, patch(
-        "api.index.save_message_to_redis"
-    ) as mock_save, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg", return_value=902) as mock_send,
+        patch("api.index.delete_msg") as mock_delete,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch(
+            "api.index.build_message_links_context",
+            return_value="LINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
+        ) as mock_links_context,
+        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_response = MagicMock()
@@ -282,14 +283,16 @@ def test_handle_msg_link_without_preview(mock_redis):
         "from": {"id": 1},
         "text": "https://example.com",
     }
-    with patch("api.index.send_msg") as mock_send, patch(
-        "api.index.replace_links"
-    ) as mock_replace, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch("api.index.initialize_commands", return_value={}), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should:
+    with (
+        patch("api.index.send_msg") as mock_send,
+        patch("api.index.replace_links") as mock_replace,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond", return_value=False),
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://example.com", False, [])
@@ -298,7 +301,6 @@ def test_handle_msg_link_without_preview(mock_redis):
 
         assert result == "ok"
         mock_send.assert_not_called()
-        mock_should.assert_not_called()
 
 
 def test_replace_links_checks_preview(monkeypatch):
@@ -324,9 +326,7 @@ def test_replace_links_strips_xcom_i_status(monkeypatch):
     assert text == "https://fixupx.com/status/1848434048944783554"
     assert changed is True
     assert originals == ["https://x.com/i/status/1848434048944783554"]
-    mock_can.assert_called_once_with(
-        "https://fixupx.com/status/1848434048944783554"
-    )
+    mock_can.assert_called_once_with("https://fixupx.com/status/1848434048944783554")
 
 
 def test_replace_links_skips_twitter_user_profiles(monkeypatch):
@@ -392,14 +392,18 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<html></html>"
-    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
+    )
 
     result = can_embed_url("http://example.com")
     assert result is False
     captured = capsys.readouterr().out
     assert "missing required metadata" in captured
     assert "og:title/twitter:title or og:description/twitter:description" in captured
-    assert "og:image/twitter:image or og:video/twitter:player or twitter:card" in captured
+    assert (
+        "og:image/twitter:image or og:video/twitter:player or twitter:card" in captured
+    )
 
 
 def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
@@ -409,7 +413,9 @@ def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = "<meta property='og:title' content='Title'>"
-    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
+    )
 
     assert can_embed_url("http://example.com") is False
 
@@ -424,7 +430,9 @@ def test_can_embed_url_allows_title_and_image(monkeypatch):
         "<meta property='og:title' content='Title'>"
         "<meta property='og:image' content='https://example.com/img.png'>"
     )
-    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
+    )
 
     assert can_embed_url("http://example.com") is True
 
@@ -440,7 +448,9 @@ def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
         "<meta name='twitter:title' content='Agustin Cortes (@agucortes)'>"
         "<meta property='og:description' content='Texto del post'>"
     )
-    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
+    )
 
     assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
 
@@ -455,7 +465,9 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
         "<meta name='twitter:card' content='summary'>"
         "<meta name='twitter:image' content='https://example.com/img.png'>"
     )
-    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response)
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
+    )
 
     assert can_embed_url("http://example.com") is False
 
@@ -482,10 +494,7 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monke
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert (
-        can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/")
-        is True
-    )
+    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
 
 
 def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
@@ -498,7 +507,9 @@ def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
     get_response = MagicMock()
     get_response.status_code = 200
     get_response.headers = {"Content-Type": "text/html"}
-    get_response.text = "<meta property='og:image' content='https://example.com/preview.jpg'>"
+    get_response.text = (
+        "<meta property='og:image' content='https://example.com/preview.jpg'>"
+    )
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
@@ -515,9 +526,7 @@ def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
 
     head_response = MagicMock()
     head_response.status_code = 307
-    head_response.headers = {
-        "Location": "https://scontent.cdninstagram.com/video.mp4"
-    }
+    head_response.headers = {"Location": "https://scontent.cdninstagram.com/video.mp4"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
@@ -526,10 +535,7 @@ def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert (
-        can_embed_url("https://eeinstagram.com/reel/DOmco1zjuVi/")
-        is True
-    )
+    assert can_embed_url("https://eeinstagram.com/reel/DOmco1zjuVi/") is True
 
 
 def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
@@ -537,9 +543,7 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
 
     head_response = MagicMock()
     head_response.status_code = 307
-    head_response.headers = {
-        "Location": "https://scontent.cdninstagram.com/video.mp4"
-    }
+    head_response.headers = {"Location": "https://scontent.cdninstagram.com/video.mp4"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
@@ -576,18 +580,18 @@ def test_handle_msg_link_already_fixed():
         "from": {"id": 1},
         "text": "https://fixupx.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond", return_value=False),
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
@@ -595,7 +599,6 @@ def test_handle_msg_link_already_fixed():
 
         assert result == "ok"
         mock_send.assert_not_called()
-        mock_should.assert_not_called()
         mock_get.assert_not_called()
 
 
@@ -606,20 +609,19 @@ def test_handle_msg_original_link_no_check():
         "from": {"id": 1},
         "text": "https://vm.tiktok.com/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.index.replace_links"
-    ) as mock_replace, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond", return_value=False),
+        patch("api.index.replace_links") as mock_replace,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_replace.return_value = ("https://vm.tiktok.com/foo", False, [])
@@ -628,7 +630,6 @@ def test_handle_msg_original_link_no_check():
 
         assert result == "ok"
         mock_send.assert_not_called()
-        mock_should.assert_not_called()
         mock_get.assert_not_called()
 
 
@@ -639,18 +640,18 @@ def test_handle_msg_link_already_fixed_subdomain():
         "from": {"id": 1},
         "text": "https://old.rxddit.com/r/foo",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond", return_value=False),
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
@@ -658,7 +659,6 @@ def test_handle_msg_link_already_fixed_subdomain():
 
         assert result == "ok"
         mock_send.assert_not_called()
-        mock_should.assert_not_called()
         mock_get.assert_not_called()
 
 
@@ -669,18 +669,18 @@ def test_handle_msg_replaced_link_adds_button():
         "from": {"id": 1},
         "text": "https://x.com/foo/status/1?utm_source=bar",
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond") as mock_should,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
@@ -712,18 +712,18 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         "text": "https://x.com/foo/status/1",
         "reply_to_message": {"message_id": 1},
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond") as mock_should,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
@@ -755,20 +755,19 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         "text": "https://x.com/foo/status/1",
         "reply_to_message": {"message_id": 2},
     }
-    with patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}), patch(
-        "api.index.config_redis"
-    ) as mock_redis, patch("api.index.send_msg") as mock_send, patch(
-        "api.index.delete_msg"
-    ) as mock_delete, patch(
-        "api.index.get_chat_config",
-        return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
-    ), patch(
-        "api.index.initialize_commands", return_value={}
-    ), patch(
-        "api.index.should_gordo_respond"
-    ) as mock_should, patch(
-        "api.utils.links.request_with_ssl_fallback"
-    ) as mock_get:
+    with (
+        patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
+        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.send_msg") as mock_send,
+        patch("api.index.delete_msg") as mock_delete,
+        patch(
+            "api.index.get_chat_config",
+            return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
+        ),
+        patch("api.index.initialize_commands", return_value={}),
+        patch("api.index.should_gordo_respond") as mock_should,
+        patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+    ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
         mock_resp = MagicMock()
