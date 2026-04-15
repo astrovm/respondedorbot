@@ -5676,6 +5676,30 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
 
     _, _, task_id = parts
 
+    tasks = _task_list_tasks(str(chat_id))
+    target_task = next((t for t in tasks if str(t.get("id")) == str(task_id)), None)
+    if not target_task:
+        if callback_id:
+            _answer_callback_query(callback_id, text="esa tarea no existe", show_alert=True)
+        return
+
+    request_user_id = user.get("id")
+    task_owner_id = target_task.get("user_id")
+    is_owner = task_owner_id and str(request_user_id) == str(task_owner_id)
+
+    chat_type = str(chat.get("type", ""))
+    is_admin = False
+    if _is_group_chat_type(chat_type):
+        redis_client = config_redis()
+        is_admin = is_chat_admin(str(chat_id), request_user_id, redis_client=redis_client)
+    else:
+        is_admin = True
+
+    if not is_owner and not is_admin:
+        if callback_id:
+            _answer_callback_query(callback_id, text="solo el creador o un admin pueden borrar esta tarea", show_alert=True)
+        return
+
     _task_cancel_task(task_id)
 
     if callback_id:
