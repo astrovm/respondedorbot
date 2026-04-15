@@ -160,7 +160,11 @@ def _fire_task(task_id: str) -> None:
     if not chat_id or not text:
         return
 
-    display = _no_mention(f"@{user_name}") if user_name else "che"
+    if not user_name:
+        print(f"task_scheduler: {task_id} missing user_name, skipping")
+        return
+
+    display = user_name
 
     task_message = {"from": {"id": user_id}} if user_id else {}
     billing = AIMessageBilling(
@@ -273,7 +277,12 @@ def schedule_task(
             tz = timezone(timedelta(hours=timezone_offset))
 
             cron_kwargs: Dict[str, Any] = {"timezone": tz}
-            for key, conv in (("hour", int), ("minute", int), ("day", int), ("day_of_week", str)):
+            for key, conv in (
+                ("hour", int),
+                ("minute", int),
+                ("day", int),
+                ("day_of_week", str),
+            ):
                 if key in trigger_config:
                     cron_kwargs[key] = conv(trigger_config[key])
 

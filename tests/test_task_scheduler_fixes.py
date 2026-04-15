@@ -205,7 +205,7 @@ class TestFireTaskCleanup:
             {
                 "chat_id": "123",
                 "text": "recordame algo",
-                "user_name": "",
+                "user_name": "@testuser",
                 "user_id": 77,
                 "interval_seconds": None,
             }
@@ -230,7 +230,7 @@ class TestFireTaskCleanup:
             {
                 "chat_id": "123",
                 "text": "noticias",
-                "user_name": "",
+                "user_name": "@testuser",
                 "user_id": 77,
                 "interval_seconds": 3600,
             }
@@ -266,7 +266,7 @@ class TestFireTaskBilling:
             {
                 "chat_id": "123",
                 "text": "recordame algo",
-                "user_name": "",
+                "user_name": "@testuser",
                 "user_id": 77,
                 "interval_seconds": None,
             }
@@ -289,7 +289,7 @@ class TestFireTaskBilling:
             {
                 "chat_id": "123",
                 "text": "noticias",
-                "user_name": "",
+                "user_name": "@testuser",
                 "user_id": 77,
                 "interval_seconds": 3600,
             }
@@ -312,7 +312,7 @@ class TestFireTaskBilling:
             {
                 "chat_id": "123",
                 "text": "recordame algo",
-                "user_name": "",
+                "user_name": "@testuser",
                 "user_id": None,
                 "interval_seconds": None,
             }

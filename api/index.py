@@ -5375,10 +5375,14 @@ def set_chat_config(
     )
 
 
-def handle_config_command(chat_id: str, chat_type: str = "") -> Tuple[str, Dict[str, Any]]:
+def handle_config_command(
+    chat_id: str, chat_type: str = ""
+) -> Tuple[str, Dict[str, Any]]:
     redis_client = config_redis()
     config = get_chat_config(redis_client, chat_id)
-    return build_config_text(config, chat_type), build_config_keyboard(config, chat_type)
+    return build_config_text(config, chat_type), build_config_keyboard(
+        config, chat_type
+    )
 
 
 def _answer_callback_query(
@@ -5661,7 +5665,9 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
     target_task = next((t for t in tasks if str(t.get("id")) == str(task_id)), None)
     if not target_task:
         if callback_id:
-            _answer_callback_query(callback_id, text="esa tarea no existe", show_alert=True)
+            _answer_callback_query(
+                callback_id, text="esa tarea no existe", show_alert=True
+            )
         return
 
     request_user_id = user.get("id")
@@ -5672,13 +5678,19 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
     is_admin = False
     if is_group_chat_type(chat_type):
         redis_client = config_redis()
-        is_admin = is_chat_admin(str(chat_id), request_user_id, redis_client=redis_client)
+        is_admin = is_chat_admin(
+            str(chat_id), request_user_id, redis_client=redis_client
+        )
     else:
         is_admin = True
 
     if not is_owner and not is_admin:
         if callback_id:
-            _answer_callback_query(callback_id, text="solo el creador o un admin pueden borrar esta tarea", show_alert=True)
+            _answer_callback_query(
+                callback_id,
+                text="solo el creador o un admin pueden borrar esta tarea",
+                show_alert=True,
+            )
         return
 
     _task_cancel_task(task_id)
