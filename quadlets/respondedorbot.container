@@ -8,6 +8,7 @@ Image=ghcr.io/astrovm/respondedorbot:latest
 EnvironmentFile=%h/respondedorbot/.env
 Environment=REDIS_HOST=respondedorbot-redis
 Environment=REDIS_PORT=6379
+Environment=PYTHONUNBUFFERED=1
 Network=respondedorbot.network
 AutoUpdate=registry
 
