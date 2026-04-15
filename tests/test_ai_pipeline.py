@@ -488,7 +488,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 9
+    assert reserve == 10
     assert metadata == {}
 
 
