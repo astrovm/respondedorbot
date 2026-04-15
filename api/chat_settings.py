@@ -21,6 +21,7 @@ CHAT_CONFIG_DEFAULTS = {
     "ai_command_followups": True,
     "ignore_link_fix_followups": True,
     "timezone_offset": -3,
+    "creditless_user_daily_limit": 5,
 }
 
 TIMEZONE_OFFSET_MIN = -12
@@ -205,12 +206,15 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         config.get("ignore_link_fix_followups"), default=True
     )
     timezone_offset = int(config.get("timezone_offset", -3))
+    creditless_limit = int(config.get("creditless_user_daily_limit", 5))
 
     link_labels = {
         "delete": "borra el mensaje original y repostea el link arreglado",
         "reply": "responde al mensaje original con el link arreglado",
         "off": "no toca los links",
     }
+
+    creditless_label = "desactivado" if creditless_limit == 0 else str(creditless_limit)
 
     lines = [
         "config del gordo",
@@ -233,6 +237,10 @@ def build_config_text(config: Mapping[str, Any]) -> str:
         "5. zona horaria",
         _format_gmt_offset(timezone_offset),
         "",
+        "6. limite ia gratis por usuario por dia",
+        "cuantas veces puede usar ia del grupo un usuario sin creditos propios (0 = sin limite)",
+        creditless_label,
+        "",
         "tocá los botones de abajo y dejalo como se te cante",
     ]
     return "\n".join(lines)
@@ -248,6 +256,7 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
         config.get("ignore_link_fix_followups"), default=True
     )
     current_offset = int(config.get("timezone_offset", -3))
+    creditless_limit = int(config.get("creditless_user_daily_limit", 5))
 
     def choice_button(
         label: str, value: str, current: str, *, action: str
@@ -262,6 +271,10 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
     def timezone_button(label: str, offset: int) -> Dict[str, str]:
         prefix = "✅ " if offset == current_offset else ""
         return {"text": f"{prefix}{label}", "callback_data": f"cfg:timezone:{offset}"}
+
+    def creditless_button(label: str, value: int) -> Dict[str, str]:
+        prefix = "✅ " if value == creditless_limit else ""
+        return {"text": f"{prefix}{label}", "callback_data": f"cfg:creditless:{value}"}
 
     dec_offset = max(current_offset - 1, TIMEZONE_OFFSET_MIN)
     inc_offset = min(current_offset + 1, TIMEZONE_OFFSET_MAX)
@@ -294,6 +307,13 @@ def build_config_keyboard(config: Mapping[str, Any]) -> Dict[str, Any]:
                 timezone_button("UTC-3", -3),
                 timezone_button("UTC-5", -5),
                 {"text": "+1", "callback_data": f"cfg:timezone:{inc_offset}"},
+            ],
+            [
+                creditless_button("∞ off", 0),
+                creditless_button("3", 3),
+                creditless_button("5", 5),
+                creditless_button("10", 10),
+                creditless_button("20", 20),
             ],
         ]
     }

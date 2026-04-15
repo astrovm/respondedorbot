@@ -951,3 +951,68 @@ def test_estimate_chat_reserve_credits_reasoning_adds_headroom():
     )
 
     assert with_reasoning > without_reasoning
+
+
+def _make_group_billing(*, limit: int, redis_client=None) -> AIMessageBilling:
+    mock_redis = redis_client or MagicMock()
+    db = MagicMock()
+    db.is_configured.return_value = True
+    db.charge_ai_credits.return_value = {"ok": True, "source": "chat"}
+    billing = AIMessageBilling(
+        credits_db_service=db,
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda _: "random",
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        command="/ask",
+        chat_id="-100",
+        chat_type="group",
+        user_id=42,
+        numeric_chat_id=100,
+        message={"from": {"first_name": "Ana"}},
+        redis_client=mock_redis,
+        creditless_user_daily_limit=limit,
+    )
+    return billing
+
+
+def test_creditless_cap_allows_under_limit():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1  # first use
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    result, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert result is not None
+    mock_redis.incr.assert_called_once_with("creditless_cap:-100:42")
+    mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 86400)
+
+
+def test_creditless_cap_blocks_over_limit_and_refunds():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 4  # over limit=3
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    result, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert result is None
+    assert error is not None
+    assert "3" in error
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    refund_kwargs = billing.credits_db_service.refund_ai_charge.call_args.kwargs
+    assert refund_kwargs["source"] == "chat"
+    assert refund_kwargs["event_type"] == "ai_refund"
+    assert refund_kwargs["amount"] == 10
+
+
+def test_creditless_cap_disabled_when_limit_zero():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 999
+    billing = _make_group_billing(limit=0, redis_client=mock_redis)
+
+    result, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert result is not None
+    mock_redis.incr.assert_not_called()

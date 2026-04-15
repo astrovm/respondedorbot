@@ -31,6 +31,7 @@ class BotPtbTests(unittest.TestCase):
         telegram_ext = MagicMock()
 
         builder.token.return_value = builder
+        builder.concurrent_updates.return_value = builder
         builder.post_init.return_value = builder
         builder.build.return_value = app
         telegram_ext.ApplicationBuilder = MagicMock(return_value=builder)
