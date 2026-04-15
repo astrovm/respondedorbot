@@ -115,6 +115,8 @@ from api.tools.task_scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
     format_interval,
+    _no_mention,
+    _owner_display,
 )
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
@@ -2310,10 +2312,9 @@ def _build_tasks_message(
 
     for t in tasks:
         interval = t.get("interval_seconds")
-        owner = f"@{t['user_name']}" if t.get("user_name") else ""
-        owner_bit = f" ({owner})" if owner else ""
+        owner_bit = _owner_display(t.get("user_name", ""))
         next_run = t.get("next_run", "")
-        task_text = t["text"].replace("@", "@\u200b")
+        task_text = _no_mention(t["text"])
         if interval:
             freq = format_interval(interval)
             lines.append(

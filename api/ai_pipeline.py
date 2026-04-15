@@ -138,7 +138,12 @@ def handle_ai_response(
 
     user_name = ""
     if user_identity:
-        user_name = user_identity.strip().split()[0] if user_identity.strip() else ""
+        m = re.search(r"\((@?\w+)\)", user_identity)
+        user_name = (
+            m.group(1).lstrip("@")
+            if m
+            else (user_identity.strip().split()[0] if user_identity.strip() else "")
+        )
 
     try:
         if image_data and is_ask_ai_handler:
