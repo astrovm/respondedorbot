@@ -170,7 +170,7 @@ class TestTaskSetTool:
         )
         assert "no se pudo" in result.output
 
-    @patch("api.index.credits_db_service")
+    @patch("api.tools.task_set.credits_db")
     def test_no_credits(self, mock_credits):
         mock_credits.is_configured.return_value = True
         mock_credits.get_balance.return_value = 0
