@@ -971,7 +971,7 @@ def _make_group_billing(*, limit: int, redis_client=None) -> AIMessageBilling:
         numeric_chat_id=100,
         message={"from": {"first_name": "Ana"}},
         redis_client=mock_redis,
-        creditless_user_daily_limit=limit,
+        creditless_user_hourly_limit=limit,
     )
     return billing
 
@@ -986,7 +986,7 @@ def test_creditless_cap_allows_under_limit():
     assert error is None
     assert result is not None
     mock_redis.incr.assert_called_once_with("creditless_cap:-100:42")
-    mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 86400)
+    mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 3600)
 
 
 def test_creditless_cap_blocks_over_limit_and_refunds():
