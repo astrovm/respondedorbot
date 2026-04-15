@@ -160,9 +160,12 @@ def handle_ai_response(
                 user_id=user_id,
             )
         else:
-            try:
-                response = handler_func(messages, response_meta=response_meta)
-            except TypeError:
+            if response_meta is not None:
+                try:
+                    response = handler_func(messages, response_meta=response_meta)
+                except TypeError:
+                    response = handler_func(messages)
+            else:
                 response = handler_func(messages)
     finally:
         if request_count_token is not None:
