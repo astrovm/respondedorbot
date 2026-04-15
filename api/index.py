@@ -164,6 +164,7 @@ from api.utils.links import (
     can_embed_url as _links_can_embed_url,
     is_social_frontend as _links_is_social_frontend,
     replace_links as _links_replace_links,
+    fetch_tweet_text as _links_fetch_tweet_text,
 )
 
 # TTL constants (seconds)
@@ -459,6 +460,11 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
     """Delegate to utils helper while keeping embed checker injectable in tests."""
 
     return _links_replace_links(text, embed_checker=can_embed_url)
+
+
+def fetch_tweet_text(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Fetch tweet content via oEmbed API and return formatted summary."""
+    return _links_fetch_tweet_text(text)
 
 
 # Provider backoff windows (seconds)
@@ -5889,6 +5895,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         should_auto_process_media=should_auto_process_media,
         extract_message_content=extract_message_content,
         replace_links=replace_links,
+        fetch_tweet_text=fetch_tweet_text,
         send_msg=send_msg,
         send_animation=send_animation,
         delete_msg=delete_msg,
