@@ -114,6 +114,7 @@ from api.tools.registry import parse_tool_call_arguments
 from api.tools.task_scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
+    format_interval,
 )
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
@@ -971,25 +972,6 @@ def _fetch_cmc_quotes(
     }
     response = cached_requests(api_url, parameters, headers, TTL_PRICE)
     return response["data"] if response else None
-
-
-def _format_cmc_quote(
-    coin_data: Dict[str, Any],
-    convert_to: str = "USD",
-    tf_label: str = "24h",
-    cmc_change_field: str = "percent_change_24h",
-) -> str:
-    quote = coin_data.get("quote", {}).get(convert_to, {})
-    price = quote.get("price")
-    if price is None:
-        return ""
-    pct = quote.get(cmc_change_field, 0) or 0
-    ticker = coin_data.get("symbol", "?")
-    decimals = f"{price:.12f}".split(".")[-1]
-    zeros = len(decimals) - len(decimals.lstrip("0"))
-    price_str = f"{price:.{zeros + 4}f}".rstrip("0").rstrip(".")
-    pct_str = f"{pct:+.2f}".rstrip("0").rstrip(".")
-    return f"{ticker}: {price_str} {convert_to} ({pct_str}% {tf_label})"
 
 
 def refresh_price_caches() -> None:
@@ -2317,15 +2299,6 @@ def convert_to_command(msg_text: str) -> str:
     return command
 
 
-def _format_schedule_interval(seconds: int) -> str:
-    if seconds >= 86400:
-        return f"cada {seconds // 86400}d"
-    elif seconds >= 3600:
-        return f"cada {seconds // 3600}h"
-    else:
-        return f"cada {seconds // 60}m"
-
-
 def _build_tareas_message(
     tasks: List[Dict[str, Any]],
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
@@ -2338,7 +2311,7 @@ def _build_tareas_message(
     for t in tasks:
         interval = t.get("interval_seconds")
         if interval:
-            freq = _format_schedule_interval(interval)
+            freq = format_interval(interval)
             lines.append(f"• {t['text']} ({freq})")
         else:
             lines.append(f"• {t['text']} ({t['next_run']})")
@@ -3838,10 +3811,23 @@ def _get_openrouter_ai_response_result(
         choice = response.choices[0]
         finish_reason = choice.finish_reason
 
-        if finish_reason == "tool_calls" and extra_tools:
+        if finish_reason == "tool_calls":
             message = choice.message
             tool_calls = getattr(message, "tool_calls", None) or []
-            if not tool_calls:
+            if not extra_tools or not tool_calls:
+                text = str(message.content or "").strip()
+                if text:
+                    metadata_fallback: Dict[str, Any] = {
+                        "provider": "openrouter",
+                        "tool_rounds": round_idx + 1,
+                    }
+                    return _build_groq_usage_result(
+                        kind="chat",
+                        text=text,
+                        model=PRIMARY_CHAT_MODEL,
+                        response=response,
+                        metadata=metadata_fallback,
+                    )
                 break
 
             known_calls = []
