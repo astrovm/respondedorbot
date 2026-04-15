@@ -338,7 +338,10 @@ def build_config_keyboard(
         ],
         [
             {"text": "➖ 1h", "callback_data": f"cfg:timezone:{dec_offset}"},
-            {"text": f"🌍 {_format_utc_offset(parsed.timezone_offset)}"},
+            {
+                "text": f"🌍 {_format_utc_offset(parsed.timezone_offset)}",
+                "callback_data": "cfg:timezone:current",
+            },
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
         ],
     ]
