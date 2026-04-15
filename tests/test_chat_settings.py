@@ -625,6 +625,7 @@ class TestHandleTaskCallback:
         }
 
         with (
+            patch("api.index._task_list_tasks", return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}]),
             patch("api.index._task_cancel_task") as mock_cancel,
             patch("api.index._answer_callback_query") as mock_answer,
             patch("api.index.edit_message") as mock_edit,
@@ -634,6 +635,28 @@ class TestHandleTaskCallback:
         mock_cancel.assert_called_once_with("abc123")
         mock_answer.assert_called_once_with("cbq1", text="tarea abc123 borrada")
         mock_edit.assert_called_once()
+
+    def test_delete_task_unauthorized(self):
+        from api.index import handle_task_callback
+
+        callback = {
+            "id": "cbq1",
+            "data": "task:del:abc123",
+            "from": {"id": 999},
+            "message": {"chat": {"id": 1, "type": "group"}, "message_id": 99},
+        }
+
+        with (
+            patch("api.index._task_list_tasks", return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}]),
+            patch("api.index.config_redis"),
+            patch("api.index.is_chat_admin", return_value=False),
+            patch("api.index._task_cancel_task") as mock_cancel,
+            patch("api.index._answer_callback_query") as mock_answer,
+        ):
+            handle_task_callback(callback)
+
+        mock_cancel.assert_not_called()
+        mock_answer.assert_called_once_with("cbq1", text="solo el creador o un admin pueden borrar esta tarea", show_alert=True)
 
 
 class TestTimezoneConfig:
