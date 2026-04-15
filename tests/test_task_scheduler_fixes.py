@@ -281,8 +281,8 @@ class TestFireTaskBilling:
 
     @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_no_credits_deletes_recurring_task(self, mock_sched, mock_redis):
-        """Even recurring tasks are deleted when the user runs out of credits."""
+    def test_no_credits_skips_but_keeps_recurring_task(self, mock_sched, mock_redis):
+        """Even if credits fail, recurring tasks are skipped for this run but kept in Redis."""
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -300,7 +300,7 @@ class TestFireTaskBilling:
             with patch("api.index.send_msg"):
                 _fire_task("x1")
 
-        redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
+        redis_client.delete.assert_not_called()
 
     @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")

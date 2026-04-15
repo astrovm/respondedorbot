@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from api.tools.registry import ToolResult, register_tool
 from api.tools.task_scheduler import schedule_task, format_interval
+from api.services import credits_db
 
 
 def _describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
@@ -55,17 +56,15 @@ def _execute_task_set(
         return ToolResult(output="no se que tarea crear, pasame el texto")
     if delay_seconds is None and interval_seconds is None and not trigger_config:
         return ToolResult(
-            output="necesito delay_seconds (una vez) o interval_seconds (repetir)"
+            output="necesito usar algun parametro de tiempo: delay_seconds (una vez), interval_seconds (repetir), o trigger_config."
         )
     if not chat_id:
         return ToolResult(output="no se en que chat estoy")
 
     if user_id:
         try:
-            from api.index import credits_db_service
-
-            if credits_db_service.is_configured():
-                balance = credits_db_service.get_balance("user", int(user_id))
+            if credits_db.is_configured():
+                balance = credits_db.get_balance("user", int(user_id))
                 if balance <= 0:
                     return ToolResult(output="no tenes creditos, recargá primero")
         except Exception:

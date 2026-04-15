@@ -117,6 +117,7 @@ def handle_ai_response(
     user_identity: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
     user_id: Optional[int] = None,
+    timezone_offset: int = -3,
     send_typing_fn: Callable[[str, str], None],
     telegram_token: Optional[str],
     reset_request_count_fn: Callable[[], Any],
@@ -154,6 +155,7 @@ def handle_ai_response(
                 chat_id=chat_id,
                 user_name=user_name,
                 user_id=user_id,
+                timezone_offset=timezone_offset,
             )
         elif is_ask_ai_handler:
             response = handler_func(
@@ -162,6 +164,7 @@ def handle_ai_response(
                 chat_id=chat_id,
                 user_name=user_name,
                 user_id=user_id,
+                timezone_offset=timezone_offset,
             )
         else:
             if response_meta is not None:

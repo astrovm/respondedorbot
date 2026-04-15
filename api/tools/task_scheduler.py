@@ -58,7 +58,6 @@ def _format_run_time(raw: str) -> str:
         return raw
 
 
-
 def get_scheduler() -> Any:
     global _scheduler_instance
     if _scheduler_instance is not None:
@@ -188,8 +187,9 @@ def _fire_task(task_id: str) -> None:
         metadata={"task_id": task_id, "chat_id": chat_id},
     )
     if reserve_error:
-        print(f"task_scheduler: {task_id} no credits, deleting: {reserve_error}")
-        _delete_task(key, task_id, redis_client)
+        print(f"task_scheduler: {task_id} no credits, skipping: {reserve_error}")
+        if not interval and not trigger_cfg:
+            _delete_task(key, task_id, redis_client)
         return
 
     try:
