@@ -3817,7 +3817,7 @@ def _get_openrouter_ai_response_result(
             if not extra_tools or not tool_calls:
                 text = str(message.content or "").strip()
                 if text:
-                    metadata_fallback: Dict[str, Any] = {
+                    metadata: Dict[str, Any] = {
                         "provider": "openrouter",
                         "tool_rounds": round_idx + 1,
                     }
@@ -3826,7 +3826,7 @@ def _get_openrouter_ai_response_result(
                         text=text,
                         model=PRIMARY_CHAT_MODEL,
                         response=response,
-                        metadata=metadata_fallback,
+                        metadata=metadata,
                     )
                 break
 
@@ -3844,14 +3844,13 @@ def _get_openrouter_ai_response_result(
             if not known_calls:
                 text = str(message.content or "").strip()
                 if text:
-                    metadata_msg: Dict[str, Any] = {"provider": "openrouter"}
-                    metadata_msg["tool_rounds"] = round_idx + 1
+                    metadata = {"provider": "openrouter", "tool_rounds": round_idx + 1}
                     return _build_groq_usage_result(
                         kind="chat",
                         text=text,
                         model=PRIMARY_CHAT_MODEL,
                         response=response,
-                        metadata=metadata_msg,
+                        metadata=metadata,
                     )
                 break
 
