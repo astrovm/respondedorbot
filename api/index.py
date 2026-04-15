@@ -109,6 +109,9 @@ import api.tools.web_fetch
 import api.tools.task_set
 import api.tools.task_list
 import api.tools.task_cancel
+from api.tools import get_all_tool_schemas, execute_tool, TOOL_REGISTRY
+from api.tools.registry import parse_tool_call_arguments
+from api.tools.task_scheduler import list_tasks as _task_list_tasks, cancel_task as _task_cancel_task
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -2344,12 +2347,10 @@ def _build_tareas_message(
 
 
 def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-    from api.tools.task_scheduler import list_tasks
-
     if not chat_id:
         return "no se en que chat estoy", None
 
-    tasks = list_tasks(chat_id)
+    tasks = _task_list_tasks(chat_id)
     return _build_tareas_message(tasks)
 
 
@@ -2976,8 +2977,6 @@ def ask_ai(
             "time": get_time_context(),
             "hacker_news": get_hacker_news_context(),
         }
-
-        from api.tools import get_all_tool_schemas
 
         extra_tools = get_all_tool_schemas()
         tool_context: Dict[str, Any] = {
@@ -3838,12 +3837,6 @@ def _get_openrouter_ai_response_result(
             tool_calls = getattr(message, "tool_calls", None) or []
             if not tool_calls:
                 break
-
-            from api.tools.registry import (
-                TOOL_REGISTRY,
-                execute_tool,
-                parse_tool_call_arguments,
-            )
 
             known_calls = []
             for tc in tool_calls:
@@ -5664,17 +5657,13 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
 
     _, _, task_id = parts
 
-    from api.tools.task_scheduler import cancel_task
-
-    cancel_task(task_id)
+    _task_cancel_task(task_id)
 
     if callback_id:
         _answer_callback_query(callback_id, text=f"tarea {task_id} borrada")
 
     if message_id:
-        from api.tools.task_scheduler import list_tasks
-
-        tasks = list_tasks(str(chat_id))
+        tasks = _task_list_tasks(str(chat_id))
         new_text, new_keyboard = _build_tareas_message(tasks)
         try:
             edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
