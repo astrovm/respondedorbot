@@ -61,6 +61,13 @@ def _get_redis() -> Any:
         return None
 
 
+def _strip_response_marker(response: str) -> str:
+    marker = "[[AI_FALLBACK]]"
+    if response.startswith(marker):
+        return response[len(marker):].lstrip()
+    return response
+
+
 def _fire_task(task_id: str) -> None:
     redis_client = _get_redis()
     if redis_client is None:
@@ -101,6 +108,7 @@ def _fire_task(task_id: str) -> None:
                 user_name=user_name,
             )
             if response:
+                response = _strip_response_marker(response)
                 send_msg(chat_id, f"{display}, tarea programada: {response}")
         except Exception as e:
             print(f"task_scheduler: recurring task {task_id} failed: {e}")
@@ -116,6 +124,7 @@ def _fire_task(task_id: str) -> None:
                 user_name=user_name,
             )
             if response:
+                response = _strip_response_marker(response)
                 send_msg(chat_id, f"{display}, {response}")
         except Exception as e:
             print(f"task_scheduler: one-shot task {task_id} failed: {e}")
@@ -142,6 +151,13 @@ def schedule_task(
 
     task_id = str(uuid.uuid4())[:8]
 
+    run_date = None
+    if delay_seconds:
+        run_date = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + delay_seconds,
+            tz=timezone.utc,
+        )
+
     redis_client = _get_redis()
     if redis_client is not None:
         data = json.dumps(
@@ -151,6 +167,7 @@ def schedule_task(
                 "text": text,
                 "user_name": user_name,
                 "interval_seconds": interval_seconds,
+                "run_date": run_date.isoformat() if run_date else None,
             }
         )
         ttl = 86400 * 90 if interval_seconds else 86400 * 30
@@ -165,11 +182,7 @@ def schedule_task(
             args=[task_id],
             replace_existing=True,
         )
-    elif delay_seconds:
-        run_date = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + delay_seconds,
-            tz=timezone.utc,
-        )
+    elif run_date:
         scheduler.add_job(
             _fire_task,
             "date",
@@ -183,13 +196,11 @@ def schedule_task(
 
 
 def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
-    scheduler = get_scheduler()
-    if scheduler is None:
-        return []
-
     redis_client = _get_redis()
     if redis_client is None:
         return []
+
+    scheduler = get_scheduler()
 
     results = []
     try:
@@ -206,23 +217,25 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
                 continue
 
             task_id = data.get("id", "")
-            job_id = f"task_{task_id}"
-            try:
-                job = scheduler.get_job(job_id)
-            except Exception:
-                job = None
-            if job is None:
-                continue
-
-            next_run = job.next_run_time
             interval = data.get("interval_seconds")
+
+            next_run = data.get("run_date") or "unknown"
+            if scheduler is not None:
+                job_id = f"task_{task_id}"
+                try:
+                    job = scheduler.get_job(job_id)
+                    if job and job.next_run_time:
+                        next_run = str(job.next_run_time)
+                except Exception:
+                    pass
+
             results.append(
                 {
                     "id": task_id,
                     "text": data.get("text", ""),
                     "user_name": data.get("user_name", ""),
                     "interval_seconds": interval,
-                    "next_run": str(next_run) if next_run else "unknown",
+                    "next_run": next_run,
                 }
             )
     except Exception as e:
