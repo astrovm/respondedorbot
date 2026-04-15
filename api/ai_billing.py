@@ -631,15 +631,9 @@ class AIMessageBilling:
         source_values = {str(item.get("source") or "user") for item in reservations}
         chat_scope_values = {item.get("chat_scope_id") for item in reservations}
         if len(source_values) > 1 or len(chat_scope_values) > 1:
-            self.admin_reporter(
-                "liquidación IA batch con reservas incompatibles; vuelvo a liquidación individual",
-                None,
-                {
-                    "chat_id": self.chat_id,
-                    "user_id": self.user_id,
-                    "reason": reason,
-                    "reservation_count": len(reservations),
-                },
+            print(
+                f"settle_batch: mixed sources {source_values} or scopes {chat_scope_values}, "
+                f"falling back to individual settlement (count={len(reservations)})"
             )
             for index, reservation in enumerate(reservations):
                 self._settle_single_reservation(
