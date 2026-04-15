@@ -2299,7 +2299,7 @@ def convert_to_command(msg_text: str) -> str:
     return command
 
 
-def _build_tareas_message(
+def _build_tasks_message(
     tasks: List[Dict[str, Any]],
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     if not tasks:
@@ -2328,12 +2328,12 @@ def _build_tareas_message(
     return "\n".join(lines), {"inline_keyboard": rows}
 
 
-def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+def tasks_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     if not chat_id:
         return "no se en que chat estoy", None
 
     tasks = _task_list_tasks(chat_id)
-    return _build_tareas_message(tasks)
+    return _build_tasks_message(tasks)
 
 
 def get_help() -> str:
@@ -4393,7 +4393,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
-            "tareas_command": tareas_command,
+            "tasks_command": tasks_command,
         }
     )
 
@@ -5676,7 +5676,7 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
 
     if message_id:
         tasks = _task_list_tasks(str(chat_id))
-        new_text, new_keyboard = _build_tareas_message(tasks)
+        new_text, new_keyboard = _build_tasks_message(tasks)
         try:
             edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
         except Exception:
