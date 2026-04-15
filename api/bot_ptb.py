@@ -122,7 +122,11 @@ def create_application(
     filters = getattr(telegram_ext, "filters")
 
     application = (
-        ApplicationBuilder().token(resolved_token).post_init(_post_init).build()
+        ApplicationBuilder()
+        .token(resolved_token)
+        .concurrent_updates(True)
+        .post_init(_post_init)
+        .build()
     )
     application.bot_data["redis"] = resolved_redis
 

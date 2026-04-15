@@ -187,6 +187,8 @@ class AIMessageBilling:
     user_id: Optional[int]
     numeric_chat_id: Optional[int]
     message: Mapping[str, Any]
+    redis_client: Any = None
+    creditless_user_daily_limit: int = 0
     onboarding_checked: bool = False
     billing_not_configured_message: str = (
         "el cobro de ia no está andando, avisale al admin"
@@ -215,6 +217,56 @@ class AIMessageBilling:
             self.numeric_chat_id if is_group_chat_type(self.chat_type) else None,
             None,
         )
+
+    def _check_creditless_cap(
+        self,
+        *,
+        chat_scope_id: Optional[int],
+        reserve_amount: int,
+        usage_tag: str,
+    ) -> Optional[str]:
+        """After a chat-sourced charge, enforce per-user daily cap via Redis counter.
+
+        Returns an error string if the cap was hit (charge already refunded), else None.
+        """
+        if (
+            self.creditless_user_daily_limit <= 0
+            or self.redis_client is None
+            or self.user_id is None
+            or chat_scope_id is None
+        ):
+            return None
+
+        key = f"creditless_cap:{self.chat_id}:{self.user_id}"
+        count = self.redis_client.incr(key)
+        if count == 1:
+            self.redis_client.expire(key, 86400)
+
+        if count > self.creditless_user_daily_limit:
+            try:
+                self.credits_db_service.refund_ai_charge(
+                    user_id=self.user_id,
+                    chat_id=chat_scope_id,
+                    amount=reserve_amount,
+                    source="chat",
+                    event_type="ai_refund",
+                    metadata=self._build_charge_metadata(
+                        usage_tag=usage_tag,
+                        extra={"reason": "creditless_daily_cap"},
+                    ),
+                )
+            except Exception as err:
+                self.admin_reporter(
+                    "falló refund por limite creditless",
+                    err,
+                    {"chat_id": self.chat_id, "user_id": self.user_id},
+                )
+            return (
+                f"llegaste al limite de {self.creditless_user_daily_limit} "
+                "ia gratis por dia en este grupo, boludo. "
+                "cargá créditos con /topup si querés seguir"
+            )
+        return None
 
     def _build_insufficient_credits_reply(
         self, charge_result: Mapping[str, Any]
@@ -311,13 +363,24 @@ class AIMessageBilling:
         if not charge_result.get("ok"):
             return None, self._build_insufficient_credits_reply(charge_result)
 
+        source = str(charge_result.get("source") or "user")
         reservation_payload = {
             "reserved_credit_units": reserve_amount,
             "chat_scope_id": chat_scope_id,
-            "source": str(charge_result.get("source") or "user"),
+            "source": source,
             "usage_tag": usage_tag,
             "metadata": reserve_metadata,
         }
+
+        if source == "chat":
+            cap_error = self._check_creditless_cap(
+                chat_scope_id=chat_scope_id,
+                reserve_amount=reserve_amount,
+                usage_tag=usage_tag,
+            )
+            if cap_error:
+                return None, cap_error
+
         self.persist_reservation_fn(usage_tag, reservation_payload)
         return reservation_payload, None
 

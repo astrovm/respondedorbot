@@ -667,7 +667,10 @@ class TestTimezoneConfig:
         keyboard = build_config_keyboard(config)
         rows = keyboard["inline_keyboard"]
 
-        tz_row = rows[-1]
+        tz_row = next(
+            r for r in rows
+            if any("cfg:timezone:" in btn["callback_data"] for btn in r)
+        )
         assert any("UTC" in btn["text"] for btn in tz_row)
         assert any("UTC-3" in btn["text"] for btn in tz_row)
         assert any("cfg:timezone:" in btn["callback_data"] for btn in tz_row)
@@ -681,7 +684,11 @@ class TestTimezoneConfig:
         config["timezone_offset"] = -3
         keyboard = build_config_keyboard(config)
 
-        tz_row = keyboard["inline_keyboard"][-1]
+        rows = keyboard["inline_keyboard"]
+        tz_row = next(
+            r for r in rows
+            if any("cfg:timezone:" in btn["callback_data"] for btn in r)
+        )
         utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
         assert utc3_btn["text"].startswith("✅")
 
