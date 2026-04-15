@@ -1216,6 +1216,15 @@ def _handle_non_ai_command(
             return None, None, False, command
         return gif_url, None, False, command
 
+    if command in ("/tareas", "/tasks"):
+        result = handler_func(chat_id)
+        response_markup = None
+        if isinstance(result, tuple):
+            response_msg, response_markup = result
+        else:
+            response_msg = result
+        return response_msg, response_markup, False, command
+
     response_msg = (
         handler_func(sanitized_message_text) if takes_params else handler_func()
     )

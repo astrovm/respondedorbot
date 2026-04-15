@@ -103,6 +103,12 @@ from api.ai_pricing import (
     ensure_mapping,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
+import api.tools.price_lookup
+import api.tools.calculate
+import api.tools.web_fetch
+import api.tools.task_set
+import api.tools.task_list
+import api.tools.task_cancel
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
@@ -945,6 +951,41 @@ def get_api_or_cache_prices(
     return response["data"] if response else None
 
 
+def _fetch_cmc_quotes(
+    identifiers: List[str],
+    convert_to: str = "USD",
+    by_slug: bool = False,
+) -> Optional[Dict[str, Any]]:
+    api_url = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest"
+    param_key = "slug" if by_slug else "symbol"
+    parameters = {param_key: ",".join(identifiers), "convert": convert_to}
+    headers = {
+        "Accepts": "application/json",
+        "X-CMC_PRO_API_KEY": environ.get("COINMARKETCAP_KEY"),
+    }
+    response = cached_requests(api_url, parameters, headers, TTL_PRICE)
+    return response["data"] if response else None
+
+
+def _format_cmc_quote(
+    coin_data: Dict[str, Any],
+    convert_to: str = "USD",
+    tf_label: str = "24h",
+    cmc_change_field: str = "percent_change_24h",
+) -> str:
+    quote = coin_data.get("quote", {}).get(convert_to, {})
+    price = quote.get("price")
+    if price is None:
+        return ""
+    pct = quote.get(cmc_change_field, 0) or 0
+    ticker = coin_data.get("symbol", "?")
+    decimals = f"{price:.12f}".split(".")[-1]
+    zeros = len(decimals) - len(decimals.lstrip("0"))
+    price_str = f"{price:.{zeros + 4}f}".rstrip("0").rstrip(".")
+    pct_str = f"{pct:+.2f}".rstrip("0").rstrip(".")
+    return f"{ticker}: {price_str} {convert_to} ({pct_str}% {tf_label})"
+
+
 def refresh_price_caches() -> None:
     """Refresh all price caches and store hourly snapshots for change calculations."""
     _fetch_criptoya_dollar_data(hourly_cache=True)
@@ -1373,7 +1414,49 @@ def get_prices(msg_text: str) -> Optional[str]:
                 new_prices.append(coin)
 
         if not new_prices:
-            return "no laburo con esos ponzis boludo"
+            found = []
+            not_found = []
+            for coin_token in coins:
+                token = coin_token.upper().replace(" ", "")
+                quote_data = _fetch_cmc_quotes([token], convert_to_parameter)
+                if quote_data:
+                    for cid, cdata in quote_data.items():
+                        price = (
+                            cdata.get("quote", {})
+                            .get(convert_to_parameter, {})
+                            .get("price")
+                        )
+                        if price:
+                            found.append(cdata)
+                            break
+                    else:
+                        quote_by_slug = _fetch_cmc_quotes(
+                            [token.lower()], convert_to_parameter, by_slug=True
+                        )
+                        if quote_by_slug:
+                            for cid, cdata in quote_by_slug.items():
+                                price = (
+                                    cdata.get("quote", {})
+                                    .get(convert_to_parameter, {})
+                                    .get("price")
+                                )
+                                if price:
+                                    found.append(cdata)
+                                    break
+                            else:
+                                not_found.append(token)
+                        else:
+                            not_found.append(token)
+                else:
+                    not_found.append(token)
+
+            if not found and not_found:
+                return f"no encontre esos ponzis: {', '.join(not_found)}"
+
+            if not found:
+                return "no pude traer precios de crypto boludo"
+
+            new_prices = found
 
         prices_number = len(new_prices)
         prices["data"] = new_prices
@@ -2228,6 +2311,48 @@ def convert_to_command(msg_text: str) -> str:
     return command
 
 
+def _format_schedule_interval(seconds: int) -> str:
+    if seconds >= 86400:
+        return f"cada {seconds // 86400}d"
+    elif seconds >= 3600:
+        return f"cada {seconds // 3600}h"
+    else:
+        return f"cada {seconds // 60}m"
+
+
+def _build_tareas_message(
+    tasks: List[Dict[str, Any]],
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    if not tasks:
+        return "no hay tareas", None
+
+    lines = []
+    rows: List[List[Dict[str, str]]] = []
+
+    for t in tasks:
+        interval = t.get("interval_seconds")
+        if interval:
+            freq = _format_schedule_interval(interval)
+            lines.append(f"• {t['text']} ({freq})")
+        else:
+            lines.append(f"• {t['text']} ({t['next_run']})")
+        rows.append(
+            [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
+        )
+
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def tareas_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    from api.tools.task_scheduler import list_tasks
+
+    if not chat_id:
+        return "no se en que chat estoy", None
+
+    tasks = list_tasks(chat_id)
+    return _build_tareas_message(tasks)
+
+
 def get_help() -> str:
     return """
 esto es lo que sé hacer, boludo:
@@ -2285,6 +2410,8 @@ esto es lo que sé hacer, boludo:
 
 - /gm: te mando un gif de buenos días random
 - /gn: te mando un gif de buenas noches random
+
+- /tareas, /tasks: tareas programadas (con botones para borrar)
 """
 
 
@@ -2837,11 +2964,12 @@ def ask_ai(
     image_file_id: Optional[str] = None,
     response_meta: Optional[Dict[str, Any]] = None,
     enable_web_search: bool = True,
+    chat_id: Optional[str] = None,
+    user_name: Optional[str] = None,
 ) -> str:
     try:
         messages = list(messages or [])
 
-        # Build context with market and weather data
         context_data = {
             "market": get_market_context(),
             "weather": get_weather_context(),
@@ -2849,16 +2977,27 @@ def ask_ai(
             "hacker_news": get_hacker_news_context(),
         }
 
-        system_message = build_system_message(context_data)
+        from api.tools import get_all_tool_schemas
 
-        # If we have an image, first describe it with the vision model then continue normal flow
+        extra_tools = get_all_tool_schemas()
+        tool_context: Dict[str, Any] = {
+            "get_prices": get_prices,
+        }
+        if chat_id:
+            tool_context["chat_id"] = chat_id
+        if user_name:
+            tool_context["user_name"] = user_name
+
+        system_message = build_system_message(
+            context_data,
+            tools_active=bool(extra_tools),
+        )
+
         if image_data:
             print("Processing image with Groq vision model...")
 
-            # Always use a description prompt for the vision model, not the user's question
             user_text = "Describe what you see in this image in detail."
 
-            # Describe the image using Groq
             image_result = _describe_image_groq_result(
                 image_data, user_text, image_file_id
             )
@@ -2866,10 +3005,8 @@ def ask_ai(
 
             if image_description:
                 _append_billing_segment(response_meta, image_result)
-                # Add image description to the conversation context
                 image_context = f"[Imagen: {image_description}]"
 
-                # Modify the last message to include the image description
                 if messages:
                     last_message = messages[-1]
                     if isinstance(last_message.get("content"), str):
@@ -2894,6 +3031,8 @@ def ask_ai(
             messages,
             response_meta=response_meta,
             enable_web_search=enable_web_search,
+            extra_tools=extra_tools or None,
+            tool_context=tool_context,
         )
         response = str(response or "")
         if response:
@@ -2919,6 +3058,8 @@ def complete_with_providers(
     *,
     response_meta: Optional[Dict[str, Any]] = None,
     enable_web_search: bool = True,
+    extra_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Try OpenRouter chat models and return the first response."""
 
@@ -2926,6 +3067,8 @@ def complete_with_providers(
         system_message,
         messages,
         enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
     )
     if result:
         if response_meta is not None:
@@ -3633,11 +3776,16 @@ def _build_groq_usage_result(
     )
 
 
+_MAX_TOOL_ROUNDS = 5
+
+
 def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any],
     messages: List[Dict[str, Any]],
     *,
     enable_web_search: bool = True,
+    extra_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[AIUsageResult]:
     client = _get_openrouter_client()
     if client is None:
@@ -3645,31 +3793,97 @@ def _get_openrouter_ai_response_result(
 
     print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
     _increment_ai_provider_request_count()
-    try:
-        request_kwargs: Dict[str, Any] = {
-            "model": PRIMARY_CHAT_MODEL,
-            "messages": cast(Any, [system_msg] + messages),
-            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-        }
-        reasoning_effort = "low" if enable_web_search else "none"
-        request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
-        if enable_web_search:
-            request_kwargs["tools"] = [_build_openrouter_web_search_tool()]
-        response = client.chat.completions.create(**request_kwargs)
-    except Exception as e:
-        print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
-        admin_report(
-            f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
-            e,
-            {"finish_reason": "error", "enable_web_search": enable_web_search},
-        )
-        return None
 
-    if response and hasattr(response, "choices") and response.choices:
-        finish_reason = response.choices[0].finish_reason
+    current_messages = list(messages)
+    for round_idx in range(_MAX_TOOL_ROUNDS):
+        try:
+            request_kwargs: Dict[str, Any] = {
+                "model": PRIMARY_CHAT_MODEL,
+                "messages": cast(Any, [system_msg] + current_messages),
+                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+            }
+            reasoning_effort = "low" if enable_web_search else "none"
+            request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
+
+            tools_list: List[Dict[str, Any]] = []
+            if enable_web_search:
+                tools_list.append(_build_openrouter_web_search_tool())
+            if extra_tools:
+                tools_list.extend(extra_tools)
+            if tools_list:
+                request_kwargs["tools"] = tools_list
+
+            response = client.chat.completions.create(**request_kwargs)
+        except Exception as e:
+            print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
+            admin_report(
+                f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
+                e,
+                {
+                    "finish_reason": "error",
+                    "enable_web_search": enable_web_search,
+                    "tool_round": round_idx,
+                },
+            )
+            return None
+
+        if not response or not hasattr(response, "choices") or not response.choices:
+            return None
+
+        choice = response.choices[0]
+        finish_reason = choice.finish_reason
+
+        if finish_reason == "tool_calls" and extra_tools:
+            message = choice.message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            assistant_msg: Dict[str, Any] = {"role": "assistant"}
+            if message.content:
+                assistant_msg["content"] = str(message.content)
+            assistant_msg["tool_calls"] = []
+            current_messages.append(assistant_msg)
+
+            from api.tools.registry import execute_tool, parse_tool_call_arguments
+
+            for tc in tool_calls:
+                tc_id = getattr(tc, "id", "") or ""
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                tool_name = getattr(fn, "name", "")
+                raw_args = getattr(fn, "arguments", "{}")
+                tool_params = parse_tool_call_arguments(raw_args)
+
+                print(f"Tool call: {tool_name}({tool_params})")
+                result = execute_tool(tool_name, tool_params, tool_context or {})
+                print(f"Tool result: {result.output[:200]}")
+
+                assistant_msg["tool_calls"].append(
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": raw_args,
+                        },
+                    }
+                )
+                current_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result.output,
+                    }
+                )
+
+            _increment_ai_provider_request_count()
+            continue
+
         if finish_reason == "stop":
             metadata: Dict[str, Any] = {"provider": "openrouter"}
-            message = response.choices[0].message
+            message = choice.message
             usage_map = _extract_groq_usage_map(response) or {}
             server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
             web_search_requests = server_tool_use.get("web_search_requests")
@@ -3690,6 +3904,7 @@ def _get_openrouter_ai_response_result(
                 )
                 if has_url_citation:
                     metadata["web_search_requests"] = 1
+            metadata["tool_rounds"] = round_idx + 1
             return _build_groq_usage_result(
                 kind="chat",
                 text=str(message.content or ""),
@@ -3697,6 +3912,7 @@ def _get_openrouter_ai_response_result(
                 response=response,
                 metadata=metadata,
             )
+
         print(
             f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
         )
@@ -3707,6 +3923,8 @@ def _get_openrouter_ai_response_result(
                 "enable_web_search": enable_web_search,
             },
         )
+        break
+
     return None
 
 
@@ -3801,7 +4019,11 @@ def get_weather_description(code: int) -> str:
     return descriptions.get(code, "clima raro")
 
 
-def build_system_message(context: Dict) -> Dict[str, Any]:
+def build_system_message(
+    context: Dict,
+    *,
+    tools_active: bool = False,
+) -> Dict[str, Any]:
     """Build system message with personality and context."""
     config = load_bot_config()
     market_info = format_market_info(context.get("market") or {})
@@ -3811,11 +4033,18 @@ def build_system_message(context: Dict) -> Dict[str, Any]:
     time_context = context.get("time") or {}
     formatted_time = str(time_context.get("formatted", "")).strip()
 
-    # Build the complete system prompt with context
     base_prompt = config.get("system_prompt", "")
 
-    contextual_info = f"""
+    tool_instruction = ""
+    if tools_active:
+        tool_instruction = (
+            "\n\nHERRAMIENTAS: price_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
+            "task_set: text + delay_seconds (una vez) o interval_seconds (repetir). 60=1min 3600=1h 86400=1d.\n"
+            "Usa herramientas cuando sean utiles, sino responde normal.\n"
+        )
 
+    contextual_info = f"""
+{tool_instruction}
 FECHA ACTUAL:
 {formatted_time}
 
@@ -4130,6 +4359,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
+            "tareas_command": tareas_command,
         }
     )
 
@@ -5384,15 +5614,58 @@ def handle_successful_payment_message(message: Dict[str, Any]) -> str:
     return "ok"
 
 
+def handle_task_callback(callback_query: Dict[str, Any]) -> None:
+    callback_data = callback_query.get("data")
+    callback_id = callback_query.get("id")
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not callback_data or chat_id is None:
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    parts = str(callback_data).split(":", 2)
+    if len(parts) != 3 or parts[0] != "task":
+        if callback_id:
+            _answer_callback_query(callback_id)
+        return
+
+    _, _, task_id = parts
+
+    from api.tools.task_scheduler import cancel_task
+
+    cancel_task(task_id)
+
+    if callback_id:
+        _answer_callback_query(callback_id, text=f"tarea {task_id} borrada")
+
+    if message_id:
+        from api.tools.task_scheduler import list_tasks
+
+        tasks = list_tasks(str(chat_id))
+        new_text, new_keyboard = _build_tareas_message(tasks)
+        try:
+            edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
+        except Exception:
+            pass
+
+
 def edit_message(
-    chat_id: str, message_id: int, text: str, reply_markup: Dict[str, Any]
+    chat_id: str,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[Dict[str, Any]] = None,
 ) -> bool:
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "reply_markup": reply_markup,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     payload_response, error = _telegram_request(
         "editMessageText", method="POST", json_payload=payload
     )
@@ -5415,6 +5688,10 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
 
     if str(callback_data).startswith("topup:"):
         handle_topup_callback(callback_query)
+        return
+
+    if str(callback_data).startswith("task:"):
+        handle_task_callback(callback_query)
         return
 
     redis_client = config_redis()

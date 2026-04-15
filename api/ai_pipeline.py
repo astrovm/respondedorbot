@@ -135,6 +135,10 @@ def handle_ai_response(
     if is_ask_ai_handler:
         request_count_token = reset_request_count_fn()
 
+    user_name = ""
+    if user_identity:
+        user_name = user_identity.strip().split()[0] if user_identity.strip() else ""
+
     try:
         if image_data and is_ask_ai_handler:
             response = handler_func(
@@ -142,12 +146,33 @@ def handle_ai_response(
                 image_data=image_data,
                 image_file_id=image_file_id,
                 response_meta=response_meta,
+                chat_id=chat_id,
+                user_name=user_name,
             )
+        elif is_ask_ai_handler:
+            if response_meta is not None:
+                try:
+                    response = handler_func(
+                        messages,
+                        response_meta=response_meta,
+                        chat_id=chat_id,
+                        user_name=user_name,
+                    )
+                except TypeError:
+                    # Compat shim: older handler variants don't accept chat_id/user_name.
+                    response = handler_func(messages, response_meta=response_meta)
+            else:
+                response = handler_func(
+                    messages,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                )
         else:
             if response_meta is not None:
                 try:
                     response = handler_func(messages, response_meta=response_meta)
                 except TypeError:
+                    # Compat shim: older handler variants don't accept response_meta.
                     response = handler_func(messages)
             else:
                 response = handler_func(messages)
