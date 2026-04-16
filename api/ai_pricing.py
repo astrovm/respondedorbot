@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from api.credit_units import format_credit_units
 
-
 PRICING_VERSION = "2026-04-12"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.0

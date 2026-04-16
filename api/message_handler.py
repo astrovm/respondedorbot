@@ -13,7 +13,6 @@ from api.ai_service import AIService, build_ai_service_from_deps
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 
-
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
 

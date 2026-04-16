@@ -1490,7 +1490,9 @@ def get_prices(msg_text: str) -> Optional[str]:
         ).rstrip(".")
         percentage = f"{coin['quote'][convert_to_parameter].get(cmc_change_field, 0):+.2f}".rstrip(
             "0"
-        ).rstrip(".")
+        ).rstrip(
+            "."
+        )
         line = f"{ticker}: {price} {convert_to} ({percentage}% {tf_label})"
 
         if (
@@ -2142,9 +2144,9 @@ def handle_transcribe_with_message_result(
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
                 if sticker_response:
-                    return sticker_response, [
-                        billing_segment
-                    ] if billing_segment else []
+                    return sticker_response, (
+                        [billing_segment] if billing_segment else []
+                    )
 
         return "ese mensaje no tiene audio, video, imagen ni sticker para laburar", []
 

@@ -15,7 +15,6 @@ import redis
 from api.chat_config_defaults import CHAT_CONFIG_DEFAULTS
 from api.storage.chat_config_repository import build_chat_config_repository
 
-
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 

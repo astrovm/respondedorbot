@@ -22,7 +22,6 @@ from api.chat_config_service import (
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 from api.storage.chat_config_repository import build_chat_config_repository
 
-
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 

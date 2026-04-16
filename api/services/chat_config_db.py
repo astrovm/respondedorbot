@@ -8,7 +8,6 @@ import json
 
 from api.services import credits_db as credits_db_service
 
-
 _SCHEMA_LOCK = Lock()
 _SCHEMA_READY = False
 
@@ -37,15 +36,13 @@ def ensure_schema() -> None:
 
         with credits_db_service.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS chat_configs (
                         chat_id TEXT PRIMARY KEY,
                         config JSONB NOT NULL DEFAULT '{}'::jsonb,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
-                    """
-                )
+                    """)
             conn.commit()
 
         _SCHEMA_READY = True
@@ -66,7 +63,9 @@ def _normalize(
     return normalized
 
 
-def get_chat_config(chat_id: str, defaults: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def get_chat_config(
+    chat_id: str, defaults: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
     """Load chat config from Postgres, or return ``None`` when absent."""
 
     ensure_schema()

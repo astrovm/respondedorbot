@@ -109,9 +109,11 @@ class AIService:
             chat_id,
             handler_func,
             ai_messages,
-            image_data=prepared_message.resized_image_data
-            if prepared_message.photo_file_id
-            else None,
+            image_data=(
+                prepared_message.resized_image_data
+                if prepared_message.photo_file_id
+                else None
+            ),
             image_file_id=prepared_message.photo_file_id,
             context_texts=[reply_context_text],
             user_identity=user_identity,
