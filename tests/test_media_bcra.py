@@ -456,7 +456,7 @@ def test_handle_transcribe_with_message_voice_download_success():
         patch(
             "api.index.measure_audio_duration_seconds", return_value=1.0
         ) as mock_measure,
-        patch("api.index._transcribe_audio_groq_result") as mock_transcribe,
+        patch("api.index._transcribe_audio_result") as mock_transcribe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
@@ -513,7 +513,7 @@ def test_handle_transcribe_with_message_audio_success():
         patch(
             "api.index.measure_audio_duration_seconds", return_value=1.0
         ) as mock_measure,
-        patch("api.index._transcribe_audio_groq_result") as mock_transcribe,
+        patch("api.index._transcribe_audio_result") as mock_transcribe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
@@ -1620,7 +1620,7 @@ def test_transcribe_file_by_id_video_fallback():
         patch("api.index.download_telegram_file", return_value=b"video bytes"),
         patch("api.index.measure_audio_duration_seconds") as mock_measure,
         patch("api.index.extract_audio_from_video") as mock_extract,
-        patch("api.index._transcribe_audio_groq_result") as mock_transcribe,
+        patch("api.index._transcribe_audio_result") as mock_transcribe,
     ):
         # First call (video bytes) returns None, second call (extracted audio) returns 5.0
         mock_measure.side_effect = [None, 5.0]
