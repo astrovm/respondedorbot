@@ -5930,7 +5930,9 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
                 pass
     elif action == "creditless":
         try:
-            limit = max(0, int(value))
+            limit = int(value)
+            if limit < -1:
+                raise ValueError
             config = set_chat_config(
                 redis_client,
                 chat_id_str,

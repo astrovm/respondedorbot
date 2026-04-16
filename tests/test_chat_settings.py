@@ -625,7 +625,10 @@ class TestHandleTaskCallback:
         }
 
         with (
-            patch("api.index._task_list_tasks", return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}]),
+            patch(
+                "api.index._task_list_tasks",
+                return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}],
+            ),
             patch("api.index._task_cancel_task") as mock_cancel,
             patch("api.index._answer_callback_query") as mock_answer,
             patch("api.index.edit_message") as mock_edit,
@@ -647,7 +650,10 @@ class TestHandleTaskCallback:
         }
 
         with (
-            patch("api.index._task_list_tasks", return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}]),
+            patch(
+                "api.index._task_list_tasks",
+                return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}],
+            ),
             patch("api.index.config_redis"),
             patch("api.index.is_chat_admin", return_value=False),
             patch("api.index._task_cancel_task") as mock_cancel,
@@ -656,7 +662,11 @@ class TestHandleTaskCallback:
             handle_task_callback(callback)
 
         mock_cancel.assert_not_called()
-        mock_answer.assert_called_once_with("cbq1", text="solo el creador o un admin pueden borrar esta tarea", show_alert=True)
+        mock_answer.assert_called_once_with(
+            "cbq1",
+            text="solo el creador o un admin pueden borrar esta tarea",
+            show_alert=True,
+        )
 
 
 class TestTimezoneConfig:
@@ -691,8 +701,7 @@ class TestTimezoneConfig:
         rows = keyboard["inline_keyboard"]
 
         tz_row = next(
-            r for r in rows
-            if any("cfg:timezone:" in btn["callback_data"] for btn in r)
+            r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r)
         )
         assert any("🌍" in btn["text"] for btn in tz_row)
         assert any("UTC" in btn["text"] for btn in tz_row)
@@ -710,8 +719,7 @@ class TestTimezoneConfig:
 
         rows = keyboard["inline_keyboard"]
         tz_row = next(
-            r for r in rows
-            if any("cfg:timezone:" in btn["callback_data"] for btn in r)
+            r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r)
         )
         utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
         assert "🌍" in utc3_btn["text"]
@@ -758,3 +766,45 @@ class TestTimezoneConfig:
         mock_set.assert_called_once()
         call_kwargs = mock_set.call_args.kwargs
         assert call_kwargs.get("timezone_offset") == -5
+
+
+def test_handle_callback_query_allows_unlimited_creditless_setting():
+    from api.index import handle_callback_query
+
+    callback = {
+        "id": "cbq",
+        "data": "cfg:creditless:-1",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    with (
+        patch("api.index.config_redis") as mock_redis,
+        patch(
+            "api.index.get_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": 2,
+            },
+        ),
+        patch(
+            "api.index.set_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": -1,
+            },
+        ) as mock_set,
+        patch("api.index.build_config_text", return_value="text"),
+        patch("api.index.build_config_keyboard", return_value={"inline_keyboard": []}),
+        patch("api.index.edit_message", return_value=True),
+        patch("api.index._answer_callback_query"),
+    ):
+        handle_callback_query(callback)
+
+    mock_set.assert_called_once()
+    call_kwargs = mock_set.call_args.kwargs
+    assert call_kwargs.get("creditless_user_hourly_limit") == -1
