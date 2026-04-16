@@ -9,20 +9,48 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from api.task_executor import (
     _strip_response_marker as _task_executor_strip_response_marker,
-    get_task_executor,
+    build_task_executor,
 )
 
 _scheduler_instance: Optional[Any] = None
+_redis_client: Optional[Any] = None
+_task_executor: Optional[Any] = None
 
 TASK_REDIS_PREFIX = "task:data:"
 
 _MINUTE = 60
 _HOUR = 3600
 _DAY = 86400
+
+
+def init_scheduler(
+    redis_factory: Callable[[], Any],
+    task_executor_deps: Dict[str, Any],
+) -> None:
+    global _redis_client, _task_executor
+    try:
+        _redis_client = redis_factory()
+    except Exception:
+        _redis_client = None
+    _task_executor = build_task_executor(**task_executor_deps)
+
+
+def _get_task_executor() -> Any:
+    return _task_executor
+
+
+def set_task_executor(executor: Any) -> None:
+    global _task_executor
+    _task_executor = executor
+
+
+def set_redis_client(client: Any) -> None:
+    global _redis_client
+    _redis_client = client
 
 
 def format_interval(seconds: int, prefix: str = "cada ") -> str:
@@ -118,12 +146,7 @@ def _strip_response_marker(response: str) -> str:
 
 
 def _get_redis() -> Any:
-    from api.index import config_redis
-
-    try:
-        return config_redis()
-    except Exception:
-        return None
+    return _redis_client
 
 
 def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None:
@@ -161,8 +184,7 @@ def _fire_task(task_id: str) -> None:
         print(f"task_scheduler: invalid JSON for {task_id}")
         return
 
-    executor = get_task_executor()
-    if executor.execute(data):
+    if _get_task_executor() is not None and _get_task_executor().execute(data):
         _delete_task(key, task_id, redis_client)
 
 

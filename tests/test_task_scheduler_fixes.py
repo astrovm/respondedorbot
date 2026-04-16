@@ -12,6 +12,8 @@ from api.tools.task_scheduler import (
     get_scheduler,
     list_tasks,
     schedule_task,
+    set_task_executor,
+    set_redis_client,
     shutdown_scheduler,
 )
 
@@ -48,6 +50,31 @@ def _credits_empty_mock() -> MagicMock:
     return mock_cs
 
 
+def _build_executor_for_tests(
+    credits_db_service: MagicMock,
+    ask_ai_fn: MagicMock,
+    send_msg_fn: MagicMock,
+    billing_factory=None,
+) -> MagicMock:
+    """Build a TaskExecutor-like mock injected into the scheduler."""
+    from api.task_executor import TaskExecutor
+
+    billing = MagicMock()
+    billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+    if billing_factory is None:
+        billing_factory = MagicMock(return_value=billing)
+
+    return TaskExecutor(
+        ask_ai=ask_ai_fn,
+        send_msg=send_msg_fn,
+        admin_report=MagicMock(),
+        credits_db_service=credits_db_service,
+        gen_random_fn=MagicMock(),
+        build_insufficient_credits_message_fn=MagicMock(),
+        billing_factory=billing_factory,
+    )
+
+
 # ---------------------------------------------------------------------------
 # _strip_response_marker
 # ---------------------------------------------------------------------------
@@ -82,9 +109,8 @@ class TestStripResponseMarker:
 class TestFireTaskStripsMarker:
     """Verify _fire_task strips [[AI_FALLBACK]] from the sent message."""
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_one_shot_strips_fallback_marker(self, mock_sched, mock_redis):
+    def test_one_shot_strips_fallback_marker(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -96,21 +122,23 @@ class TestFireTaskStripsMarker:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.send_msg") as mock_send:
-                with patch("api.index.ask_ai", return_value="[[AI_FALLBACK]]no boludo"):
-                    _fire_task("abc123")
+        mock_ask_ai = MagicMock(return_value="[[AI_FALLBACK]]no boludo")
+        mock_send = MagicMock()
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
+        set_task_executor(executor)
+
+        _fire_task("abc123")
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
         assert "[[AI_FALLBACK]]" not in sent_text
         assert "no boludo" in sent_text
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_recurring_strips_fallback_marker(self, mock_sched, mock_redis):
+    def test_recurring_strips_fallback_marker(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -122,23 +150,23 @@ class TestFireTaskStripsMarker:
                 "interval_seconds": 3600,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.send_msg") as mock_send:
-                with patch(
-                    "api.index.ask_ai", return_value="[[AI_FALLBACK]]fallback response"
-                ):
-                    _fire_task("abc123")
+        mock_ask_ai = MagicMock(return_value="[[AI_FALLBACK]]fallback response")
+        mock_send = MagicMock()
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
+        set_task_executor(executor)
+
+        _fire_task("abc123")
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
         assert "[[AI_FALLBACK]]" not in sent_text
         assert "fallback response" in sent_text
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_one_shot_normal_response_unchanged(self, mock_sched, mock_redis):
+    def test_one_shot_normal_response_unchanged(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -150,24 +178,21 @@ class TestFireTaskStripsMarker:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.send_msg") as mock_send:
-                with patch(
-                    "api.index.ask_ai",
-                    return_value="aca tenes las noticias pedazo de bobi",
-                ):
-                    _fire_task("abc123")
+        mock_ask_ai = MagicMock(return_value="aca tenes las noticias pedazo de bobi")
+        mock_send = MagicMock()
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
+        set_task_executor(executor)
+
+        _fire_task("abc123")
 
         sent_text = mock_send.call_args[0][1]
         assert "aca tenes las noticias pedazo de bobi" in sent_text
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_sent_message_includes_tarea_programada_prefix(
-        self, mock_sched, mock_redis
-    ):
+    def test_sent_message_includes_tarea_programada_prefix(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -179,12 +204,15 @@ class TestFireTaskStripsMarker:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.send_msg") as mock_send:
-                with patch("api.index.ask_ai", return_value="dale"):
-                    _fire_task("abc123")
+        mock_ask_ai = MagicMock(return_value="dale")
+        mock_send = MagicMock()
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
+        set_task_executor(executor)
+
+        _fire_task("abc123")
 
         sent_text = mock_send.call_args[0][1]
         assert "tarea programada:" in sent_text
@@ -198,9 +226,8 @@ class TestFireTaskStripsMarker:
 class TestFireTaskCleanup:
     """Verify Redis key and job removal behavior for one-shot vs recurring tasks."""
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_one_shot_deletes_redis_key_on_success(self, mock_sched, mock_redis):
+    def test_one_shot_deletes_redis_key_on_success(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -212,20 +239,22 @@ class TestFireTaskCleanup:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.ask_ai", return_value="dale"):
-                with patch("api.index.send_msg"):
-                    _fire_task("x1")
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(
+            credits,
+            MagicMock(return_value="dale"),
+            MagicMock(),
+        )
+        set_task_executor(executor)
+
+        _fire_task("x1")
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_recurring_does_not_delete_redis_key_on_success(
-        self, mock_sched, mock_redis
-    ):
+    def test_recurring_does_not_delete_redis_key_on_success(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -237,23 +266,31 @@ class TestFireTaskCleanup:
                 "interval_seconds": 3600,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_ok_mock()):
-            with patch("api.index.ask_ai", return_value="noticias"):
-                with patch("api.index.send_msg"):
-                    _fire_task("x1")
+        credits = _credits_ok_mock()
+        executor = _build_executor_for_tests(
+            credits,
+            MagicMock(return_value="noticias"),
+            MagicMock(),
+        )
+        set_task_executor(executor)
+
+        _fire_task("x1")
 
         redis_client.delete.assert_not_called()
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
     def test_one_shot_refunds_reservation_and_deletes_task_on_fallback(
-        self, mock_sched, mock_redis
+        self, mock_sched
     ):
         from api.tools.task_scheduler import _fire_task
 
         credits = _credits_ok_mock()
+        billing = MagicMock()
+        billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        billing_factory = MagicMock(return_value=billing)
+
         redis_client = _make_redis_with_task(
             {
                 "chat_id": "123",
@@ -263,14 +300,19 @@ class TestFireTaskCleanup:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", credits):
-            with patch("api.index.ask_ai", return_value="[[AI_FALLBACK]]dale"):
-                with patch("api.index.send_msg"):
-                    _fire_task("x1")
+        executor = _build_executor_for_tests(
+            credits,
+            MagicMock(return_value="[[AI_FALLBACK]]dale"),
+            MagicMock(),
+            billing_factory=billing_factory,
+        )
+        set_task_executor(executor)
 
-        credits.refund_ai_charge.assert_called_once()
+        _fire_task("x1")
+
+        billing.refund_reserved_ai_credits.assert_called_once()
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
 
@@ -286,9 +328,8 @@ class TestFireTaskBilling:
     credits or cannot be identified, the task is deleted automatically.
     """
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_no_credits_deletes_one_shot_task(self, mock_sched, mock_redis):
+    def test_no_credits_deletes_one_shot_task(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -300,17 +341,18 @@ class TestFireTaskBilling:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_empty_mock()):
-            with patch("api.index.send_msg"):
-                _fire_task("x1")
+        credits = _credits_empty_mock()
+        executor = _build_executor_for_tests(credits, MagicMock(), MagicMock())
+        set_task_executor(executor)
+
+        _fire_task("x1")
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_no_credits_skips_but_keeps_recurring_task(self, mock_sched, mock_redis):
+    def test_no_credits_skips_but_keeps_recurring_task(self, mock_sched):
         """Even if credits fail, recurring tasks are skipped for this run but kept in Redis."""
         from api.tools.task_scheduler import _fire_task
 
@@ -323,17 +365,18 @@ class TestFireTaskBilling:
                 "interval_seconds": 3600,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_empty_mock()):
-            with patch("api.index.send_msg"):
-                _fire_task("x1")
+        credits = _credits_empty_mock()
+        executor = _build_executor_for_tests(credits, MagicMock(), MagicMock())
+        set_task_executor(executor)
+
+        _fire_task("x1")
 
         redis_client.delete.assert_not_called()
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_no_user_id_deletes_task(self, mock_sched, mock_redis):
+    def test_no_user_id_deletes_task(self, mock_sched):
         """If user_id is missing from task data the task cannot be billed and is deleted."""
         from api.tools.task_scheduler import _fire_task
 
@@ -346,19 +389,18 @@ class TestFireTaskBilling:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        with patch("api.index.credits_db_service", _credits_empty_mock()):
-            with patch("api.index.send_msg"):
-                _fire_task("x1")
+        credits = _credits_empty_mock()
+        executor = _build_executor_for_tests(credits, MagicMock(), MagicMock())
+        set_task_executor(executor)
+
+        _fire_task("x1")
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler._get_redis")
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_billing_uses_private_chat_type_never_charges_group(
-        self, mock_sched, mock_redis
-    ):
+    def test_billing_uses_private_chat_type_never_charges_group(self, mock_sched):
         """
         Even if the task was created in a group chat, billing is done as
         chat_type='private' with numeric_chat_id=None so only the user's
@@ -376,23 +418,48 @@ class TestFireTaskBilling:
                 "interval_seconds": None,
             }
         )
-        mock_redis.return_value = redis_client
+        set_redis_client(redis_client)
 
-        captured: list = []
+        credits = _credits_ok_mock()
+
+        captured_init_kwargs = []
         original_init = AIMessageBilling.__init__
 
         def capture_init(self, **kwargs):
-            captured.append(kwargs)
+            captured_init_kwargs.append(kwargs)
             original_init(self, **kwargs)
 
         with patch.object(AIMessageBilling, "__init__", capture_init):
-            with patch("api.index.credits_db_service", _credits_ok_mock()):
-                with patch("api.index.ask_ai", return_value="ok"):
-                    with patch("api.index.send_msg"):
-                        _fire_task("x1")
+            real_billing = AIMessageBilling(
+                credits_db_service=credits,
+                admin_reporter=MagicMock(),
+                gen_random_fn=MagicMock(),
+                build_insufficient_credits_message_fn=MagicMock(),
+                maybe_grant_onboarding_credits_fn=MagicMock(),
+                command="task",
+                chat_id="-100999",
+                chat_type="private",
+                user_id=42,
+                numeric_chat_id=None,
+                message={},
+            )
 
-        assert captured, "AIMessageBilling was not instantiated"
-        init_kwargs = captured[0]
+        real_billing.reserve_ai_credits = MagicMock(
+            return_value=({"reservation": "ok"}, None)
+        )
+        billing_factory = MagicMock(return_value=real_billing)
+        executor = _build_executor_for_tests(
+            credits,
+            MagicMock(return_value="ok"),
+            MagicMock(),
+            billing_factory=billing_factory,
+        )
+        set_task_executor(executor)
+
+        _fire_task("x1")
+
+        assert captured_init_kwargs, "AIMessageBilling was not instantiated"
+        init_kwargs = captured_init_kwargs[0]
         assert init_kwargs["chat_type"] == "private"
         assert init_kwargs["numeric_chat_id"] is None
 

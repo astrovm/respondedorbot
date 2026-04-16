@@ -117,14 +117,22 @@ class TaskExecutor:
         return should_delete
 
 
-def get_task_executor() -> TaskExecutor:
-    from api import index as api_index
-
+def build_task_executor(
+    *,
+    ask_ai: Callable[..., str],
+    send_msg: Callable[..., Any],
+    admin_report: Callable[..., None],
+    credits_db_service: Any,
+    gen_random_fn: Callable[[str], str],
+    build_insufficient_credits_message_fn: Callable[..., str],
+    billing_factory: Callable[..., AIMessageBilling] = AIMessageBilling,
+) -> TaskExecutor:
     return TaskExecutor(
-        ask_ai=api_index.ask_ai,
-        send_msg=api_index.send_msg,
-        admin_report=api_index.admin_report,
-        credits_db_service=api_index.credits_db_service,
-        gen_random_fn=api_index.gen_random,
-        build_insufficient_credits_message_fn=api_index.build_insufficient_credits_message,
+        ask_ai=ask_ai,
+        send_msg=send_msg,
+        admin_report=admin_report,
+        credits_db_service=credits_db_service,
+        gen_random_fn=gen_random_fn,
+        build_insufficient_credits_message_fn=build_insufficient_credits_message_fn,
+        billing_factory=billing_factory,
     )

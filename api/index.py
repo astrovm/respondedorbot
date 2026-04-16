@@ -5233,6 +5233,93 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
+def _build_chat_config_service() -> Any:
+    """Build a ChatConfigService instance for application composition.
+
+    Imported lazily to avoid import cycles during module load.
+    """
+    from api.chat_config_service import build_chat_config_service as _build
+
+    # Use the default repository builder inside the service module.
+    return _build(admin_reporter=admin_report, log_event=_log_config_event)
+
+
+def build_telegram_gateway() -> TelegramGateway:
+    """Builder for TelegramGateway (kept for composition clarity)."""
+    return TelegramGateway(_telegram_request)
+
+
+def build_routing_policy() -> RoutingPolicy:
+    """Builder for the global routing policy (returns the configured instance)."""
+    return RoutingPolicy(
+        base_policy=_command_should_gordo_respond,
+        has_ai_credits_for_random_reply=_has_ai_credits_for_random_reply,
+        load_bot_config_fn=load_bot_config,
+    )
+
+
+def build_ai_service() -> Any:
+    """Lightweight AI service adapter exposing existing ask/handle functions.
+
+    This adapter keeps current behaviour while offering a single object
+    consumers can depend on during the migration.
+    """
+
+    class _AIServiceAdapter:
+        def ask(self, *args, **kwargs):
+            return ask_ai(*args, **kwargs)
+
+        def handle_response(self, *args, **kwargs):
+            return handle_ai_response(*args, **kwargs)
+
+    return _AIServiceAdapter()
+
+
+def build_task_executor() -> Any:
+    """Return the TaskExecutor instance used by the scheduler."""
+    from api.task_executor import build_task_executor as _build
+
+    return _build(
+        ask_ai=ask_ai,
+        send_msg=send_msg,
+        admin_report=admin_report,
+        credits_db_service=credits_db_service,
+        gen_random_fn=gen_random,
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+    )
+
+
+# Module-level composed instances (composition root surface)
+try:
+    chat_config_service = _build_chat_config_service()
+except Exception:
+    # Fallback to None - callers will use compatibility wrappers when needed.
+    chat_config_service = None
+
+telegram_gateway = build_telegram_gateway()
+_ROUTING_POLICY = build_routing_policy()
+ai_service = build_ai_service()
+task_executor = build_task_executor()
+
+# Wire scheduler with its dependencies (breaks scheduler<->index coupling)
+try:
+    from api.tools import task_scheduler as _ts
+
+    _ts.init_scheduler(
+        redis_factory=config_redis,
+        task_executor_deps={
+            "ask_ai": ask_ai,
+            "send_msg": send_msg,
+            "admin_report": admin_report,
+            "credits_db_service": credits_db_service,
+            "gen_random_fn": gen_random,
+            "build_insufficient_credits_message_fn": build_insufficient_credits_message,
+        },
+    )
+except Exception:
+    pass
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     return _chat_get_chat_config(
         redis_client,
