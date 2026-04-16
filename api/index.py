@@ -3881,7 +3881,7 @@ def build_system_message(
             "- si el usuario dice 'decime', 'avisame' o pide que el bot hable de si mismo, guarda eso literal.\n"
             "- trigger_config con type='interval' y days=N para cada N dias.\n"
             "- trigger_config con type='cron', hour, minute para horarios especificos.\n"
-            "- cron puede tener day_of_week='lun,mie,vie' o day=1 para primer dia del mes.\n"
+            "- cron puede tener day_of_week='lun,mie,vie' o 'mon,wed,fri'; se normaliza internamente. Tambien puede usar day=1 para primer dia del mes.\n"
             "- si no especificas hora para cron, elegi una hora razonable segun el contexto.\n"
             "Usa herramientas cuando sean utiles, sino responde normal.\n"
         )
