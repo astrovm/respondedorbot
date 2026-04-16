@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 from api.ai_billing import AIMessageBilling
-from api.chat_context import format_user_identity
-from api.credit_units import format_credit_units, parse_credit_units
 from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import run_ai_flow as _run_ai_flow
+from api.ai_service import AIService, run_ai_flow as _run_ai_flow
+from api.chat_context import format_user_identity
+from api.credit_units import format_credit_units, parse_credit_units
 
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
@@ -98,6 +98,7 @@ class MessageHandlerDeps:
         lambda _usage_tag, _reservation: None
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
+    ai_service: Optional[AIService] = None
 
 
 @dataclass

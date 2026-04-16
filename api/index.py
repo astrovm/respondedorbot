@@ -147,6 +147,7 @@ from api.command_registry import (
     should_gordo_respond as _command_should_gordo_respond,
 )
 from api.message_handler import MessageHandlerDeps, handle_msg as _handle_msg_impl
+from api.ai_service import AIService
 from api.routing_policy import RoutingPolicy
 from api.telegram_gateway import TelegramGateway
 from api.message_state import (
@@ -2704,9 +2705,9 @@ def _get_giphy_pool(category: str) -> List[str]:
 
     if redis_client:
         try:
-            raw = redis_client.get(pool_key)
-            if raw:
-                return json.loads(str(raw))
+            cached = redis_get_json(redis_client, pool_key)
+            if cached is not None:
+                return cached
         except Exception as e:
             print(f"Error reading Giphy pool from cache: {e}")
 
@@ -2720,10 +2721,10 @@ def _get_giphy_pool(category: str) -> List[str]:
             print(f"Error caching Giphy pool: {e}")
     elif not urls and redis_client:
         try:
-            raw = redis_client.get(stale_key)
-            if raw:
+            stale = redis_get_json(redis_client, stale_key)
+            if stale is not None:
                 print(f"Giphy API failed, using stale pool for {category}")
-                return json.loads(str(raw))
+                return stale
         except Exception as e:
             print(f"Error reading stale Giphy pool: {e}")
 
@@ -5258,23 +5259,6 @@ def build_routing_policy() -> RoutingPolicy:
     )
 
 
-def build_ai_service() -> Any:
-    """Lightweight AI service adapter exposing existing ask/handle functions.
-
-    This adapter keeps current behaviour while offering a single object
-    consumers can depend on during the migration.
-    """
-
-    class _AIServiceAdapter:
-        def ask(self, *args, **kwargs):
-            return ask_ai(*args, **kwargs)
-
-        def handle_response(self, *args, **kwargs):
-            return handle_ai_response(*args, **kwargs)
-
-    return _AIServiceAdapter()
-
-
 def build_task_executor() -> Any:
     """Return the TaskExecutor instance used by the scheduler."""
     from api.task_executor import build_task_executor as _build
@@ -5298,7 +5282,6 @@ except Exception:
 
 telegram_gateway = build_telegram_gateway()
 _ROUTING_POLICY = build_routing_policy()
-ai_service = build_ai_service()
 task_executor = build_task_executor()
 
 # Wire scheduler with its dependencies (breaks scheduler<->index coupling)
@@ -5856,6 +5839,17 @@ def format_user_message(
 
 
 def _build_message_handler_deps() -> MessageHandlerDeps:
+    ai_svc = AIService(
+        credits_db_service=credits_db_service,
+        get_chat_history=get_chat_history,
+        build_ai_messages=build_ai_messages,
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=has_openrouter_fallback,
+        handle_rate_limit=handle_rate_limit,
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+    )
     return MessageHandlerDeps(
         config_redis=config_redis,
         get_chat_config=get_chat_config,
@@ -5909,6 +5903,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         load_persisted_reservation=lambda _tag: None,
         persist_reservation=lambda _tag, _data: None,
         clear_persisted_reservation=lambda _tag: None,
+        ai_service=ai_svc,
     )
 
 
