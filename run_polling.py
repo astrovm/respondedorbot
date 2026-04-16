@@ -63,8 +63,11 @@ def main() -> int:
 
     from api.index import update_telegram_bot_commands
     from api.bot_ptb import run_polling
+    from api.tools.task_scheduler import get_scheduler
 
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
+
+    get_scheduler()
 
     try:
         update_telegram_bot_commands()
