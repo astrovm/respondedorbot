@@ -1490,9 +1490,7 @@ def get_prices(msg_text: str) -> Optional[str]:
         ).rstrip(".")
         percentage = f"{coin['quote'][convert_to_parameter].get(cmc_change_field, 0):+.2f}".rstrip(
             "0"
-        ).rstrip(
-            "."
-        )
+        ).rstrip(".")
         line = f"{ticker}: {price} {convert_to} ({percentage}% {tf_label})"
 
         if (
@@ -5668,9 +5666,30 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
                 pass
     elif action == "creditless":
         try:
-            limit = int(value)
-            if limit < -1:
-                raise ValueError
+            current_limit = int(
+                config.get(
+                    "creditless_user_hourly_limit",
+                    config.get("creditless_user_daily_limit", 5),
+                )
+            )
+            if value == "none":
+                limit = 0
+            elif value == "decrease":
+                limit = (
+                    current_limit if current_limit < 0 else max(0, current_limit - 1)
+                )
+            elif value == "current":
+                if callback_id:
+                    _answer_callback_query(callback_id)
+                return
+            elif value == "increase":
+                limit = current_limit if current_limit < 0 else current_limit + 1
+            elif value == "unlimited":
+                limit = -1
+            else:
+                limit = int(value)
+                if limit < -1:
+                    raise ValueError
             config = set_chat_config(
                 redis_client,
                 chat_id_str,
