@@ -6006,7 +6006,6 @@ def update_telegram_bot_commands() -> bool:
         "command": "te lo convierto en comando de telegram",
         "buscar": "te busco en la web",
         "search": "te busco en la web",
-        "instance": "te digo dónde estoy corriendo",
         "help": "te muestro todos los comandos",
         "transcribe": "te transcribo audio o describo imagen",
         "describe": "te transcribo audio o describo imagen",
@@ -6017,6 +6016,8 @@ def update_telegram_bot_commands() -> bool:
         "transfer": "le pasás créditos tuyos al grupo",
         "gm": "gif de buenos días",
         "gn": "gif de buenas noches",
+        "tareas": "listado de tareas programadas",
+        "tasks": "listado de tareas programadas",
     }
 
     # Build commands list from COMMAND_GROUPS
@@ -6028,8 +6029,13 @@ def update_telegram_bot_commands() -> bool:
             command = alias.lstrip("/")  # Remove leading slash
             if command not in seen_commands:
                 seen_commands.add(command)
-                description = command_descriptions.get(command, f"Comando /{command}")
-                commands_list.append({"command": command, "description": description})
+                if command in command_descriptions:
+                    commands_list.append(
+                        {
+                            "command": command,
+                            "description": command_descriptions[command],
+                        }
+                    )
 
     # Sort commands alphabetically
     commands_list.sort(key=lambda x: x["command"])
