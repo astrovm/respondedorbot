@@ -79,6 +79,13 @@ def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
     mock_admin.assert_called_once()
 
 
+def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
+    text = build_config_text(CHAT_CONFIG_DEFAULTS)
+
+    assert "6. mensajes gratis por usuario por hora" in text
+    assert "cuantos mensajes de ia paga el grupo por usuario cada hora" in text
+
+
 def test_get_chat_config_migration_error_returns_redis_config_and_reports():
     redis_client = MagicMock(spec=redis.Redis)
     redis_client.get.return_value = json.dumps({"link_mode": "off"})
