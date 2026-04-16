@@ -91,6 +91,7 @@ def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
     assert "a veces respondo solo en el grupo aunque nadie me llame" in text
     assert "6. mensajes gratis por usuario por hora" in text
     assert "cuantos mensajes de ia paga el grupo por usuario cada hora" in text
+    assert "\n5\n" in text
     assert "tocá los botones de abajo para cambiar la config" in text
 
 
@@ -443,6 +444,14 @@ def test_build_config_text_and_keyboard_reflect_values():
         == "✅ ignorar replies a links arreglados"
     )
     assert keyboard["inline_keyboard"][4][0]["callback_data"] == "cfg:random:toggle"
+    assert keyboard["inline_keyboard"][5][0]["text"] == "0"
+    assert keyboard["inline_keyboard"][5][1]["text"] == "-"
+    assert keyboard["inline_keyboard"][5][2]["text"] == "5"
+    assert (
+        keyboard["inline_keyboard"][5][2]["callback_data"] == "cfg:creditless:current"
+    )
+    assert keyboard["inline_keyboard"][5][3]["text"] == "+"
+    assert keyboard["inline_keyboard"][5][4]["text"] == "∞"
 
 
 def test_handle_config_command_loads_config():
@@ -739,6 +748,27 @@ class TestTimezoneConfig:
         utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
         assert "🌍" in utc3_btn["text"]
 
+    def test_config_keyboard_creditless_stepper_uses_default_five(self):
+        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+
+        keyboard = build_config_keyboard(dict(CHAT_CONFIG_DEFAULTS))
+        creditless_row = keyboard["inline_keyboard"][5]
+
+        assert [button["text"] for button in creditless_row] == [
+            "0",
+            "-",
+            "5",
+            "+",
+            "∞",
+        ]
+        assert [button["callback_data"] for button in creditless_row] == [
+            "cfg:creditless:none",
+            "cfg:creditless:decrease",
+            "cfg:creditless:current",
+            "cfg:creditless:increase",
+            "cfg:creditless:unlimited",
+        ]
+
     def test_handle_callback_query_updates_timezone(self):
         from api.index import handle_callback_query
 
@@ -783,12 +813,12 @@ class TestTimezoneConfig:
         assert call_kwargs.get("timezone_offset") == -5
 
 
-def test_handle_callback_query_allows_unlimited_creditless_setting():
+def test_handle_callback_query_sets_creditless_unlimited():
     from api.index import handle_callback_query
 
     callback = {
         "id": "cbq",
-        "data": "cfg:creditless:-1",
+        "data": "cfg:creditless:unlimited",
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
@@ -800,7 +830,7 @@ def test_handle_callback_query_allows_unlimited_creditless_setting():
                 "ai_random_replies": True,
                 "ai_command_followups": True,
                 "ignore_link_fix_followups": True,
-                "creditless_user_hourly_limit": 2,
+                "creditless_user_hourly_limit": 5,
             },
         ),
         patch(
@@ -823,3 +853,83 @@ def test_handle_callback_query_allows_unlimited_creditless_setting():
     mock_set.assert_called_once()
     call_kwargs = mock_set.call_args.kwargs
     assert call_kwargs.get("creditless_user_hourly_limit") == -1
+
+
+def test_handle_callback_query_increases_creditless_limit():
+    from api.index import handle_callback_query
+
+    callback = {
+        "id": "cbq",
+        "data": "cfg:creditless:increase",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    with (
+        patch("api.index.config_redis"),
+        patch(
+            "api.index.get_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": 5,
+            },
+        ),
+        patch(
+            "api.index.set_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": 6,
+            },
+        ) as mock_set,
+        patch("api.index.build_config_text", return_value="text"),
+        patch("api.index.build_config_keyboard", return_value={"inline_keyboard": []}),
+        patch("api.index.edit_message", return_value=True),
+        patch("api.index._answer_callback_query"),
+    ):
+        handle_callback_query(callback)
+
+    assert mock_set.call_args.kwargs["creditless_user_hourly_limit"] == 6
+
+
+def test_handle_callback_query_decrease_clamps_creditless_limit_at_zero():
+    from api.index import handle_callback_query
+
+    callback = {
+        "id": "cbq",
+        "data": "cfg:creditless:decrease",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    with (
+        patch("api.index.config_redis"),
+        patch(
+            "api.index.get_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": 0,
+            },
+        ),
+        patch(
+            "api.index.set_chat_config",
+            return_value={
+                "link_mode": "reply",
+                "ai_random_replies": True,
+                "ai_command_followups": True,
+                "ignore_link_fix_followups": True,
+                "creditless_user_hourly_limit": 0,
+            },
+        ) as mock_set,
+        patch("api.index.build_config_text", return_value="text"),
+        patch("api.index.build_config_keyboard", return_value={"inline_keyboard": []}),
+        patch("api.index.edit_message", return_value=True),
+        patch("api.index._answer_callback_query"),
+    ):
+        handle_callback_query(callback)
+
+    assert mock_set.call_args.kwargs["creditless_user_hourly_limit"] == 0
