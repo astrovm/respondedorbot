@@ -167,6 +167,10 @@ from api.utils.links import (
     replace_links as _links_replace_links,
     fetch_tweet_text as _links_fetch_tweet_text,
 )
+from api.utils.youtube_transcript import (
+    extract_youtube_video_id,
+    get_youtube_transcript_context,
+)
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -3377,6 +3381,8 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     print(f"build_message_links_context: extracted {len(urls)} url(s) urls={urls}")
 
     lines = ["LINKS DEL MENSAJE:"]
+    transcript_parts: List[str] = []
+
     for index, url in enumerate(urls, 1):
         metadata = fetch_link_metadata(url)
         final_url = str(metadata.get("url") or url).strip() or url
@@ -3389,6 +3395,17 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
             lines.append(f"titulo: {title}")
         if description:
             lines.append(f"descripcion: {description}")
+
+        video_id = extract_youtube_video_id(final_url)
+        if video_id:
+            transcript = get_youtube_transcript_context(video_id)
+            if transcript:
+                transcript_parts.append(transcript)
+
+    if transcript_parts:
+        lines.append("")
+        lines.extend(transcript_parts)
+
     return "\n".join(lines)
 
 
@@ -5243,7 +5260,7 @@ def _transcribe_audio_result(
             transcription = response.get("text")
         else:
             transcription = getattr(response, "text", None)
-            
+        
         if transcription:
             print(f"Audio transcribed successfully: {transcription[:100]}...")
             return _build_groq_usage_result(
@@ -5275,6 +5292,7 @@ def _transcribe_audio_result(
         cache_transcription(file_id, result.text)
 
     return result
+
 
 def transcribe_audio_groq(
     audio_data: bytes,

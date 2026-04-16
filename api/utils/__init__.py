@@ -21,6 +21,12 @@ from api.utils.links import (
     fetch_tweet_via_oembed,
     fetch_tweet_text,
 )
+from api.utils.youtube_transcript import (
+    extract_youtube_video_id,
+    fetch_youtube_transcript,
+    format_youtube_transcript_for_context,
+    get_youtube_transcript_context,
+)
 
 __all__ = [
     "fmt_num",
@@ -42,4 +48,8 @@ __all__ = [
     "extract_tweet_urls",
     "fetch_tweet_via_oembed",
     "fetch_tweet_text",
+    "extract_youtube_video_id",
+    "fetch_youtube_transcript",
+    "format_youtube_transcript_for_context",
+    "get_youtube_transcript_context",
 ]
