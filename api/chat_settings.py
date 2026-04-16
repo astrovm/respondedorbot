@@ -1,77 +1,30 @@
-"""Chat configuration persistence and admin helpers."""
+"""Chat configuration compatibility wrappers and admin helpers."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import redis
 
 from api.chat_context import is_group_chat_type
+from api.chat_config_defaults import (
+    CHAT_ADMIN_STATUS_TTL,
+    CHAT_CONFIG_DEFAULTS,
+    TIMEZONE_OFFSET_MAX,
+    TIMEZONE_OFFSET_MIN,
+)
+from api.chat_config_service import (
+    build_chat_config_service,
+    decode_redis_value,
+    load_chat_config_from_redis,
+)
 from api.services.redis_helpers import redis_get_json, redis_setex_json
-from api.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import build_chat_config_repository
 
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
-
-
-CHAT_CONFIG_DEFAULTS = {
-    "link_mode": "reply",
-    "ai_random_replies": True,
-    "ai_command_followups": True,
-    "ignore_link_fix_followups": True,
-    "timezone_offset": -3,
-    "creditless_user_hourly_limit": 2,
-}
-
-TIMEZONE_OFFSET_MIN = -12
-TIMEZONE_OFFSET_MAX = 14
-
-CHAT_ADMIN_STATUS_TTL = 300
-
-
-def decode_redis_value(value: Any) -> Optional[str]:
-    """Decode Redis values that may be bytes or text."""
-
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", errors="replace")
-    if value is not None:
-        return str(value)
-    return None
-
-
-def load_chat_config_from_redis(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    log_event: ConfigLogger,
-) -> Dict[str, Any]:
-    """Load chat config from Redis for one-time migration to Postgres."""
-
-    config = dict(CHAT_CONFIG_DEFAULTS)
-    raw_value = redis_client.get(f"chat_config:{chat_id}")
-    raw_value_text = decode_redis_value(raw_value)
-    log_event(
-        "Chat config raw value fetched",
-        {"chat_id": chat_id, "raw_value": raw_value_text},
-    )
-
-    if raw_value_text:
-        try:
-            loaded = json.loads(raw_value_text)
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict):
-            for key, value in loaded.items():
-                if key in config:
-                    config[key] = value
-            return config
-
-    log_event("No stored chat config found; using defaults", {"chat_id": chat_id})
-    return config
 
 
 def get_chat_config(

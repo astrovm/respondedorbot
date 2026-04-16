@@ -19,12 +19,40 @@ ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 
-def _decode_redis_value(value: Any) -> Optional[str]:
+def decode_redis_value(value: Any) -> Optional[str]:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace")
     if value is not None:
         return str(value)
     return None
+
+
+def load_chat_config_from_redis(
+    redis_client: redis.Redis,
+    chat_id: str,
+    *,
+    log_event: ConfigLogger,
+) -> Dict[str, Any]:
+    config: Dict[str, Any] = dict(CHAT_CONFIG_DEFAULTS)
+    raw = redis_client.get(f"chat_config:{chat_id}")
+    raw_text = decode_redis_value(raw)
+    log_event(
+        "Chat config raw value fetched", {"chat_id": chat_id, "raw_value": raw_text}
+    )
+
+    if raw_text:
+        try:
+            loaded = json.loads(raw_text)
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            for key, value in loaded.items():
+                if key in config:
+                    config[key] = value
+            return config
+
+    log_event("No stored chat config found; using defaults", {"chat_id": chat_id})
+    return config
 
 
 class ChatConfigService:
@@ -38,32 +66,6 @@ class ChatConfigService:
         self._repo = repository
         self._admin_reporter = admin_reporter
         self._log_event = log_event
-
-    def load_chat_config_from_redis(
-        self, redis_client: redis.Redis, chat_id: str
-    ) -> Dict[str, Any]:
-        config: Dict[str, Any] = dict(CHAT_CONFIG_DEFAULTS)
-        raw = redis_client.get(f"chat_config:{chat_id}")
-        raw_text = _decode_redis_value(raw)
-        self._log_event(
-            "Chat config raw value fetched", {"chat_id": chat_id, "raw_value": raw_text}
-        )
-
-        if raw_text:
-            try:
-                loaded = json.loads(raw_text)
-            except json.JSONDecodeError:
-                loaded = None
-            if isinstance(loaded, dict):
-                for key, value in loaded.items():
-                    if key in config:
-                        config[key] = value
-                return config
-
-        self._log_event(
-            "No stored chat config found; using defaults", {"chat_id": chat_id}
-        )
-        return config
 
     def get_chat_config(
         self, redis_client: redis.Redis, chat_id: str
@@ -82,7 +84,11 @@ class ChatConfigService:
             if isinstance(pg_config, dict):
                 return pg_config
 
-            redis_config = self.load_chat_config_from_redis(redis_client, chat_id)
+            redis_config = load_chat_config_from_redis(
+                redis_client,
+                chat_id,
+                log_event=self._log_event,
+            )
             if redis_config != CHAT_CONFIG_DEFAULTS:
                 try:
                     self._repo.set_chat_config(chat_id, redis_config)

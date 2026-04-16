@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
@@ -9,7 +9,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import AIService, run_ai_flow as _run_ai_flow
+from api.ai_service import AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 
@@ -99,6 +99,15 @@ class MessageHandlerDeps:
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
     ai_service: Optional[AIService] = None
+
+    @classmethod
+    def with_deps(cls, **overrides) -> "MessageHandlerDeps":
+        from api import index as _api_index
+
+        defaults = _api_index._build_message_handler_deps()
+        for key, value in overrides.items():
+            object.__setattr__(defaults, key, value)
+        return defaults
 
 
 @dataclass
@@ -235,6 +244,54 @@ def _build_billing_helper(
         load_persisted_reservation_fn=deps.load_persisted_reservation,
         persist_reservation_fn=deps.persist_reservation,
         clear_persisted_reservation_fn=deps.clear_persisted_reservation,
+    )
+
+
+def _get_ai_service(deps: MessageHandlerDeps) -> AIService:
+    if isinstance(deps.ai_service, AIService):
+        return deps.ai_service
+    return AIService(
+        credits_db_service=deps.credits_db_service,
+        get_chat_history=deps.get_chat_history,
+        build_ai_messages=deps.build_ai_messages,
+        check_provider_available=deps.check_provider_available,
+        has_openrouter_fallback=deps.has_openrouter_fallback,
+        handle_rate_limit=deps.handle_rate_limit,
+        handle_ai_response=deps.handle_ai_response,
+        estimate_ai_base_reserve_credits=deps.estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=deps.estimate_image_context_reserve_credits,
+    )
+
+
+def _run_ai_flow(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message: Dict[str, Any],
+    user_id: Optional[int],
+    prepared_message: Any,
+    billing_helper: Any,
+    prompt_text: str,
+    reply_context_text: Optional[str],
+    user_identity: str,
+    handler_func: Callable[..., str],
+    redis_client: Any,
+    timezone_offset: int = -3,
+    is_spontaneous: bool = False,
+) -> Tuple[str, bool]:
+    return _get_ai_service(deps).run_conversation(
+        chat_id=chat_id,
+        message=message,
+        user_id=user_id,
+        prepared_message=prepared_message,
+        billing_helper=billing_helper,
+        prompt_text=prompt_text,
+        reply_context_text=reply_context_text,
+        user_identity=user_identity,
+        handler_func=handler_func,
+        redis_client=redis_client,
+        timezone_offset=timezone_offset,
+        is_spontaneous=is_spontaneous,
     )
 
 
@@ -1190,8 +1247,7 @@ def _handle_known_command(
         response_command = command
 
         if uses_ai:
-            response_msg, response_uses_ai = _run_ai_flow(
-                deps,
+            response_msg, response_uses_ai = _get_ai_service(deps).run_conversation(
                 chat_id=chat_id,
                 message=message,
                 user_id=user_id,
@@ -1218,8 +1274,7 @@ def _handle_known_command(
         )
         return response_msg, response_markup, False, response_command
 
-    response_msg, response_uses_ai = _run_ai_flow(
-        deps,
+    response_msg, response_uses_ai = _get_ai_service(deps).run_conversation(
         chat_id=chat_id,
         message=message,
         user_id=user_id,

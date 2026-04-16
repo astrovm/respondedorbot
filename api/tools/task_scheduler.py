@@ -32,10 +32,7 @@ def init_scheduler(
     task_executor_deps: Dict[str, Any],
 ) -> None:
     global _redis_client, _task_executor
-    try:
-        _redis_client = redis_factory()
-    except Exception:
-        _redis_client = None
+    _redis_client = redis_factory()
     _task_executor = build_task_executor(**task_executor_deps)
 
 

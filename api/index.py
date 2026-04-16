@@ -2597,9 +2597,6 @@ def send_typing(token: str, chat_id: str) -> None:
     )
 
 
-telegram_gateway = TelegramGateway(_telegram_request)
-
-
 def send_msg(
     chat_id: str,
     msg: str,
@@ -4277,13 +4274,6 @@ def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
     return _fetch_balance("chat", chat_id) > 0
 
 
-_ROUTING_POLICY = RoutingPolicy(
-    base_policy=_command_should_gordo_respond,
-    has_ai_credits_for_random_reply=_has_ai_credits_for_random_reply,
-    load_bot_config_fn=load_bot_config,
-)
-
-
 def should_auto_process_media(
     commands: Mapping[str, Tuple[Callable, bool, bool]],
     command: str,
@@ -4320,24 +4310,14 @@ def has_openrouter_fallback() -> bool:
     return _get_openrouter_api_key() is not None
 
 
-def get_ai_onboarding_credits() -> int:
-    return _billing_get_ai_onboarding_credits()
-
-
-def get_ai_billing_packs() -> List[Dict[str, int]]:
-    return _billing_get_ai_billing_packs()
-
-
-def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
-    return _billing_get_ai_billing_pack(pack_id)
-
-
-def build_topup_keyboard() -> Dict[str, Any]:
-    return _billing_build_topup_keyboard()
-
-
-def _parse_topup_payload(payload: str) -> Tuple[Optional[str], Optional[int]]:
-    return _billing_parse_topup_payload(payload)
+# Billing helpers: expose ai_billing functions directly while keeping
+# the small compatibility surface required by callers/tests.
+# These are thin aliases that forward to implementations in api.ai_billing.
+get_ai_onboarding_credits = _billing_get_ai_onboarding_credits
+get_ai_billing_packs = _billing_get_ai_billing_packs
+get_ai_billing_pack = _billing_get_ai_billing_pack
+build_topup_keyboard = _billing_build_topup_keyboard
+_parse_topup_payload = _billing_parse_topup_payload
 
 
 def build_insufficient_credits_message(
@@ -4350,54 +4330,34 @@ def build_insufficient_credits_message(
     )
 
 
-def _extract_numeric_chat_id(chat_id: str) -> Optional[int]:
-    return _billing_extract_numeric_chat_id(chat_id)
+_extract_numeric_chat_id = _billing_extract_numeric_chat_id
+_extract_user_id = _billing_extract_user_id
 
 
-def _extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
-    return _billing_extract_user_id(message)
+# Keep a small internal adapter around for the balance formatter which expects
+# an object with a get_balance method.
+def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
+    return credits_db_service.get_balance(scope_type, int(scope_id))
+
+
+class _BalanceServiceAdapter:
+    @staticmethod
+    def get_balance(scope_type: str, scope_id: int) -> int:
+        return _fetch_balance(scope_type, scope_id)
 
 
 def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
-    _billing_maybe_grant_onboarding_credits(
-        credits_db_service,
-        admin_report,
-        user_id,
-    )
+    _billing_maybe_grant_onboarding_credits(credits_db_service, admin_report, user_id)
 
 
 def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
-    class _BalanceServiceAdapter:
-        @staticmethod
-        def get_balance(scope_type: str, scope_id: int) -> int:
-            return _fetch_balance(cast(Literal["user", "chat"], scope_type), scope_id)
-
     return _billing_format_balance_command(
-        _BalanceServiceAdapter(),
-        chat_type=chat_type,
-        user_id=user_id,
-        chat_id=chat_id,
+        _BalanceServiceAdapter(), chat_type=chat_type, user_id=user_id, chat_id=chat_id
     )
 
 
 def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
     return credits_db_service.get_balance(scope_type, int(scope_id))
-
-
-def _message_handler_maybe_grant_onboarding(
-    _service: Any,
-    _reporter: Callable[..., None],
-    user_id: Optional[int],
-) -> None:
-    _maybe_grant_onboarding_credits(user_id)
-
-
-def _message_handler_format_balance_command(_service: Any, **kwargs: Any) -> str:
-    return _format_balance_command(
-        kwargs["chat_type"],
-        kwargs["user_id"],
-        kwargs["chat_id"],
-    )
 
 
 def _send_stars_invoice(
@@ -5234,17 +5194,6 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
-def _build_chat_config_service() -> Any:
-    """Build a ChatConfigService instance for application composition.
-
-    Imported lazily to avoid import cycles during module load.
-    """
-    from api.chat_config_service import build_chat_config_service as _build
-
-    # Use the default repository builder inside the service module.
-    return _build(admin_reporter=admin_report, log_event=_log_config_event)
-
-
 def build_telegram_gateway() -> TelegramGateway:
     """Builder for TelegramGateway (kept for composition clarity)."""
     return TelegramGateway(_telegram_request)
@@ -5259,48 +5208,9 @@ def build_routing_policy() -> RoutingPolicy:
     )
 
 
-def build_task_executor() -> Any:
-    """Return the TaskExecutor instance used by the scheduler."""
-    from api.task_executor import build_task_executor as _build
-
-    return _build(
-        ask_ai=ask_ai,
-        send_msg=send_msg,
-        admin_report=admin_report,
-        credits_db_service=credits_db_service,
-        gen_random_fn=gen_random,
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-    )
-
-
 # Module-level composed instances (composition root surface)
-try:
-    chat_config_service = _build_chat_config_service()
-except Exception:
-    # Fallback to None - callers will use compatibility wrappers when needed.
-    chat_config_service = None
-
 telegram_gateway = build_telegram_gateway()
 _ROUTING_POLICY = build_routing_policy()
-task_executor = build_task_executor()
-
-# Wire scheduler with its dependencies (breaks scheduler<->index coupling)
-try:
-    from api.tools import task_scheduler as _ts
-
-    _ts.init_scheduler(
-        redis_factory=config_redis,
-        task_executor_deps={
-            "ask_ai": ask_ai,
-            "send_msg": send_msg,
-            "admin_report": admin_report,
-            "credits_db_service": credits_db_service,
-            "gen_random_fn": gen_random,
-            "build_insufficient_credits_message_fn": build_insufficient_credits_message,
-        },
-    )
-except Exception:
-    pass
 
 
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
@@ -5880,8 +5790,10 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         is_group_chat_type=is_group_chat_type,
         extract_user_id=_extract_user_id,
         extract_numeric_chat_id=_extract_numeric_chat_id,
-        maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
-        format_balance_command=_message_handler_format_balance_command,
+        maybe_grant_onboarding_credits=lambda _svc, _rep, uid: (
+            _maybe_grant_onboarding_credits(uid)
+        ),
+        format_balance_command=_format_balance_command,
         handle_transcribe_with_message=handle_transcribe_with_message,
         handle_transcribe_with_message_result=handle_transcribe_with_message_result,
         check_provider_available=check_provider_available,
@@ -5921,10 +5833,6 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
         gen_random,
         cast(Mapping[str, Any], message.get("from") or {}),
     )
-
-
-remove_gordo_prefix = _ai_remove_gordo_prefix
-clean_duplicate_response = _ai_clean_duplicate_response
 
 
 def handle_ai_response(
