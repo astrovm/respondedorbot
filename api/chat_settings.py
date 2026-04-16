@@ -129,7 +129,7 @@ def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
         creditless_limit=int(
             config.get(
                 "creditless_user_hourly_limit",
-                config.get("creditless_user_daily_limit", 2),
+                config.get("creditless_user_daily_limit", 5),
             )
         ),
     )
@@ -213,9 +213,12 @@ def build_config_keyboard(
         prefix = "✅" if enabled else "▫️"
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:toggle"}
 
-    def creditless_button(label: str, value: int) -> Dict[str, str]:
-        prefix = "✅ " if value == parsed.creditless_limit else ""
-        return {"text": f"{prefix}{label}", "callback_data": f"cfg:creditless:{value}"}
+    def creditless_button(label: str, value: str) -> Dict[str, str]:
+        return {"text": label, "callback_data": f"cfg:creditless:{value}"}
+
+    creditless_current_label = (
+        "∞" if parsed.creditless_limit < 0 else str(parsed.creditless_limit)
+    )
 
     dec_offset = max(parsed.timezone_offset - 1, TIMEZONE_OFFSET_MIN)
     inc_offset = min(parsed.timezone_offset + 1, TIMEZONE_OFFSET_MAX)
@@ -261,11 +264,11 @@ def build_config_keyboard(
                     )
                 ],
                 [
-                    creditless_button("ninguno", 0),
-                    creditless_button("1", 1),
-                    creditless_button("2", 2),
-                    creditless_button("5", 5),
-                    creditless_button("∞", -1),
+                    creditless_button("0", "none"),
+                    creditless_button("-", "decrease"),
+                    creditless_button(creditless_current_label, "current"),
+                    creditless_button("+", "increase"),
+                    creditless_button("∞", "unlimited"),
                 ],
             ]
         )
