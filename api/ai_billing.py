@@ -258,7 +258,7 @@ class AIMessageBilling:
                 )
             return (
                 f"llegaste al limite de {self.creditless_user_hourly_limit} "
-                "ia gratis por hora en este grupo, boludo. "
+                "mensajes de ia gratis por hora en este grupo, boludo. "
                 "cargá créditos con /topup si querés seguir"
             )
         return None
