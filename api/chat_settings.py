@@ -271,8 +271,8 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
                 "si está activado, a veces me meto solo en la charla aunque nadie me llame",
                 f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
                 "",
-                "6. limite ia gratis por usuario por hora",
-                "cuantas veces puede usar ia del grupo un usuario sin creditos propios por hora",
+                "6. mensajes gratis por usuario por hora",
+                "cuantos mensajes de ia paga el grupo por usuario cada hora",
                 creditless_label,
             ]
         )
