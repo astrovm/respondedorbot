@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 import redis
 
 from api.chat_config_defaults import CHAT_CONFIG_DEFAULTS
+from api.storage.chat_config_repository import build_chat_config_repository
 
 
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
@@ -147,8 +148,6 @@ def build_chat_config_service(
     repository=None, *, admin_reporter=None, log_event=None
 ) -> ChatConfigService:
     if repository is None:
-        from api.storage.chat_config_repository import build_chat_config_repository
-
         repository = build_chat_config_repository()
     if admin_reporter is None:
 
