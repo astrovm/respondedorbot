@@ -10,7 +10,7 @@ CHAT_CONFIG_DEFAULTS: Dict[str, object] = {
     "ai_command_followups": True,
     "ignore_link_fix_followups": True,
     "timezone_offset": -3,
-    "creditless_user_hourly_limit": 2,
+    "creditless_user_hourly_limit": 5,
 }
 
 TIMEZONE_OFFSET_MIN = -12
