@@ -4829,7 +4829,7 @@ def _execute_groq_request_with_fallback(
             account=account,
             token_count=token_count,
             audio_seconds=audio_seconds,
-result=result,
+            result=result,
         )
         if result:
             result.metadata.setdefault("groq_account", account)
@@ -5293,7 +5293,6 @@ def transcribe_audio_groq(
 
 
 def _process_media_with_cache(
-
     *,
     file_id: str,
     use_cache: bool,
