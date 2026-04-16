@@ -37,6 +37,11 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     "whisper-large-v3": {
         "audio_per_hour": 111_000,
     },
+    # Gemini 3.1 Flash-Lite via OpenRouter (~$0.0045/min for audio = ~$0.27/hr)
+    "google/gemini-3.1-flash-lite-preview": {
+        "input_per_million": 250_000,
+        "output_per_million": 1_500_000,
+    },
     "qwen/qwen3.6-plus": {
         "input_per_million": 325_000,
         "output_per_million": 1_950_000,
@@ -48,6 +53,7 @@ MODEL_BILLING_ALIASES = {
     "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
     "groq/whisper-large-v3": "whisper-large-v3",
     "qwen/qwen3.6-plus-04-02": "qwen/qwen3.6-plus",
+    "gemini-3.1-flash-lite-preview": "google/gemini-3.1-flash-lite-preview",
 }
 
 

@@ -5,6 +5,7 @@ from html.parser import HTMLParser
 from html import unescape
 from math import log
 from openai import OpenAI
+from groq import Groq as GroqClient
 from os import environ
 from PIL import Image
 from requests.exceptions import RequestException
@@ -4752,7 +4753,6 @@ def _get_groq_client(
         print(f"Groq API key not configured for account={account}")
         return None
 
-    # Cloudflare AI Gateway configuration
     cf_aig_token = environ.get("CF_AIG_TOKEN")
     cf_gateway_base_url = environ.get(
         "CF_AIG_BASE_URL", "https://api.groq.com/openai/v1"
@@ -4769,6 +4769,18 @@ def _get_groq_client(
     if headers:
         client_kwargs["default_headers"] = headers
     return OpenAI(**client_kwargs)
+
+
+def _get_groq_native_client(
+    account: str,
+) -> Optional[GroqClient]:
+    """Create native Groq client using groq library (not OpenAI SDK)."""
+    groq_api_key = _get_groq_api_key(account)
+    if not groq_api_key:
+        print(f"Groq API key not configured for account={account}")
+        return None
+
+    return GroqClient(api_key=groq_api_key)
 
 
 def _execute_groq_request_with_fallback(
@@ -5121,13 +5133,111 @@ def describe_image_groq(
     return None
 
 
+OPENROUTER_TRANSCRIBE_MODEL = "google/gemini-3.1-flash-lite-preview"
+
+
+def _transcribe_audio_openrouter_result(
+    audio_data: bytes,
+    file_id: Optional[str] = None,
+) -> Optional[AIUsageResult]:
+    """Transcribe audio using OpenRouter with Gemini (fallback for Groq)."""
+    model = OPENROUTER_TRANSCRIBE_MODEL
+
+    client = _get_openrouter_client()
+    if client is None:
+        print("OpenRouter transcription: no client available")
+        return None
+
+    audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+
+    audio_format = "webm"
+    if audio_data.startswith(b"\x1aE\xdf\xa3"):
+        audio_format = "mp3"
+    elif audio_data.startswith(b"ID3"):
+        audio_format = "mp3"
+    elif audio_data.startswith(b"OggS"):
+        audio_format = "ogg"
+
+    print(f"Transcribing audio with OpenRouter Gemini using model={model}...")
+    _increment_ai_provider_request_count()
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=cast(
+                Any,
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "format": audio_format,
+                                    "data": audio_base64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": "Transcribe this audio exactly as spoken.",
+                            },
+                        ],
+                    }
+                ],
+            ),
+            max_tokens=4096,
+        )
+    except Exception as e:
+        print(f"OpenRouter transcription error: {e}")
+        return None
+
+    if response and hasattr(response, "choices") and response.choices:
+        content = getattr(response.choices[0].message, "content", None)
+        if content:
+            print(f"Audio transcribed successfully: {content[:100]}...")
+            return _build_groq_usage_result(
+                kind="transcribe",
+                text=str(content),
+                model=model,
+                response=response,
+                audio_seconds=0.0,
+                metadata={
+                    "file_id": file_id,
+                    "cache_hit": False,
+                    "provider": "openrouter",
+                },
+            )
+    return None
+
+
+def _transcribe_audio_with_fallback(
+    audio_data: bytes,
+    file_id: Optional[str] = None,
+    *,
+    use_cache: bool = True,
+) -> Optional[AIUsageResult]:
+    """Transcribe audio with Groq native, falling back to OpenRouter on failure."""
+    groq_result = _transcribe_audio_groq_result(
+        audio_data, file_id, use_cache=use_cache
+    )
+    if groq_result:
+        return groq_result
+
+    print("Groq transcription failed, trying OpenRouter fallback...")
+    openrouter_result = _transcribe_audio_openrouter_result(audio_data, file_id)
+    if openrouter_result and file_id:
+        cache_transcription(file_id, openrouter_result.text)
+
+    return openrouter_result
+
+
 def _transcribe_audio_groq_result(
     audio_data: bytes,
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
 ) -> Optional[AIUsageResult]:
-    """Transcribe audio using Groq Whisper."""
+    """Transcribe audio using Groq Whisper with native groq library."""
 
     if file_id and use_cache:
         cached = get_cached_transcription(file_id)
@@ -5142,46 +5252,49 @@ def _transcribe_audio_groq_result(
 
     measured_audio_seconds = measure_audio_duration_seconds(audio_data)
 
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[AIUsageResult]:
-        print(f"Transcribing audio with Groq Whisper using account={account}...")
-        audio_file = io.BytesIO(audio_data)
-        audio_file.name = "audio.webm"
-        response = groq_client.audio.transcriptions.create(
-            model=GROQ_TRANSCRIBE_MODEL,
-            file=audio_file,
-        )
-        transcription = None
-        if isinstance(response, dict):
-            transcription = response.get("text")
-        else:
-            transcription = getattr(response, "text", None)
-        if transcription:
-            print(f"Audio transcribed successfully: {transcription[:100]}...")
-            return _build_groq_usage_result(
-                kind="transcribe",
-                text=str(transcription),
-                model=GROQ_TRANSCRIBE_MODEL,
-                response=response,
-                audio_seconds=measured_audio_seconds,
-                metadata={
-                    "file_id": file_id,
-                    "cache_hit": False,
-                    "groq_account": account,
-                },
-            )
+    configured_accounts = list(_get_groq_accounts_for_scope())
+    if not configured_accounts:
+        print("Groq API key not configured")
         return None
 
-    result = _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="transcribe",
-        label="Groq Whisper",
-        audio_seconds=measured_audio_seconds or 0.0,
-    )
+    for account in configured_accounts:
+        native_client = _get_groq_native_client(account)
+        if native_client is None:
+            continue
 
-    if result and result.text and file_id:
-        cache_transcription(file_id, result.text)
+        print(f"Transcribing audio with Groq Whisper using account={account}...")
 
-    return result
+        try:
+            audio_file = io.BytesIO(audio_data)
+            audio_file.name = "audio.webm"
+            response = native_client.audio.transcriptions.create(
+                model=GROQ_TRANSCRIBE_MODEL,
+                file=audio_file,
+            )
+            transcription = None
+            if isinstance(response, dict):
+                transcription = response.get("text")
+            else:
+                transcription = getattr(response, "text", None)
+            if transcription:
+                print(f"Audio transcribed successfully: {transcription[:100]}...")
+                return _build_groq_usage_result(
+                    kind="transcribe",
+                    text=str(transcription),
+                    model=GROQ_TRANSCRIBE_MODEL,
+                    response=response,
+                    audio_seconds=measured_audio_seconds,
+                    metadata={
+                        "file_id": file_id,
+                        "cache_hit": False,
+                        "groq_account": account,
+                    },
+                )
+        except Exception as e:
+            print(f"Groq transcription error for account={account}: {e}")
+            continue
+
+    return None
 
 
 def transcribe_audio_groq(
@@ -5255,7 +5368,6 @@ def transcribe_file_by_id(
 
         duration_seconds = measure_audio_duration_seconds(media_bytes)
         if duration_seconds is None:
-            # Could be a video file -- try extracting audio with ffmpeg
             extracted = extract_audio_from_video(media_bytes)
             if extracted:
                 print("Extracted audio from video for transcription")
@@ -5264,7 +5376,7 @@ def transcribe_file_by_id(
             if duration_seconds is None:
                 return None, "duration", None
 
-        result = _transcribe_audio_groq_result(
+        result = _transcribe_audio_with_fallback(
             media_bytes, file_id, use_cache=use_cache
         )
         if result:
