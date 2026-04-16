@@ -120,9 +120,18 @@ class TestFetchYouTubeTranscript:
     def test_no_transcript_found(self, mock_yta):
         from youtube_transcript_api._errors import NoTranscriptFound
 
-        mock_yta.list_transcripts.side_effect = NoTranscriptFound(
-            "No transcript available"
+        mock_list = MagicMock()
+        mock_list.find_transcript.side_effect = NoTranscriptFound(
+            "dQw4w9WgXcQ",
+            ["en", "es"],
+            mock_list,
         )
+        mock_list.find_generated_transcript.side_effect = NoTranscriptFound(
+            "dQw4w9WgXcQ",
+            ["en", "es"],
+            mock_list,
+        )
+        mock_yta.list_transcripts.return_value = mock_list
 
         transcript, error = fetch_youtube_transcript("dQw4w9WgXcQ")
 
