@@ -35,7 +35,8 @@ def extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
 def format_user_identity(user: Mapping[str, Any]) -> str:
     """Build a short display name for a Telegram user."""
 
-    first_name = "" if user.get("first_name") is None else str(user.get("first_name", ""))
+    first_name = (
+        "" if user.get("first_name") is None else str(user.get("first_name", ""))
+    )
     username = "" if user.get("username") is None else str(user.get("username", ""))
     return first_name + (f" ({username})" if username else "")
-

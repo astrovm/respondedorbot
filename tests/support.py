@@ -39,7 +39,6 @@ from api.message_state import (
 )
 from api.services import bcra as bcra_service
 
-
 convert_to_command = index.convert_to_command
 config_redis = index.config_redis
 check_provider_available = index.check_provider_available

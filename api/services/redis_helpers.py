@@ -16,7 +16,15 @@ def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
         data = redis_client.get(key)
         if not data:
             return None
-        return json.loads(str(data))
+        # Decode bytes safely before JSON parsing
+        if isinstance(data, (bytes, bytearray)):
+            text = data.decode("utf-8", errors="replace")
+        else:
+            text = str(data)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
     except Exception:
         return None
 

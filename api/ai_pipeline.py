@@ -7,7 +7,6 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
 LOG_PREVIEW_LIMIT = 160
 

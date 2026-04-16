@@ -40,7 +40,6 @@ from api.utils import (
     update_local_cache,
 )
 
-
 CachedRequestFn = Callable[..., Optional[Dict[str, Any]]]
 RedisFactoryFn = Callable[..., redis.Redis]
 AdminReporterFn = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]

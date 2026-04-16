@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, Optional
 
 import redis
 
-
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 
