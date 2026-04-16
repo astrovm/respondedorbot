@@ -5,38 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import schedule_task, format_interval
+from api.tools.task_scheduler import describe_trigger, format_interval, schedule_task
 from api.services import credits_db
-
-
-def _describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
-    """Generate human-readable description of trigger config."""
-    if not trigger_config:
-        return ""
-
-    trigger_type = trigger_config.get("type", "interval")
-
-    if trigger_type == "cron":
-        hour = trigger_config.get("hour")
-        minute = trigger_config.get("minute", 0)
-        day_of_week = trigger_config.get("day_of_week")
-        day = trigger_config.get("day")
-
-        time_str = f"{hour:02d}:{minute:02d}" if hour is not None else "a alguna hora"
-
-        if day_of_week:
-            return f"los {day_of_week} a las {time_str}"
-        elif day:
-            return f"el dia {day} de cada mes a las {time_str}"
-        else:
-            return f"todos los dias a las {time_str}"
-
-    elif trigger_type == "interval":
-        days = trigger_config.get("days", 0)
-        if days > 0:
-            return f"cada {days} dias"
-
-    return ""
 
 
 def _validate_cron_trigger(trigger_config: Dict[str, Any]) -> Optional[str]:
@@ -131,7 +101,7 @@ def _execute_task_set(
         return ToolResult(output="no se pudo crear la tarea")
 
     if trigger_config:
-        desc = _describe_trigger(trigger_config)
+        desc = describe_trigger(trigger_config)
     elif interval_seconds:
         desc = format_interval(interval_seconds)
     else:
@@ -151,7 +121,7 @@ register_tool(
         "properties": {
             "text": {
                 "type": "string",
-                "description": "What the task should do or remind",
+                "description": "Literal future instruction the bot will execute later. Preserve original perspective, subject, and pronouns.",
             },
             "delay_seconds": {
                 "type": "integer",

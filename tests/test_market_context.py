@@ -839,6 +839,24 @@ def test_build_system_message_empty_context():
         assert len(content_text) > 100
 
 
+def test_build_system_message_task_tool_instructions_preserve_perspective():
+    from api.index import build_system_message
+
+    context = {
+        "market": {},
+        "weather": None,
+        "time": {"formatted": "Monday"},
+        "hacker_news": [],
+    }
+
+    result = build_system_message(context, tools_active=True)
+
+    content_text = result["content"][0]["text"]
+    assert "task_set.text debe ser la instruccion literal futura" in content_text
+    assert "no reescribas pronombres ni cambies sujeto" in content_text
+    assert "si el usuario dice 'decime'" in content_text
+
+
 def test_clean_crypto_data():
     from api.index import clean_crypto_data
 

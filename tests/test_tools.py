@@ -346,6 +346,20 @@ class TestTaskListTool:
         result = execute_tool("task_list", {}, {"chat_id": "123"})
         assert "noticias sonic" in result.output
 
+    @patch("api.tools.task_list.list_tasks")
+    def test_with_cron_recurring(self, mock_list):
+        mock_list.return_value = [
+            {
+                "id": "t1",
+                "text": "cuanta aura farmeaste hoy",
+                "interval_seconds": None,
+                "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
+                "next_run": "16/04 20:30",
+            }
+        ]
+        result = execute_tool("task_list", {}, {"chat_id": "123"})
+        assert "todos los dias a las 20:30" in result.output
+
     def test_no_chat(self):
         result = execute_tool("task_list", {}, {})
         assert "chat" in result.output.lower()
