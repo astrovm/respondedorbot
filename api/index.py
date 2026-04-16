@@ -104,14 +104,15 @@ from api.ai_pricing import (
     ensure_mapping,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
+from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
 import api.tools.price_lookup
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
 import api.tools.task_list
 import api.tools.task_cancel
-from api.tools import get_all_tool_schemas, execute_tool, TOOL_REGISTRY
-from api.tools.registry import parse_tool_call_arguments
+from api.tools import get_all_tool_schemas
+from api.tool_runtime import ToolRuntime
 from api.tools.task_scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
@@ -146,6 +147,9 @@ from api.command_registry import (
     should_gordo_respond as _command_should_gordo_respond,
 )
 from api.message_handler import MessageHandlerDeps, handle_msg as _handle_msg_impl
+from api.ai_service import build_ai_service
+from api.routing_policy import RoutingPolicy
+from api.telegram_gateway import TelegramGateway
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
     build_reply_context_text as _state_build_reply_context_text,
@@ -1486,7 +1490,9 @@ def get_prices(msg_text: str) -> Optional[str]:
         ).rstrip(".")
         percentage = f"{coin['quote'][convert_to_parameter].get(cmc_change_field, 0):+.2f}".rstrip(
             "0"
-        ).rstrip(".")
+        ).rstrip(
+            "."
+        )
         line = f"{ticker}: {price} {convert_to} ({percentage}% {tf_label})"
 
         if (
@@ -2138,9 +2144,9 @@ def handle_transcribe_with_message_result(
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
                 if sticker_response:
-                    return sticker_response, [
-                        billing_segment
-                    ] if billing_segment else []
+                    return sticker_response, (
+                        [billing_segment] if billing_segment else []
+                    )
 
         return "ese mensaje no tiene audio, video, imagen ni sticker para laburar", []
 
@@ -2593,33 +2599,6 @@ def send_typing(token: str, chat_id: str) -> None:
     )
 
 
-def _message_has_domain_link(message: str, domain: str) -> bool:
-    """Return True when *message* includes a URL matching *domain*."""
-
-    if not message:
-        return False
-
-    normalized_domain = domain.lower().strip(".")
-    if not normalized_domain:
-        return False
-
-    candidates = re.findall(
-        r"(https?://[^\s<>()]+|www\.[^\s<>()]+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?)",
-        message,
-        flags=re.IGNORECASE,
-    )
-    for candidate in candidates:
-        cleaned_candidate = candidate.rstrip(".,!?;:)]}'\"")
-        normalized_url = normalize_http_url(cleaned_candidate)
-        if not normalized_url:
-            continue
-        hostname = (urlparse(normalized_url).hostname or "").lower()
-        if hostname == normalized_domain or hostname.endswith(f".{normalized_domain}"):
-            return True
-
-    return False
-
-
 def send_msg(
     chat_id: str,
     msg: str,
@@ -2627,44 +2606,12 @@ def send_msg(
     buttons: Optional[List[str]] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
-    payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
-    if _message_has_domain_link(msg, "polymarket.com"):
-        payload["disable_web_page_preview"] = True
-    if msg_id:
-        payload["reply_to_message_id"] = msg_id
-
-    markup = reply_markup
-    if markup is None and buttons:
-        keyboard = [[{"text": "abrir en la app", "url": url}] for url in buttons]
-        markup = {"inline_keyboard": keyboard}
-
-    if markup is not None:
-        payload["reply_markup"] = markup
-
-    payload_response, error = _telegram_request(
-        "sendMessage", method="POST", json_payload=payload
-    )
-    if error or not payload_response:
-        return None
-
-    result = payload_response.get("result")
-    if isinstance(result, dict):
-        message_id = result.get("message_id")
-        if isinstance(message_id, int):
-            return message_id
-
-    return None
+    return telegram_gateway.send_message(chat_id, msg, msg_id, buttons, reply_markup)
 
 
 def delete_msg(chat_id: str, msg_id: str) -> None:
     """Delete a Telegram message"""
-    _telegram_request(
-        "deleteMessage",
-        method="GET",
-        params={"chat_id": chat_id, "message_id": msg_id},
-        log_errors=False,
-        expect_json=False,
-    )
+    telegram_gateway.delete_message(chat_id, msg_id)
 
 
 def send_animation(
@@ -2757,9 +2704,9 @@ def _get_giphy_pool(category: str) -> List[str]:
 
     if redis_client:
         try:
-            raw = redis_client.get(pool_key)
-            if raw:
-                return json.loads(str(raw))
+            cached = redis_get_json(redis_client, pool_key)
+            if cached is not None:
+                return cached
         except Exception as e:
             print(f"Error reading Giphy pool from cache: {e}")
 
@@ -2773,10 +2720,10 @@ def _get_giphy_pool(category: str) -> List[str]:
             print(f"Error caching Giphy pool: {e}")
     elif not urls and redis_client:
         try:
-            raw = redis_client.get(stale_key)
-            if raw:
+            stale = redis_get_json(redis_client, stale_key)
+            if stale is not None:
                 print(f"Giphy API failed, using stale pool for {category}")
-                return json.loads(str(raw))
+                return stale
         except Exception as e:
             print(f"Error reading stale Giphy pool: {e}")
 
@@ -3786,6 +3733,7 @@ def _build_groq_usage_result(
 
 
 _MAX_TOOL_ROUNDS = 5
+_TOOL_RUNTIME = ToolRuntime()
 
 
 def _get_openrouter_ai_response_result(
@@ -3796,195 +3744,26 @@ def _get_openrouter_ai_response_result(
     extra_tools: Optional[List[Dict[str, Any]]] = None,
     tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[AIUsageResult]:
-    client = _get_openrouter_client()
-    if client is None:
-        return None
-
-    print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
-    _increment_ai_provider_request_count()
-
-    current_messages = list(messages)
-    for round_idx in range(_MAX_TOOL_ROUNDS):
-        try:
-            request_kwargs: Dict[str, Any] = {
-                "model": PRIMARY_CHAT_MODEL,
-                "messages": cast(Any, [system_msg] + current_messages),
-                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-            }
-            reasoning_effort = "low" if enable_web_search else "none"
-            request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
-
-            tools_list: List[Dict[str, Any]] = []
-            if enable_web_search:
-                tools_list.append(_build_openrouter_web_search_tool())
-            if extra_tools:
-                tools_list.extend(extra_tools)
-            if tools_list:
-                request_kwargs["tools"] = tools_list
-
-            response = None
-            for _attempt in range(3):
-                try:
-                    response = client.chat.completions.create(**request_kwargs)
-                    break
-                except Exception as e:
-                    is_json_error = isinstance(e, json.JSONDecodeError) or (
-                        "JSONDecodeError" in type(e).__name__
-                    )
-                    if is_json_error and _attempt < 2:
-                        wait = 2**_attempt
-                        print(
-                            f"OpenRouter JSONDecodeError, retrying in {wait}s "
-                            f"(attempt {_attempt + 1}/3) model={PRIMARY_CHAT_MODEL}"
-                        )
-                        time.sleep(wait)
-                        continue
-                    raise
-        except Exception as e:
-            print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
-            admin_report(
-                f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
-                e,
-                {
-                    "finish_reason": "error",
-                    "enable_web_search": enable_web_search,
-                    "tool_round": round_idx,
-                },
-            )
-            return None
-
-        if not response or not hasattr(response, "choices") or not response.choices:
-            return None
-
-        choice = response.choices[0]
-        finish_reason = choice.finish_reason
-
-        if finish_reason == "tool_calls":
-            message = choice.message
-            tool_calls = getattr(message, "tool_calls", None) or []
-            if not extra_tools or not tool_calls:
-                text = str(message.content or "").strip()
-                if text:
-                    metadata: Dict[str, Any] = {
-                        "provider": "openrouter",
-                        "tool_rounds": round_idx + 1,
-                    }
-                    return _build_groq_usage_result(
-                        kind="chat",
-                        text=text,
-                        model=PRIMARY_CHAT_MODEL,
-                        response=response,
-                        metadata=metadata,
-                    )
-                break
-
-            known_calls = []
-            for tc in tool_calls:
-                fn = getattr(tc, "function", None)
-                if fn is None:
-                    continue
-                tool_name = getattr(fn, "name", "")
-                if tool_name not in TOOL_REGISTRY:
-                    print(f"Tool call skipped (not registered): {tool_name}")
-                    continue
-                known_calls.append(tc)
-
-            if not known_calls:
-                text = str(message.content or "").strip()
-                if text:
-                    metadata = {"provider": "openrouter", "tool_rounds": round_idx + 1}
-                    return _build_groq_usage_result(
-                        kind="chat",
-                        text=text,
-                        model=PRIMARY_CHAT_MODEL,
-                        response=response,
-                        metadata=metadata,
-                    )
-                break
-
-            assistant_msg: Dict[str, Any] = {"role": "assistant"}
-            if message.content:
-                assistant_msg["content"] = str(message.content)
-            assistant_msg["tool_calls"] = []
-            current_messages.append(assistant_msg)
-
-            for tc in known_calls:
-                tc_id = getattr(tc, "id", "") or ""
-                fn = getattr(tc, "function", None)
-                tool_name = getattr(fn, "name", "")
-                raw_args = getattr(fn, "arguments", "{}")
-                tool_params = parse_tool_call_arguments(raw_args)
-
-                print(f"Tool call: {tool_name}({tool_params})")
-                result = execute_tool(tool_name, tool_params, tool_context or {})
-                print(f"Tool result: {result.output[:200]}")
-
-                assistant_msg["tool_calls"].append(
-                    {
-                        "id": tc_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": raw_args,
-                        },
-                    }
-                )
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": result.output,
-                    }
-                )
-
-            _increment_ai_provider_request_count()
-            continue
-
-        if finish_reason == "stop":
-            metadata: Dict[str, Any] = {"provider": "openrouter"}
-            message = choice.message
-            usage_map = _extract_groq_usage_map(response) or {}
-            server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
-            web_search_requests = server_tool_use.get("web_search_requests")
-            if web_search_requests is not None:
-                try:
-                    metadata["web_search_requests"] = int(web_search_requests)
-                except (TypeError, ValueError):
-                    pass
-            if "web_search_requests" not in metadata:
-                annotations = getattr(message, "annotations", None) or []
-                has_url_citation = any(
-                    getattr(ann, "type", None) == "url_citation"
-                    or (
-                        isinstance(ann, Mapping)
-                        and str(ann.get("type") or "") == "url_citation"
-                    )
-                    for ann in annotations
-                )
-                if has_url_citation:
-                    metadata["web_search_requests"] = 1
-            metadata["tool_rounds"] = round_idx + 1
-            return _build_groq_usage_result(
-                kind="chat",
-                text=str(message.content or ""),
-                model=PRIMARY_CHAT_MODEL,
-                response=response,
-                metadata=metadata,
-            )
-
-        print(
-            f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
-        )
-        admin_report(
-            f"OpenRouter unexpected finish_reason={finish_reason!r}",
-            extra_context={
-                "model": PRIMARY_CHAT_MODEL,
-                "enable_web_search": enable_web_search,
-            },
-        )
-        break
-
-    return None
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=_get_openrouter_client,
+            admin_report=admin_report,
+            increment_request_count=_increment_ai_provider_request_count,
+            build_web_search_tool=_build_openrouter_web_search_tool,
+            build_usage_result=_build_groq_usage_result,
+            extract_usage_map=_extract_groq_usage_map,
+            primary_model=PRIMARY_CHAT_MODEL,
+            max_tool_rounds=_MAX_TOOL_ROUNDS,
+        ),
+        _TOOL_RUNTIME,
+    )
+    return runtime.complete(
+        system_msg,
+        messages,
+        enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
+    )
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
@@ -4462,35 +4241,14 @@ def should_gordo_respond(
     chat_config: Mapping[str, Any],
     reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
-    should_respond = _command_should_gordo_respond(
+    return _ROUTING_POLICY.should_respond(
         commands,
         command,
         message_text,
         message,
         chat_config,
         reply_metadata,
-        load_bot_config_fn=load_bot_config,
     )
-    if not should_respond:
-        return False
-
-    chat = cast(Mapping[str, Any], message.get("chat") or {})
-    chat_type = str(chat.get("type") or "")
-    if chat_type == "private" or command in commands:
-        return True
-
-    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
-    if bot_username and f"@{bot_username}" in message_text.lower():
-        return True
-
-    reply = message.get("reply_to_message") or {}
-    if (
-        isinstance(reply, Mapping)
-        and str((reply.get("from") or {}).get("username") or "") == bot_username
-    ):
-        return True
-
-    return _has_ai_credits_for_random_reply(message)
 
 
 def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
@@ -4551,24 +4309,14 @@ def has_openrouter_fallback() -> bool:
     return _get_openrouter_api_key() is not None
 
 
-def get_ai_onboarding_credits() -> int:
-    return _billing_get_ai_onboarding_credits()
-
-
-def get_ai_billing_packs() -> List[Dict[str, int]]:
-    return _billing_get_ai_billing_packs()
-
-
-def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
-    return _billing_get_ai_billing_pack(pack_id)
-
-
-def build_topup_keyboard() -> Dict[str, Any]:
-    return _billing_build_topup_keyboard()
-
-
-def _parse_topup_payload(payload: str) -> Tuple[Optional[str], Optional[int]]:
-    return _billing_parse_topup_payload(payload)
+# Billing helpers: expose ai_billing functions directly while keeping
+# the small compatibility surface required by callers/tests.
+# These are thin aliases that forward to implementations in api.ai_billing.
+get_ai_onboarding_credits = _billing_get_ai_onboarding_credits
+get_ai_billing_packs = _billing_get_ai_billing_packs
+get_ai_billing_pack = _billing_get_ai_billing_pack
+build_topup_keyboard = _billing_build_topup_keyboard
+_parse_topup_payload = _billing_parse_topup_payload
 
 
 def build_insufficient_credits_message(
@@ -4581,53 +4329,29 @@ def build_insufficient_credits_message(
     )
 
 
-def _extract_numeric_chat_id(chat_id: str) -> Optional[int]:
-    return _billing_extract_numeric_chat_id(chat_id)
+_extract_numeric_chat_id = _billing_extract_numeric_chat_id
+_extract_user_id = _billing_extract_user_id
 
 
-def _extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
-    return _billing_extract_user_id(message)
-
-
-def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
-    _billing_maybe_grant_onboarding_credits(
-        credits_db_service,
-        admin_report,
-        user_id,
-    )
-
-
-def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
-    class _BalanceServiceAdapter:
-        @staticmethod
-        def get_balance(scope_type: str, scope_id: int) -> int:
-            return _fetch_balance(cast(Literal["user", "chat"], scope_type), scope_id)
-
-    return _billing_format_balance_command(
-        _BalanceServiceAdapter(),
-        chat_type=chat_type,
-        user_id=user_id,
-        chat_id=chat_id,
-    )
-
-
+# Keep a small internal adapter around for the balance formatter which expects
+# an object with a get_balance method.
 def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
     return credits_db_service.get_balance(scope_type, int(scope_id))
 
 
-def _message_handler_maybe_grant_onboarding(
-    _service: Any,
-    _reporter: Callable[..., None],
-    user_id: Optional[int],
-) -> None:
-    _maybe_grant_onboarding_credits(user_id)
+class _BalanceServiceAdapter:
+    @staticmethod
+    def get_balance(scope_type: str, scope_id: int) -> int:
+        return _fetch_balance(scope_type, scope_id)
 
 
-def _message_handler_format_balance_command(_service: Any, **kwargs: Any) -> str:
-    return _format_balance_command(
-        kwargs["chat_type"],
-        kwargs["user_id"],
-        kwargs["chat_id"],
+def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
+    _billing_maybe_grant_onboarding_credits(credits_db_service, admin_report, user_id)
+
+
+def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
+    return _billing_format_balance_command(
+        _BalanceServiceAdapter(), chat_type=chat_type, user_id=user_id, chat_id=chat_id
     )
 
 
@@ -5465,6 +5189,20 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
+def build_routing_policy() -> RoutingPolicy:
+    """Builder for the global routing policy (returns the configured instance)."""
+    return RoutingPolicy(
+        base_policy=_command_should_gordo_respond,
+        has_ai_credits_for_random_reply=_has_ai_credits_for_random_reply,
+        load_bot_config_fn=load_bot_config,
+    )
+
+
+# Module-level composed instances (composition root surface)
+telegram_gateway = TelegramGateway(_telegram_request)
+_ROUTING_POLICY = build_routing_policy()
+
+
 def get_chat_config(redis_client: redis.Redis, chat_id: str) -> Dict[str, Any]:
     return _chat_get_chat_config(
         redis_client,
@@ -6001,6 +5739,17 @@ def format_user_message(
 
 
 def _build_message_handler_deps() -> MessageHandlerDeps:
+    ai_svc = build_ai_service(
+        credits_db_service=credits_db_service,
+        get_chat_history=get_chat_history,
+        build_ai_messages=build_ai_messages,
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=has_openrouter_fallback,
+        handle_rate_limit=handle_rate_limit,
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+    )
     return MessageHandlerDeps(
         config_redis=config_redis,
         get_chat_config=get_chat_config,
@@ -6031,8 +5780,10 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         is_group_chat_type=is_group_chat_type,
         extract_user_id=_extract_user_id,
         extract_numeric_chat_id=_extract_numeric_chat_id,
-        maybe_grant_onboarding_credits=_message_handler_maybe_grant_onboarding,
-        format_balance_command=_message_handler_format_balance_command,
+        maybe_grant_onboarding_credits=lambda _svc, _rep, uid: (
+            _maybe_grant_onboarding_credits(uid)
+        ),
+        format_balance_command=_format_balance_command,
         handle_transcribe_with_message=handle_transcribe_with_message,
         handle_transcribe_with_message_result=handle_transcribe_with_message_result,
         check_provider_available=check_provider_available,
@@ -6054,6 +5805,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         load_persisted_reservation=lambda _tag: None,
         persist_reservation=lambda _tag, _data: None,
         clear_persisted_reservation=lambda _tag: None,
+        ai_service=ai_svc,
     )
 
 
@@ -6071,10 +5823,6 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
         gen_random,
         cast(Mapping[str, Any], message.get("from") or {}),
     )
-
-
-remove_gordo_prefix = _ai_remove_gordo_prefix
-clean_duplicate_response = _ai_clean_duplicate_response
 
 
 def handle_ai_response(
@@ -6156,7 +5904,6 @@ def update_telegram_bot_commands() -> bool:
         "command": "te lo convierto en comando de telegram",
         "buscar": "te busco en la web",
         "search": "te busco en la web",
-        "instance": "te digo dónde estoy corriendo",
         "help": "te muestro todos los comandos",
         "transcribe": "te transcribo audio o describo imagen",
         "describe": "te transcribo audio o describo imagen",
@@ -6167,6 +5914,8 @@ def update_telegram_bot_commands() -> bool:
         "transfer": "le pasás créditos tuyos al grupo",
         "gm": "gif de buenos días",
         "gn": "gif de buenas noches",
+        "tareas": "listado de tareas programadas",
+        "tasks": "listado de tareas programadas",
     }
 
     # Build commands list from COMMAND_GROUPS
@@ -6178,8 +5927,13 @@ def update_telegram_bot_commands() -> bool:
             command = alias.lstrip("/")  # Remove leading slash
             if command not in seen_commands:
                 seen_commands.add(command)
-                description = command_descriptions.get(command, f"Comando /{command}")
-                commands_list.append({"command": command, "description": description})
+                if command in command_descriptions:
+                    commands_list.append(
+                        {
+                            "command": command,
+                            "description": command_descriptions[command],
+                        }
+                    )
 
     # Sort commands alphabetically
     commands_list.sort(key=lambda x: x["command"])

@@ -107,8 +107,7 @@ def ensure_schema() -> None:
 
         with connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_accounts (
                         scope_type TEXT NOT NULL CHECK (scope_type IN ('user', 'chat')),
                         scope_id BIGINT NOT NULL,
@@ -116,19 +115,15 @@ def ensure_schema() -> None:
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         PRIMARY KEY (scope_type, scope_id)
                     )
-                    """
-                )
-                cur.execute(
-                    """
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS onboarding_grants (
                         user_id BIGINT PRIMARY KEY,
                         credits INTEGER NOT NULL,
                         granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
-                    """
-                )
-                cur.execute(
-                    """
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS star_payments (
                         telegram_payment_charge_id TEXT PRIMARY KEY,
                         user_id BIGINT NOT NULL,
@@ -138,10 +133,8 @@ def ensure_schema() -> None:
                         payload TEXT,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
-                    """
-                )
-                cur.execute(
-                    """
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_ledger (
                         id BIGSERIAL PRIMARY KEY,
                         event_type TEXT NOT NULL,
@@ -152,16 +145,13 @@ def ensure_schema() -> None:
                         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
-                    """
-                )
-                cur.execute(
-                    """
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_schema_migrations (
                         name TEXT PRIMARY KEY,
                         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
-                    """
-                )
+                    """)
                 _migrate_credit_amounts_to_units(cur)
             conn.commit()
 
@@ -240,14 +230,12 @@ def _set_balance(cur: Any, scope_type: ScopeType, scope_id: int, balance: int) -
 def _get_recent_onboarding_grant_counts(cur: Any) -> Tuple[int, int]:
     """Return onboarding grant counts for the last hour and day."""
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT
             COUNT(*) FILTER (WHERE granted_at >= NOW() - INTERVAL '1 hour') AS hourly_count,
             COUNT(*) FILTER (WHERE granted_at >= NOW() - INTERVAL '1 day') AS daily_count
         FROM onboarding_grants
-        """
-    )
+        """)
     row = cur.fetchone()
     if not row:
         return 0, 0

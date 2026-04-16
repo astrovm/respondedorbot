@@ -29,7 +29,6 @@ from api.credit_units import (
 from api.ai_pricing import calculate_billing_for_segments
 from api.random_replies import build_random_reply
 
-
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 

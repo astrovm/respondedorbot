@@ -9,17 +9,70 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from api.ai_billing import AIMessageBilling
+from api.task_executor import (
+    _strip_response_marker as _task_executor_strip_response_marker,
+    build_task_executor,
+)
 
 _scheduler_instance: Optional[Any] = None
+_redis_client: Optional[Any] = None
+_task_executor: Optional[Any] = None
 
 TASK_REDIS_PREFIX = "task:data:"
 
 _MINUTE = 60
 _HOUR = 3600
 _DAY = 86400
+
+
+def init_scheduler(
+    redis_factory: Callable[[], Any],
+    task_executor_deps: Dict[str, Any],
+) -> None:
+    global _redis_client, _task_executor
+    _redis_client = redis_factory()
+    _task_executor = build_task_executor(**task_executor_deps)
+
+
+def _ensure_runtime_deps() -> None:
+    if _redis_client is not None and _task_executor is not None:
+        return
+
+    try:
+        from api import index as _index
+
+        init_scheduler(
+            redis_factory=_index.config_redis,
+            task_executor_deps={
+                "ask_ai": _index.ask_ai,
+                "send_msg": _index.send_msg,
+                "admin_report": _index.admin_report,
+                "credits_db_service": _index.credits_db_service,
+                "gen_random_fn": _index.gen_random,
+                "build_insufficient_credits_message_fn": (
+                    _index.build_insufficient_credits_message
+                ),
+            },
+        )
+    except Exception as error:
+        print(f"task_scheduler: failed to initialize runtime deps: {error}")
+
+
+def _get_task_executor() -> Any:
+    _ensure_runtime_deps()
+    return _task_executor
+
+
+def set_task_executor(executor: Any) -> None:
+    global _task_executor
+    _task_executor = executor
+
+
+def set_redis_client(client: Any) -> None:
+    global _redis_client
+    _redis_client = client
 
 
 def format_interval(seconds: int, prefix: str = "cada ") -> str:
@@ -110,13 +163,13 @@ def shutdown_scheduler() -> None:
         _scheduler_instance = None
 
 
-def _get_redis() -> Any:
-    from api.index import config_redis
+def _strip_response_marker(response: str) -> str:
+    return _task_executor_strip_response_marker(response)
 
-    try:
-        return config_redis()
-    except Exception:
-        return None
+
+def _get_redis() -> Any:
+    _ensure_runtime_deps()
+    return _redis_client
 
 
 def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None:
@@ -134,23 +187,7 @@ def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None
             pass
 
 
-def _strip_response_marker(response: str) -> str:
-    marker = "[[AI_FALLBACK]]"
-    if response.startswith(marker):
-        return response[len(marker) :].lstrip()
-    return response
-
-
 def _fire_task(task_id: str) -> None:
-    from api.index import (
-        ask_ai,
-        admin_report,
-        build_insufficient_credits_message,
-        credits_db_service,
-        gen_random,
-        send_msg,
-    )
-
     print(f"task_scheduler: firing task {task_id}")
 
     redis_client = _get_redis()
@@ -170,84 +207,7 @@ def _fire_task(task_id: str) -> None:
         print(f"task_scheduler: invalid JSON for {task_id}")
         return
 
-    chat_id = str(data.get("chat_id", ""))
-    text = str(data.get("text", ""))
-    user_name = str(data.get("user_name", ""))
-    interval = data.get("interval_seconds")
-    trigger_cfg = data.get("trigger_config")
-    user_id = data.get("user_id")
-
-    if not chat_id or not text:
-        print(f"task_scheduler: {task_id} missing chat_id or text")
-        return
-
-    if not user_name:
-        print(f"task_scheduler: {task_id} missing user_name, skipping")
-        return
-
-    display = user_name
-
-    task_message = {"from": {"id": user_id}} if user_id else {}
-    billing = AIMessageBilling(
-        credits_db_service=credits_db_service,
-        admin_reporter=admin_report,
-        gen_random_fn=gen_random,
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda uid: None,
-        command="task",
-        chat_id=chat_id,
-        chat_type="private",
-        user_id=user_id,
-        numeric_chat_id=None,
-        message=task_message,
-    )
-
-    messages = [{"role": "user", "content": text}]
-    response_meta: Dict[str, Any] = {}
-    is_fallback = False
-
-    reserve_meta, reserve_error = billing.reserve_ai_credits(
-        "task_ai",
-        1000,
-        metadata={"task_id": task_id, "chat_id": chat_id},
-    )
-    if reserve_error:
-        print(f"task_scheduler: {task_id} no credits, skipping: {reserve_error}")
-        if not interval and not trigger_cfg:
-            _delete_task(key, task_id, redis_client)
-        return
-
-    try:
-        print(f"task_scheduler: {task_id} calling ask_ai...")
-        response = ask_ai(
-            messages,
-            response_meta=response_meta,
-            enable_web_search=True,
-            chat_id=chat_id,
-            user_name=user_name,
-            user_id=user_id,
-        )
-        is_fallback = response.startswith("[[AI_FALLBACK]]")
-        if response:
-            response = _strip_response_marker(response)
-            send_msg(chat_id, f"{display}, tarea programada: {response}")
-            print(f"task_scheduler: {task_id} completed successfully")
-    except Exception as e:
-        print(f"task_scheduler: {task_id} ask_ai failed: {e}")
-        admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
-        is_fallback = True
-    else:
-        if is_fallback:
-            billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
-        else:
-            segments = list(response_meta.get("billing_segments") or [])
-            billing.settle_reserved_ai_credits(
-                reserve_meta,
-                segments,
-                reason="task_success",
-            )
-
-    if not interval and not trigger_cfg:
+    if _get_task_executor() is not None and _get_task_executor().execute(data):
         _delete_task(key, task_id, redis_client)
 
 

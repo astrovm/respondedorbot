@@ -14,7 +14,6 @@ from api.index import (
     handle_pre_checkout_query,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
