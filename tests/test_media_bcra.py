@@ -1468,7 +1468,7 @@ def test_transcribe_audio_groq_success():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index.GroqClient") as mock_groq,
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1479,7 +1479,7 @@ def test_transcribe_audio_groq_success():
 
         fake_client = MagicMock()
         fake_client.audio.transcriptions.create.return_value = fake_response
-        mock_openai.return_value = fake_client
+        mock_groq.return_value = fake_client
 
         result = transcribe_audio_groq(b"audio_data")
 
@@ -1493,7 +1493,7 @@ def test_transcribe_audio_groq_network_error():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.OpenAI") as mock_openai,
+        patch("api.index.GroqClient") as mock_groq,
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1501,7 +1501,7 @@ def test_transcribe_audio_groq_network_error():
 
         fake_client = MagicMock()
         fake_client.audio.transcriptions.create.side_effect = Exception("Network error")
-        mock_openai.return_value = fake_client
+        mock_groq.return_value = fake_client
 
         result = transcribe_audio_groq(b"audio_data")
 
@@ -1518,7 +1518,7 @@ def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index._get_groq_client", return_value=None),
+        patch("api.index._get_groq_native_client", return_value=None),
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1549,14 +1549,14 @@ def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
     paid_client.audio.transcriptions.create.return_value = paid_choice
 
     with patch(
-        "api.index.OpenAI", side_effect=[free_client, paid_client]
-    ) as mock_openai:
+        "api.index.GroqClient", side_effect=[free_client, paid_client]
+    ) as mock_groq:
         result = transcribe_audio_groq(b"audio_data")
 
     assert result is not None
-    assert mock_openai.call_count == 2
-    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "paid_api_key"
+    assert mock_groq.call_count == 2
+    assert mock_groq.call_args_list[0].kwargs["api_key"] == "free_api_key"
+    assert mock_groq.call_args_list[1].kwargs["api_key"] == "paid_api_key"
 
 
 # Tests for video transcription support
