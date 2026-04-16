@@ -260,6 +260,30 @@ class TestTaskSetTool:
         )
         assert "0-23" in result.output
 
+    def test_trigger_config_cron_requires_hour(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "cron", "minute": 15},
+            },
+            {"chat_id": "123"},
+        )
+        assert "hour" in result.output.lower()
+        assert "requerido" in result.output.lower()
+
+    def test_trigger_config_cron_requires_minute(self):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {"type": "cron", "hour": 9},
+            },
+            {"chat_id": "123"},
+        )
+        assert "minute" in result.output.lower()
+        assert "requerido" in result.output.lower()
+
     def test_trigger_config_invalid_days(self):
         result = execute_tool(
             "task_set",

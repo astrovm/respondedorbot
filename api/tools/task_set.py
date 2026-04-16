@@ -39,6 +39,22 @@ def _describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def _validate_cron_trigger(trigger_config: Dict[str, Any]) -> Optional[str]:
+    hour = trigger_config.get("hour")
+    if hour is None:
+        return "hour es requerido para trigger cron"
+    if not isinstance(hour, int) or hour < 0 or hour > 23:
+        return "hour debe ser 0-23"
+
+    minute = trigger_config.get("minute")
+    if minute is None:
+        return "minute es requerido para trigger cron"
+    if not isinstance(minute, int) or minute < 0 or minute > 59:
+        return "minute debe ser 0-59"
+
+    return None
+
+
 def _execute_task_set(
     params: Dict[str, Any],
     context: Dict[str, Any],
@@ -97,16 +113,9 @@ def _execute_task_set(
                 return ToolResult(output="el maximo son 90 dias")
 
         if trigger_type == "cron":
-            hour = trigger_config.get("hour")
-            if hour is not None and (
-                not isinstance(hour, int) or hour < 0 or hour > 23
-            ):
-                return ToolResult(output="hour debe ser 0-23")
-            minute = trigger_config.get("minute")
-            if minute is not None and (
-                not isinstance(minute, int) or minute < 0 or minute > 59
-            ):
-                return ToolResult(output="minute debe ser 0-59")
+            cron_error = _validate_cron_trigger(trigger_config)
+            if cron_error:
+                return ToolResult(output=cron_error)
 
     task_id = schedule_task(
         chat_id,

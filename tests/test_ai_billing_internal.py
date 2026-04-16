@@ -1017,6 +1017,7 @@ def test_creditless_cap_disabled_when_limit_negative():
     assert result is not None
     mock_redis.incr.assert_not_called()
 
+
 def test_creditless_cap_blocks_always_when_limit_zero():
     mock_redis = MagicMock()
     mock_redis.incr.return_value = 1
@@ -1028,3 +1029,18 @@ def test_creditless_cap_blocks_always_when_limit_zero():
     assert error is not None
     assert "0" in error
     billing.credits_db_service.refund_ai_charge.assert_called_once()
+
+
+def test_refund_reserved_ai_credits_rolls_back_creditless_cap_for_chat_source():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert reservation is not None
+
+    billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
+
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")

@@ -861,6 +861,30 @@ def test_build_message_links_context_includes_url_when_metadata_fails():
     assert "descripcion:" not in context
 
 
+def test_build_message_links_context_keeps_full_youtube_transcript():
+    transcript = "linea\n".join(
+        [f"[{index:02d}:00] bloque {index}" for index in range(20)]
+    )
+
+    with (
+        patch(
+            "api.index.extract_message_urls",
+            return_value=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+        ),
+        patch(
+            "api.index.fetch_link_metadata",
+            return_value={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        ),
+        patch("api.index.get_youtube_transcript_context", return_value=transcript),
+    ):
+        context = build_message_links_context(
+            {"text": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
+        )
+
+    assert transcript in context
+    assert context.count(transcript) == 1
+
+
 def test_handle_ai_response_strips_internal_ai_fallback_marker(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
