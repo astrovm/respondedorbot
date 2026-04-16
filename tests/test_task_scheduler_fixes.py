@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 from api.tools.task_scheduler import (
     TASK_REDIS_PREFIX,
     _strip_response_marker,
+    get_scheduler,
     list_tasks,
     schedule_task,
+    shutdown_scheduler,
 )
 
 
@@ -541,6 +543,31 @@ class TestListTasksResilience:
         assert "buscar noticias de linux" in texts
         assert "bañarse" in texts
 
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_lists_tasks_with_stored_timezone_offset(self, mock_sched, mock_redis):
+        mock_sched.return_value = None
+
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+
+        task_data = {
+            "id": "abc1",
+            "chat_id": "123",
+            "text": "recordame algo",
+            "user_name": "astro",
+            "interval_seconds": None,
+            "run_date": "2026-04-15T05:00:00+00:00",
+            "timezone_offset": -5,
+        }
+        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
+        redis_client.get.return_value = json.dumps(task_data)
+
+        tasks = list_tasks("123")
+
+        assert len(tasks) == 1
+        assert tasks[0]["next_run"] == "15/04 00:00"
+
 
 # ---------------------------------------------------------------------------
 # schedule_task -- Redis storage
@@ -582,6 +609,43 @@ class TestScheduleTaskStoresRunDate:
         stored_call = redis_client.setex.call_args
         stored_data = json.loads(stored_call[0][2])
         assert stored_data["run_date"] is None
+
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_stores_timezone_offset(self, mock_sched, mock_redis):
+        scheduler = MagicMock()
+        mock_sched.return_value = scheduler
+
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+
+        task_id = schedule_task("123", "test", delay_seconds=300, timezone_offset=-5)
+
+        assert task_id is not None
+        stored_call = redis_client.setex.call_args
+        stored_data = json.loads(stored_call[0][2])
+        assert stored_data["timezone_offset"] == -5
+
+
+def test_get_scheduler_uses_integer_misfire_grace_time(monkeypatch):
+    shutdown_scheduler()
+    monkeypatch.setenv("REDIS_PORT", "6379")
+
+    with (
+        patch("apscheduler.jobstores.redis.RedisJobStore") as mock_jobstore,
+        patch(
+            "apscheduler.schedulers.background.BackgroundScheduler"
+        ) as mock_scheduler,
+    ):
+        scheduler = MagicMock()
+        mock_scheduler.return_value = scheduler
+
+        result = get_scheduler()
+
+    assert result is scheduler
+    mock_jobstore.assert_called_once()
+    assert mock_scheduler.call_args.kwargs["job_defaults"]["misfire_grace_time"] == 300
+    shutdown_scheduler()
 
 
 # ---------------------------------------------------------------------------

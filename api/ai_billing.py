@@ -225,19 +225,14 @@ class AIMessageBilling:
         reserve_amount: int,
         usage_tag: str,
     ) -> Optional[str]:
-        """After a chat-sourced charge, enforce per-user daily cap via Redis counter.
+        """After a chat-sourced charge, enforce per-user hourly cap via Redis counter.
 
         Returns an error string if the cap was hit (charge already refunded), else None.
         """
-        if (
-            self.creditless_user_hourly_limit < 0
-            or self.redis_client is None
-            or self.user_id is None
-            or chat_scope_id is None
-        ):
+        key = self._creditless_cap_key(chat_scope_id)
+        if key is None:
             return None
 
-        key = f"creditless_cap:{self.chat_id}:{self.user_id}"
         count = self.redis_client.incr(key)
         if count == 1:
             self.redis_client.expire(key, 3600)
@@ -252,7 +247,7 @@ class AIMessageBilling:
                     event_type="ai_refund",
                     metadata=self._build_charge_metadata(
                         usage_tag=usage_tag,
-                        extra={"reason": "creditless_daily_cap"},
+                        extra={"reason": "creditless_hourly_cap"},
                     ),
                 )
             except Exception as err:
@@ -267,6 +262,37 @@ class AIMessageBilling:
                 "cargá créditos con /topup si querés seguir"
             )
         return None
+
+    def _creditless_cap_key(self, chat_scope_id: Optional[int]) -> Optional[str]:
+        if (
+            self.creditless_user_hourly_limit < 0
+            or self.redis_client is None
+            or self.user_id is None
+            or chat_scope_id is None
+        ):
+            return None
+        return f"creditless_cap:{self.chat_id}:{self.user_id}"
+
+    def _rollback_creditless_cap(
+        self, reservation_meta: Optional[Mapping[str, Any]]
+    ) -> None:
+        if not reservation_meta:
+            return
+        if str(reservation_meta.get("source") or "user") != "chat":
+            return
+
+        key = self._creditless_cap_key(reservation_meta.get("chat_scope_id"))
+        if key is None:
+            return
+
+        try:
+            self.redis_client.decr(key)
+        except Exception as error:
+            self.admin_reporter(
+                "falló rollback de limite creditless",
+                error,
+                {"chat_id": self.chat_id, "user_id": self.user_id},
+            )
 
     def _build_insufficient_credits_reply(
         self, charge_result: Mapping[str, Any]
@@ -983,6 +1009,7 @@ class AIMessageBilling:
             )
             return
 
+        self._rollback_creditless_cap(reservation_meta)
         self.clear_persisted_reservation_fn(usage_tag)
 
     def refund_ai_charge_meta(

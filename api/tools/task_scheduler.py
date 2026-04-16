@@ -45,14 +45,21 @@ def _owner_display(user_name: str) -> str:
     return f" ({_no_mention(user_name)})"
 
 
-def _format_run_time(raw: str) -> str:
+def _coerce_timezone_offset(value: Any, default: int = -3) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_run_time(raw: str, timezone_offset: int = -3) -> str:
     if not raw or raw == "unknown":
         return raw
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone(timezone(timedelta(hours=-3)))
+        local = dt.astimezone(timezone(timedelta(hours=timezone_offset)))
         return local.strftime("%d/%m %H:%M")
     except (ValueError, TypeError):
         return raw
@@ -80,7 +87,7 @@ def get_scheduler() -> Any:
             )
         }
         job_defaults = {
-            "misfire_grace_time": timedelta(seconds=300),
+            "misfire_grace_time": 300,
             "coalesce": True,
             "max_instances": 3,
         }
@@ -284,6 +291,7 @@ def schedule_task(
             "interval_seconds": interval_seconds,
             "run_date": run_date.isoformat() if run_date else None,
             "trigger_config": trigger_config,
+            "timezone_offset": _coerce_timezone_offset(timezone_offset),
         }
         ttl = 86400 * 90 if is_recurring else 86400 * 30
         redis_client.setex(redis_key, ttl, json.dumps(data))
@@ -373,6 +381,7 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
 
             task_id = data.get("id", "")
             interval = data.get("interval_seconds")
+            timezone_offset = _coerce_timezone_offset(data.get("timezone_offset"), -3)
 
             next_run = data.get("run_date") or "unknown"
             if scheduler is not None:
@@ -390,7 +399,7 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
                     "text": data.get("text", ""),
                     "user_name": data.get("user_name", ""),
                     "interval_seconds": interval,
-                    "next_run": _format_run_time(next_run),
+                    "next_run": _format_run_time(next_run, timezone_offset),
                 }
             )
     except Exception as e:
