@@ -799,6 +799,31 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["next_run"] == "15/04 00:00"
 
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_lists_trigger_config_for_cron_tasks(self, mock_sched, mock_redis):
+        mock_sched.return_value = None
+
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+
+        task_data = {
+            "id": "abc1",
+            "chat_id": "123",
+            "text": "recordame algo",
+            "user_name": "astro",
+            "interval_seconds": None,
+            "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
+            "run_date": None,
+        }
+        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
+        redis_client.get.return_value = json.dumps(task_data)
+
+        tasks = list_tasks("123")
+
+        assert len(tasks) == 1
+        assert tasks[0]["trigger_config"] == {"type": "cron", "hour": 20, "minute": 30}
+
 
 # ---------------------------------------------------------------------------
 # schedule_task -- Redis storage

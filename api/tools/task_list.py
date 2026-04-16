@@ -7,6 +7,7 @@ from typing import Any, Dict
 from api.tools.registry import ToolResult, register_tool
 from api.tools.task_scheduler import (
     list_tasks,
+    describe_trigger,
     format_interval,
     _no_mention,
     _owner_display,
@@ -28,11 +29,17 @@ def _execute_task_list(
     lines = []
     for t in tasks:
         interval = t.get("interval_seconds")
+        trigger_config = t.get("trigger_config")
         owner_bit = _owner_display(t.get("user_name", ""))
         next_run = t.get("next_run", "")
         task_text = _no_mention(t["text"])
         if interval:
             freq = format_interval(interval)
+            lines.append(
+                f"[{t['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+            )
+        elif trigger_config:
+            freq = describe_trigger(trigger_config)
             lines.append(
                 f"[{t['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
             )
