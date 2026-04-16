@@ -4356,10 +4356,6 @@ def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
     )
 
 
-def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
-    return credits_db_service.get_balance(scope_type, int(scope_id))
-
-
 def _send_stars_invoice(
     *,
     chat_id: str,

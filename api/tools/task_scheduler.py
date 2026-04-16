@@ -36,7 +36,32 @@ def init_scheduler(
     _task_executor = build_task_executor(**task_executor_deps)
 
 
+def _ensure_runtime_deps() -> None:
+    if _redis_client is not None and _task_executor is not None:
+        return
+
+    try:
+        from api import index as _index
+
+        init_scheduler(
+            redis_factory=_index.config_redis,
+            task_executor_deps={
+                "ask_ai": _index.ask_ai,
+                "send_msg": _index.send_msg,
+                "admin_report": _index.admin_report,
+                "credits_db_service": _index.credits_db_service,
+                "gen_random_fn": _index.gen_random,
+                "build_insufficient_credits_message_fn": (
+                    _index.build_insufficient_credits_message
+                ),
+            },
+        )
+    except Exception as error:
+        print(f"task_scheduler: failed to initialize runtime deps: {error}")
+
+
 def _get_task_executor() -> Any:
+    _ensure_runtime_deps()
     return _task_executor
 
 
@@ -143,6 +168,7 @@ def _strip_response_marker(response: str) -> str:
 
 
 def _get_redis() -> Any:
+    _ensure_runtime_deps()
     return _redis_client
 
 
