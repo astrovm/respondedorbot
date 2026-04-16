@@ -82,8 +82,16 @@ def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
 def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
     text = build_config_text(CHAT_CONFIG_DEFAULTS)
 
+    assert "2. seguir charla en comandos" in text
+    assert "después de un comando sigo la conversación si me respondés" in text
+    assert (
+        "ignoro respuestas normales a mensajes automáticos con links arreglados" in text
+    )
+    assert "5. respuestas random" in text
+    assert "a veces respondo solo en el grupo aunque nadie me llame" in text
     assert "6. mensajes gratis por usuario por hora" in text
     assert "cuantos mensajes de ia paga el grupo por usuario cada hora" in text
+    assert "tocá los botones de abajo para cambiar la config" in text
 
 
 def test_get_chat_config_migration_error_returns_redis_config_and_reports():
@@ -411,19 +419,19 @@ def test_build_config_text_and_keyboard_reflect_values():
     assert "links arreglados" in text
     assert "borra el mensaje original y repostea el link arreglado" in text
     assert (
-        "si está activado, a veces me meto solo en la charla aunque nadie me llame"
+        "si está activado, a veces respondo solo en el grupo aunque nadie me llame"
         in text
     )
     assert (
-        "si está activado, me contestás después de un comando y sigo el hilo como si nada"
+        "si está activado, después de un comando sigo la conversación si me respondés"
         in text
     )
     assert (
-        "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares"
+        "si está activado, ignoro respuestas normales a mensajes automáticos con links arreglados"
         in text
     )
     assert "▫️ desactivado" in text
-    assert "tocá los botones de abajo y dejalo como se te cante" in text
+    assert "tocá los botones de abajo para cambiar la config" in text
 
     keyboard = build_config_keyboard(config)
     assert keyboard["inline_keyboard"][0][1]["text"] == "✅ borrar link"
