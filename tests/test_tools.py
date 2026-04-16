@@ -238,6 +238,27 @@ class TestTaskSetTool:
         assert "listo" in result.output
         mock_schedule.assert_called_once()
 
+    @patch("api.tools.task_set.schedule_task")
+    def test_trigger_config_cron_weekdays_accepts_spanish_tokens(self, mock_schedule):
+        mock_schedule.return_value = "weekdays123"
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "recordar los lunes y miercoles",
+                "trigger_config": {
+                    "type": "cron",
+                    "hour": 9,
+                    "minute": 0,
+                    "day_of_week": "lun,mie",
+                },
+            },
+            {"chat_id": "123"},
+        )
+        assert "listo" in result.output
+        mock_schedule.assert_called_once()
+        call_kwargs = mock_schedule.call_args.kwargs
+        assert call_kwargs["trigger_config"]["day_of_week"] == "mon,wed"
+
     def test_trigger_config_invalid_type(self):
         result = execute_tool(
             "task_set",
@@ -259,6 +280,24 @@ class TestTaskSetTool:
             {"chat_id": "123"},
         )
         assert "0-23" in result.output
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_trigger_config_invalid_day_of_week(self, mock_schedule):
+        result = execute_tool(
+            "task_set",
+            {
+                "text": "algo",
+                "trigger_config": {
+                    "type": "cron",
+                    "hour": 9,
+                    "minute": 0,
+                    "day_of_week": "foo",
+                },
+            },
+            {"chat_id": "123"},
+        )
+        assert "day_of_week" in result.output.lower()
+        mock_schedule.assert_not_called()
 
     def test_trigger_config_cron_requires_hour(self):
         result = execute_tool(
@@ -359,6 +398,25 @@ class TestTaskListTool:
         ]
         result = execute_tool("task_list", {}, {"chat_id": "123"})
         assert "todos los dias a las 20:30" in result.output
+
+    @patch("api.tools.task_list.list_tasks")
+    def test_with_cron_weekdays_recurring_shows_spanish_days(self, mock_list):
+        mock_list.return_value = [
+            {
+                "id": "t1",
+                "text": "cuanta aura farmeaste hoy",
+                "interval_seconds": None,
+                "trigger_config": {
+                    "type": "cron",
+                    "hour": 20,
+                    "minute": 30,
+                    "day_of_week": "mon,wed",
+                },
+                "next_run": "16/04 20:30",
+            }
+        ]
+        result = execute_tool("task_list", {}, {"chat_id": "123"})
+        assert "los lun, mie a las 20:30" in result.output
 
     def test_no_chat(self):
         result = execute_tool("task_list", {}, {})

@@ -25,6 +25,15 @@ TASK_REDIS_PREFIX = "task:data:"
 _MINUTE = 60
 _HOUR = 3600
 _DAY = 86400
+_ENGLISH_TO_SPANISH_WEEKDAY = {
+    "mon": "lun",
+    "tue": "mar",
+    "wed": "mie",
+    "thu": "jue",
+    "fri": "vie",
+    "sat": "sab",
+    "sun": "dom",
+}
 
 
 def init_scheduler(
@@ -102,7 +111,15 @@ def describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
         time_str = f"{hour:02d}:{minute:02d}" if hour is not None else "a alguna hora"
 
         if day_of_week:
-            return f"los {day_of_week} a las {time_str}"
+            weekday_tokens = []
+            for token in str(day_of_week).split(","):
+                normalized = token.strip().lower()
+                if normalized:
+                    weekday_tokens.append(
+                        _ENGLISH_TO_SPANISH_WEEKDAY.get(normalized, normalized)
+                    )
+            weekdays_text = ", ".join(weekday_tokens) or str(day_of_week)
+            return f"los {weekdays_text} a las {time_str}"
         if day:
             return f"el dia {day} de cada mes a las {time_str}"
         return f"todos los dias a las {time_str}"
