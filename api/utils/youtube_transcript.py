@@ -21,15 +21,6 @@ __all__ = [
 ]
 
 
-YOUTUBE_HOSTS = {
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "youtu.be",
-    "www.youtu.be",
-}
-
-
 def extract_youtube_video_id(url: str) -> Optional[str]:
     """Extract the 11-character video ID from a YouTube URL.
 
