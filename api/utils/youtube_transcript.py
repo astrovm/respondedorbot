@@ -15,7 +15,6 @@ from youtube_transcript_api._errors import (
 
 __all__ = [
     "extract_youtube_video_id",
-    "is_youtube_url",
     "fetch_youtube_transcript",
     "format_youtube_transcript_for_context",
     "get_youtube_transcript_context",
@@ -29,15 +28,6 @@ YOUTUBE_HOSTS = {
     "youtu.be",
     "www.youtu.be",
 }
-
-YOUTUBE_REGEX = re.compile(
-    r"(?:https?://)?(?:"
-    r"(?:www\.)?youtube\.com(?:/[^/\s]+)*"
-    r"|"
-    r"youtu\.be"
-    r")"
-    r"(?:/[^\s]*)?"
-)
 
 
 def extract_youtube_video_id(url: str) -> Optional[str]:
@@ -55,26 +45,13 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
         return None
 
     parsed_url = re.search(
-        r"(?:v=|/v/|/embed/|/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
+        r"(?:v=|/v/|/embed/|/shorts/|/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
         url,
     )
     if parsed_url:
         return parsed_url.group(1)
 
     return None
-
-
-def is_youtube_url(url: str) -> bool:
-    """Return True if the URL is a YouTube video URL."""
-    if not url:
-        return False
-
-    video_id = extract_youtube_video_id(url)
-    if video_id:
-        return True
-
-    url_lower = url.lower()
-    return any(host in url_lower for host in YOUTUBE_HOSTS)
 
 
 def fetch_youtube_transcript(

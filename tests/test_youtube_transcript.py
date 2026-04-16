@@ -3,7 +3,6 @@ from unittest.mock import patch, MagicMock
 
 from api.utils.youtube_transcript import (
     extract_youtube_video_id,
-    is_youtube_url,
     fetch_youtube_transcript,
     format_youtube_transcript_for_context,
     get_youtube_transcript_context,
@@ -53,22 +52,6 @@ class TestExtractVideoId:
     def test_non_youtube_url_returns_none(self):
         assert extract_youtube_video_id("https://www.google.com") is None
         assert extract_youtube_video_id("https://vimeo.com/123456789") is None
-
-
-class TestIsYoutubeUrl:
-    def test_standard_youtube_url(self):
-        assert is_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") is True
-
-    def test_youtu_be_url(self):
-        assert is_youtube_url("https://youtu.be/dQw4w9WgXcQ") is True
-
-    def test_non_youtube_url(self):
-        assert is_youtube_url("https://www.google.com") is False
-        assert is_youtube_url("https://vimeo.com/123456789") is False
-
-    def test_empty_url(self):
-        assert is_youtube_url("") is False
-        assert is_youtube_url(None) is False
 
 
 class TestFormatTranscriptForContext:

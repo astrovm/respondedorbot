@@ -23,7 +23,6 @@ from api.utils.links import (
 )
 from api.utils.youtube_transcript import (
     extract_youtube_video_id,
-    is_youtube_url,
     fetch_youtube_transcript,
     format_youtube_transcript_for_context,
     get_youtube_transcript_context,
@@ -50,7 +49,6 @@ __all__ = [
     "fetch_tweet_via_oembed",
     "fetch_tweet_text",
     "extract_youtube_video_id",
-    "is_youtube_url",
     "fetch_youtube_transcript",
     "format_youtube_transcript_for_context",
     "get_youtube_transcript_context",
