@@ -88,6 +88,33 @@ def format_interval(seconds: int, prefix: str = "cada ") -> str:
     return f"{prefix}{val} {unit}"
 
 
+def describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
+    if not trigger_config:
+        return ""
+
+    trigger_type = trigger_config.get("type", "interval")
+
+    if trigger_type == "cron":
+        hour = trigger_config.get("hour")
+        minute = trigger_config.get("minute", 0)
+        day_of_week = trigger_config.get("day_of_week")
+        day = trigger_config.get("day")
+        time_str = f"{hour:02d}:{minute:02d}" if hour is not None else "a alguna hora"
+
+        if day_of_week:
+            return f"los {day_of_week} a las {time_str}"
+        if day:
+            return f"el dia {day} de cada mes a las {time_str}"
+        return f"todos los dias a las {time_str}"
+
+    if trigger_type == "interval":
+        days = trigger_config.get("days", 0)
+        if days > 0:
+            return f"cada {days} dias"
+
+    return ""
+
+
 def _no_mention(text: str) -> str:
     return text.replace("@", "@\u200b")
 
@@ -359,6 +386,7 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
                     "text": data.get("text", ""),
                     "user_name": data.get("user_name", ""),
                     "interval_seconds": interval,
+                    "trigger_config": data.get("trigger_config"),
                     "next_run": _format_run_time(next_run, timezone_offset),
                 }
             )

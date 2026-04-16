@@ -3876,6 +3876,9 @@ def build_system_message(
         tool_instruction = (
             "\n\nHERRAMIENTAS: price_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
             "task_set: create scheduled tasks. params: text, y opcionalmente delay_seconds/interval_seconds o trigger_config.\n"
+            "- task_set.text debe ser la instruccion literal futura que el bot ejecutara despues.\n"
+            "- no reescribas pronombres ni cambies sujeto al guardar la tarea.\n"
+            "- si el usuario dice 'decime', 'avisame' o pide que el bot hable de si mismo, guarda eso literal.\n"
             "- trigger_config con type='interval' y days=N para cada N dias.\n"
             "- trigger_config con type='cron', hour, minute para horarios especificos.\n"
             "- cron puede tener day_of_week='lun,mie,vie' o day=1 para primer dia del mes.\n"

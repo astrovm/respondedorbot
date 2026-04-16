@@ -53,6 +53,27 @@ class TestTaskExecutor:
         send_msg.assert_called_once_with("123", "astro, tarea programada: hola")
         billing.settle_reserved_ai_credits.assert_called_once()
 
+    def test_passes_stored_task_text_as_is(self):
+        executor, billing, ask_ai, send_msg = _build_executor(
+            ask_ai_return_value="hola"
+        )
+
+        task = {
+            "id": "abc123",
+            "chat_id": "123",
+            "text": "decime cuanta aura farmeaste hoy",
+            "user_name": "astro",
+            "user_id": 77,
+            "interval_seconds": None,
+            "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
+        }
+
+        executor.execute(task)
+
+        ask_ai.assert_called_once()
+        sent_prompt = ask_ai.call_args.args[0][0]["content"]
+        assert sent_prompt == "decime cuanta aura farmeaste hoy"
+
     def test_refunds_reserved_credits_on_fallback(self):
         executor, billing, ask_ai, send_msg = _build_executor(
             ask_ai_return_value="[[AI_FALLBACK]]respuesta"
