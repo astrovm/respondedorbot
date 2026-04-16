@@ -8,6 +8,37 @@ from api.tools.registry import ToolResult, register_tool
 from api.tools.task_scheduler import describe_trigger, format_interval, schedule_task
 from api.services import credits_db
 
+_SPANISH_TO_ENGLISH_WEEKDAY = {
+    "lun": "mon",
+    "mar": "tue",
+    "mie": "wed",
+    "jue": "thu",
+    "vie": "fri",
+    "sab": "sat",
+    "dom": "sun",
+}
+_ENGLISH_WEEKDAYS = set(_SPANISH_TO_ENGLISH_WEEKDAY.values())
+
+
+def _normalize_day_of_week(raw_value: Any) -> tuple[Optional[str], Optional[str]]:
+    if raw_value in (None, ""):
+        return None, None
+
+    tokens = []
+    for part in str(raw_value).split(","):
+        token = part.strip().lower()
+        if not token:
+            continue
+        normalized = _SPANISH_TO_ENGLISH_WEEKDAY.get(token, token)
+        if normalized not in _ENGLISH_WEEKDAYS:
+            return None, f"day_of_week invalido: {token}"
+        tokens.append(normalized)
+
+    if not tokens:
+        return None, "day_of_week invalido"
+
+    return ",".join(tokens), None
+
 
 def _validate_cron_trigger(trigger_config: Dict[str, Any]) -> Optional[str]:
     hour = trigger_config.get("hour")
@@ -21,6 +52,14 @@ def _validate_cron_trigger(trigger_config: Dict[str, Any]) -> Optional[str]:
         return "minute es requerido para trigger cron"
     if not isinstance(minute, int) or minute < 0 or minute > 59:
         return "minute debe ser 0-59"
+
+    normalized_day_of_week, day_of_week_error = _normalize_day_of_week(
+        trigger_config.get("day_of_week")
+    )
+    if day_of_week_error:
+        return day_of_week_error
+    if normalized_day_of_week:
+        trigger_config["day_of_week"] = normalized_day_of_week
 
     return None
 
@@ -133,7 +172,7 @@ register_tool(
             },
             "trigger_config": {
                 "type": "object",
-                "description": "Advanced trigger config with type=interval/cron. interval: {type:'interval', days:N}. cron: {type:'cron', hour:0-23, minute:0-59, day_of_week:'mon,wed', day:1-31}",
+                "description": "Advanced trigger config with type=interval/cron. interval: {type:'interval', days:N}. cron: {type:'cron', hour:0-23, minute:0-59, day_of_week:'mon,wed' or 'lun,mie', day:1-31}",
                 "properties": {
                     "type": {
                         "type": "string",
@@ -153,7 +192,7 @@ register_tool(
                     },
                     "day_of_week": {
                         "type": "string",
-                        "description": "For cron type: days of week (mon,wed,fri)",
+                        "description": "For cron type: days of week in English or Spanish abbreviations (mon,wed,fri or lun,mie,vie)",
                     },
                     "day": {
                         "type": "integer",
