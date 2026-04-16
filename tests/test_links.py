@@ -146,33 +146,19 @@ def test_handle_msg_link_reply():
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
-        def side_effect(url, **kwargs):
-            mock_response = MagicMock()
-            if "publish.twitter.com/oembed" in url:
-                mock_response.status_code = 200
-                mock_response.headers = {"Content-Type": "application/json"}
-                mock_response.json.return_value = {
-                    "html": "<p>Test tweet</p>",
-                    "author_name": "TestUser",
-                }
-            elif "t.co" in url:
-                mock_response.status_code = 301
-                mock_response.headers = {"Location": "https://twitter.com/bar/status/2"}
-            else:
-                mock_response.status_code = 200
-                mock_response.headers = {"Content-Type": "text/html"}
-                mock_response.text = (
-                    "<meta property='og:title' content='foo'>"
-                    "<meta property='og:image' content='https://example.com/image.png'>"
-                )
-            return mock_response
-
-        mock_get.side_effect = side_effect
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
+        mock_get.return_value = mock_response
 
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = 'check https://fxtwitter.com/foo/status/1\n\n📱 @TestUser\n"Test tweet"\n\ncompartido por @john'
+        expected = "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john"
         mock_send.assert_called_once_with(
             "123", expected, "1", ["https://twitter.com/foo/status/1"]
         )
@@ -181,7 +167,7 @@ def test_handle_msg_link_reply():
         mock_save.assert_called_once_with(
             "123",
             "bot_901",
-            'check https://fxtwitter.com/foo/status/1\n\n📱 @TestUser\n"Test tweet"\n\ncompartido por @john\n\nLINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo',
+            "check https://fxtwitter.com/foo/status/1\n\ncompartido por @john\n\nLINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
             redis_client,
         )
 
@@ -265,33 +251,19 @@ def test_handle_msg_link_delete():
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
-        def side_effect(url, **kwargs):
-            mock_response = MagicMock()
-            if "publish.twitter.com/oembed" in url:
-                mock_response.status_code = 200
-                mock_response.headers = {"Content-Type": "application/json"}
-                mock_response.json.return_value = {
-                    "html": "<p>Test tweet</p>",
-                    "author_name": "TestUser",
-                }
-            elif "t.co" in url:
-                mock_response.status_code = 301
-                mock_response.headers = {"Location": "https://twitter.com/bar/status/2"}
-            else:
-                mock_response.status_code = 200
-                mock_response.headers = {"Content-Type": "text/html"}
-                mock_response.text = (
-                    "<meta property='og:title' content='foo'>"
-                    "<meta property='og:image' content='https://example.com/image.png'>"
-                )
-            return mock_response
-
-        mock_get.side_effect = side_effect
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.text = (
+            "<meta property='og:title' content='foo'>"
+            "<meta property='og:image' content='https://example.com/image.png'>"
+        )
+        mock_get.return_value = mock_response
 
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = 'look https://fixupx.com/bar/status/1\n\n📱 @TestUser\n"Test tweet"\n\ncompartido por @ana'
+        expected = "look https://fixupx.com/bar/status/1\n\ncompartido por @ana"
         mock_delete.assert_called_once_with("456", "2")
         mock_send.assert_called_once_with(
             "456", expected, buttons=["https://x.com/bar/status/1"]
@@ -300,7 +272,7 @@ def test_handle_msg_link_delete():
         mock_save.assert_called_once_with(
             "456",
             "bot_902",
-            'look https://fixupx.com/bar/status/1\n\n📱 @TestUser\n"Test tweet"\n\ncompartido por @ana\n\nLINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo',
+            "look https://fixupx.com/bar/status/1\n\ncompartido por @ana\n\nLINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
             redis_client,
         )
 
