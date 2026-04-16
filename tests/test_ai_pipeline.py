@@ -382,7 +382,6 @@ def test_log_groq_request_result_logs_local_billing_details():
             account="primary",
             token_count=321,
             audio_seconds=0.0,
-            default_headers={"Groq-Model-Version": "latest"},
             result=result,
         )
 
@@ -391,7 +390,6 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["scope"] == "groq_request"
     assert log_entry["status"] == "success"
     assert log_entry["request_scope"] == "chat"
-    assert log_entry["default_headers"]["Groq-Model-Version"] == "latest"
     assert log_entry["usage"] == {"input_tokens": 100, "output_tokens": 50}
     assert log_entry["local_billing"]["raw_usd_micros"] == 130
     assert log_entry["local_billing"]["charged_credit_units"] == 1
@@ -408,7 +406,6 @@ def test_log_groq_request_result_logs_empty_requests():
             account="primary",
             token_count=123,
             audio_seconds=0.0,
-            default_headers={"Groq-Model-Version": "latest"},
             result=None,
         )
 
@@ -421,7 +418,6 @@ def test_log_groq_request_result_logs_empty_requests():
         "account": "primary",
         "estimated_token_count": 123,
         "estimated_audio_seconds": 0.0,
-        "default_headers": {"Groq-Model-Version": "latest"},
         "status": "empty",
     }
 
@@ -435,7 +431,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
             self.status_code = 413
             self.code = "request_too_large"
 
-    def fake_attempt(account, _client):
+    def fake_attempt(account):
         if account == "free":
             raise Fake413Error()
         return AIUsageResult(
@@ -461,7 +457,6 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
             scope="vision",
             label="Groq Vision",
             token_count=123,
-            default_headers={"Groq-Model-Version": "latest"},
             attempt=fake_attempt,
         )
 
