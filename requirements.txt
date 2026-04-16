@@ -10,3 +10,4 @@ psycopg[binary]>=3.3.3
 mutagen>=1.47.0
 python-telegram-bot>=22.7,<23.0
 APScheduler>=3.10.4,<4.0
+youtube-transcript-api>=0.2.2
