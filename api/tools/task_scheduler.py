@@ -79,8 +79,17 @@ def get_scheduler() -> Any:
                 password=password or None,
             )
         }
-        _scheduler_instance = BackgroundScheduler(jobstores=jobstores)
+        job_defaults = {
+            "misfire_grace_time": timedelta(seconds=300),
+            "coalesce": True,
+            "max_instances": 3,
+        }
+        _scheduler_instance = BackgroundScheduler(
+            jobstores=jobstores,
+            job_defaults=job_defaults,
+        )
         _scheduler_instance.start()
+        print(f"task_scheduler: started with {len(jobstores)} jobstores")
         return _scheduler_instance
     except Exception as e:
         print(f"task_scheduler: failed to initialize APScheduler: {e}")
@@ -135,6 +144,8 @@ def _fire_task(task_id: str) -> None:
         send_msg,
     )
 
+    print(f"task_scheduler: firing task {task_id}")
+
     redis_client = _get_redis()
     if redis_client is None:
         print(f"task_scheduler: no redis, cannot fire {task_id}")
@@ -143,11 +154,13 @@ def _fire_task(task_id: str) -> None:
     key = f"{TASK_REDIS_PREFIX}{task_id}"
     raw = redis_client.get(key)
     if not raw:
+        print(f"task_scheduler: no data for {task_id} in redis")
         return
 
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
+        print(f"task_scheduler: invalid JSON for {task_id}")
         return
 
     chat_id = str(data.get("chat_id", ""))
@@ -158,6 +171,7 @@ def _fire_task(task_id: str) -> None:
     user_id = data.get("user_id")
 
     if not chat_id or not text:
+        print(f"task_scheduler: {task_id} missing chat_id or text")
         return
 
     if not user_name:
@@ -197,6 +211,7 @@ def _fire_task(task_id: str) -> None:
         return
 
     try:
+        print(f"task_scheduler: {task_id} calling ask_ai...")
         response = ask_ai(
             messages,
             response_meta=response_meta,
@@ -209,6 +224,7 @@ def _fire_task(task_id: str) -> None:
         if response:
             response = _strip_response_marker(response)
             send_msg(chat_id, f"{display}, tarea programada: {response}")
+            print(f"task_scheduler: {task_id} completed successfully")
     except Exception as e:
         print(f"task_scheduler: {task_id} ask_ai failed: {e}")
         admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
