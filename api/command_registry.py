@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from os import environ
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
-
 CommandHandler = Callable[..., str]
 CommandTuple = Tuple[CommandHandler, bool, bool]
 

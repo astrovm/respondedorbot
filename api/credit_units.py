@@ -5,7 +5,6 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
-
 CREDIT_SCALE = 10
 _CREDIT_SCALE_DECIMAL = Decimal(CREDIT_SCALE)
 

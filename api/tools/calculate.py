@@ -7,7 +7,6 @@ from typing import Any, Dict, Union
 
 from api.tools.registry import ToolResult, register_tool
 
-
 _SAFE_NODES = (
     ast.Expression,
     ast.BinOp,

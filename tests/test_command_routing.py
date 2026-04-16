@@ -1063,7 +1063,9 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
+    def fake_get(
+        url, params=None, headers=None, timeout=5, verify=True
+    ):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] == 1:
             raise requests.RequestException("boom")

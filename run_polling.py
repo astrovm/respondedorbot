@@ -61,16 +61,32 @@ def main() -> int:
         print("FATAL: TELEGRAM_TOKEN not set", file=sys.stderr)
         return 1
 
-    from api.index import update_telegram_bot_commands
+    from api import index
     from api.bot_ptb import run_polling
-    from api.tools.task_scheduler import get_scheduler
+    from api.tools.task_scheduler import get_scheduler, init_scheduler
 
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
 
-    get_scheduler()
+    try:
+        init_scheduler(
+            redis_factory=index.config_redis,
+            task_executor_deps={
+                "ask_ai": index.ask_ai,
+                "send_msg": index.send_msg,
+                "admin_report": index.admin_report,
+                "credits_db_service": index.credits_db_service,
+                "gen_random_fn": index.gen_random,
+                "build_insufficient_credits_message_fn": (
+                    index.build_insufficient_credits_message
+                ),
+            },
+        )
+        get_scheduler()
+    except Exception as error:
+        print(f"Warning: failed to initialize task scheduler: {error}", file=sys.stderr)
 
     try:
-        update_telegram_bot_commands()
+        index.update_telegram_bot_commands()
     except Exception as e:
         print(f"Warning: failed to update bot commands: {e}", file=sys.stderr)
 

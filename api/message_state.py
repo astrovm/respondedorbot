@@ -22,7 +22,6 @@ import redis
 from api.chat_context import format_user_identity
 from api.services.maintenance import CHAT_STATE_TTL
 
-
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 DecodeRedisValue = Callable[[Any], Optional[str]]
 ExtractMessageText = Callable[[Dict[str, Any]], str]
