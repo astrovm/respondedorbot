@@ -3735,6 +3735,22 @@ def _build_groq_usage_result(
 _MAX_TOOL_ROUNDS = 5
 
 
+def _build_provider_runtime() -> ProviderRuntime:
+    return ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=_get_openrouter_client,
+            admin_report=admin_report,
+            increment_request_count=_increment_ai_provider_request_count,
+            build_web_search_tool=_build_openrouter_web_search_tool,
+            build_usage_result=_build_groq_usage_result,
+            extract_usage_map=_extract_groq_usage_map,
+            primary_model=PRIMARY_CHAT_MODEL,
+            max_tool_rounds=_MAX_TOOL_ROUNDS,
+        ),
+        ToolRuntime(),
+    )
+
+
 def _get_openrouter_ai_response_result(
     system_msg: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -3743,195 +3759,14 @@ def _get_openrouter_ai_response_result(
     extra_tools: Optional[List[Dict[str, Any]]] = None,
     tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[AIUsageResult]:
-    client = _get_openrouter_client()
-    if client is None:
-        return None
-
-    print(f"Trying OpenRouter chat with model={PRIMARY_CHAT_MODEL}...")
-    _increment_ai_provider_request_count()
-
-    current_messages = list(messages)
-    for round_idx in range(_MAX_TOOL_ROUNDS):
-        try:
-            request_kwargs: Dict[str, Any] = {
-                "model": PRIMARY_CHAT_MODEL,
-                "messages": cast(Any, [system_msg] + current_messages),
-                "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-            }
-            reasoning_effort = "low" if enable_web_search else "none"
-            request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
-
-            tools_list: List[Dict[str, Any]] = []
-            if enable_web_search:
-                tools_list.append(_build_openrouter_web_search_tool())
-            if extra_tools:
-                tools_list.extend(extra_tools)
-            if tools_list:
-                request_kwargs["tools"] = tools_list
-
-            response = None
-            for _attempt in range(3):
-                try:
-                    response = client.chat.completions.create(**request_kwargs)
-                    break
-                except Exception as e:
-                    is_json_error = isinstance(e, json.JSONDecodeError) or (
-                        "JSONDecodeError" in type(e).__name__
-                    )
-                    if is_json_error and _attempt < 2:
-                        wait = 2**_attempt
-                        print(
-                            f"OpenRouter JSONDecodeError, retrying in {wait}s "
-                            f"(attempt {_attempt + 1}/3) model={PRIMARY_CHAT_MODEL}"
-                        )
-                        time.sleep(wait)
-                        continue
-                    raise
-        except Exception as e:
-            print(f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}: {e}")
-            admin_report(
-                f"OpenRouter chat error model={PRIMARY_CHAT_MODEL}",
-                e,
-                {
-                    "finish_reason": "error",
-                    "enable_web_search": enable_web_search,
-                    "tool_round": round_idx,
-                },
-            )
-            return None
-
-        if not response or not hasattr(response, "choices") or not response.choices:
-            return None
-
-        choice = response.choices[0]
-        finish_reason = choice.finish_reason
-
-        if finish_reason == "tool_calls":
-            message = choice.message
-            tool_calls = getattr(message, "tool_calls", None) or []
-            if not extra_tools or not tool_calls:
-                text = str(message.content or "").strip()
-                if text:
-                    metadata: Dict[str, Any] = {
-                        "provider": "openrouter",
-                        "tool_rounds": round_idx + 1,
-                    }
-                    return _build_groq_usage_result(
-                        kind="chat",
-                        text=text,
-                        model=PRIMARY_CHAT_MODEL,
-                        response=response,
-                        metadata=metadata,
-                    )
-                break
-
-            known_calls = []
-            for tc in tool_calls:
-                fn = getattr(tc, "function", None)
-                if fn is None:
-                    continue
-                tool_name = getattr(fn, "name", "")
-                if tool_name not in TOOL_REGISTRY:
-                    print(f"Tool call skipped (not registered): {tool_name}")
-                    continue
-                known_calls.append(tc)
-
-            if not known_calls:
-                text = str(message.content or "").strip()
-                if text:
-                    metadata = {"provider": "openrouter", "tool_rounds": round_idx + 1}
-                    return _build_groq_usage_result(
-                        kind="chat",
-                        text=text,
-                        model=PRIMARY_CHAT_MODEL,
-                        response=response,
-                        metadata=metadata,
-                    )
-                break
-
-            assistant_msg: Dict[str, Any] = {"role": "assistant"}
-            if message.content:
-                assistant_msg["content"] = str(message.content)
-            assistant_msg["tool_calls"] = []
-            current_messages.append(assistant_msg)
-
-            for tc in known_calls:
-                tc_id = getattr(tc, "id", "") or ""
-                fn = getattr(tc, "function", None)
-                tool_name = getattr(fn, "name", "")
-                raw_args = getattr(fn, "arguments", "{}")
-                tool_params = parse_tool_call_arguments(raw_args)
-
-                print(f"Tool call: {tool_name}({tool_params})")
-                result = execute_tool(tool_name, tool_params, tool_context or {})
-                print(f"Tool result: {result.output[:200]}")
-
-                assistant_msg["tool_calls"].append(
-                    {
-                        "id": tc_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": raw_args,
-                        },
-                    }
-                )
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": result.output,
-                    }
-                )
-
-            _increment_ai_provider_request_count()
-            continue
-
-        if finish_reason == "stop":
-            metadata: Dict[str, Any] = {"provider": "openrouter"}
-            message = choice.message
-            usage_map = _extract_groq_usage_map(response) or {}
-            server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
-            web_search_requests = server_tool_use.get("web_search_requests")
-            if web_search_requests is not None:
-                try:
-                    metadata["web_search_requests"] = int(web_search_requests)
-                except (TypeError, ValueError):
-                    pass
-            if "web_search_requests" not in metadata:
-                annotations = getattr(message, "annotations", None) or []
-                has_url_citation = any(
-                    getattr(ann, "type", None) == "url_citation"
-                    or (
-                        isinstance(ann, Mapping)
-                        and str(ann.get("type") or "") == "url_citation"
-                    )
-                    for ann in annotations
-                )
-                if has_url_citation:
-                    metadata["web_search_requests"] = 1
-            metadata["tool_rounds"] = round_idx + 1
-            return _build_groq_usage_result(
-                kind="chat",
-                text=str(message.content or ""),
-                model=PRIMARY_CHAT_MODEL,
-                response=response,
-                metadata=metadata,
-            )
-
-        print(
-            f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={PRIMARY_CHAT_MODEL}"
-        )
-        admin_report(
-            f"OpenRouter unexpected finish_reason={finish_reason!r}",
-            extra_context={
-                "model": PRIMARY_CHAT_MODEL,
-                "enable_web_search": enable_web_search,
-            },
-        )
-        break
-
-    return None
+    runtime = _build_provider_runtime()
+    return runtime.complete(
+        system_msg,
+        messages,
+        enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
+    )
 
 
 def get_fallback_response(messages: List[Dict]) -> str:

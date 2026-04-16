@@ -11,7 +11,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from api.ai_billing import AIMessageBilling
+from api.task_executor import (
+    _strip_response_marker as _task_executor_strip_response_marker,
+    get_task_executor,
+)
 
 _scheduler_instance: Optional[Any] = None
 
@@ -110,6 +113,10 @@ def shutdown_scheduler() -> None:
         _scheduler_instance = None
 
 
+def _strip_response_marker(response: str) -> str:
+    return _task_executor_strip_response_marker(response)
+
+
 def _get_redis() -> Any:
     from api.index import config_redis
 
@@ -134,23 +141,7 @@ def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None
             pass
 
 
-def _strip_response_marker(response: str) -> str:
-    marker = "[[AI_FALLBACK]]"
-    if response.startswith(marker):
-        return response[len(marker) :].lstrip()
-    return response
-
-
 def _fire_task(task_id: str) -> None:
-    from api.index import (
-        ask_ai,
-        admin_report,
-        build_insufficient_credits_message,
-        credits_db_service,
-        gen_random,
-        send_msg,
-    )
-
     print(f"task_scheduler: firing task {task_id}")
 
     redis_client = _get_redis()
@@ -170,84 +161,8 @@ def _fire_task(task_id: str) -> None:
         print(f"task_scheduler: invalid JSON for {task_id}")
         return
 
-    chat_id = str(data.get("chat_id", ""))
-    text = str(data.get("text", ""))
-    user_name = str(data.get("user_name", ""))
-    interval = data.get("interval_seconds")
-    trigger_cfg = data.get("trigger_config")
-    user_id = data.get("user_id")
-
-    if not chat_id or not text:
-        print(f"task_scheduler: {task_id} missing chat_id or text")
-        return
-
-    if not user_name:
-        print(f"task_scheduler: {task_id} missing user_name, skipping")
-        return
-
-    display = user_name
-
-    task_message = {"from": {"id": user_id}} if user_id else {}
-    billing = AIMessageBilling(
-        credits_db_service=credits_db_service,
-        admin_reporter=admin_report,
-        gen_random_fn=gen_random,
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda uid: None,
-        command="task",
-        chat_id=chat_id,
-        chat_type="private",
-        user_id=user_id,
-        numeric_chat_id=None,
-        message=task_message,
-    )
-
-    messages = [{"role": "user", "content": text}]
-    response_meta: Dict[str, Any] = {}
-    is_fallback = False
-
-    reserve_meta, reserve_error = billing.reserve_ai_credits(
-        "task_ai",
-        1000,
-        metadata={"task_id": task_id, "chat_id": chat_id},
-    )
-    if reserve_error:
-        print(f"task_scheduler: {task_id} no credits, skipping: {reserve_error}")
-        if not interval and not trigger_cfg:
-            _delete_task(key, task_id, redis_client)
-        return
-
-    try:
-        print(f"task_scheduler: {task_id} calling ask_ai...")
-        response = ask_ai(
-            messages,
-            response_meta=response_meta,
-            enable_web_search=True,
-            chat_id=chat_id,
-            user_name=user_name,
-            user_id=user_id,
-        )
-        is_fallback = response.startswith("[[AI_FALLBACK]]")
-        if response:
-            response = _strip_response_marker(response)
-            send_msg(chat_id, f"{display}, tarea programada: {response}")
-            print(f"task_scheduler: {task_id} completed successfully")
-    except Exception as e:
-        print(f"task_scheduler: {task_id} ask_ai failed: {e}")
-        admin_report(f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id})
-        is_fallback = True
-    else:
-        if is_fallback:
-            billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
-        else:
-            segments = list(response_meta.get("billing_segments") or [])
-            billing.settle_reserved_ai_credits(
-                reserve_meta,
-                segments,
-                reason="task_success",
-            )
-
-    if not interval and not trigger_cfg:
+    executor = get_task_executor()
+    if executor.execute(data):
         _delete_task(key, task_id, redis_client)
 
 
