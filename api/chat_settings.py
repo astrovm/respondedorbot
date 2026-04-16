@@ -10,6 +10,8 @@ import redis
 
 from api.chat_context import is_group_chat_type
 from api.services.redis_helpers import redis_get_json, redis_setex_json
+from api.chat_config_service import build_chat_config_service
+from api.storage.chat_config_repository import build_chat_config_repository
 
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -76,101 +78,49 @@ def get_chat_config(
     redis_client: redis.Redis,
     chat_id: str,
     *,
-    chat_config_db_service: Any,
-    admin_reporter: AdminReporter,
-    log_event: ConfigLogger,
+    chat_config_db_service: Any = None,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
 ) -> Dict[str, Any]:
-    """Load chat config from Postgres and migrate from Redis once when needed."""
+    """Compatibility wrapper that builds a ChatConfigService and delegates.
 
-    config = dict(CHAT_CONFIG_DEFAULTS)
-    try:
-        log_event("Loading chat config", {"chat_id": chat_id})
-        if not chat_config_db_service.is_configured():
-            log_event(
-                "Chat config storage is not configured; using defaults",
-                {"chat_id": chat_id},
-            )
-            return config
+    Kept as a function so existing callsites (api.index and tests) keep the same
+    signature while the implementation is moved into the service.
+    """
 
-        pg_config = chat_config_db_service.get_chat_config(
-            chat_id, CHAT_CONFIG_DEFAULTS
-        )
-        if isinstance(pg_config, dict):
-            return pg_config
-
-        redis_config = load_chat_config_from_redis(
-            redis_client, chat_id, log_event=log_event
-        )
-        if redis_config != CHAT_CONFIG_DEFAULTS:
-            try:
-                chat_config_db_service.set_chat_config(chat_id, redis_config)
-            except Exception as persist_error:
-                admin_reporter(
-                    "Error migrating chat config from Redis to Postgres",
-                    persist_error,
-                    {"chat_id": chat_id},
-                )
-            else:
-                log_event(
-                    "Migrated chat config from Redis to Postgres",
-                    {"chat_id": chat_id, "config": redis_config},
-                )
-        return redis_config
-    except Exception as error:
-        admin_reporter(
-            "Error loading chat config",
-            error,
-            {
-                "chat_id": chat_id,
-                "postgres_configured": chat_config_db_service.is_configured(),
-            },
-        )
-    return config
+    repo = (
+        chat_config_db_service
+        if chat_config_db_service is not None
+        else build_chat_config_repository()
+    )
+    service = build_chat_config_service(
+        repository=repo,
+        admin_reporter=admin_reporter or (lambda *a, **k: None),
+        log_event=log_event or (lambda *a, **k: None),
+    )
+    return service.get_chat_config(redis_client, chat_id)
 
 
 def set_chat_config(
     redis_client: redis.Redis,
     chat_id: str,
     *,
-    chat_config_db_service: Any,
-    admin_reporter: AdminReporter,
-    log_event: ConfigLogger,
+    chat_config_db_service: Any = None,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
     **updates: Any,
 ) -> Dict[str, Any]:
-    """Apply and persist a partial chat config update."""
-
-    config = get_chat_config(
-        redis_client,
-        chat_id,
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
+    repo = (
+        chat_config_db_service
+        if chat_config_db_service is not None
+        else build_chat_config_repository()
     )
-    for key, value in updates.items():
-        if key in config:
-            config[key] = value
-
-    try:
-        log_event(
-            "Saving chat config",
-            {"chat_id": chat_id, "updates": updates, "config": config},
-        )
-        if not chat_config_db_service.is_configured():
-            log_event(
-                "Chat config storage is not configured; skipping persistence",
-                {"chat_id": chat_id, "config": config},
-            )
-            return config
-
-        chat_config_db_service.set_chat_config(chat_id, config)
-    except Exception as error:
-        admin_reporter(
-            "Error saving chat config",
-            error,
-            {"chat_id": chat_id, "updates": updates},
-        )
-
-    return config
+    service = build_chat_config_service(
+        repository=repo,
+        admin_reporter=admin_reporter or (lambda *a, **k: None),
+        log_event=log_event or (lambda *a, **k: None),
+    )
+    return service.set_chat_config(redis_client, chat_id, **updates)
 
 
 def coerce_bool(value: Any, *, default: bool) -> bool:
