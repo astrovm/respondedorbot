@@ -167,6 +167,10 @@ from api.utils.links import (
     replace_links as _links_replace_links,
     fetch_tweet_text as _links_fetch_tweet_text,
 )
+from api.utils.youtube_transcript import (
+    extract_youtube_video_id,
+    get_youtube_transcript_context,
+)
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -3377,6 +3381,8 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     print(f"build_message_links_context: extracted {len(urls)} url(s) urls={urls}")
 
     lines = ["LINKS DEL MENSAJE:"]
+    transcript_parts: List[str] = []
+
     for index, url in enumerate(urls, 1):
         metadata = fetch_link_metadata(url)
         final_url = str(metadata.get("url") or url).strip() or url
@@ -3389,6 +3395,17 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
             lines.append(f"titulo: {title}")
         if description:
             lines.append(f"descripcion: {description}")
+
+        video_id = extract_youtube_video_id(final_url)
+        if video_id:
+            transcript = get_youtube_transcript_context(video_id)
+            if transcript:
+                transcript_parts.append(transcript)
+
+    if transcript_parts:
+        lines.append("")
+        lines.extend(transcript_parts)
+
     return "\n".join(lines)
 
 
@@ -3625,7 +3642,6 @@ def _log_groq_request_result(
     account: str,
     token_count: int,
     audio_seconds: float,
-
     result: Optional[AIUsageResult],
 ) -> None:
     log_entry: Dict[str, Any] = {
@@ -3635,7 +3651,6 @@ def _log_groq_request_result(
         "account": account,
         "estimated_token_count": int(max(0, token_count)),
         "estimated_audio_seconds": float(max(0.0, audio_seconds)),
-
         "status": "success" if result else "empty",
     }
 
@@ -5010,7 +5025,8 @@ def _describe_image_groq_result(
 
     def _attempt(account: str) -> Optional[AIUsageResult]:
         groq_client = _get_groq_client(account)
-        if groq_client is None: return None
+        if groq_client is None:
+            return None
         print(f"Describing image with Groq vision model using account={account}...")
         input_payload = cast(
             ResponseInputParam,
@@ -5229,9 +5245,10 @@ def _transcribe_audio_result(
 
     def _attempt(account: str) -> Optional[AIUsageResult]:
         native_client = _get_groq_native_client(account)
-        if native_client is None: return None
+        if native_client is None:
+            return None
         print(f"Transcribing audio with Groq Whisper using account={account}...")
-        
+
         audio_file = io.BytesIO(audio_data)
         audio_file.name = "audio.webm"
         response = native_client.audio.transcriptions.create(
@@ -5243,7 +5260,7 @@ def _transcribe_audio_result(
             transcription = response.get("text")
         else:
             transcription = getattr(response, "text", None)
-            
+
         if transcription:
             print(f"Audio transcribed successfully: {transcription[:100]}...")
             return _build_groq_usage_result(
@@ -5275,6 +5292,7 @@ def _transcribe_audio_result(
         cache_transcription(file_id, result.text)
 
     return result
+
 
 def transcribe_audio_groq(
     audio_data: bytes,
@@ -5355,9 +5373,7 @@ def transcribe_file_by_id(
             if duration_seconds is None:
                 return None, "duration", None
 
-        result = _transcribe_audio_result(
-            media_bytes, file_id, use_cache=use_cache
-        )
+        result = _transcribe_audio_result(media_bytes, file_id, use_cache=use_cache)
         if result:
             if not result.audio_seconds:
                 result.audio_seconds = duration_seconds
