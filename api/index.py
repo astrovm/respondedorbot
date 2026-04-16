@@ -3625,7 +3625,7 @@ def _log_groq_request_result(
     account: str,
     token_count: int,
     audio_seconds: float,
-    default_headers: Optional[Mapping[str, str]],
+
     result: Optional[AIUsageResult],
 ) -> None:
     log_entry: Dict[str, Any] = {
@@ -3635,7 +3635,7 @@ def _log_groq_request_result(
         "account": account,
         "estimated_token_count": int(max(0, token_count)),
         "estimated_audio_seconds": float(max(0.0, audio_seconds)),
-        "default_headers": dict(default_headers or {}),
+
         "status": "success" if result else "empty",
     }
 
@@ -4789,8 +4789,7 @@ def _execute_groq_request_with_fallback(
     label: str,
     token_count: int = 0,
     audio_seconds: float = 0.0,
-    default_headers: Optional[Mapping[str, str]] = None,
-    attempt: Callable[[str, OpenAI], Optional[AIUsageResult]],
+    attempt: Callable[[str], Optional[AIUsageResult]],
 ) -> Optional[AIUsageResult]:
     configured_accounts = list(_get_groq_accounts_for_scope())
     if not configured_accounts:
@@ -4798,16 +4797,12 @@ def _execute_groq_request_with_fallback(
         return None
 
     for account in configured_accounts:
-        groq_client = _get_groq_client(account, default_headers=default_headers)
-        if groq_client is None:
-            continue
-
         last_error: Optional[Exception] = None
 
         def _wrapped_attempt() -> Optional[AIUsageResult]:
             nonlocal last_error
             try:
-                return attempt(account, groq_client)
+                return attempt(account)
             except Exception as error:
                 last_error = error
                 raise
@@ -4834,8 +4829,7 @@ def _execute_groq_request_with_fallback(
             account=account,
             token_count=token_count,
             audio_seconds=audio_seconds,
-            default_headers=default_headers,
-            result=result,
+result=result,
         )
         if result:
             result.metadata.setdefault("groq_account", account)
@@ -5014,7 +5008,9 @@ def _describe_image_groq_result(
         + VISION_OUTPUT_TOKEN_LIMIT
     )
 
-    def _attempt(account: str, groq_client: OpenAI) -> Optional[AIUsageResult]:
+    def _attempt(account: str) -> Optional[AIUsageResult]:
+        groq_client = _get_groq_client(account)
+        if groq_client is None: return None
         print(f"Describing image with Groq vision model using account={account}...")
         input_payload = cast(
             ResponseInputParam,
@@ -5210,34 +5206,13 @@ def _transcribe_audio_openrouter_result(
     return None
 
 
-def _transcribe_audio_with_fallback(
+def _transcribe_audio_result(
     audio_data: bytes,
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
 ) -> Optional[AIUsageResult]:
-    """Transcribe audio with Groq native, falling back to OpenRouter on failure."""
-    groq_result = _transcribe_audio_groq_result(
-        audio_data, file_id, use_cache=use_cache
-    )
-    if groq_result:
-        return groq_result
-
-    print("Groq transcription failed, trying OpenRouter fallback...")
-    openrouter_result = _transcribe_audio_openrouter_result(audio_data, file_id)
-    if openrouter_result and file_id:
-        cache_transcription(file_id, openrouter_result.text)
-
-    return openrouter_result
-
-
-def _transcribe_audio_groq_result(
-    audio_data: bytes,
-    file_id: Optional[str] = None,
-    *,
-    use_cache: bool = True,
-) -> Optional[AIUsageResult]:
-    """Transcribe audio using Groq Whisper with native groq library."""
+    """Transcribe audio using Groq Whisper, falling back to OpenRouter."""
 
     if file_id and use_cache:
         cached = get_cached_transcription(file_id)
@@ -5252,50 +5227,54 @@ def _transcribe_audio_groq_result(
 
     measured_audio_seconds = measure_audio_duration_seconds(audio_data)
 
-    configured_accounts = list(_get_groq_accounts_for_scope())
-    if not configured_accounts:
-        print("Groq API key not configured")
+    def _attempt(account: str) -> Optional[AIUsageResult]:
+        native_client = _get_groq_native_client(account)
+        if native_client is None: return None
+        print(f"Transcribing audio with Groq Whisper using account={account}...")
+        
+        audio_file = io.BytesIO(audio_data)
+        audio_file.name = "audio.webm"
+        response = native_client.audio.transcriptions.create(
+            model=GROQ_TRANSCRIBE_MODEL,
+            file=audio_file,
+        )
+        transcription = None
+        if isinstance(response, dict):
+            transcription = response.get("text")
+        else:
+            transcription = getattr(response, "text", None)
+            
+        if transcription:
+            print(f"Audio transcribed successfully: {transcription[:100]}...")
+            return _build_groq_usage_result(
+                kind="transcribe",
+                text=str(transcription),
+                model=GROQ_TRANSCRIBE_MODEL,
+                response=response,
+                audio_seconds=measured_audio_seconds,
+                metadata={
+                    "file_id": file_id,
+                    "cache_hit": False,
+                    "groq_account": account,
+                },
+            )
         return None
 
-    for account in configured_accounts:
-        native_client = _get_groq_native_client(account)
-        if native_client is None:
-            continue
+    result = _execute_groq_request_with_fallback(
+        attempt=_attempt,
+        scope="transcribe",
+        label="Groq Whisper",
+        audio_seconds=measured_audio_seconds or 0.0,
+    )
 
-        print(f"Transcribing audio with Groq Whisper using account={account}...")
+    if result is None:
+        print("Groq transcription failed, trying OpenRouter fallback...")
+        result = _transcribe_audio_openrouter_result(audio_data, file_id)
 
-        try:
-            audio_file = io.BytesIO(audio_data)
-            audio_file.name = "audio.webm"
-            response = native_client.audio.transcriptions.create(
-                model=GROQ_TRANSCRIBE_MODEL,
-                file=audio_file,
-            )
-            transcription = None
-            if isinstance(response, dict):
-                transcription = response.get("text")
-            else:
-                transcription = getattr(response, "text", None)
-            if transcription:
-                print(f"Audio transcribed successfully: {transcription[:100]}...")
-                return _build_groq_usage_result(
-                    kind="transcribe",
-                    text=str(transcription),
-                    model=GROQ_TRANSCRIBE_MODEL,
-                    response=response,
-                    audio_seconds=measured_audio_seconds,
-                    metadata={
-                        "file_id": file_id,
-                        "cache_hit": False,
-                        "groq_account": account,
-                    },
-                )
-        except Exception as e:
-            print(f"Groq transcription error for account={account}: {e}")
-            continue
+    if result and result.text and file_id:
+        cache_transcription(file_id, result.text)
 
-    return None
-
+    return result
 
 def transcribe_audio_groq(
     audio_data: bytes,
@@ -5303,7 +5282,7 @@ def transcribe_audio_groq(
     *,
     use_cache: bool = True,
 ) -> Optional[str]:
-    result = _transcribe_audio_groq_result(
+    result = _transcribe_audio_result(
         audio_data,
         file_id,
         use_cache=use_cache,
@@ -5314,6 +5293,7 @@ def transcribe_audio_groq(
 
 
 def _process_media_with_cache(
+
     *,
     file_id: str,
     use_cache: bool,
@@ -5376,7 +5356,7 @@ def transcribe_file_by_id(
             if duration_seconds is None:
                 return None, "duration", None
 
-        result = _transcribe_audio_with_fallback(
+        result = _transcribe_audio_result(
             media_bytes, file_id, use_cache=use_cache
         )
         if result:
