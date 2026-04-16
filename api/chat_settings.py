@@ -251,12 +251,12 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         "1. links arreglados",
         link_labels.get(parsed.link_mode, parsed.link_mode),
         "",
-        "2. seguir charla",
-        "si está activado, me contestás después de un comando y sigo el hilo como si nada",
+        "2. seguir charla en comandos",
+        "si está activado, después de un comando sigo la conversación si me respondés",
         f"{'✅ activado' if parsed.followups_enabled else '▫️ desactivado'}",
         "",
         "3. ignorar replies a links arreglados",
-        "si está activado, ignoro replies comunes a mensajes automáticos con fixupx/fxtwitter y similares",
+        "si está activado, ignoro respuestas normales a mensajes automáticos con links arreglados",
         f"{'✅ activado' if parsed.ignore_link_fix_followups else '▫️ desactivado'}",
         "",
         "4. zona horaria",
@@ -267,8 +267,8 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         lines.extend(
             [
                 "",
-                "5. ia random",
-                "si está activado, a veces me meto solo en la charla aunque nadie me llame",
+                "5. respuestas random",
+                "si está activado, a veces respondo solo en el grupo aunque nadie me llame",
                 f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
                 "",
                 "6. mensajes gratis por usuario por hora",
@@ -280,7 +280,7 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
     lines.extend(
         [
             "",
-            "tocá los botones de abajo y dejalo como se te cante",
+            "tocá los botones de abajo para cambiar la config",
         ]
     )
     return "\n".join(lines)

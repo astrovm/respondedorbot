@@ -999,7 +999,7 @@ def test_creditless_cap_blocks_over_limit_and_refunds():
     assert result is None
     assert error is not None
     assert "3" in error
-    assert "mensajes de ia gratis por hora" in error
+    assert "mensajes de ia pagados por el grupo por hora" in error
     billing.credits_db_service.refund_ai_charge.assert_called_once()
     refund_kwargs = billing.credits_db_service.refund_ai_charge.call_args.kwargs
     assert refund_kwargs["source"] == "chat"
