@@ -1,3 +1,5 @@
+from unittest.mock import call
+
 from tests.support import *  # noqa: F401,F403
 
 
@@ -1891,6 +1893,119 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     assert handled is True
     assert response_msg == "🖼️ en la imagen veo: todo piola"
     deps.handle_ai_response.assert_called_once()
+
+
+def _build_message_handler_deps():
+    from api.message_handler import MessageHandlerDeps
+
+    values = {}
+    for field_name in MessageHandlerDeps.__dataclass_fields__:
+        values[field_name] = MagicMock(name=field_name)
+
+    deps = MessageHandlerDeps(**values)
+    redis_client = MagicMock()
+
+    deps.config_redis.return_value = redis_client
+    deps.get_chat_config.return_value = dict(CHAT_CONFIG_DEFAULTS)
+    deps.initialize_commands.return_value = {
+        "/ask": (lambda *_args, **_kwargs: "", True, True)
+    }
+    deps.parse_command.side_effect = lambda text, _bot_name: (
+        ("/ask", "hola") if text.startswith("/ask") else ("", text)
+    )
+    deps.should_auto_process_media.return_value = False
+    deps.extract_message_content.side_effect = lambda message: (
+        message.get("text", ""),
+        None,
+        None,
+    )
+    deps.replace_links.side_effect = lambda text: (text, False, [])
+    deps.get_bot_message_metadata.return_value = None
+    deps.build_reply_context_text.return_value = None
+    deps.build_message_links_context.return_value = ""
+    deps.format_user_message.side_effect = lambda message, text, _reply_context: (
+        f"{message['from']['first_name']}: {text}"
+    )
+    deps.get_chat_history.return_value = []
+    deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
+    deps.handle_ai_response.return_value = "respuesta ok"
+    deps.ask_ai.return_value = "respuesta ok"
+    deps.build_topup_keyboard.return_value = {}
+    deps.is_group_chat_type.side_effect = lambda chat_type: (
+        chat_type in {"group", "supergroup"}
+    )
+    deps.extract_user_id.return_value = 1001
+    deps.extract_numeric_chat_id.return_value = 555
+    deps.check_provider_available.return_value = True
+    deps.has_openrouter_fallback.return_value = False
+    deps.handle_rate_limit.return_value = "no boludo"
+    deps.estimate_ai_base_reserve_credits.return_value = (1, {})
+    deps.estimate_image_context_reserve_credits.return_value = 1
+    deps.load_persisted_reservation.return_value = None
+    deps.send_msg.return_value = 999
+    deps.credits_db_service.is_configured.return_value = True
+    deps.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "source": "user",
+    }
+
+    return deps, redis_client
+
+
+def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
+    from api.message_handler import handle_msg
+
+    deps, redis_client = _build_message_handler_deps()
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    message = {
+        "message_id": 401,
+        "chat": {"id": 555, "type": "private"},
+        "from": {"id": 1001, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    deps.handle_ai_response.assert_called_once()
+    assert deps.save_message_to_redis.call_args_list == [
+        call("555", "401", "Ana: /ask hola", redis_client),
+        call("555", "bot_999", "respuesta ok", redis_client),
+    ]
+    deps.send_msg.assert_called_once_with(
+        "555", "respuesta ok", "401", reply_markup=None
+    )
+    deps.save_bot_message_metadata.assert_called_once_with(
+        redis_client,
+        "555",
+        999,
+        {"type": "command", "command": "/ask", "uses_ai": True},
+    )
+
+
+def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeypatch):
+    from api.message_handler import handle_msg
+
+    deps, redis_client = _build_message_handler_deps()
+    deps.should_gordo_respond.return_value = False
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    message = {
+        "message_id": 402,
+        "chat": {"id": 556, "type": "group"},
+        "from": {"id": 1002, "first_name": "Ana", "username": "ana"},
+        "text": "hola gordo",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    deps.handle_ai_response.assert_not_called()
+    deps.send_msg.assert_not_called()
+    deps.save_message_to_redis.assert_called_once_with(
+        "556", "402", "Ana: hola gordo", redis_client
+    )
 
 
 def test_handle_msg_with_unknown_command():

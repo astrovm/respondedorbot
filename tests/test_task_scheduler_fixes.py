@@ -246,6 +246,33 @@ class TestFireTaskCleanup:
 
         redis_client.delete.assert_not_called()
 
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_one_shot_refunds_reservation_and_deletes_task_on_fallback(
+        self, mock_sched, mock_redis
+    ):
+        from api.tools.task_scheduler import _fire_task
+
+        credits = _credits_ok_mock()
+        redis_client = _make_redis_with_task(
+            {
+                "chat_id": "123",
+                "text": "recordame algo",
+                "user_name": "@testuser",
+                "user_id": 77,
+                "interval_seconds": None,
+            }
+        )
+        mock_redis.return_value = redis_client
+
+        with patch("api.index.credits_db_service", credits):
+            with patch("api.index.ask_ai", return_value="[[AI_FALLBACK]]dale"):
+                with patch("api.index.send_msg"):
+                    _fire_task("x1")
+
+        credits.refund_ai_charge.assert_called_once()
+        redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
+
 
 # ---------------------------------------------------------------------------
 # _fire_task -- billing / auto-deletion rules

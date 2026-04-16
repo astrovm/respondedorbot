@@ -8,10 +8,10 @@ from api.ai_billing import AIMessageBilling
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 from api.ai_pricing import (
-    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
+from api.ai_service import run_ai_flow as _run_ai_flow
 
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
@@ -132,17 +132,6 @@ def _require_billing_for_command(
     if _billing_is_available(deps):
         return None
     return _billing_unavailable_command_response(command)
-
-
-def _degrade_when_billing_unavailable(
-    deps: MessageHandlerDeps,
-    *,
-    chat_id: str,
-    message: Dict[str, Any],
-) -> Optional[Tuple[str, bool]]:
-    if _billing_is_available(deps):
-        return None
-    return deps.handle_rate_limit(chat_id, message), False
 
 
 def _store_user_message_if_present(
@@ -521,136 +510,6 @@ def _save_replied_message_context(
         cast(Dict[str, Any], reply_msg), reply_text
     )
     deps.save_message_to_redis(chat_id, reply_id, formatted_reply, redis_client)
-
-
-def _run_ai_flow(
-    deps: MessageHandlerDeps,
-    *,
-    chat_id: str,
-    message: Dict[str, Any],
-    user_id: Optional[int],
-    prepared_message: PreparedMessage,
-    billing_helper: AIMessageBilling,
-    prompt_text: str,
-    reply_context_text: Optional[str],
-    user_identity: str,
-    handler_func: Callable[..., str],
-    redis_client: Any,
-    timezone_offset: int = -3,
-    is_spontaneous: bool = False,
-) -> Tuple[str, bool]:
-    billing_unavailable = _degrade_when_billing_unavailable(
-        deps,
-        chat_id=chat_id,
-        message=message,
-    )
-    if billing_unavailable is not None:
-        return ("ok", False) if is_spontaneous else billing_unavailable
-
-    chat_history = deps.get_chat_history(chat_id, redis_client)
-    ai_messages = deps.build_ai_messages(
-        message,
-        chat_history,
-        prompt_text,
-        reply_context_text,
-    )
-
-    main_reserve_credits, reserve_meta = deps.estimate_ai_base_reserve_credits(
-        ai_messages,
-        extra_input_tokens=(
-            IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-            if prepared_message.resized_image_data and prepared_message.photo_file_id
-            else 0
-        ),
-    )
-    if (
-        not deps.check_provider_available(
-            scope="chat",
-        )
-        and not deps.has_openrouter_fallback()
-    ):
-        rate_limit_msg = deps.handle_rate_limit(chat_id, message)
-        return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
-    base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
-        "ai_response_base",
-        main_reserve_credits,
-        metadata={
-            "estimated_prompt_messages": len(ai_messages),
-            **reserve_meta,
-        },
-    )
-    if base_charge_error:
-        return ("ok", False) if is_spontaneous else (base_charge_error, False)
-
-    media_charge_meta: Optional[Dict[str, Any]] = None
-    if prepared_message.resized_image_data and prepared_message.photo_file_id:
-        image_prompt = "Describe what you see in this image in detail."
-        if (
-            not deps.check_provider_available(
-                scope="vision",
-            )
-            and not deps.has_openrouter_fallback()
-        ):
-            billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="image_context_local_rate_limit"
-            )
-            rate_limit_msg = deps.handle_rate_limit(chat_id, message)
-            return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
-        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
-            "image_context_media",
-            deps.estimate_image_context_reserve_credits(
-                prepared_message.resized_image_data,
-                image_prompt,
-            ),
-            metadata={"photo_file_id": prepared_message.photo_file_id},
-        )
-        if media_charge_error:
-            billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="image_context_reserve_failed"
-            )
-            return ("ok", False) if is_spontaneous else (media_charge_error, False)
-
-    ai_response_meta: Dict[str, Any] = {}
-    response_msg = deps.handle_ai_response(
-        chat_id,
-        handler_func,
-        ai_messages,
-        image_data=prepared_message.resized_image_data
-        if prepared_message.photo_file_id
-        else None,
-        image_file_id=prepared_message.photo_file_id,
-        context_texts=[reply_context_text],
-        user_identity=user_identity,
-        response_meta=ai_response_meta,
-        user_id=user_id,
-        timezone_offset=timezone_offset,
-    )
-
-    billing_segments = list(ai_response_meta.get("billing_segments") or [])
-    if (
-        response_msg == "me quedé reculando y no te pude responder, probá de nuevo"
-        or bool(ai_response_meta.get("ai_fallback"))
-    ):
-        if media_charge_meta:
-            billing_helper.refund_reserved_ai_credits(
-                media_charge_meta, reason="ai_response_fallback"
-            )
-        billing_helper.refund_reserved_ai_credits(
-            base_charge_meta, reason="ai_response_fallback"
-        )
-        return response_msg, True
-
-    settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
-    if media_charge_meta:
-        settlement_reservations.append(media_charge_meta)
-
-    billing_helper.settle_reserved_ai_credits_batch(
-        settlement_reservations,
-        billing_segments,
-        reason="ai_response_success",
-    )
-
-    return response_msg, True
 
 
 def _handle_config_command(
@@ -1459,14 +1318,15 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         )
         reply_context_text = deps.build_reply_context_text(message)
 
-        if not deps.should_gordo_respond(
+        should_respond = deps.should_gordo_respond(
             commands,
             command,
             sanitized_message_text,
             message,
             chat_config,
             reply_metadata,
-        ):
+        )
+        if not should_respond:
             _store_user_message_if_present(
                 deps,
                 chat_id=chat_id,

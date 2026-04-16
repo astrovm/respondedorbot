@@ -104,14 +104,15 @@ from api.ai_pricing import (
     ensure_mapping,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
+from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
 import api.tools.price_lookup
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
 import api.tools.task_list
 import api.tools.task_cancel
-from api.tools import get_all_tool_schemas, execute_tool, TOOL_REGISTRY
-from api.tools.registry import parse_tool_call_arguments
+from api.tools import get_all_tool_schemas
+from api.tool_runtime import ToolRuntime
 from api.tools.task_scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
@@ -146,6 +147,8 @@ from api.command_registry import (
     should_gordo_respond as _command_should_gordo_respond,
 )
 from api.message_handler import MessageHandlerDeps, handle_msg as _handle_msg_impl
+from api.routing_policy import RoutingPolicy
+from api.telegram_gateway import TelegramGateway
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
     build_reply_context_text as _state_build_reply_context_text,
@@ -2593,31 +2596,7 @@ def send_typing(token: str, chat_id: str) -> None:
     )
 
 
-def _message_has_domain_link(message: str, domain: str) -> bool:
-    """Return True when *message* includes a URL matching *domain*."""
-
-    if not message:
-        return False
-
-    normalized_domain = domain.lower().strip(".")
-    if not normalized_domain:
-        return False
-
-    candidates = re.findall(
-        r"(https?://[^\s<>()]+|www\.[^\s<>()]+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?)",
-        message,
-        flags=re.IGNORECASE,
-    )
-    for candidate in candidates:
-        cleaned_candidate = candidate.rstrip(".,!?;:)]}'\"")
-        normalized_url = normalize_http_url(cleaned_candidate)
-        if not normalized_url:
-            continue
-        hostname = (urlparse(normalized_url).hostname or "").lower()
-        if hostname == normalized_domain or hostname.endswith(f".{normalized_domain}"):
-            return True
-
-    return False
+telegram_gateway = TelegramGateway(_telegram_request)
 
 
 def send_msg(
@@ -2627,44 +2606,12 @@ def send_msg(
     buttons: Optional[List[str]] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
-    payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
-    if _message_has_domain_link(msg, "polymarket.com"):
-        payload["disable_web_page_preview"] = True
-    if msg_id:
-        payload["reply_to_message_id"] = msg_id
-
-    markup = reply_markup
-    if markup is None and buttons:
-        keyboard = [[{"text": "abrir en la app", "url": url}] for url in buttons]
-        markup = {"inline_keyboard": keyboard}
-
-    if markup is not None:
-        payload["reply_markup"] = markup
-
-    payload_response, error = _telegram_request(
-        "sendMessage", method="POST", json_payload=payload
-    )
-    if error or not payload_response:
-        return None
-
-    result = payload_response.get("result")
-    if isinstance(result, dict):
-        message_id = result.get("message_id")
-        if isinstance(message_id, int):
-            return message_id
-
-    return None
+    return telegram_gateway.send_message(chat_id, msg, msg_id, buttons, reply_markup)
 
 
 def delete_msg(chat_id: str, msg_id: str) -> None:
     """Delete a Telegram message"""
-    _telegram_request(
-        "deleteMessage",
-        method="GET",
-        params={"chat_id": chat_id, "message_id": msg_id},
-        log_errors=False,
-        expect_json=False,
-    )
+    telegram_gateway.delete_message(chat_id, msg_id)
 
 
 def send_animation(
@@ -4462,35 +4409,14 @@ def should_gordo_respond(
     chat_config: Mapping[str, Any],
     reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
-    should_respond = _command_should_gordo_respond(
+    return _ROUTING_POLICY.should_respond(
         commands,
         command,
         message_text,
         message,
         chat_config,
         reply_metadata,
-        load_bot_config_fn=load_bot_config,
     )
-    if not should_respond:
-        return False
-
-    chat = cast(Mapping[str, Any], message.get("chat") or {})
-    chat_type = str(chat.get("type") or "")
-    if chat_type == "private" or command in commands:
-        return True
-
-    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
-    if bot_username and f"@{bot_username}" in message_text.lower():
-        return True
-
-    reply = message.get("reply_to_message") or {}
-    if (
-        isinstance(reply, Mapping)
-        and str((reply.get("from") or {}).get("username") or "") == bot_username
-    ):
-        return True
-
-    return _has_ai_credits_for_random_reply(message)
 
 
 def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
@@ -4513,6 +4439,13 @@ def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
         return False
 
     return _fetch_balance("chat", chat_id) > 0
+
+
+_ROUTING_POLICY = RoutingPolicy(
+    base_policy=_command_should_gordo_respond,
+    has_ai_credits_for_random_reply=_has_ai_credits_for_random_reply,
+    load_bot_config_fn=load_bot_config,
+)
 
 
 def should_auto_process_media(
