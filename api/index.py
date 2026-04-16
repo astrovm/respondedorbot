@@ -147,7 +147,7 @@ from api.command_registry import (
     should_gordo_respond as _command_should_gordo_respond,
 )
 from api.message_handler import MessageHandlerDeps, handle_msg as _handle_msg_impl
-from api.ai_service import AIService
+from api.ai_service import build_ai_service
 from api.routing_policy import RoutingPolicy
 from api.telegram_gateway import TelegramGateway
 from api.message_state import (
@@ -3731,22 +3731,7 @@ def _build_groq_usage_result(
 
 
 _MAX_TOOL_ROUNDS = 5
-
-
-def _build_provider_runtime() -> ProviderRuntime:
-    return ProviderRuntime(
-        ProviderRuntimeDeps(
-            get_client=_get_openrouter_client,
-            admin_report=admin_report,
-            increment_request_count=_increment_ai_provider_request_count,
-            build_web_search_tool=_build_openrouter_web_search_tool,
-            build_usage_result=_build_groq_usage_result,
-            extract_usage_map=_extract_groq_usage_map,
-            primary_model=PRIMARY_CHAT_MODEL,
-            max_tool_rounds=_MAX_TOOL_ROUNDS,
-        ),
-        ToolRuntime(),
-    )
+_TOOL_RUNTIME = ToolRuntime()
 
 
 def _get_openrouter_ai_response_result(
@@ -3757,7 +3742,19 @@ def _get_openrouter_ai_response_result(
     extra_tools: Optional[List[Dict[str, Any]]] = None,
     tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[AIUsageResult]:
-    runtime = _build_provider_runtime()
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=_get_openrouter_client,
+            admin_report=admin_report,
+            increment_request_count=_increment_ai_provider_request_count,
+            build_web_search_tool=_build_openrouter_web_search_tool,
+            build_usage_result=_build_groq_usage_result,
+            extract_usage_map=_extract_groq_usage_map,
+            primary_model=PRIMARY_CHAT_MODEL,
+            max_tool_rounds=_MAX_TOOL_ROUNDS,
+        ),
+        _TOOL_RUNTIME,
+    )
     return runtime.complete(
         system_msg,
         messages,
@@ -5190,11 +5187,6 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     print(json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
-def build_telegram_gateway() -> TelegramGateway:
-    """Builder for TelegramGateway (kept for composition clarity)."""
-    return TelegramGateway(_telegram_request)
-
-
 def build_routing_policy() -> RoutingPolicy:
     """Builder for the global routing policy (returns the configured instance)."""
     return RoutingPolicy(
@@ -5205,7 +5197,7 @@ def build_routing_policy() -> RoutingPolicy:
 
 
 # Module-level composed instances (composition root surface)
-telegram_gateway = build_telegram_gateway()
+telegram_gateway = TelegramGateway(_telegram_request)
 _ROUTING_POLICY = build_routing_policy()
 
 
@@ -5745,7 +5737,7 @@ def format_user_message(
 
 
 def _build_message_handler_deps() -> MessageHandlerDeps:
-    ai_svc = AIService(
+    ai_svc = build_ai_service(
         credits_db_service=credits_db_service,
         get_chat_history=get_chat_history,
         build_ai_messages=build_ai_messages,

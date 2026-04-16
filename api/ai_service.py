@@ -7,7 +7,7 @@ media context handling, fallback detection, and billing settlement.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.ai_pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
 
@@ -147,6 +147,45 @@ class AIService:
         return response_msg, True
 
 
+def build_ai_service(
+    *,
+    credits_db_service: Any,
+    get_chat_history: Callable[[str, Any], List[Dict[str, Any]]],
+    build_ai_messages: Callable[..., List[Dict[str, Any]]],
+    check_provider_available: Callable[..., bool],
+    has_openrouter_fallback: Callable[[], bool],
+    handle_rate_limit: Callable[[str, Dict[str, Any]], str],
+    handle_ai_response: Callable[..., str],
+    estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
+    estimate_image_context_reserve_credits: Callable[[bytes, str], int],
+) -> AIService:
+    return AIService(
+        credits_db_service=credits_db_service,
+        get_chat_history=get_chat_history,
+        build_ai_messages=build_ai_messages,
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=has_openrouter_fallback,
+        handle_rate_limit=handle_rate_limit,
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+    )
+
+
+def build_ai_service_from_deps(deps: Any) -> AIService:
+    return build_ai_service(
+        credits_db_service=deps.credits_db_service,
+        get_chat_history=deps.get_chat_history,
+        build_ai_messages=deps.build_ai_messages,
+        check_provider_available=deps.check_provider_available,
+        has_openrouter_fallback=deps.has_openrouter_fallback,
+        handle_rate_limit=deps.handle_rate_limit,
+        handle_ai_response=deps.handle_ai_response,
+        estimate_ai_base_reserve_credits=deps.estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=deps.estimate_image_context_reserve_credits,
+    )
+
+
 def run_ai_flow(
     deps: Any,
     *,
@@ -164,17 +203,7 @@ def run_ai_flow(
     is_spontaneous: bool = False,
 ) -> Tuple[str, bool]:
     """Backward-compatible wrapper using deps for individual callables."""
-    service = AIService(
-        credits_db_service=deps.credits_db_service,
-        get_chat_history=deps.get_chat_history,
-        build_ai_messages=deps.build_ai_messages,
-        check_provider_available=deps.check_provider_available,
-        has_openrouter_fallback=deps.has_openrouter_fallback,
-        handle_rate_limit=deps.handle_rate_limit,
-        handle_ai_response=deps.handle_ai_response,
-        estimate_ai_base_reserve_credits=deps.estimate_ai_base_reserve_credits,
-        estimate_image_context_reserve_credits=deps.estimate_image_context_reserve_credits,
-    )
+    service = build_ai_service_from_deps(deps)
     return service.run_conversation(
         chat_id=chat_id,
         message=message,

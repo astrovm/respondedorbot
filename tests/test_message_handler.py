@@ -1880,6 +1880,8 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
 
 
 def _build_message_handler_deps():
+    from dataclasses import fields
+
     from api.message_handler import MessageHandlerDeps
     from api.command_registry import parse_command as _parse_command
     from api import index as _api_index
@@ -1959,9 +1961,11 @@ def _build_message_handler_deps():
             "clear_persisted_reservation": MagicMock(),
             "ai_service": None,
         }
+        valid_fields = {field.name for field in fields(MessageHandlerDeps)}
         for k, v in overrides.items():
-            defaults[k] = v
-        return MessageHandlerDeps.with_deps(**defaults)
+            if k in valid_fields:
+                defaults[k] = v
+        return MessageHandlerDeps(**defaults)
 
     return make_deps, redis_client
 

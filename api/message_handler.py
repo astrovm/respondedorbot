@@ -9,7 +9,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import AIService
+from api.ai_service import AIService, build_ai_service_from_deps
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 
@@ -99,15 +99,6 @@ class MessageHandlerDeps:
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
     ai_service: Optional[AIService] = None
-
-    @classmethod
-    def with_deps(cls, **overrides) -> "MessageHandlerDeps":
-        from api import index as _api_index
-
-        defaults = _api_index._build_message_handler_deps()
-        for key, value in overrides.items():
-            object.__setattr__(defaults, key, value)
-        return defaults
 
 
 @dataclass
@@ -250,17 +241,7 @@ def _build_billing_helper(
 def _get_ai_service(deps: MessageHandlerDeps) -> AIService:
     if isinstance(deps.ai_service, AIService):
         return deps.ai_service
-    return AIService(
-        credits_db_service=deps.credits_db_service,
-        get_chat_history=deps.get_chat_history,
-        build_ai_messages=deps.build_ai_messages,
-        check_provider_available=deps.check_provider_available,
-        has_openrouter_fallback=deps.has_openrouter_fallback,
-        handle_rate_limit=deps.handle_rate_limit,
-        handle_ai_response=deps.handle_ai_response,
-        estimate_ai_base_reserve_credits=deps.estimate_ai_base_reserve_credits,
-        estimate_image_context_reserve_credits=deps.estimate_image_context_reserve_credits,
-    )
+    return build_ai_service_from_deps(deps)
 
 
 def _run_ai_flow(

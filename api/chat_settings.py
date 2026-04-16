@@ -27,6 +27,24 @@ AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], N
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 
 
+def _build_service(
+    *,
+    chat_config_db_service: Any = None,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
+):
+    repo = (
+        chat_config_db_service
+        if chat_config_db_service is not None
+        else build_chat_config_repository()
+    )
+    return build_chat_config_service(
+        repository=repo,
+        admin_reporter=admin_reporter or (lambda *a, **k: None),
+        log_event=log_event or (lambda *a, **k: None),
+    )
+
+
 def get_chat_config(
     redis_client: redis.Redis,
     chat_id: str,
@@ -41,15 +59,10 @@ def get_chat_config(
     signature while the implementation is moved into the service.
     """
 
-    repo = (
-        chat_config_db_service
-        if chat_config_db_service is not None
-        else build_chat_config_repository()
-    )
-    service = build_chat_config_service(
-        repository=repo,
-        admin_reporter=admin_reporter or (lambda *a, **k: None),
-        log_event=log_event or (lambda *a, **k: None),
+    service = _build_service(
+        chat_config_db_service=chat_config_db_service,
+        admin_reporter=admin_reporter,
+        log_event=log_event,
     )
     return service.get_chat_config(redis_client, chat_id)
 
@@ -63,15 +76,10 @@ def set_chat_config(
     log_event: Optional[ConfigLogger] = None,
     **updates: Any,
 ) -> Dict[str, Any]:
-    repo = (
-        chat_config_db_service
-        if chat_config_db_service is not None
-        else build_chat_config_repository()
-    )
-    service = build_chat_config_service(
-        repository=repo,
-        admin_reporter=admin_reporter or (lambda *a, **k: None),
-        log_event=log_event or (lambda *a, **k: None),
+    service = _build_service(
+        chat_config_db_service=chat_config_db_service,
+        admin_reporter=admin_reporter,
+        log_event=log_event,
     )
     return service.set_chat_config(redis_client, chat_id, **updates)
 
