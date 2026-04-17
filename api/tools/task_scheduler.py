@@ -294,6 +294,11 @@ def schedule_task(
     if scheduler is None:
         return None
 
+    redis_client = _get_redis()
+    if redis_client is None:
+        print("task_scheduler: no redis, cannot schedule task")
+        return None
+
     task_id = str(uuid.uuid4())[:8]
 
     run_date = None
@@ -306,21 +311,23 @@ def schedule_task(
         )
 
     redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
-    redis_client = _get_redis()
-    if redis_client is not None:
-        data = {
-            "id": task_id,
-            "chat_id": str(chat_id),
-            "text": text,
-            "user_name": user_name,
-            "user_id": user_id,
-            "interval_seconds": interval_seconds,
-            "run_date": run_date.isoformat() if run_date else None,
-            "trigger_config": trigger_config,
-            "timezone_offset": _coerce_timezone_offset(timezone_offset),
-        }
-        ttl = 86400 * 90 if is_recurring else 86400 * 30
+    data = {
+        "id": task_id,
+        "chat_id": str(chat_id),
+        "text": text,
+        "user_name": user_name,
+        "user_id": user_id,
+        "interval_seconds": interval_seconds,
+        "run_date": run_date.isoformat() if run_date else None,
+        "trigger_config": trigger_config,
+        "timezone_offset": _coerce_timezone_offset(timezone_offset),
+    }
+    ttl = 86400 * 90 if is_recurring else 86400 * 30
+    try:
         redis_client.setex(redis_key, ttl, json.dumps(data))
+    except Exception as e:
+        print(f"task_scheduler: failed to persist task {task_id}: {e}")
+        return None
 
     try:
         if trigger_config and trigger_config.get("type") == "cron":
