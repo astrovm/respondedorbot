@@ -9,12 +9,110 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import AIConversationRequest, AIService, build_ai_service_from_deps
+from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
+
+
+@dataclass(frozen=True)
+class MessageChatDeps:
+    config_redis: Callable[[], Any]
+    get_chat_config: Callable[[Any, str], Dict[str, Any]]
+    extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
+    extract_numeric_chat_id: Callable[[str], Optional[int]]
+
+
+@dataclass(frozen=True)
+class MessageRoutingDeps:
+    initialize_commands: Callable[[], Dict[str, CommandTuple]]
+    parse_command: Callable[[str, str], Tuple[str, str]]
+    should_auto_process_media: Callable[
+        [Mapping[str, CommandTuple], str, str, Mapping[str, Any]], bool
+    ]
+    replace_links: Callable[[str], Tuple[str, bool, List[str]]]
+    should_gordo_respond: Callable[
+        [
+            Mapping[str, CommandTuple],
+            str,
+            str,
+            Mapping[str, Any],
+            Mapping[str, Any],
+            Optional[Mapping[str, Any]],
+        ],
+        bool,
+    ]
+    is_group_chat_type: Callable[[Optional[str]], bool]
+
+
+@dataclass(frozen=True)
+class MessageIODeps:
+    send_msg: Callable[..., Optional[int]]
+    send_animation: Callable[..., Optional[int]]
+    delete_msg: Callable[[str, str], None]
+    admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
+
+
+@dataclass(frozen=True)
+class MessageStateDeps:
+    get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
+    save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
+    build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
+    build_message_links_context: Callable[[Mapping[str, Any]], str]
+    format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
+    save_message_to_redis: Callable[[str, str, str, Any], None]
+
+
+@dataclass(frozen=True)
+class MessageAIDeps:
+    ai_service: AIService
+    ask_ai: Callable[..., str]
+    gen_random: Callable[[str], str]
+    build_insufficient_credits_message: Callable[..., str]
+    build_topup_keyboard: Callable[[], Dict[str, Any]]
+    credits_db_service: Any
+    maybe_grant_onboarding_credits: Callable[
+        [Any, Callable[..., None], Optional[int]], None
+    ]
+    format_balance_command: Callable[..., str]
+    handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
+    handle_transcribe_with_message_result: Callable[
+        [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
+    ]
+    check_provider_available: Callable[..., bool]
+    has_openrouter_fallback: Callable[[], bool]
+    handle_rate_limit: Callable[[str, Dict[str, Any]], str]
+    handle_successful_payment_message: Callable[[Dict[str, Any]], str]
+    handle_config_command: Callable[[str, str], Tuple[str, Dict[str, Any]]]
+    is_chat_admin: Callable[..., bool]
+    report_unauthorized_config_attempt: Callable[..., None]
+    handle_transcribe: Callable[[], str]
+    estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
+    estimate_image_context_reserve_credits: Callable[[bytes, str], int]
+    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = (
+        lambda _usage_tag: None
+    )
+    persist_reservation: Callable[[str, Mapping[str, Any]], None] = (
+        lambda _usage_tag, _reservation: None
+    )
+    clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
+
+
+@dataclass(frozen=True)
+class MessageMediaDeps:
+    extract_message_content: Callable[
+        [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
+    ]
+    _transcribe_audio_file: Callable[
+        ..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]
+    ]
+    _transcription_error_message: Callable[..., Optional[str]]
+    download_telegram_file: Callable[[str], Optional[bytes]]
+    measure_audio_duration_seconds: Callable[[bytes], Optional[float]]
+    resize_image_if_needed: Callable[[bytes], bytes]
+    encode_image_to_base64: Callable[[bytes], str]
 
 
 @dataclass(frozen=True)
@@ -51,11 +149,6 @@ class MessageHandlerDeps:
     ]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[[str, str, str, Any], None]
-    get_chat_history: Callable[[str, Any], List[Dict[str, Any]]]
-    build_ai_messages: Callable[
-        [Dict[str, Any], List[Dict[str, Any]], str, Optional[str]], List[Dict[str, Any]]
-    ]
-    handle_ai_response: Callable[..., str]
     ask_ai: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
@@ -82,6 +175,7 @@ class MessageHandlerDeps:
     handle_transcribe: Callable[[], str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
+    ai_service: AIService
     _transcribe_audio_file: Callable[
         ..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]
     ]
@@ -97,7 +191,69 @@ class MessageHandlerDeps:
         lambda _usage_tag, _reservation: None
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
-    ai_service: Optional[AIService] = None
+
+
+def build_message_handler_deps(
+    *,
+    chat: MessageChatDeps,
+    routing: MessageRoutingDeps,
+    io: MessageIODeps,
+    state: MessageStateDeps,
+    ai: MessageAIDeps,
+    media: MessageMediaDeps,
+) -> MessageHandlerDeps:
+    return MessageHandlerDeps(
+        config_redis=chat.config_redis,
+        get_chat_config=chat.get_chat_config,
+        initialize_commands=routing.initialize_commands,
+        parse_command=routing.parse_command,
+        should_auto_process_media=routing.should_auto_process_media,
+        extract_message_content=media.extract_message_content,
+        replace_links=routing.replace_links,
+        send_msg=io.send_msg,
+        send_animation=io.send_animation,
+        delete_msg=io.delete_msg,
+        admin_report=io.admin_report,
+        get_bot_message_metadata=state.get_bot_message_metadata,
+        save_bot_message_metadata=state.save_bot_message_metadata,
+        build_reply_context_text=state.build_reply_context_text,
+        build_message_links_context=state.build_message_links_context,
+        should_gordo_respond=routing.should_gordo_respond,
+        format_user_message=state.format_user_message,
+        save_message_to_redis=state.save_message_to_redis,
+        ask_ai=ai.ask_ai,
+        gen_random=ai.gen_random,
+        build_insufficient_credits_message=ai.build_insufficient_credits_message,
+        build_topup_keyboard=ai.build_topup_keyboard,
+        credits_db_service=ai.credits_db_service,
+        is_group_chat_type=routing.is_group_chat_type,
+        extract_user_id=chat.extract_user_id,
+        extract_numeric_chat_id=chat.extract_numeric_chat_id,
+        maybe_grant_onboarding_credits=ai.maybe_grant_onboarding_credits,
+        format_balance_command=ai.format_balance_command,
+        handle_transcribe_with_message=ai.handle_transcribe_with_message,
+        handle_transcribe_with_message_result=ai.handle_transcribe_with_message_result,
+        check_provider_available=ai.check_provider_available,
+        has_openrouter_fallback=ai.has_openrouter_fallback,
+        handle_rate_limit=ai.handle_rate_limit,
+        handle_successful_payment_message=ai.handle_successful_payment_message,
+        handle_config_command=ai.handle_config_command,
+        is_chat_admin=ai.is_chat_admin,
+        report_unauthorized_config_attempt=ai.report_unauthorized_config_attempt,
+        handle_transcribe=ai.handle_transcribe,
+        estimate_ai_base_reserve_credits=ai.estimate_ai_base_reserve_credits,
+        estimate_image_context_reserve_credits=ai.estimate_image_context_reserve_credits,
+        _transcribe_audio_file=media._transcribe_audio_file,
+        _transcription_error_message=media._transcription_error_message,
+        download_telegram_file=media.download_telegram_file,
+        measure_audio_duration_seconds=media.measure_audio_duration_seconds,
+        resize_image_if_needed=media.resize_image_if_needed,
+        encode_image_to_base64=media.encode_image_to_base64,
+        load_persisted_reservation=ai.load_persisted_reservation,
+        persist_reservation=ai.persist_reservation,
+        clear_persisted_reservation=ai.clear_persisted_reservation,
+        ai_service=ai.ai_service,
+    )
 
 
 @dataclass
@@ -238,11 +394,7 @@ def _build_billing_helper(
 
 
 def _get_ai_service(deps: MessageHandlerDeps) -> AIService:
-    deps_dict = getattr(deps, "__dict__", {})
-    candidate = deps_dict.get("ai_service") if isinstance(deps_dict, dict) else None
-    if callable(getattr(candidate, "run_conversation", None)):
-        return candidate
-    return build_ai_service_from_deps(deps)
+    return deps.ai_service
 
 
 def _run_ai_flow(
@@ -1460,4 +1612,14 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         return "error procesando mensaje"
 
 
-__all__ = ["MessageHandlerDeps", "handle_msg"]
+__all__ = [
+    "MessageAIDeps",
+    "MessageChatDeps",
+    "MessageHandlerDeps",
+    "MessageIODeps",
+    "MessageMediaDeps",
+    "MessageRoutingDeps",
+    "MessageStateDeps",
+    "build_message_handler_deps",
+    "handle_msg",
+]

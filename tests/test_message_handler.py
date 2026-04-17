@@ -462,8 +462,8 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
         credits_db_service=mock_credits,
         get_chat_history=MagicMock(return_value=[]),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        handle_ai_response=fake_handle_ai_response,
     )
-    object.__setattr__(deps, "handle_ai_response", fake_handle_ai_response)
     result = handle_msg(message, deps)
 
     assert result == "ok"
@@ -1773,19 +1773,22 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
     from api.ai_billing import AIMessageBilling
+    from api.ai_service import build_ai_service
     from api.message_handler import PreparedMessage, _run_ai_flow
 
     deps = MagicMock()
-    deps.get_chat_history.return_value = []
-    deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
-    deps.estimate_ai_base_reserve_credits.return_value = (
-        1,
-        {},
+    handle_ai_response = MagicMock(return_value="respuesta ok")
+    deps.ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=False),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(return_value="no boludo"),
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    deps.check_provider_available.return_value = False
-    deps.has_openrouter_fallback.return_value = True
-    deps.estimate_image_context_reserve_credits.return_value = 1
-    deps.handle_ai_response.return_value = "respuesta ok"
 
     billing_helper = AIMessageBilling(
         credits_db_service=MagicMock(),
@@ -1822,24 +1825,27 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
 
     assert handled is True
     assert response_msg == "respuesta ok"
-    deps.handle_ai_response.assert_called_once()
+    handle_ai_response.assert_called_once()
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcribe():
     from api.ai_billing import AIMessageBilling
+    from api.ai_service import build_ai_service
     from api.message_handler import PreparedMessage, _run_ai_flow
 
     deps = MagicMock()
-    deps.get_chat_history.return_value = []
-    deps.build_ai_messages.return_value = [{"role": "user", "content": "hola"}]
-    deps.estimate_ai_base_reserve_credits.return_value = (
-        1,
-        {},
+    handle_ai_response = MagicMock(return_value="🖼️ en la imagen veo: todo piola")
+    deps.ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=False),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(return_value="no boludo"),
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    deps.check_provider_available.return_value = False
-    deps.has_openrouter_fallback.return_value = True
-    deps.estimate_image_context_reserve_credits.return_value = 1
-    deps.handle_ai_response.return_value = "🖼️ en la imagen veo: todo piola"
 
     billing_helper = AIMessageBilling(
         credits_db_service=MagicMock(),
@@ -1876,15 +1882,23 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
 
     assert handled is True
     assert response_msg == "🖼️ en la imagen veo: todo piola"
-    deps.handle_ai_response.assert_called_once()
+    handle_ai_response.assert_called_once()
 
 
 def _build_message_handler_deps():
-    from dataclasses import fields
-
     from api.message_handler import MessageHandlerDeps
+    from api.ai_service import build_ai_service
     from api.command_registry import parse_command as _parse_command
     from api import index as _api_index
+    from api.message_handler import (
+        MessageAIDeps,
+        MessageChatDeps,
+        MessageIODeps,
+        MessageMediaDeps,
+        MessageRoutingDeps,
+        MessageStateDeps,
+        build_message_handler_deps,
+    )
 
     redis_client = MagicMock()
     mock_credits = MagicMock()
@@ -1892,7 +1906,7 @@ def _build_message_handler_deps():
     mock_credits.charge_ai_credits.return_value = {"ok": True, "source": "user"}
 
     def make_deps(**overrides):
-        defaults = {
+        flat_defaults = {
             "config_redis": lambda: redis_client,
             "get_chat_config": lambda _rc, _cid: dict(CHAT_CONFIG_DEFAULTS),
             "initialize_commands": _api_index.initialize_commands,
@@ -1959,15 +1973,204 @@ def _build_message_handler_deps():
             "load_persisted_reservation": MagicMock(return_value=None),
             "persist_reservation": MagicMock(),
             "clear_persisted_reservation": MagicMock(),
-            "ai_service": None,
         }
-        valid_fields = {field.name for field in fields(MessageHandlerDeps)}
-        for k, v in overrides.items():
-            if k in valid_fields:
-                defaults[k] = v
-        return MessageHandlerDeps(**defaults)
+        flat_defaults.update(overrides)
+
+        ai_service = flat_defaults.get("ai_service") or build_ai_service(
+            credits_db_service=flat_defaults["credits_db_service"],
+            get_chat_history=flat_defaults["get_chat_history"],
+            build_ai_messages=flat_defaults["build_ai_messages"],
+            check_provider_available=flat_defaults["check_provider_available"],
+            has_openrouter_fallback=flat_defaults["has_openrouter_fallback"],
+            handle_rate_limit=flat_defaults["handle_rate_limit"],
+            handle_ai_response=flat_defaults["handle_ai_response"],
+            estimate_ai_base_reserve_credits=flat_defaults[
+                "estimate_ai_base_reserve_credits"
+            ],
+            estimate_image_context_reserve_credits=flat_defaults[
+                "estimate_image_context_reserve_credits"
+            ],
+        )
+
+        deps = build_message_handler_deps(
+            chat=MessageChatDeps(
+                config_redis=flat_defaults["config_redis"],
+                get_chat_config=flat_defaults["get_chat_config"],
+                extract_user_id=flat_defaults["extract_user_id"],
+                extract_numeric_chat_id=flat_defaults["extract_numeric_chat_id"],
+            ),
+            routing=MessageRoutingDeps(
+                initialize_commands=flat_defaults["initialize_commands"],
+                parse_command=flat_defaults["parse_command"],
+                should_auto_process_media=flat_defaults["should_auto_process_media"],
+                replace_links=flat_defaults["replace_links"],
+                should_gordo_respond=flat_defaults["should_gordo_respond"],
+                is_group_chat_type=flat_defaults["is_group_chat_type"],
+            ),
+            io=MessageIODeps(
+                send_msg=flat_defaults["send_msg"],
+                send_animation=flat_defaults["send_animation"],
+                delete_msg=flat_defaults["delete_msg"],
+                admin_report=flat_defaults["admin_report"],
+            ),
+            state=MessageStateDeps(
+                get_bot_message_metadata=flat_defaults["get_bot_message_metadata"],
+                save_bot_message_metadata=flat_defaults["save_bot_message_metadata"],
+                build_reply_context_text=flat_defaults["build_reply_context_text"],
+                build_message_links_context=flat_defaults[
+                    "build_message_links_context"
+                ],
+                format_user_message=flat_defaults["format_user_message"],
+                save_message_to_redis=flat_defaults["save_message_to_redis"],
+            ),
+            ai=MessageAIDeps(
+                ai_service=ai_service,
+                ask_ai=flat_defaults["ask_ai"],
+                gen_random=flat_defaults["gen_random"],
+                build_insufficient_credits_message=flat_defaults[
+                    "build_insufficient_credits_message"
+                ],
+                build_topup_keyboard=flat_defaults["build_topup_keyboard"],
+                credits_db_service=flat_defaults["credits_db_service"],
+                maybe_grant_onboarding_credits=flat_defaults[
+                    "maybe_grant_onboarding_credits"
+                ],
+                format_balance_command=flat_defaults["format_balance_command"],
+                handle_transcribe_with_message=flat_defaults[
+                    "handle_transcribe_with_message"
+                ],
+                handle_transcribe_with_message_result=flat_defaults[
+                    "handle_transcribe_with_message_result"
+                ],
+                check_provider_available=flat_defaults["check_provider_available"],
+                has_openrouter_fallback=flat_defaults["has_openrouter_fallback"],
+                handle_rate_limit=flat_defaults["handle_rate_limit"],
+                handle_successful_payment_message=flat_defaults[
+                    "handle_successful_payment_message"
+                ],
+                handle_config_command=flat_defaults["handle_config_command"],
+                is_chat_admin=flat_defaults["is_chat_admin"],
+                report_unauthorized_config_attempt=flat_defaults[
+                    "report_unauthorized_config_attempt"
+                ],
+                handle_transcribe=flat_defaults["handle_transcribe"],
+                estimate_ai_base_reserve_credits=flat_defaults[
+                    "estimate_ai_base_reserve_credits"
+                ],
+                estimate_image_context_reserve_credits=flat_defaults[
+                    "estimate_image_context_reserve_credits"
+                ],
+                load_persisted_reservation=flat_defaults["load_persisted_reservation"],
+                persist_reservation=flat_defaults["persist_reservation"],
+                clear_persisted_reservation=flat_defaults[
+                    "clear_persisted_reservation"
+                ],
+            ),
+            media=MessageMediaDeps(
+                extract_message_content=flat_defaults["extract_message_content"],
+                _transcribe_audio_file=flat_defaults["_transcribe_audio_file"],
+                _transcription_error_message=flat_defaults[
+                    "_transcription_error_message"
+                ],
+                download_telegram_file=flat_defaults["download_telegram_file"],
+                measure_audio_duration_seconds=flat_defaults[
+                    "measure_audio_duration_seconds"
+                ],
+                resize_image_if_needed=flat_defaults["resize_image_if_needed"],
+                encode_image_to_base64=flat_defaults["encode_image_to_base64"],
+            ),
+        )
+        assert isinstance(deps, MessageHandlerDeps)
+        return deps
 
     return make_deps, redis_client
+
+
+def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
+    from api.message_handler import (
+        MessageAIDeps,
+        MessageChatDeps,
+        MessageHandlerDeps,
+        MessageIODeps,
+        MessageMediaDeps,
+        MessageRoutingDeps,
+        MessageStateDeps,
+        build_message_handler_deps,
+    )
+
+    ai_service = MagicMock()
+    credits = MagicMock()
+
+    deps = build_message_handler_deps(
+        chat=MessageChatDeps(
+            config_redis=MagicMock(),
+            get_chat_config=MagicMock(),
+            extract_user_id=MagicMock(),
+            extract_numeric_chat_id=MagicMock(),
+        ),
+        routing=MessageRoutingDeps(
+            initialize_commands=MagicMock(),
+            parse_command=MagicMock(),
+            should_auto_process_media=MagicMock(),
+            replace_links=MagicMock(),
+            should_gordo_respond=MagicMock(),
+            is_group_chat_type=MagicMock(),
+        ),
+        io=MessageIODeps(
+            send_msg=MagicMock(),
+            send_animation=MagicMock(),
+            delete_msg=MagicMock(),
+            admin_report=MagicMock(),
+        ),
+        state=MessageStateDeps(
+            get_bot_message_metadata=MagicMock(),
+            save_bot_message_metadata=MagicMock(),
+            build_reply_context_text=MagicMock(),
+            build_message_links_context=MagicMock(),
+            format_user_message=MagicMock(),
+            save_message_to_redis=MagicMock(),
+        ),
+        ai=MessageAIDeps(
+            ai_service=ai_service,
+            ask_ai=MagicMock(),
+            gen_random=MagicMock(),
+            build_insufficient_credits_message=MagicMock(),
+            build_topup_keyboard=MagicMock(),
+            credits_db_service=credits,
+            maybe_grant_onboarding_credits=MagicMock(),
+            format_balance_command=MagicMock(),
+            handle_transcribe_with_message=MagicMock(),
+            handle_transcribe_with_message_result=MagicMock(),
+            check_provider_available=MagicMock(),
+            has_openrouter_fallback=MagicMock(),
+            handle_rate_limit=MagicMock(),
+            handle_successful_payment_message=MagicMock(),
+            handle_config_command=MagicMock(),
+            is_chat_admin=MagicMock(),
+            report_unauthorized_config_attempt=MagicMock(),
+            handle_transcribe=MagicMock(),
+            estimate_ai_base_reserve_credits=MagicMock(),
+            estimate_image_context_reserve_credits=MagicMock(),
+        ),
+        media=MessageMediaDeps(
+            extract_message_content=MagicMock(),
+            _transcribe_audio_file=MagicMock(),
+            _transcription_error_message=MagicMock(),
+            download_telegram_file=MagicMock(),
+            measure_audio_duration_seconds=MagicMock(),
+            resize_image_if_needed=MagicMock(),
+            encode_image_to_base64=MagicMock(),
+        ),
+    )
+
+    assert isinstance(deps, MessageHandlerDeps)
+    assert deps.ai_service is ai_service
+    assert deps.credits_db_service is credits
+    assert deps.config_redis is not None
+    assert deps.parse_command is not None
+    assert deps.send_msg is not None
+    assert deps.save_message_to_redis is not None
+    assert deps.extract_message_content is not None
 
 
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
