@@ -793,12 +793,7 @@ def test_handle_msg_with_image(monkeypatch):
         check_provider_available=MagicMock(return_value=True),
         credits_db_service=mock_credits,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "private"},
-        "from": {"id": 11, "first_name": "John", "username": "john"},
-        "photo": [{"file_id": "photo_123"}],
-    }
+    message = _private_photo_message(message_id=1, user_id=11, file_id="photo_123")
 
     result = handle_msg(message, deps)
     assert result == "ok"
@@ -839,12 +834,7 @@ def test_handle_msg_with_audio(monkeypatch):
         check_provider_available=MagicMock(return_value=True),
         credits_db_service=mock_credits,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "private"},
-        "from": {"id": 12, "first_name": "John", "username": "john"},
-        "voice": {"file_id": "voice_123", "duration": 10},
-    }
+    message = _private_voice_message(message_id=1, user_id=12, duration=10)
 
     result = handle_msg(message, deps)
     assert result == "ok"
@@ -879,12 +869,12 @@ def test_handle_msg_group_audio_without_invocation_skips_auto_transcription(
         send_msg=mock_send_msg,
         _transcribe_audio_file=mock_transcribe,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "group"},
-        "from": {"first_name": "John", "username": "john"},
-        "voice": {"file_id": "voice_123"},
-    }
+    message = _telegram_message(
+        message_id=1,
+        chat_type="group",
+        user_id=None,
+        voice={"file_id": "voice_123"},
+    )
 
     result = handle_msg(message, deps)
 
@@ -1114,12 +1104,7 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
         should_gordo_respond=MagicMock(return_value=False),
         credits_db_service=mock_credits,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "private"},
-        "from": {"id": 88, "first_name": "John", "username": "john"},
-        "voice": {"file_id": "voice_123", "duration": 10},
-    }
+    message = _private_voice_message(message_id=1, user_id=88, duration=10)
 
     result = handle_msg(message, deps)
     assert result == "ok"
@@ -1151,12 +1136,7 @@ def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
         measure_audio_duration_seconds=MagicMock(return_value=None),
         credits_db_service=mock_credits,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "private"},
-        "from": {"id": 88, "first_name": "John", "username": "john"},
-        "voice": {"file_id": "voice_123"},
-    }
+    message = _private_voice_message(message_id=1, user_id=88)
 
     result = handle_msg(message, deps)
 
@@ -1201,12 +1181,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
         should_gordo_respond=MagicMock(return_value=False),
         credits_db_service=mock_credits,
     )
-    message = {
-        "message_id": 1,
-        "chat": {"id": 123, "type": "private"},
-        "from": {"id": 88, "first_name": "John", "username": "john"},
-        "voice": {"file_id": "voice_123"},
-    }
+    message = _private_voice_message(message_id=1, user_id=88)
 
     result = handle_msg(message, deps)
 
@@ -1313,12 +1288,7 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits(monkey
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         handle_ai_response=MagicMock(return_value="todo piola"),
     )
-    message = {
-        "message_id": 22,
-        "chat": {"id": 555, "type": "private"},
-        "from": {"id": 99, "first_name": "Ana", "username": "ana"},
-        "photo": [{"file_id": "img1"}],
-    }
+    message = _private_photo_message(message_id=22, chat_id=555, user_id=99)
 
     result = handle_msg(message, deps)
 
@@ -1389,12 +1359,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         handle_ai_response=fake_handle_ai_response,
     )
-    message = {
-        "message_id": 33,
-        "chat": {"id": 555, "type": "private"},
-        "from": {"id": 991, "first_name": "Ana", "username": "ana"},
-        "photo": [{"file_id": "img1"}],
-    }
+    message = _private_photo_message(message_id=33, chat_id=555, user_id=991)
 
     result = handle_msg(message, deps)
 
@@ -1885,6 +1850,57 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     handle_ai_response.assert_called_once()
 
 
+def _telegram_message(
+    *,
+    message_id=1,
+    chat_id=123,
+    chat_type="private",
+    user_id=88,
+    first_name="John",
+    username="john",
+    text=None,
+    voice=None,
+    photo=None,
+    reply_to_message=None,
+):
+    message = {
+        "message_id": message_id,
+        "chat": {"id": chat_id, "type": chat_type},
+        "from": {"first_name": first_name, "username": username},
+    }
+    if user_id is not None:
+        message["from"]["id"] = user_id
+    if text is not None:
+        message["text"] = text
+    if voice is not None:
+        message["voice"] = voice
+    if photo is not None:
+        message["photo"] = photo
+    if reply_to_message is not None:
+        message["reply_to_message"] = reply_to_message
+    return message
+
+
+def _private_voice_message(
+    *, message_id=1, user_id=88, duration=None, file_id="voice_123"
+):
+    voice = {"file_id": file_id}
+    if duration is not None:
+        voice["duration"] = duration
+    return _telegram_message(message_id=message_id, user_id=user_id, voice=voice)
+
+
+def _private_photo_message(*, message_id=1, chat_id=123, user_id=88, file_id="img1"):
+    return _telegram_message(
+        message_id=message_id,
+        chat_id=chat_id,
+        user_id=user_id,
+        first_name="Ana",
+        username="ana",
+        photo=[{"file_id": file_id}],
+    )
+
+
 def _build_message_handler_flat_defaults(redis_client, mock_credits):
     from api.command_registry import parse_command as _parse_command
     from api import index as _api_index
@@ -2223,6 +2239,48 @@ def test_handle_prepared_message_early_response_sends_and_stops():
 
     assert handled is True
     deps.send_msg.assert_called_once_with("555", "no boludo", "42")
+
+
+def test_resolve_message_intent_uses_reply_text_for_command_without_params():
+    from api.message_handler import MessageContext, MessageRuntime, PreparedMessage
+    from api.message_handler import _resolve_message_intent
+
+    deps = MagicMock()
+    deps.parse_command.return_value = ("/command", "")
+    deps.build_reply_context_text.return_value = None
+    deps.should_gordo_respond.return_value = True
+    deps.extract_message_content.return_value = ("texto citado", None, None)
+
+    intent = _resolve_message_intent(
+        deps,
+        context=MessageContext(
+            message_id="42",
+            chat_id="555",
+            chat_type="private",
+            user_identity="Ana (ana)",
+            user_id=77,
+            numeric_chat_id=555,
+        ),
+        runtime=MessageRuntime(
+            redis_client=MagicMock(),
+            chat_config={},
+            commands={},
+            bot_name="@testbot",
+            billing_helper=MagicMock(),
+            prepared_message=PreparedMessage(
+                message_text="/command",
+                photo_file_id=None,
+                audio_file_id=None,
+            ),
+        ),
+        message={
+            "reply_to_message": {"text": "quoted text"},
+        },
+    )
+
+    assert intent.command == "/command"
+    assert intent.sanitized_message_text == "texto citado"
+    assert intent.should_respond is True
 
 
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):

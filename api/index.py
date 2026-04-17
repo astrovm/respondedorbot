@@ -158,6 +158,7 @@ from api.message_handler import (
 from api.ai_service import build_ai_service
 from api.routing_policy import RoutingPolicy
 from api.telegram_gateway import TelegramGateway
+from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
     build_reply_context_text as _state_build_reply_context_text,
@@ -5896,94 +5897,13 @@ def update_telegram_bot_commands() -> bool:
     if not token:
         print("TELEGRAM_TOKEN not set, cannot update bot commands")
         return False
-
-    # Command descriptions mapping
-    command_descriptions = {
-        "ask": "te contesto cualquier gilada",
-        "pregunta": "te contesto cualquier gilada",
-        "che": "te contesto cualquier gilada",
-        "gordo": "te contesto cualquier gilada",
-        "config": "tocás la config del gordo y de los links",
-        "convertbase": "te paso números entre bases",
-        "random": "elijo por vos entre opciones o números",
-        "prices": "precios crypto [1h/24h/7d/30d]",
-        "price": "precios crypto [1h/24h/7d/30d]",
-        "precios": "precios crypto [1h/24h/7d/30d]",
-        "precio": "precios crypto [1h/24h/7d/30d]",
-        "presios": "precios crypto [1h/24h/7d/30d]",
-        "presio": "precios crypto [1h/24h/7d/30d]",
-        "bresio": "precios crypto [1h/24h/7d/30d]",
-        "bresios": "precios crypto [1h/24h/7d/30d]",
-        "brecio": "precios crypto [1h/24h/7d/30d]",
-        "brecios": "precios crypto [1h/24h/7d/30d]",
-        "dolar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-        "dollar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-        "usd": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-        "petroleo": "te paso el precio del Brent y del WTI",
-        "oil": "te paso el precio del Brent y del WTI",
-        "eleccion": "odds actuales de Polymarket para Diputados 2025",
-        "rulo": "te armo los rulos desde el oficial",
-        "devo": "te calculo el arbitraje entre tarjeta y crypto",
-        "powerlaw": "te tiro el precio justo de btc según power law",
-        "rainbow": "te tiro el precio justo de btc según rainbow chart",
-        "satoshi": "te digo cuánto vale un satoshi",
-        "sat": "te digo cuánto vale un satoshi",
-        "sats": "te digo cuánto vale un satoshi",
-        "time": "timestamp unix actual",
-        "comando": "te lo convierto en comando de telegram",
-        "command": "te lo convierto en comando de telegram",
-        "buscar": "te busco en la web",
-        "search": "te busco en la web",
-        "help": "te muestro todos los comandos",
-        "transcribe": "te transcribo audio o describo imagen",
-        "describe": "te transcribo audio o describo imagen",
-        "bcra": "te tiro las variables económicas del bcra",
-        "variables": "te tiro las variables económicas del bcra",
-        "topup": "cargás créditos IA con Telegram Stars por privado",
-        "balance": "te muestro tu saldo IA",
-        "transfer": "le pasás créditos tuyos al grupo",
-        "gm": "gif de buenos días",
-        "gn": "gif de buenas noches",
-        "tareas": "listado de tareas programadas",
-        "tasks": "listado de tareas programadas",
-    }
-
-    # Build commands list from COMMAND_GROUPS
-    commands_list = []
-    seen_commands = set()
-
-    for aliases, handler_name, uses_ai, takes_params in COMMAND_GROUPS:
-        for alias in aliases:
-            command = alias.lstrip("/")  # Remove leading slash
-            if command not in seen_commands:
-                seen_commands.add(command)
-                if command in command_descriptions:
-                    commands_list.append(
-                        {
-                            "command": command,
-                            "description": command_descriptions[command],
-                        }
-                    )
-
-    # Sort commands alphabetically
-    commands_list.sort(key=lambda x: x["command"])
-
-    # Call setMyCommands
-    payload = {"commands": json.dumps(commands_list)}
-
     try:
-        response, error = _telegram_request(
-            "setMyCommands",
-            method="POST",
-            json_payload=payload,
+        return _update_bot_commands(
             token=token,
-            expect_json=False,
+            request_fn=_telegram_request,
+            command_groups=COMMAND_GROUPS,
+            logger=print,
         )
-        if error:
-            print(f"Error updating bot commands: {error}")
-            return False
-        print(f"Bot commands updated successfully: {len(commands_list)} commands")
-        return True
     except Exception as e:
         print(f"Exception updating bot commands: {e}")
         return False
