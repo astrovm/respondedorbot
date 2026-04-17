@@ -132,6 +132,28 @@ def describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def format_task_summary(task: Dict[str, Any], *, prefix: str = "") -> str:
+    interval = task.get("interval_seconds")
+    trigger_config = task.get("trigger_config")
+    owner_bit = _owner_display(task.get("user_name", ""))
+    next_run = task.get("next_run", "")
+    task_text = _no_mention(task.get("text", ""))
+
+    if interval:
+        freq = format_interval(interval)
+        return (
+            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+        )
+
+    if trigger_config:
+        freq = describe_trigger(trigger_config)
+        return (
+            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+        )
+
+    return f"{prefix}[{task['id']}] {task_text}{owner_bit} - {next_run}"
+
+
 def _no_mention(text: str) -> str:
     return text.replace("@", "@\u200b")
 

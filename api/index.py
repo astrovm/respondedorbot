@@ -116,9 +116,7 @@ from api.tool_runtime import ToolRuntime
 from api.tools.task_scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
-    format_interval,
-    _no_mention,
-    _owner_display,
+    format_task_summary,
 )
 from api.ai_pipeline import (
     clean_duplicate_response as _ai_clean_duplicate_response,
@@ -2328,17 +2326,7 @@ def _build_tasks_message(
     rows: List[List[Dict[str, str]]] = []
 
     for t in tasks:
-        interval = t.get("interval_seconds")
-        owner_bit = _owner_display(t.get("user_name", ""))
-        next_run = t.get("next_run", "")
-        task_text = _no_mention(t["text"])
-        if interval:
-            freq = format_interval(interval)
-            lines.append(
-                f"• [{t['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
-            )
-        else:
-            lines.append(f"• [{t['id']}] {task_text}{owner_bit} - {next_run}")
+        lines.append(format_task_summary(t, prefix="• "))
         rows.append(
             [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
         )

@@ -68,6 +68,28 @@ def test_optional_redis_client_handles_failure():
     assert result is None
 
 
+def test_tasks_command_shows_cron_frequency():
+    from api.index import tasks_command
+
+    with patch(
+        "api.index._task_list_tasks",
+        return_value=[
+            {
+                "id": "63dce153",
+                "text": "decime cuanta aura farmeaste hoy",
+                "user_name": "@astrolince",
+                "interval_seconds": None,
+                "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
+                "next_run": "17/04 20:30",
+            }
+        ],
+    ):
+        message, markup = tasks_command("123")
+
+    assert "todos los dias a las 20:30, prox: 17/04 20:30" in message
+    assert markup is not None
+
+
 def test_hash_cache_key_is_stable():
     from api.index import _hash_cache_key
 
@@ -1063,9 +1085,7 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    def fake_get(
-        url, params=None, headers=None, timeout=5, verify=True
-    ):  # noqa: ARG001
+    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] == 1:
             raise requests.RequestException("boom")
