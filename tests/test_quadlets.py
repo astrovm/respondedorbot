@@ -13,8 +13,8 @@ class QuadletTests(unittest.TestCase):
         contents = BOT_CONTAINER_QUADLET.read_text(encoding="utf-8")
 
         self.assertIn("AutoUpdate=registry", contents)
-        self.assertIn("StopTimeout=600", contents)
         self.assertIn("TimeoutStopSec=630", contents)
+        self.assertNotIn("StopTimeout=600", contents)
 
 
 if __name__ == "__main__":
