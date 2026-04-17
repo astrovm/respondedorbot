@@ -566,8 +566,8 @@ class TestFireTaskAIFailure:
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_ask_ai_exception_does_not_settle_or_refund(self, mock_sched):
-        """When ask_ai throws, no billing settlement or refund occurs."""
+    def test_ask_ai_exception_refunds_reserved_credits(self, mock_sched):
+        """When ask_ai throws, reserved credits are refunded and never settled."""
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -596,7 +596,9 @@ class TestFireTaskAIFailure:
         _fire_task("x1")
 
         billing.settle_reserved_ai_credits.assert_not_called()
-        billing.refund_reserved_ai_credits.assert_not_called()
+        billing.refund_reserved_ai_credits.assert_called_once_with(
+            {"reservation": "ok"}, reason="task_error"
+        )
 
 
 # ---------------------------------------------------------------------------

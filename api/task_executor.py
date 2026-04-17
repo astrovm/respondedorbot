@@ -100,6 +100,7 @@ class TaskExecutor:
                 print(f"task_scheduler: {task_id} completed successfully")
         except Exception as e:
             print(f"task_scheduler: {task_id} ask_ai failed: {e}")
+            billing.refund_reserved_ai_credits(reserve_meta, reason="task_error")
             self._admin_report(
                 f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
             )

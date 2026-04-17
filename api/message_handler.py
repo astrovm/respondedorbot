@@ -9,7 +9,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import AIService, build_ai_service_from_deps
+from api.ai_service import AIConversationRequest, AIService, build_ai_service_from_deps
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 
@@ -238,8 +238,10 @@ def _build_billing_helper(
 
 
 def _get_ai_service(deps: MessageHandlerDeps) -> AIService:
-    if isinstance(deps.ai_service, AIService):
-        return deps.ai_service
+    deps_dict = getattr(deps, "__dict__", {})
+    candidate = deps_dict.get("ai_service") if isinstance(deps_dict, dict) else None
+    if callable(getattr(candidate, "run_conversation", None)):
+        return candidate
     return build_ai_service_from_deps(deps)
 
 
@@ -260,18 +262,20 @@ def _run_ai_flow(
     is_spontaneous: bool = False,
 ) -> Tuple[str, bool]:
     return _get_ai_service(deps).run_conversation(
-        chat_id=chat_id,
-        message=message,
-        user_id=user_id,
-        prepared_message=prepared_message,
-        billing_helper=billing_helper,
-        prompt_text=prompt_text,
-        reply_context_text=reply_context_text,
-        user_identity=user_identity,
-        handler_func=handler_func,
-        redis_client=redis_client,
-        timezone_offset=timezone_offset,
-        is_spontaneous=is_spontaneous,
+        AIConversationRequest(
+            chat_id=chat_id,
+            message=message,
+            user_id=user_id,
+            prepared_message=prepared_message,
+            billing_helper=billing_helper,
+            prompt_text=prompt_text,
+            reply_context_text=reply_context_text,
+            user_identity=user_identity,
+            handler_func=handler_func,
+            redis_client=redis_client,
+            timezone_offset=timezone_offset,
+            is_spontaneous=is_spontaneous,
+        )
     )
 
 
@@ -1227,7 +1231,8 @@ def _handle_known_command(
         response_command = command
 
         if uses_ai:
-            response_msg, response_uses_ai = _get_ai_service(deps).run_conversation(
+            response_msg, response_uses_ai = _run_ai_flow(
+                deps,
                 chat_id=chat_id,
                 message=message,
                 user_id=user_id,
@@ -1254,7 +1259,8 @@ def _handle_known_command(
         )
         return response_msg, response_markup, False, response_command
 
-    response_msg, response_uses_ai = _get_ai_service(deps).run_conversation(
+    response_msg, response_uses_ai = _run_ai_flow(
+        deps,
         chat_id=chat_id,
         message=message,
         user_id=user_id,
