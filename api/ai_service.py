@@ -26,38 +26,29 @@ class AIService:
 
     def run_conversation(
         self,
-        *,
-        chat_id: str,
-        message: Dict[str, Any],
-        user_id: Optional[int],
-        prepared_message: Any,
-        billing_helper: Any,
-        prompt_text: str,
-        reply_context_text: Optional[str],
-        user_identity: str,
-        handler_func: Callable[..., str],
-        redis_client: Any,
-        timezone_offset: int = -3,
-        is_spontaneous: bool = False,
+        request: AIConversationRequest,
     ) -> Tuple[str, bool]:
         if not self.credits_db_service.is_configured():
-            billing_unavailable = self.handle_rate_limit(chat_id, message), False
-            return ("ok", False) if is_spontaneous else billing_unavailable
+            billing_unavailable = (
+                self.handle_rate_limit(request.chat_id, request.message),
+                False,
+            )
+            return ("ok", False) if request.is_spontaneous else billing_unavailable
 
-        chat_history = self.get_chat_history(chat_id, redis_client)
+        chat_history = self.get_chat_history(request.chat_id, request.redis_client)
         ai_messages = self.build_ai_messages(
-            message,
+            request.message,
             chat_history,
-            prompt_text,
-            reply_context_text,
+            request.prompt_text,
+            request.reply_context_text,
         )
 
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
             ai_messages,
             extra_input_tokens=(
                 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-                if prepared_message.resized_image_data
-                and prepared_message.photo_file_id
+                if request.prepared_message.resized_image_data
+                and request.prepared_message.photo_file_id
                 else 0
             ),
         )
@@ -65,9 +56,9 @@ class AIService:
             not self.check_provider_available(scope="chat")
             and not self.has_openrouter_fallback()
         ):
-            rate_limit_msg = self.handle_rate_limit(chat_id, message)
-            return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
-        base_charge_meta, base_charge_error = billing_helper.reserve_ai_credits(
+            rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
+            return ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
+        base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
             "ai_response_base",
             main_reserve_credits,
             metadata={
@@ -76,50 +67,65 @@ class AIService:
             },
         )
         if base_charge_error:
-            return ("ok", False) if is_spontaneous else (base_charge_error, False)
+            return (
+                ("ok", False) if request.is_spontaneous else (base_charge_error, False)
+            )
 
         media_charge_meta: Optional[Dict[str, Any]] = None
-        if prepared_message.resized_image_data and prepared_message.photo_file_id:
+        if (
+            request.prepared_message.resized_image_data
+            and request.prepared_message.photo_file_id
+        ):
             image_prompt = "Describe what you see in this image in detail."
             if (
                 not self.check_provider_available(scope="vision")
                 and not self.has_openrouter_fallback()
             ):
-                billing_helper.refund_reserved_ai_credits(
+                request.billing_helper.refund_reserved_ai_credits(
                     base_charge_meta, reason="image_context_local_rate_limit"
                 )
-                rate_limit_msg = self.handle_rate_limit(chat_id, message)
-                return ("ok", False) if is_spontaneous else (rate_limit_msg, False)
-            media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
-                "image_context_media",
-                self.estimate_image_context_reserve_credits(
-                    prepared_message.resized_image_data,
-                    image_prompt,
-                ),
-                metadata={"photo_file_id": prepared_message.photo_file_id},
+                rate_limit_msg = self.handle_rate_limit(
+                    request.chat_id, request.message
+                )
+                return (
+                    ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
+                )
+            media_charge_meta, media_charge_error = (
+                request.billing_helper.reserve_ai_credits(
+                    "image_context_media",
+                    self.estimate_image_context_reserve_credits(
+                        request.prepared_message.resized_image_data,
+                        image_prompt,
+                    ),
+                    metadata={"photo_file_id": request.prepared_message.photo_file_id},
+                )
             )
             if media_charge_error:
-                billing_helper.refund_reserved_ai_credits(
+                request.billing_helper.refund_reserved_ai_credits(
                     base_charge_meta, reason="image_context_reserve_failed"
                 )
-                return ("ok", False) if is_spontaneous else (media_charge_error, False)
+                return (
+                    ("ok", False)
+                    if request.is_spontaneous
+                    else (media_charge_error, False)
+                )
 
         ai_response_meta: Dict[str, Any] = {}
         response_msg = self.handle_ai_response(
-            chat_id,
-            handler_func,
+            request.chat_id,
+            request.handler_func,
             ai_messages,
             image_data=(
-                prepared_message.resized_image_data
-                if prepared_message.photo_file_id
+                request.prepared_message.resized_image_data
+                if request.prepared_message.photo_file_id
                 else None
             ),
-            image_file_id=prepared_message.photo_file_id,
-            context_texts=[reply_context_text],
-            user_identity=user_identity,
+            image_file_id=request.prepared_message.photo_file_id,
+            context_texts=[request.reply_context_text],
+            user_identity=request.user_identity,
             response_meta=ai_response_meta,
-            user_id=user_id,
-            timezone_offset=timezone_offset,
+            user_id=request.user_id,
+            timezone_offset=request.timezone_offset,
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
@@ -128,10 +134,10 @@ class AIService:
             or bool(ai_response_meta.get("ai_fallback"))
         ):
             if media_charge_meta:
-                billing_helper.refund_reserved_ai_credits(
+                request.billing_helper.refund_reserved_ai_credits(
                     media_charge_meta, reason="ai_response_fallback"
                 )
-            billing_helper.refund_reserved_ai_credits(
+            request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_response_fallback"
             )
             return response_msg, True
@@ -140,13 +146,29 @@ class AIService:
         if media_charge_meta:
             settlement_reservations.append(media_charge_meta)
 
-        billing_helper.settle_reserved_ai_credits_batch(
+        request.billing_helper.settle_reserved_ai_credits_batch(
             settlement_reservations,
             billing_segments,
             reason="ai_response_success",
         )
 
         return response_msg, True
+
+
+@dataclass(frozen=True)
+class AIConversationRequest:
+    chat_id: str
+    message: Dict[str, Any]
+    user_id: Optional[int]
+    prepared_message: Any
+    billing_helper: Any
+    prompt_text: str
+    reply_context_text: Optional[str]
+    user_identity: str
+    handler_func: Callable[..., str]
+    redis_client: Any
+    timezone_offset: int = -3
+    is_spontaneous: bool = False
 
 
 def build_ai_service(
@@ -207,16 +229,18 @@ def run_ai_flow(
     """Backward-compatible wrapper using deps for individual callables."""
     service = build_ai_service_from_deps(deps)
     return service.run_conversation(
-        chat_id=chat_id,
-        message=message,
-        user_id=user_id,
-        prepared_message=prepared_message,
-        billing_helper=billing_helper,
-        prompt_text=prompt_text,
-        reply_context_text=reply_context_text,
-        user_identity=user_identity,
-        handler_func=handler_func,
-        redis_client=redis_client,
-        timezone_offset=timezone_offset,
-        is_spontaneous=is_spontaneous,
+        AIConversationRequest(
+            chat_id=chat_id,
+            message=message,
+            user_id=user_id,
+            prepared_message=prepared_message,
+            billing_helper=billing_helper,
+            prompt_text=prompt_text,
+            reply_context_text=reply_context_text,
+            user_identity=user_identity,
+            handler_func=handler_func,
+            redis_client=redis_client,
+            timezone_offset=timezone_offset,
+            is_spontaneous=is_spontaneous,
+        )
     )

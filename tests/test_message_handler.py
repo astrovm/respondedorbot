@@ -2004,6 +2004,80 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
     )
 
 
+def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
+    from api.ai_service import AIConversationRequest
+    from api.message_handler import handle_msg
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    ai_service = MagicMock()
+    ai_service.run_conversation.return_value = ("respuesta ai", True)
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        ai_service=ai_service,
+        send_msg=MagicMock(return_value=999),
+    )
+
+    message = {
+        "message_id": 501,
+        "chat": {"id": 557, "type": "private"},
+        "from": {"id": 1003, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    ai_service.run_conversation.assert_called_once()
+    request = ai_service.run_conversation.call_args.args[0]
+    assert isinstance(request, AIConversationRequest)
+    assert request.chat_id == "557"
+    assert request.prompt_text == "hola"
+    assert request.is_spontaneous is False
+    deps.send_msg.assert_called_once_with(
+        "557", "respuesta ai", "501", reply_markup=None
+    )
+
+
+def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypatch):
+    from api.ai_service import AIConversationRequest
+    from api.message_handler import handle_msg
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    ai_service = MagicMock()
+    ai_service.run_conversation.return_value = ("respuesta espontanea", True)
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        ai_service=ai_service,
+        send_msg=MagicMock(return_value=999),
+        should_gordo_respond=MagicMock(return_value=True),
+    )
+
+    message = {
+        "message_id": 502,
+        "chat": {"id": 558, "type": "private"},
+        "from": {"id": 1004, "first_name": "Ana", "username": "ana"},
+        "text": "hola gordo",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    ai_service.run_conversation.assert_called_once()
+    request = ai_service.run_conversation.call_args.args[0]
+    assert isinstance(request, AIConversationRequest)
+    assert request.chat_id == "558"
+    assert request.prompt_text == "hola gordo"
+    assert request.handler_func is deps.ask_ai
+    assert request.is_spontaneous is True
+    deps.send_msg.assert_called_once_with(
+        "558", "respuesta espontanea", "502", reply_markup=None
+    )
+
+
 def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeypatch):
     from api.message_handler import handle_msg
 
