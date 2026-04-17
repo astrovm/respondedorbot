@@ -884,6 +884,18 @@ class TestScheduleTaskStoresRunDate:
         stored_data = json.loads(stored_call[0][2])
         assert stored_data["timezone_offset"] == -5
 
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_returns_none_when_redis_is_unavailable(self, mock_sched, mock_redis):
+        scheduler = MagicMock()
+        mock_sched.return_value = scheduler
+        mock_redis.return_value = None
+
+        task_id = schedule_task("123", "test", delay_seconds=300)
+
+        assert task_id is None
+        scheduler.add_job.assert_not_called()
+
 
 def test_get_scheduler_uses_integer_misfire_grace_time(monkeypatch):
     shutdown_scheduler()
