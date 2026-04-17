@@ -11,10 +11,12 @@ Environment=REDIS_PORT=6379
 Environment=PYTHONUNBUFFERED=1
 Network=respondedorbot.network
 AutoUpdate=registry
+StopTimeout=600
 
 [Service]
 Restart=always
 TimeoutStartSec=60
+TimeoutStopSec=630
 
 [Install]
 WantedBy=default.target
