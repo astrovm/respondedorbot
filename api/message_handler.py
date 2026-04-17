@@ -286,6 +286,14 @@ class MessageRuntime:
     prepared_message: PreparedMessage
 
 
+@dataclass(frozen=True)
+class MessageIntent:
+    command: str
+    sanitized_message_text: str
+    reply_context_text: Optional[str]
+    should_respond: bool
+
+
 def _billing_is_available(deps: MessageHandlerDeps) -> bool:
     return bool(deps.credits_db_service.is_configured())
 
@@ -412,6 +420,49 @@ def _finalize_message_response(
         )
 
     return "ok"
+
+
+def _resolve_message_intent(
+    deps: MessageHandlerDeps,
+    *,
+    context: MessageContext,
+    runtime: MessageRuntime,
+    message: Dict[str, Any],
+) -> MessageIntent:
+    command, sanitized_message_text = deps.parse_command(
+        runtime.prepared_message.message_text,
+        runtime.bot_name,
+    )
+    reply_metadata = _load_reply_metadata(
+        deps,
+        redis_client=runtime.redis_client,
+        chat_id=context.chat_id,
+        message=message,
+    )
+    reply_context_text = deps.build_reply_context_text(message)
+    should_respond = deps.should_gordo_respond(
+        runtime.commands,
+        command,
+        sanitized_message_text,
+        message,
+        runtime.chat_config,
+        reply_metadata,
+    )
+    if (
+        command in ["/comando", "/command"]
+        and not sanitized_message_text
+        and "reply_to_message" in message
+    ):
+        sanitized_message_text = deps.extract_message_content(
+            cast(Dict[str, Any], message["reply_to_message"])
+        )[0]
+
+    return MessageIntent(
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        reply_context_text=reply_context_text,
+        should_respond=should_respond,
+    )
 
 
 def _billing_unavailable_command_response(
@@ -1608,45 +1659,23 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         ):
             return "ok"
 
-        command, sanitized_message_text = deps.parse_command(
-            runtime.prepared_message.message_text, runtime.bot_name
-        )
-        reply_metadata = _load_reply_metadata(
+        intent = _resolve_message_intent(
             deps,
-            redis_client=runtime.redis_client,
-            chat_id=context.chat_id,
+            context=context,
+            runtime=runtime,
             message=message,
         )
-        reply_context_text = deps.build_reply_context_text(message)
-
-        should_respond = deps.should_gordo_respond(
-            runtime.commands,
-            command,
-            sanitized_message_text,
-            message,
-            runtime.chat_config,
-            reply_metadata,
-        )
-        if not should_respond:
+        if not intent.should_respond:
             _store_user_message_if_present(
                 deps,
                 chat_id=context.chat_id,
                 message_id=context.message_id,
                 message=message,
                 message_text=runtime.prepared_message.message_text,
-                reply_context_text=reply_context_text,
+                reply_context_text=intent.reply_context_text,
                 redis_client=runtime.redis_client,
             )
             return "ok"
-
-        if (
-            command in ["/comando", "/command"]
-            and not sanitized_message_text
-            and "reply_to_message" in message
-        ):
-            sanitized_message_text = deps.extract_message_content(
-                cast(Dict[str, Any], message["reply_to_message"])
-            )[0]
 
         _save_replied_message_context(
             deps,
@@ -1659,8 +1688,8 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             _handle_known_command(
                 deps,
                 commands=runtime.commands,
-                command=command,
-                sanitized_message_text=sanitized_message_text,
+                command=intent.command,
+                sanitized_message_text=intent.sanitized_message_text,
                 message=message,
                 chat_id=context.chat_id,
                 chat_type=context.chat_type,
@@ -1668,7 +1697,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
                 numeric_chat_id=context.numeric_chat_id,
                 prepared_message=runtime.prepared_message,
                 billing_helper=runtime.billing_helper,
-                reply_context_text=reply_context_text,
+                reply_context_text=intent.reply_context_text,
                 user_identity=context.user_identity,
                 redis_client=runtime.redis_client,
                 timezone_offset=int(runtime.chat_config.get("timezone_offset", -3)),
@@ -1680,7 +1709,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             context=context,
             message=message,
             prepared_message=runtime.prepared_message,
-            reply_context_text=reply_context_text,
+            reply_context_text=intent.reply_context_text,
             redis_client=runtime.redis_client,
             response_msg=response_msg,
             response_markup=response_markup,
