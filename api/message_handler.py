@@ -266,8 +266,152 @@ class PreparedMessage:
     audio_duration_seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class MessageContext:
+    message_id: str
+    chat_id: str
+    chat_type: str
+    user_identity: str
+    user_id: Optional[int]
+    numeric_chat_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class MessageRuntime:
+    redis_client: Any
+    chat_config: Mapping[str, Any]
+    commands: Mapping[str, CommandTuple]
+    bot_name: str
+    billing_helper: AIMessageBilling
+    prepared_message: PreparedMessage
+
+
 def _billing_is_available(deps: MessageHandlerDeps) -> bool:
     return bool(deps.credits_db_service.is_configured())
+
+
+def _build_message_context(
+    message: Dict[str, Any], deps: MessageHandlerDeps
+) -> Optional[MessageContext]:
+    chat = cast(Dict[str, Any], message.get("chat", {}))
+    sender = cast(Mapping[str, Any], message.get("from", {}))
+    if not chat or chat.get("id") is None or not sender:
+        return None
+    chat_id = str(chat.get("id"))
+    return MessageContext(
+        message_id=str(message.get("message_id")),
+        chat_id=chat_id,
+        chat_type=str(chat.get("type", "")),
+        user_identity=format_user_identity(sender),
+        user_id=deps.extract_user_id(message),
+        numeric_chat_id=deps.extract_numeric_chat_id(chat_id),
+    )
+
+
+def _handle_prepared_message_early_response(
+    deps: MessageHandlerDeps,
+    *,
+    chat_id: str,
+    message_id: str,
+    prepared_message: PreparedMessage,
+) -> bool:
+    if not prepared_message.early_response:
+        return False
+    if prepared_message.early_response != "ok":
+        deps.send_msg(chat_id, prepared_message.early_response, message_id)
+    return True
+
+
+def _initialize_message_runtime(
+    deps: MessageHandlerDeps,
+    *,
+    context: MessageContext,
+    message: Dict[str, Any],
+) -> MessageRuntime:
+    redis_client = deps.config_redis()
+    chat_config = deps.get_chat_config(redis_client, context.chat_id)
+    commands = deps.initialize_commands()
+    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+    raw_message_text, _, _ = deps.extract_message_content(message)
+    command, _ = deps.parse_command(raw_message_text, bot_name)
+    auto_process_media = deps.should_auto_process_media(
+        commands,
+        command,
+        raw_message_text,
+        message,
+    )
+    billing_helper = _build_billing_helper(
+        deps,
+        chat_id=context.chat_id,
+        chat_type=context.chat_type,
+        user_id=context.user_id,
+        numeric_chat_id=context.numeric_chat_id,
+        command=command,
+        message=message,
+        redis_client=redis_client,
+        creditless_user_hourly_limit=int(
+            chat_config.get(
+                "creditless_user_hourly_limit",
+                chat_config.get("creditless_user_daily_limit", 0),
+            )
+        ),
+    )
+    prepared_message = _prepare_message_content(
+        message,
+        auto_process_media=auto_process_media,
+        deps=deps,
+        billing_helper=billing_helper,
+        redis_client=redis_client,
+    )
+    return MessageRuntime(
+        redis_client=redis_client,
+        chat_config=chat_config,
+        commands=commands,
+        bot_name=bot_name,
+        billing_helper=billing_helper,
+        prepared_message=prepared_message,
+    )
+
+
+def _finalize_message_response(
+    deps: MessageHandlerDeps,
+    *,
+    context: MessageContext,
+    message: Dict[str, Any],
+    prepared_message: PreparedMessage,
+    reply_context_text: Optional[str],
+    redis_client: Any,
+    response_msg: str,
+    response_markup: Optional[Dict[str, Any]],
+    response_uses_ai: bool,
+    response_command: Optional[str],
+) -> str:
+    if response_msg == "ok" and response_command is None and response_markup is None:
+        return "ok"
+
+    _store_user_message_if_present(
+        deps,
+        chat_id=context.chat_id,
+        message_id=context.message_id,
+        message=message,
+        message_text=prepared_message.message_text,
+        reply_context_text=reply_context_text,
+        redis_client=redis_client,
+    )
+
+    if response_msg:
+        _send_response_and_store_metadata(
+            deps,
+            chat_id=context.chat_id,
+            message_id=context.message_id,
+            response_msg=response_msg,
+            response_markup=response_markup,
+            response_command=response_command,
+            response_uses_ai=response_uses_ai,
+            redis_client=redis_client,
+        )
+
+    return "ok"
 
 
 def _billing_unavailable_command_response(
@@ -1433,102 +1577,65 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
     """Handle an incoming Telegram message."""
 
     try:
-        chat = cast(Dict[str, Any], message.get("chat", {}))
-        sender = cast(Mapping[str, Any], message.get("from", {}))
-        if not chat or chat.get("id") is None or not sender:
+        context = _build_message_context(message, deps)
+        if context is None:
             return "ok"
-        message_id = str(message.get("message_id"))
-        chat_id = str(chat.get("id"))
-        chat_type = str(chat.get("type", ""))
-        user_identity = format_user_identity(sender)
-
-        user_id = deps.extract_user_id(message)
-        numeric_chat_id = deps.extract_numeric_chat_id(chat_id)
 
         if isinstance(message.get("successful_payment"), Mapping):
             return deps.handle_successful_payment_message(message)
 
-        redis_client = deps.config_redis()
-        chat_config = deps.get_chat_config(redis_client, chat_id)
-
-        commands = deps.initialize_commands()
-        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-        raw_message_text, _, _ = deps.extract_message_content(message)
-        command, _ = deps.parse_command(raw_message_text, bot_name)
-        auto_process_media = deps.should_auto_process_media(
-            commands,
-            command,
-            raw_message_text,
-            message,
-        )
-
-        billing_helper = _build_billing_helper(
+        runtime = _initialize_message_runtime(
             deps,
-            chat_id=chat_id,
-            chat_type=chat_type,
-            user_id=user_id,
-            numeric_chat_id=numeric_chat_id,
-            command=command,
+            context=context,
             message=message,
-            redis_client=redis_client,
-            creditless_user_hourly_limit=int(
-                chat_config.get(
-                    "creditless_user_hourly_limit",
-                    chat_config.get("creditless_user_daily_limit", 0),
-                )
-            ),
         )
-        prepared_message = _prepare_message_content(
-            message,
-            auto_process_media=auto_process_media,
-            deps=deps,
-            billing_helper=billing_helper,
-            redis_client=redis_client,
-        )
-        if prepared_message.early_response:
-            if prepared_message.early_response != "ok":
-                deps.send_msg(chat_id, prepared_message.early_response, message_id)
+        if _handle_prepared_message_early_response(
+            deps,
+            chat_id=context.chat_id,
+            message_id=context.message_id,
+            prepared_message=runtime.prepared_message,
+        ):
             return "ok"
 
         if _handle_link_replacement(
             deps,
-            chat_config=chat_config,
+            chat_config=runtime.chat_config,
             message=message,
-            message_text=prepared_message.message_text,
-            chat_id=chat_id,
-            message_id=message_id,
-            redis_client=redis_client,
+            message_text=runtime.prepared_message.message_text,
+            chat_id=context.chat_id,
+            message_id=context.message_id,
+            redis_client=runtime.redis_client,
         ):
             return "ok"
 
         command, sanitized_message_text = deps.parse_command(
-            prepared_message.message_text, bot_name
+            runtime.prepared_message.message_text, runtime.bot_name
         )
         reply_metadata = _load_reply_metadata(
             deps,
-            redis_client=redis_client,
-            chat_id=chat_id,
+            redis_client=runtime.redis_client,
+            chat_id=context.chat_id,
             message=message,
         )
         reply_context_text = deps.build_reply_context_text(message)
 
         should_respond = deps.should_gordo_respond(
-            commands,
+            runtime.commands,
             command,
             sanitized_message_text,
             message,
-            chat_config,
+            runtime.chat_config,
             reply_metadata,
         )
         if not should_respond:
             _store_user_message_if_present(
                 deps,
-                chat_id=chat_id,
-                message_id=message_id,
+                chat_id=context.chat_id,
+                message_id=context.message_id,
                 message=message,
-                message_text=prepared_message.message_text,
+                message_text=runtime.prepared_message.message_text,
                 reply_context_text=reply_context_text,
-                redis_client=redis_client,
+                redis_client=runtime.redis_client,
             )
             return "ok"
 
@@ -1544,60 +1651,42 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         _save_replied_message_context(
             deps,
             message=message,
-            chat_id=chat_id,
-            redis_client=redis_client,
+            chat_id=context.chat_id,
+            redis_client=runtime.redis_client,
         )
 
         response_msg, response_markup, response_uses_ai, response_command = (
             _handle_known_command(
                 deps,
-                commands=commands,
+                commands=runtime.commands,
                 command=command,
                 sanitized_message_text=sanitized_message_text,
                 message=message,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                user_id=user_id,
-                numeric_chat_id=numeric_chat_id,
-                prepared_message=prepared_message,
-                billing_helper=billing_helper,
+                chat_id=context.chat_id,
+                chat_type=context.chat_type,
+                user_id=context.user_id,
+                numeric_chat_id=context.numeric_chat_id,
+                prepared_message=runtime.prepared_message,
+                billing_helper=runtime.billing_helper,
                 reply_context_text=reply_context_text,
-                user_identity=user_identity,
-                redis_client=redis_client,
-                timezone_offset=int(chat_config.get("timezone_offset", -3)),
+                user_identity=context.user_identity,
+                redis_client=runtime.redis_client,
+                timezone_offset=int(runtime.chat_config.get("timezone_offset", -3)),
             )
         )
 
-        if (
-            response_msg == "ok"
-            and response_command is None
-            and response_markup is None
-        ):
-            return "ok"
-
-        _store_user_message_if_present(
+        return _finalize_message_response(
             deps,
-            chat_id=chat_id,
-            message_id=message_id,
+            context=context,
             message=message,
-            message_text=prepared_message.message_text,
+            prepared_message=runtime.prepared_message,
             reply_context_text=reply_context_text,
-            redis_client=redis_client,
+            redis_client=runtime.redis_client,
+            response_msg=response_msg,
+            response_markup=response_markup,
+            response_uses_ai=response_uses_ai,
+            response_command=response_command,
         )
-
-        if response_msg:
-            _send_response_and_store_metadata(
-                deps,
-                chat_id=chat_id,
-                message_id=message_id,
-                response_msg=response_msg,
-                response_markup=response_markup,
-                response_command=response_command,
-                response_uses_ai=response_uses_ai,
-                redis_client=redis_client,
-            )
-
-        return "ok"
 
     except Exception as error:
         deps.admin_report(
