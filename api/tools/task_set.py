@@ -160,7 +160,7 @@ register_tool(
         "properties": {
             "text": {
                 "type": "string",
-                "description": "Literal future instruction the bot will execute later. Preserve original perspective, subject, and pronouns.",
+                "description": "Content-only future instruction the bot will execute later. Preserve perspective, subject, and pronouns, but exclude scheduling/time expressions that belong in delay_seconds, interval_seconds, or trigger_config.",
             },
             "delay_seconds": {
                 "type": "integer",
