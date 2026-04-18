@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Dict, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
 
@@ -24,6 +24,7 @@ class TaskExecutor:
         credits_db_service: Any,
         gen_random_fn: Callable[[str], str],
         build_insufficient_credits_message_fn: Callable[..., str],
+        estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
         billing_factory: Callable[..., AIMessageBilling] = AIMessageBilling,
     ) -> None:
         self._ask_ai = ask_ai
@@ -34,6 +35,7 @@ class TaskExecutor:
         self._build_insufficient_credits_message_fn = (
             build_insufficient_credits_message_fn
         )
+        self._estimate_ai_base_reserve_credits = estimate_ai_base_reserve_credits
         self._billing_factory = billing_factory
 
     def execute(self, task: Mapping[str, Any]) -> bool:
@@ -74,13 +76,20 @@ class TaskExecutor:
         response_meta: dict[str, Any] = {}
         is_fallback = False
 
-        reserve_meta, reserve_error = billing.reserve_ai_credits(
-            "task_ai",
-            1000,
-            metadata={"task_id": task_id, "chat_id": chat_id},
+        reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
+            messages=messages,
+            chat_id=chat_id,
+            chat_type="private",
+            enable_search=True,
+            user_id=user_id,
         )
-        if reserve_error:
-            print(f"task_scheduler: {task_id} no credits, skipping: {reserve_error}")
+        charge_meta, charge_error = billing.reserve_ai_credits(
+            "task_ai",
+            reserve_credits,
+            metadata={"task_id": task_id, "chat_id": chat_id, **reserve_meta},
+        )
+        if charge_error:
+            print(f"task_scheduler: {task_id} no credits, skipping: {charge_error}")
             return should_delete
 
         try:
@@ -100,17 +109,17 @@ class TaskExecutor:
                 print(f"task_scheduler: {task_id} completed successfully")
         except Exception as e:
             print(f"task_scheduler: {task_id} ask_ai failed: {e}")
-            billing.refund_reserved_ai_credits(reserve_meta, reason="task_error")
+            billing.refund_reserved_ai_credits(charge_meta, reason="task_error")
             self._admin_report(
                 f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
             )
         else:
             if is_fallback:
-                billing.refund_reserved_ai_credits(reserve_meta, reason="task_fallback")
+                billing.refund_reserved_ai_credits(charge_meta, reason="task_fallback")
             else:
                 segments = list(response_meta.get("billing_segments") or [])
                 billing.settle_reserved_ai_credits(
-                    reserve_meta,
+                    charge_meta,
                     segments,
                     reason="task_success",
                 )
@@ -126,6 +135,7 @@ def build_task_executor(
     credits_db_service: Any,
     gen_random_fn: Callable[[str], str],
     build_insufficient_credits_message_fn: Callable[..., str],
+    estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     billing_factory: Callable[..., AIMessageBilling] = AIMessageBilling,
 ) -> TaskExecutor:
     return TaskExecutor(
@@ -135,5 +145,6 @@ def build_task_executor(
         credits_db_service=credits_db_service,
         gen_random_fn=gen_random_fn,
         build_insufficient_credits_message_fn=build_insufficient_credits_message_fn,
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         billing_factory=billing_factory,
     )
