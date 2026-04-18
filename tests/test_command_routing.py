@@ -496,15 +496,12 @@ def test_select_random():
 
 
 def test_format_balance_command_private_includes_topup_hint():
-    from api.index import _format_balance_command
+    from api.ai_billing import BalanceFormatter
 
     credits_db_service = MagicMock()
     credits_db_service.get_balance.return_value = 420
-    text = _format_balance_command(
-        credits_db_service,
-        chat_type="private",
-        user_id=1,
-        chat_id=2,
+    text = BalanceFormatter(credits_db_service).format(
+        chat_type="private", user_id=1, chat_id=2
     )
 
     assert "tenés 42.0 créditos ia" in text
@@ -512,15 +509,12 @@ def test_format_balance_command_private_includes_topup_hint():
 
 
 def test_format_balance_command_group_includes_topup_and_transfer_hints():
-    from api.index import _format_balance_command
+    from api.ai_billing import BalanceFormatter
 
     credits_db_service = MagicMock()
     credits_db_service.get_balance.side_effect = [300, 1200]
-    text = _format_balance_command(
-        credits_db_service,
-        chat_type="group",
-        user_id=1,
-        chat_id=2,
+    text = BalanceFormatter(credits_db_service).format(
+        chat_type="group", user_id=1, chat_id=2
     )
 
     assert "lo tuyo: 30.0" in text

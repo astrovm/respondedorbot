@@ -171,6 +171,19 @@ def format_balance_command(
     )
 
 
+@dataclass(frozen=True)
+class BalanceFormatter:
+    credits_db_service: Any
+
+    def format(self, *, chat_type: str, user_id: int, chat_id: int) -> str:
+        return format_balance_command(
+            self.credits_db_service,
+            chat_type=chat_type,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+
+
 @dataclass
 class AIMessageBilling:
     """Charge/refund helper for a single handled message."""

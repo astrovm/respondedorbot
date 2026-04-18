@@ -68,6 +68,7 @@ class MessageStateDeps:
 @dataclass(frozen=True)
 class MessageAIDeps:
     ai_service: AIService
+    balance_formatter: Any
     ask_ai: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
@@ -76,7 +77,6 @@ class MessageAIDeps:
     maybe_grant_onboarding_credits: Callable[
         [Any, Callable[..., None], Optional[int]], None
     ]
-    format_balance_command: Callable[..., str]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
     handle_transcribe_with_message_result: Callable[
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
@@ -154,13 +154,13 @@ class MessageHandlerDeps:
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
     credits_db_service: Any
+    balance_formatter: Any
     is_group_chat_type: Callable[[Optional[str]], bool]
     extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
     extract_numeric_chat_id: Callable[[str], Optional[int]]
     maybe_grant_onboarding_credits: Callable[
         [Any, Callable[..., None], Optional[int]], None
     ]
-    format_balance_command: Callable[..., str]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
     handle_transcribe_with_message_result: Callable[
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
@@ -226,11 +226,11 @@ def build_message_handler_deps(
         build_insufficient_credits_message=ai.build_insufficient_credits_message,
         build_topup_keyboard=ai.build_topup_keyboard,
         credits_db_service=ai.credits_db_service,
+        balance_formatter=ai.balance_formatter,
         is_group_chat_type=routing.is_group_chat_type,
         extract_user_id=chat.extract_user_id,
         extract_numeric_chat_id=chat.extract_numeric_chat_id,
         maybe_grant_onboarding_credits=ai.maybe_grant_onboarding_credits,
-        format_balance_command=ai.format_balance_command,
         handle_transcribe_with_message=ai.handle_transcribe_with_message,
         handle_transcribe_with_message_result=ai.handle_transcribe_with_message_result,
         check_provider_available=ai.check_provider_available,
@@ -985,8 +985,7 @@ def _handle_balance_command(
         deps.maybe_grant_onboarding_credits(
             deps.credits_db_service, deps.admin_report, user_id
         )
-        response_msg = deps.format_balance_command(
-            deps.credits_db_service,
+        response_msg = deps.balance_formatter.format(
             chat_type=chat_type,
             user_id=user_id,
             chat_id=numeric_chat_id,

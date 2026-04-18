@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import describe_trigger, format_interval, schedule_task
+from api.tools.task_scheduler import (
+    describe_trigger,
+    format_interval,
+    get_scheduler_runtime_status,
+    schedule_task,
+)
 from api.services import credits_db
 
 _SPANISH_TO_ENGLISH_WEEKDAY = {
@@ -85,6 +90,12 @@ def _execute_task_set(
         )
     if not chat_id:
         return ToolResult(output="no se en que chat estoy")
+
+    runtime_status = get_scheduler_runtime_status()
+    if not runtime_status.get("ready"):
+        return ToolResult(
+            output=f"no se pudo crear la tarea: {runtime_status.get('reason', 'runtime unavailable')}"
+        )
 
     if user_id:
         try:
