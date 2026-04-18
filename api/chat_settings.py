@@ -45,6 +45,20 @@ def _build_service(
 
 
 _cached_service: Optional[Any] = None
+_cached_service_key: Optional[tuple[int, int, int]] = None
+
+
+def _service_cache_key(
+    *,
+    chat_config_db_service: Any = None,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
+) -> tuple[int, int, int]:
+    return (
+        id(chat_config_db_service),
+        id(admin_reporter),
+        id(log_event),
+    )
 
 
 def _get_cached_service(
@@ -53,19 +67,26 @@ def _get_cached_service(
     admin_reporter: Optional[AdminReporter] = None,
     log_event: Optional[ConfigLogger] = None,
 ):
-    global _cached_service
-    if _cached_service is None:
+    global _cached_service, _cached_service_key
+    cache_key = _service_cache_key(
+        chat_config_db_service=chat_config_db_service,
+        admin_reporter=admin_reporter,
+        log_event=log_event,
+    )
+    if _cached_service is None or _cached_service_key != cache_key:
         _cached_service = _build_service(
             chat_config_db_service=chat_config_db_service,
             admin_reporter=admin_reporter,
             log_event=log_event,
         )
+        _cached_service_key = cache_key
     return _cached_service
 
 
 def reset_chat_config_cache() -> None:
-    global _cached_service
+    global _cached_service, _cached_service_key
     _cached_service = None
+    _cached_service_key = None
 
 
 def get_chat_config(

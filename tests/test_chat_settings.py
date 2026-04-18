@@ -123,6 +123,31 @@ def test_get_chat_config_uses_defaults_when_postgres_is_unconfigured():
     redis_client.get.assert_not_called()
 
 
+def test_get_chat_config_respects_per_call_repository_override():
+    from api.chat_settings import get_chat_config as real_get_chat_config
+
+    redis_client = MagicMock(spec=redis.Redis)
+    repo_one = MagicMock()
+    repo_one.is_configured.return_value = True
+    repo_one.get_chat_config.return_value = {"link_mode": "reply"}
+
+    repo_two = MagicMock()
+    repo_two.is_configured.return_value = True
+    repo_two.get_chat_config.return_value = {"link_mode": "off"}
+
+    first = real_get_chat_config(
+        redis_client, "chat-a", chat_config_db_service=repo_one
+    )
+    second = real_get_chat_config(
+        redis_client, "chat-b", chat_config_db_service=repo_two
+    )
+
+    assert first["link_mode"] == "reply"
+    assert second["link_mode"] == "off"
+    repo_one.get_chat_config.assert_called_once_with("chat-a", CHAT_CONFIG_DEFAULTS)
+    repo_two.get_chat_config.assert_called_once_with("chat-b", CHAT_CONFIG_DEFAULTS)
+
+
 def test_is_chat_admin_uses_cache():
     redis_client = MagicMock(spec=redis.Redis)
 
