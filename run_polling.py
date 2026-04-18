@@ -79,6 +79,9 @@ def main() -> int:
                 "build_insufficient_credits_message_fn": (
                     index.build_insufficient_credits_message
                 ),
+                "estimate_ai_base_reserve_credits": (
+                    index.estimate_ai_base_reserve_credits
+                ),
             },
         )
         get_scheduler()
