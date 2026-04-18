@@ -63,6 +63,9 @@ def _ensure_runtime_deps() -> None:
                 "build_insufficient_credits_message_fn": (
                     _index.build_insufficient_credits_message
                 ),
+                "estimate_ai_base_reserve_credits": (
+                    _index.estimate_ai_base_reserve_credits
+                ),
             },
         )
     except Exception as error:

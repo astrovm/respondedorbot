@@ -16,6 +16,7 @@ def _build_executor(
     billing = MagicMock()
     billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
     billing_factory = MagicMock(return_value=billing)
+    estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
     executor = TaskExecutor(
         ask_ai=ask_ai,
@@ -24,6 +25,7 @@ def _build_executor(
         credits_db_service=MagicMock(),
         gen_random_fn=MagicMock(),
         build_insufficient_credits_message_fn=MagicMock(),
+        estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         billing_factory=billing_factory,
     )
 
@@ -104,6 +106,7 @@ class TestTaskExecutor:
         billing = MagicMock()
         billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
         billing_factory = MagicMock(return_value=billing)
+        estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
         executor = TaskExecutor(
             ask_ai=ask_ai,
@@ -112,6 +115,7 @@ class TestTaskExecutor:
             credits_db_service=MagicMock(),
             gen_random_fn=MagicMock(),
             build_insufficient_credits_message_fn=MagicMock(),
+            estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
             billing_factory=billing_factory,
         )
 

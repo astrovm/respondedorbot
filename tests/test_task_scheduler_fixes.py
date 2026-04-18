@@ -70,6 +70,7 @@ def _build_executor_for_tests(
         credits_db_service=credits_db_service,
         gen_random_fn=MagicMock(),
         build_insufficient_credits_message_fn=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(10, {})),
         billing_factory=billing_factory,
     )
 
@@ -552,6 +553,7 @@ class TestFireTaskAIFailure:
             credits_db_service=credits,
             gen_random_fn=MagicMock(),
             build_insufficient_credits_message_fn=MagicMock(),
+            estimate_ai_base_reserve_credits=MagicMock(return_value=(10, {})),
             billing_factory=billing_factory,
         )
         set_task_executor(executor)
