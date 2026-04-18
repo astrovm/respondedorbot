@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from api.tools.task_scheduler import (
     TASK_REDIS_PREFIX,
     _strip_response_marker,
+    get_scheduler_runtime_status,
     get_scheduler,
     list_tasks,
     schedule_task,
@@ -897,6 +898,44 @@ class TestScheduleTaskStoresRunDate:
 
         assert task_id is None
         scheduler.add_job.assert_not_called()
+
+
+class TestSchedulerRuntimeStatus:
+    @patch("api.tools.task_scheduler._get_task_executor")
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_reports_storage_unavailable(self, mock_sched, mock_redis, mock_executor):
+        mock_sched.return_value = MagicMock()
+        mock_redis.return_value = None
+        mock_executor.return_value = MagicMock()
+
+        status = get_scheduler_runtime_status()
+
+        assert status == {
+            "ready": False,
+            "reason": "storage unavailable",
+            "scheduler": True,
+            "redis": False,
+            "executor": True,
+        }
+
+    @patch("api.tools.task_scheduler._get_task_executor")
+    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tools.task_scheduler.get_scheduler")
+    def test_reports_ready(self, mock_sched, mock_redis, mock_executor):
+        mock_sched.return_value = MagicMock()
+        mock_redis.return_value = MagicMock()
+        mock_executor.return_value = MagicMock()
+
+        status = get_scheduler_runtime_status()
+
+        assert status == {
+            "ready": True,
+            "reason": "",
+            "scheduler": True,
+            "redis": True,
+            "executor": True,
+        }
 
 
 def test_get_scheduler_uses_integer_misfire_grace_time(monkeypatch):

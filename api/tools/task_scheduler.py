@@ -43,6 +43,15 @@ def init_scheduler(
     global _redis_client, _task_executor
     _redis_client = redis_factory()
     _task_executor = build_task_executor(**task_executor_deps)
+    status = get_scheduler_runtime_status()
+    print(
+        "task_scheduler: runtime"
+        f" ready={status['ready']}"
+        f" scheduler={status['scheduler']}"
+        f" redis={status['redis']}"
+        f" executor={status['executor']}"
+        f" reason={status['reason'] or 'ok'}"
+    )
 
 
 def _ensure_runtime_deps() -> None:
@@ -85,6 +94,47 @@ def set_task_executor(executor: Any) -> None:
 def set_redis_client(client: Any) -> None:
     global _redis_client
     _redis_client = client
+
+
+def get_scheduler_runtime_status() -> Dict[str, Any]:
+    scheduler = get_scheduler()
+    redis_client = _get_redis()
+    executor = _get_task_executor()
+
+    if scheduler is None:
+        return {
+            "ready": False,
+            "reason": "scheduler unavailable",
+            "scheduler": False,
+            "redis": redis_client is not None,
+            "executor": executor is not None,
+        }
+
+    if redis_client is None:
+        return {
+            "ready": False,
+            "reason": "storage unavailable",
+            "scheduler": True,
+            "redis": False,
+            "executor": executor is not None,
+        }
+
+    if executor is None:
+        return {
+            "ready": False,
+            "reason": "task executor unavailable",
+            "scheduler": True,
+            "redis": True,
+            "executor": False,
+        }
+
+    return {
+        "ready": True,
+        "reason": "",
+        "scheduler": True,
+        "redis": True,
+        "executor": True,
+    }
 
 
 def format_interval(seconds: int, prefix: str = "cada ") -> str:

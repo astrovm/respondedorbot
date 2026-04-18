@@ -93,8 +93,10 @@ def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
         config_redis=lambda: redis_client,
         send_msg=mock_send_msg,
         credits_db_service=mock_credits,
-        format_balance_command=lambda _svc, **kw: (
-            "tenés 42.0 créditos ia\nsi querés cargar más mandale /topup"
+        balance_formatter=MagicMock(
+            format=MagicMock(
+                return_value="tenés 42.0 créditos ia\nsi querés cargar más mandale /topup"
+            )
         ),
     )
     result = handle_msg(message, deps)
@@ -105,7 +107,7 @@ def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
 
 
 def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
-    from api import index as _api_index
+    from api.ai_billing import BalanceFormatter
     from api.message_handler import handle_msg
 
     message = {
@@ -129,13 +131,49 @@ def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
         send_msg=mock_send_msg,
         credits_db_service=mock_credits,
         admin_report=mock_admin_report,
-        format_balance_command=_api_index._format_balance_command,
+        balance_formatter=BalanceFormatter(mock_credits),
     )
     result = handle_msg(message, deps)
 
     assert result == "ok"
     assert "42.0" in mock_send_msg.call_args[0][1]
     mock_admin_report.assert_not_called()
+
+
+def test_handle_msg_balance_private_uses_balance_formatter_object(monkeypatch):
+    from api.message_handler import handle_msg
+
+    message = {
+        "message_id": "11",
+        "chat": {"id": "101", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/balance",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    mock_send_msg = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+    mock_formatter = MagicMock()
+    mock_formatter.format.return_value = "tenés 42.0 créditos ia"
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        credits_db_service=mock_credits,
+        balance_formatter=mock_formatter,
+    )
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    mock_formatter.format.assert_called_once_with(
+        chat_type="private",
+        user_id=55,
+        chat_id=101,
+    )
+    assert "42.0" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_transfer_group_moves_credits():
@@ -1972,13 +2010,13 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         ),
         "build_topup_keyboard": MagicMock(return_value={}),
         "credits_db_service": mock_credits,
+        "balance_formatter": MagicMock(format=MagicMock(return_value="balance info")),
         "is_group_chat_type": lambda chat_type: chat_type in {"group", "supergroup"},
         "extract_user_id": lambda message: message.get("from", {}).get("id"),
         "extract_numeric_chat_id": lambda chat_id: (
             int(chat_id) if chat_id.isdigit() else None
         ),
         "maybe_grant_onboarding_credits": MagicMock(),
-        "format_balance_command": MagicMock(return_value="balance info"),
         "handle_transcribe_with_message": MagicMock(return_value="transcribed"),
         "handle_transcribe_with_message_result": MagicMock(
             return_value=("transcribed", [])
@@ -2071,6 +2109,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
         ),
         ai=MessageAIDeps(
             ai_service=ai_service,
+            balance_formatter=flat_defaults["balance_formatter"],
             ask_ai=flat_defaults["ask_ai"],
             gen_random=flat_defaults["gen_random"],
             build_insufficient_credits_message=flat_defaults[
@@ -2081,7 +2120,6 @@ def _build_grouped_message_handler_deps(flat_defaults):
             maybe_grant_onboarding_credits=flat_defaults[
                 "maybe_grant_onboarding_credits"
             ],
-            format_balance_command=flat_defaults["format_balance_command"],
             handle_transcribe_with_message=flat_defaults[
                 "handle_transcribe_with_message"
             ],
@@ -2191,8 +2229,8 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             build_insufficient_credits_message=MagicMock(),
             build_topup_keyboard=MagicMock(),
             credits_db_service=credits,
+            balance_formatter=MagicMock(),
             maybe_grant_onboarding_credits=MagicMock(),
-            format_balance_command=MagicMock(),
             handle_transcribe_with_message=MagicMock(),
             handle_transcribe_with_message_result=MagicMock(),
             check_provider_available=MagicMock(),

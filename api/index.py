@@ -82,11 +82,11 @@ from api.config import (
     load_bot_config as _config_load_bot_config,
 )
 from api.ai_billing import (
+    BalanceFormatter,
     build_insufficient_credits_message as _billing_build_insufficient_credits_message,
     build_topup_keyboard as _billing_build_topup_keyboard,
     extract_numeric_chat_id as _billing_extract_numeric_chat_id,
     extract_user_id as _billing_extract_user_id,
-    format_balance_command as _billing_format_balance_command,
     get_ai_billing_pack as _billing_get_ai_billing_pack,
     get_ai_billing_packs as _billing_get_ai_billing_packs,
     get_ai_onboarding_credits as _billing_get_ai_onboarding_credits,
@@ -4337,35 +4337,12 @@ _extract_numeric_chat_id = _billing_extract_numeric_chat_id
 _extract_user_id = _billing_extract_user_id
 
 
-# Keep a small internal adapter around for the balance formatter which expects
-# an object with a get_balance method.
 def _fetch_balance(scope_type: Literal["user", "chat"], scope_id: int) -> int:
     return credits_db_service.get_balance(scope_type, int(scope_id))
 
 
-class _BalanceServiceAdapter:
-    @staticmethod
-    def get_balance(scope_type: str, scope_id: int) -> int:
-        return _fetch_balance(scope_type, scope_id)
-
-
 def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
     _billing_maybe_grant_onboarding_credits(credits_db_service, admin_report, user_id)
-
-
-def _format_balance_command(
-    credits_db_service: Any,
-    *,
-    chat_type: str,
-    user_id: int,
-    chat_id: int,
-) -> str:
-    return _billing_format_balance_command(
-        credits_db_service,
-        chat_type=chat_type,
-        user_id=user_id,
-        chat_id=chat_id,
-    )
 
 
 def _send_stars_invoice(
@@ -5815,6 +5792,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         ),
         ai=MessageAIDeps(
             ai_service=ai_svc,
+            balance_formatter=BalanceFormatter(credits_db_service),
             ask_ai=ask_ai,
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
@@ -5823,7 +5801,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             maybe_grant_onboarding_credits=lambda _svc, _rep, uid: (
                 _maybe_grant_onboarding_credits(uid)
             ),
-            format_balance_command=_format_balance_command,
             handle_transcribe_with_message=handle_transcribe_with_message,
             handle_transcribe_with_message_result=handle_transcribe_with_message_result,
             check_provider_available=check_provider_available,
