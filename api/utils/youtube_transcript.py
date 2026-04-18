@@ -63,7 +63,8 @@ def fetch_youtube_transcript(
         languages = ["en", "es"]
 
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.list(video_id)
 
         try:
             transcript = transcript_list.find_transcript(languages)
@@ -82,7 +83,7 @@ def fetch_youtube_transcript(
                         return None, "no transcript found"
 
         fetched_transcript = transcript.fetch()
-        return fetched_transcript, None
+        return fetched_transcript.to_raw_data(), None
 
     except VideoUnavailable:
         return None, "video unavailable"
