@@ -4353,9 +4353,18 @@ def _maybe_grant_onboarding_credits(user_id: Optional[int]) -> None:
     _billing_maybe_grant_onboarding_credits(credits_db_service, admin_report, user_id)
 
 
-def _format_balance_command(chat_type: str, user_id: int, chat_id: int) -> str:
+def _format_balance_command(
+    credits_db_service: Any,
+    *,
+    chat_type: str,
+    user_id: int,
+    chat_id: int,
+) -> str:
     return _billing_format_balance_command(
-        _BalanceServiceAdapter(), chat_type=chat_type, user_id=user_id, chat_id=chat_id
+        credits_db_service,
+        chat_type=chat_type,
+        user_id=user_id,
+        chat_id=chat_id,
     )
 
 
