@@ -104,6 +104,40 @@ def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
     assert "/topup" in mock_send_msg.call_args[0][1]
 
 
+def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
+    from api import index as _api_index
+    from api.message_handler import handle_msg
+
+    message = {
+        "message_id": "11",
+        "chat": {"id": "101", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/balance",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    mock_send_msg = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+    mock_credits.get_balance.return_value = 420
+    mock_admin_report = MagicMock()
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        credits_db_service=mock_credits,
+        admin_report=mock_admin_report,
+        format_balance_command=_api_index._format_balance_command,
+    )
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    assert "42.0" in mock_send_msg.call_args[0][1]
+    mock_admin_report.assert_not_called()
+
+
 def test_handle_msg_transfer_group_moves_credits():
     from api.message_handler import handle_msg
 
