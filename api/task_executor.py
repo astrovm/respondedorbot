@@ -78,10 +78,6 @@ class TaskExecutor:
 
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
             messages=messages,
-            chat_id=chat_id,
-            chat_type="private",
-            enable_search=True,
-            user_id=user_id,
         )
         charge_meta, charge_error = billing.reserve_ai_credits(
             "task_ai",
