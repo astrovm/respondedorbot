@@ -37,7 +37,8 @@ def load_chat_config_from_redis(
     raw = redis_client.get(f"chat_config:{chat_id}")
     raw_text = decode_redis_value(raw)
     log_event(
-        "Chat config raw value fetched", {"chat_id": chat_id, "raw_value": raw_text}
+        "Chat config raw value fetched",
+        {"chat_id": chat_id, "raw_value": raw_text[:200] if raw_text else None},
     )
 
     if raw_text:
@@ -66,10 +67,17 @@ class ChatConfigService:
         self._repo = repository
         self._admin_reporter = admin_reporter
         self._log_event = log_event
+        self._cache: Dict[str, Dict[str, Any]] = {}
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
     def get_chat_config(
         self, redis_client: redis.Redis, chat_id: str
     ) -> Dict[str, Any]:
+        if chat_id in self._cache:
+            return self._cache[chat_id]
+
         config = dict(CHAT_CONFIG_DEFAULTS)
         try:
             self._log_event("Loading chat config", {"chat_id": chat_id})
@@ -82,6 +90,7 @@ class ChatConfigService:
 
             pg_config = self._repo.get_chat_config(chat_id, CHAT_CONFIG_DEFAULTS)
             if isinstance(pg_config, dict):
+                self._cache[chat_id] = pg_config
                 return pg_config
 
             redis_config = load_chat_config_from_redis(
@@ -103,6 +112,7 @@ class ChatConfigService:
                         "Migrated chat config from Redis to Postgres",
                         {"chat_id": chat_id, "config": redis_config},
                     )
+            self._cache[chat_id] = redis_config
             return redis_config
         except Exception as error:
             self._admin_reporter(
@@ -140,6 +150,7 @@ class ChatConfigService:
                 {"chat_id": chat_id, "updates": updates},
             )
 
+        self._cache[chat_id] = config
         return config
 
 
