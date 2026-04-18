@@ -100,26 +100,30 @@ class TestFormatTranscriptForContext:
 class TestFetchYouTubeTranscript:
     @patch("api.utils.youtube_transcript.YouTubeTranscriptApi")
     def test_successful_fetch(self, mock_yta):
+        mock_yta_instance = MagicMock()
+        mock_yta.return_value = mock_yta_instance
         mock_transcript_list = MagicMock()
         mock_transcript = MagicMock()
-        mock_transcript.fetch.return_value = [
+        mock_transcript.fetch.return_value.to_raw_data.return_value = [
             {"start": 0.0, "text": "Hello world"},
             {"start": 5.0, "text": "Test transcript"},
         ]
         mock_transcript_list.find_transcript.return_value = mock_transcript
-        mock_yta.list_transcripts.return_value = mock_transcript_list
+        mock_yta_instance.list.return_value = mock_transcript_list
 
         transcript, error = fetch_youtube_transcript("dQw4w9WgXcQ")
 
         assert transcript is not None
         assert len(transcript) == 2
         assert error is None
-        mock_yta.list_transcripts.assert_called_once_with("dQw4w9WgXcQ")
+        mock_yta_instance.list.assert_called_once_with("dQw4w9WgXcQ")
 
     @patch("api.utils.youtube_transcript.YouTubeTranscriptApi")
     def test_no_transcript_found(self, mock_yta):
         from youtube_transcript_api._errors import NoTranscriptFound
 
+        mock_yta_instance = MagicMock()
+        mock_yta.return_value = mock_yta_instance
         mock_list = MagicMock()
         mock_list.find_transcript.side_effect = NoTranscriptFound(
             "dQw4w9WgXcQ",
@@ -131,7 +135,7 @@ class TestFetchYouTubeTranscript:
             ["en", "es"],
             mock_list,
         )
-        mock_yta.list_transcripts.return_value = mock_list
+        mock_yta_instance.list.return_value = mock_list
 
         transcript, error = fetch_youtube_transcript("dQw4w9WgXcQ")
 
@@ -142,7 +146,9 @@ class TestFetchYouTubeTranscript:
     def test_video_unavailable(self, mock_yta):
         from youtube_transcript_api._errors import VideoUnavailable
 
-        mock_yta.list_transcripts.side_effect = VideoUnavailable("Video not found")
+        mock_yta_instance = MagicMock()
+        mock_yta.return_value = mock_yta_instance
+        mock_yta_instance.list.side_effect = VideoUnavailable("Video not found")
 
         transcript, error = fetch_youtube_transcript("invalid_video_id")
 

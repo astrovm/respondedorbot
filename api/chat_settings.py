@@ -44,6 +44,30 @@ def _build_service(
     )
 
 
+_cached_service: Optional[Any] = None
+
+
+def _get_cached_service(
+    *,
+    chat_config_db_service: Any = None,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
+):
+    global _cached_service
+    if _cached_service is None:
+        _cached_service = _build_service(
+            chat_config_db_service=chat_config_db_service,
+            admin_reporter=admin_reporter,
+            log_event=log_event,
+        )
+    return _cached_service
+
+
+def reset_chat_config_cache() -> None:
+    global _cached_service
+    _cached_service = None
+
+
 def get_chat_config(
     redis_client: redis.Redis,
     chat_id: str,
@@ -58,7 +82,7 @@ def get_chat_config(
     signature while the implementation is moved into the service.
     """
 
-    service = _build_service(
+    service = _get_cached_service(
         chat_config_db_service=chat_config_db_service,
         admin_reporter=admin_reporter,
         log_event=log_event,
@@ -75,7 +99,7 @@ def set_chat_config(
     log_event: Optional[ConfigLogger] = None,
     **updates: Any,
 ) -> Dict[str, Any]:
-    service = _build_service(
+    service = _get_cached_service(
         chat_config_db_service=chat_config_db_service,
         admin_reporter=admin_reporter,
         log_event=log_event,
