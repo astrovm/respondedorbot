@@ -375,7 +375,7 @@ def schedule_task(
         "trigger_config": trigger_config,
         "timezone_offset": _coerce_timezone_offset(timezone_offset),
     }
-    ttl = 86400 * 90 if is_recurring else 86400 * 30
+    ttl = 86400 * 3650
     try:
         redis_client.setex(redis_key, ttl, json.dumps(data))
     except Exception as e:
