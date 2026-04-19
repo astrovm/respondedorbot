@@ -139,7 +139,7 @@ class TestTaskSetTool:
     def test_delay_too_long(self):
         result = execute_tool(
             "task_set",
-            {"text": "algo", "delay_seconds": 86400 * 31},
+            {"text": "algo", "delay_seconds": 86400 * 3651},
             {"chat_id": "123"},
         )
         assert "maximo" in result.output.lower()
