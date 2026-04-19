@@ -109,8 +109,8 @@ def _execute_task_set(
     if delay_seconds is not None:
         if not isinstance(delay_seconds, int) or delay_seconds < 1:
             return ToolResult(output="delay_seconds debe ser un entero positivo")
-        if delay_seconds > 86400 * 30:
-            return ToolResult(output="el maximo es 30 dias")
+        if delay_seconds > 86400 * 3650:
+            return ToolResult(output="el maximo es 10 años")
 
     if interval_seconds is not None:
         if not isinstance(interval_seconds, int) or interval_seconds < 300:
@@ -155,7 +155,7 @@ def _execute_task_set(
     elif interval_seconds:
         desc = format_interval(interval_seconds)
     else:
-        desc = format_interval(delay_seconds, "en ")
+        desc = format_interval(delay_seconds, "en ")  # type: ignore[arg-type]
 
     return ToolResult(
         output=f"listo, tarea programada {desc}: {text}",
@@ -175,7 +175,7 @@ register_tool(
             },
             "delay_seconds": {
                 "type": "integer",
-                "description": "Delay in seconds for one-shot task. 60=1min, 3600=1h, 86400=1d. Max 2592000 (30d).",
+                "description": "Delay in seconds for one-shot task. 60=1min, 3600=1h, 86400=1d. Max 315360000 (10y).",
             },
             "interval_seconds": {
                 "type": "integer",
