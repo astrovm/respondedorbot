@@ -2945,7 +2945,7 @@ def ask_ai(
             summary, summary_cost = _compact_conversation(dropped_text)
             if summary:
                 messages = [
-                    {"role": "system", "content": summary}
+                    {"role": "user", "content": f"[resumen del contexto anterior: {summary}]"}
                 ] + messages[-COMPACTION_KEEP:]
                 if summary_cost > 0:
                     _append_billing_segment(response_meta, _make_summary_result(summary_cost))
