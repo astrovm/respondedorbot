@@ -9,7 +9,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone, UTC
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.task_executor import (
     _strip_response_marker as _task_executor_strip_response_marker,
