@@ -1398,7 +1398,6 @@ def _handle_non_ai_command(
         result = summarize_conversation(
             chat_id=chat_id,
             redis_client=redis_client,
-            ask_ai_fn=deps.ask_ai,
             num_messages=num_messages,
             custom_instruction=custom_instruction,
         )

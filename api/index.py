@@ -231,6 +231,7 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
+SUMMARY_MODEL = "google/gemini-2.5-flash-lite-preview"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
@@ -2563,7 +2564,6 @@ def get_stock_prices(msg_text: str) -> str:
 def summarize_conversation(
     chat_id: str,
     redis_client: Any,
-    ask_ai_fn: Callable,
     num_messages: int = 50,
     custom_instruction: Optional[str] = None,
 ) -> str:
@@ -2588,22 +2588,15 @@ def summarize_conversation(
             formatted.append(f"{sender}: {content}")
 
     instruction = custom_instruction or "resumí esta conversación en español, capturando los puntos clave, temas discutidos y conclusiones. sé conciso."
-    prompt = f"{instruction}\n\nConversación:\n" + "\n".join(formatted)
+    messages = [
+        {"role": "system", "content": "sos un asistente que resume conversaciones de telegram."},
+        {"role": "user", "content": f"{instruction}\n\nConversación:\n" + "\n".join(formatted)},
+    ]
 
-    messages = [{"role": "user", "content": prompt}]
-    response_meta: dict = {}
-    try:
-        response = ask_ai_fn(
-            messages,
-            response_meta=response_meta,
-            enable_web_search=False,
-            chat_id=chat_id,
-        )
-        if response.startswith("[[AI_FALLBACK]]"):
-            return "no pude resumir la conversación"
-        return response
-    except Exception:
-        return "error al resumir la conversación"
+    response = _call_summary_model(messages)
+    if not response:
+        return "no pude resumir la conversación"
+    return response
 
 
 def get_instance_name() -> str:
@@ -3874,6 +3867,23 @@ def _get_openrouter_ai_response_result(
         extra_tools=extra_tools,
         tool_context=tool_context,
     )
+
+
+def _call_summary_model(messages: List[Dict[str, Any]]) -> Optional[str]:
+    client = _get_openrouter_client()
+    if client is None:
+        return None
+    try:
+        resp = client.chat.completions.create(
+            model=SUMMARY_MODEL,
+            messages=messages,
+            max_tokens=512,
+        )
+        if resp and resp.choices and resp.choices[0].message:
+            return str(resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"summary model error: {e}")
+    return None
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
