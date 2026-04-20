@@ -232,6 +232,7 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
+SUMMARY_FALLBACK_MODEL = "minimax/minimax-m2.5:free"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
@@ -3848,16 +3849,17 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Optional[str]:
     client = _get_openrouter_client()
     if client is None:
         return None
-    try:
-        resp = client.chat.completions.create(
-            model=SUMMARY_MODEL,
-            messages=messages,
-            max_tokens=512,
-        )
-        if resp and resp.choices and resp.choices[0].message:
-            return str(resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        print(f"summary model error: {e}")
+    for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=512,
+            )
+            if resp and resp.choices and resp.choices[0].message:
+                return str(resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            print(f"summary model {model} error: {e}")
     return None
 
 
