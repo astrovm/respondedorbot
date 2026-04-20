@@ -156,7 +156,7 @@ def fetch_chat_messages_for_compaction(
 ) -> List[Dict[str, Any]]:
     try:
         _ensure_search_index(redis_client)
-        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} *"
+        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}}"
         raw = redis_client.execute_command(
             "FT.SEARCH",
             CHAT_SEARCH_INDEX,
