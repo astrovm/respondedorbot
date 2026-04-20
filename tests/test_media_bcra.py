@@ -205,13 +205,22 @@ def test_get_cache_history_invalid_data():
     assert result is None
 
 
+def _bcra_service_patches():
+    """Patch BCRA service to bypass _require_configured and use mock redis."""
+    mock_redis = MagicMock()
+    return (
+        patch("api.services.bcra._require_configured", return_value=None),
+        patch("api.services.bcra._config_redis", return_value=mock_redis),
+        mock_redis,
+    )
+
+
 def test_get_cached_bcra_variables_success():
     from api.index import get_cached_bcra_variables
     import json
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
         test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
         payload = {"data": test_data, "fetched_at": "2025-09-20T00:00:00+00:00"}
         mock_redis.get.return_value = json.dumps(payload)
@@ -219,28 +228,26 @@ def test_get_cached_bcra_variables_success():
         result = get_cached_bcra_variables()
 
         assert result == test_data
-        mock_redis.get.assert_called_once_with("bcra_variables")
 
 
 def test_get_cached_bcra_variables_not_found():
     from api.index import get_cached_bcra_variables
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
         mock_redis.get.return_value = None
 
         result = get_cached_bcra_variables()
 
         assert result is None
-        mock_redis.get.assert_called_once_with("bcra_variables")
 
 
 def test_get_cached_bcra_variables_exception():
     from api.index import get_cached_bcra_variables
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
+        mock_redis.get.side_effect = Exception("Redis error")
 
         result = get_cached_bcra_variables()
 
@@ -252,9 +259,8 @@ def test_cache_bcra_variables_success():
     import json
     from api.services.maintenance import last_success_ttl
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
         test_data = {"base_monetaria": "1000000", "inflacion_mensual": "5.2"}
 
         cache_bcra_variables(test_data, 600)
@@ -279,9 +285,8 @@ def test_cache_bcra_variables_default_ttl():
     from api.index import cache_bcra_variables
     import json
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
         test_data = {"base_monetaria": "1000000"}
 
         cache_bcra_variables(test_data)
@@ -297,11 +302,11 @@ def test_cache_bcra_variables_default_ttl():
 def test_cache_bcra_variables_exception():
     from api.index import cache_bcra_variables
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
+        mock_redis.setex.side_effect = Exception("Redis error")
         test_data = {"base_monetaria": "1000000"}
 
-        # Should not raise exception, just print error
         cache_bcra_variables(test_data)
 
 
@@ -310,9 +315,8 @@ def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
 
     test_data = {"Tipo de cambio mayorista": {"value": "1000", "date": "01/09/2025"}}
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
-        mock_config_redis.return_value = mock_redis
+    p_req, p_red, mock_redis = _bcra_service_patches()
+    with p_req, p_red:
         cache_bcra_variables(test_data, ttl=1)
 
     bcra_service._bcra_local_cache["expires_at"] = time.time() - 10

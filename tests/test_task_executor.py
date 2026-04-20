@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from api.task_executor import TaskExecutor
+from api.ai_pipeline import INSTRUCCIONES_BASE
 
 
 def _build_executor(
@@ -55,7 +56,7 @@ class TestTaskExecutor:
         send_msg.assert_called_once_with("123", "astro, tarea programada: hola")
         billing.settle_reserved_ai_credits.assert_called_once()
 
-    def test_passes_stored_task_text_as_is(self):
+    def test_passes_stored_task_text_with_formatting_instructions(self):
         executor, billing, ask_ai, send_msg = _build_executor(
             ask_ai_return_value="hola"
         )
@@ -74,7 +75,8 @@ class TestTaskExecutor:
 
         ask_ai.assert_called_once()
         sent_prompt = ask_ai.call_args.args[0][0]["content"]
-        assert sent_prompt == "decime cuanta aura farmeaste hoy"
+        assert sent_prompt.startswith("decime cuanta aura farmeaste hoy")
+        assert "INSTRUCCIONES:" in sent_prompt
 
     def test_refunds_reserved_credits_on_fallback(self):
         executor, billing, ask_ai, send_msg = _build_executor(
