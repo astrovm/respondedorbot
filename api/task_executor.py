@@ -5,16 +5,30 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
+from api.ai_pipeline import (
+    INSTRUCCIONES_BASE,
+    clean_duplicate_response,
+    remove_gordo_prefix,
+)
 
 _FALLBACK_MARKER = "[[AI_FALLBACK]]"
 _MAX_FALLBACK_RETRIES = 1
 _MAX_EMPTY_RETRIES = 1
+
+_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(INSTRUCCIONES_BASE)
 
 
 def _strip_response_marker(response: str) -> str:
     if response.startswith(_FALLBACK_MARKER):
         return response[len(_FALLBACK_MARKER) :].lstrip()
     return response
+
+
+def _clean_task_response(response: str) -> str:
+    """Apply the same cleanup pipeline as handle_ai_response for task output."""
+    response = remove_gordo_prefix(response)
+    response = clean_duplicate_response(response)
+    return response.strip()
 
 
 class TaskExecutor:
@@ -75,7 +89,7 @@ class TaskExecutor:
             message=task_message,
         )
 
-        messages = [{"role": "user", "content": text}]
+        messages = [{"role": "user", "content": text + _FORMATTING_INSTRUCTIONS}]
         response_meta: dict[str, Any] = {}
 
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
@@ -134,6 +148,7 @@ class TaskExecutor:
                     continue
 
                 response = _strip_response_marker(response)
+                response = _clean_task_response(response)
                 self._send_msg(chat_id, f"{display}, tarea programada: {response}")
                 print(f"task_scheduler: {task_id} completed successfully")
 

@@ -122,6 +122,7 @@ from api.tools.task_scheduler import (
     format_task_summary,
 )
 from api.ai_pipeline import (
+    INSTRUCCIONES_BASE,
     handle_ai_response as _ai_handle_response,
 )
 from api.chat_settings import (
@@ -4272,14 +4273,7 @@ def build_ai_messages(
     if link_context:
         context_parts.extend(["", link_context])
 
-    instructions = [
-        "",
-        "INSTRUCCIONES:",
-        "- mantené el personaje del gordo",
-        "- usá lenguaje coloquial argentino",
-        "- respondé en minúsculas, sin emojis, sin punto final",
-        "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
-    ]
+    instructions = [""] + INSTRUCCIONES_BASE[:]
     if enable_web_search:
         instructions.append("- si no estás seguro de algo podes buscarlo en internet")
 
