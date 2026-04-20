@@ -2355,6 +2355,86 @@ def test_resolve_message_intent_uses_reply_text_for_command_without_params():
     assert intent.should_respond is True
 
 
+def test_handle_non_ai_command_summary_builds_valid_prepared_message_and_tuple():
+    from api.message_handler import _handle_non_ai_command
+
+    deps = MagicMock()
+    commands = {"/resumen": (MagicMock(), False, True)}
+
+    with patch(
+        "api.message_handler._run_ai_flow",
+        return_value=("resumen listo", True),
+    ) as run_ai_flow:
+        response = _handle_non_ai_command(
+            deps,
+            command="/resumen",
+            commands=commands,
+            sanitized_message_text="focus en crypto",
+            message={"message_id": "10"},
+            chat_id="123",
+            redis_client=MagicMock(),
+            billing_helper=MagicMock(),
+            user_id=7,
+            user_identity="Ana (ana)",
+            timezone_offset=-3,
+        )
+
+    assert response == ("resumen listo", None, True, "/resumen")
+    prepared_message = run_ai_flow.call_args.kwargs["prepared_message"]
+    assert (
+        prepared_message.message_text
+        == "focus en crypto. resumí toda esta conversación. sé conciso."
+    )
+    assert prepared_message.photo_file_id is None
+    assert prepared_message.audio_file_id is None
+
+
+def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
+    from api.message_handler import PreparedMessage, _handle_known_command
+
+    deps = MagicMock()
+    commands = {"/resumen": (MagicMock(), False, True)}
+
+    empty_response = (None, None, False, None)
+    with patch("api.message_handler._handle_config_command", return_value=empty_response), patch(
+        "api.message_handler._handle_topup_command", return_value=empty_response
+    ), patch("api.message_handler._handle_balance_command", return_value=empty_response), patch(
+        "api.message_handler._handle_transfer_command", return_value=empty_response
+    ), patch(
+        "api.message_handler._handle_admin_printcredits_command",
+        return_value=empty_response,
+    ), patch(
+        "api.message_handler._handle_admin_creditlog_command",
+        return_value=empty_response,
+    ), patch(
+        "api.message_handler._handle_non_ai_command",
+        return_value=("resumen listo", None, True, "/resumen"),
+    ):
+        response = _handle_known_command(
+            deps,
+            commands=commands,
+            command="/resumen",
+            sanitized_message_text="focus en crypto",
+            message={"message_id": "10"},
+            chat_id="123",
+            chat_type="private",
+            user_id=7,
+            numeric_chat_id=123,
+            prepared_message=PreparedMessage(
+                message_text="/resumen focus en crypto",
+                photo_file_id=None,
+                audio_file_id=None,
+            ),
+            billing_helper=MagicMock(),
+            reply_context_text=None,
+            user_identity="Ana (ana)",
+            redis_client=MagicMock(),
+            timezone_offset=-3,
+        )
+
+    assert response == ("resumen listo", None, True, "/resumen")
+
+
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
     from api.message_handler import handle_msg
 
