@@ -758,32 +758,6 @@ def _process_message_media(
     )
 
 
-def _prepare_message_content(
-    message: Dict[str, Any],
-    *,
-    auto_process_media: bool,
-    deps: MessageHandlerDeps,
-    billing_helper: AIMessageBilling,
-    redis_client: Any,
-) -> PreparedMessage:
-    """Probe + process media in one call. Kept for backward compatibility."""
-    message_text, photo_file_id, audio_file_id = _probe_message_content(
-        message, deps=deps
-    )
-    probe = PreparedMessage(
-        message_text=message_text,
-        photo_file_id=photo_file_id,
-        audio_file_id=audio_file_id,
-    )
-    return _process_message_media(
-        probe,
-        message=message,
-        auto_process_media=auto_process_media,
-        deps=deps,
-        billing_helper=billing_helper,
-    )
-
-
 def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
     for container in (
         message,
