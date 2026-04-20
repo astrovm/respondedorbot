@@ -1167,23 +1167,25 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     mock_credits.charge_ai_credits = mock_charge
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(
         config_redis=lambda: redis_client,
         send_msg=mock_send_msg,
         _transcribe_audio_file=mock_transcribe,
-        should_gordo_respond=MagicMock(return_value=False),
+        should_gordo_respond=MagicMock(return_value=True),
         credits_db_service=mock_credits,
     )
     message = _private_voice_message(message_id=1, user_id=88, duration=10)
 
-    result = handle_msg(message, deps)
+    with patch("api.index.ask_ai", return_value="respuesta ok"):
+        result = handle_msg(message, deps)
     assert result == "ok"
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
-    assert mock_charge.call_count == 1
-    assert mock_charge.call_args.kwargs["amount"] == 1
-    mock_send_msg.assert_not_called()
+    assert mock_charge.call_count == 2
+    assert mock_charge.call_args_list[0].kwargs["amount"] == 1
+    mock_send_msg.assert_called_once()
 
 
 def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
@@ -1242,6 +1244,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
     mock_credits.charge_ai_credits = mock_charge
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(
@@ -1250,19 +1253,82 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
         _transcribe_audio_file=mock_transcribe,
         download_telegram_file=mock_download,
         measure_audio_duration_seconds=mock_measure,
-        should_gordo_respond=MagicMock(return_value=False),
+        should_gordo_respond=MagicMock(return_value=True),
         credits_db_service=mock_credits,
     )
     message = _private_voice_message(message_id=1, user_id=88)
 
-    result = handle_msg(message, deps)
+    with patch("api.index.ask_ai", return_value="respuesta ok"):
+        result = handle_msg(message, deps)
 
     assert result == "ok"
     mock_download.assert_called_once_with("voice_123")
     mock_measure.assert_called_once_with(b"audio-bytes")
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
-    assert mock_charge.call_count == 1
-    mock_send_msg.assert_not_called()
+    assert mock_charge.call_count == 2
+    mock_send_msg.assert_called_once()
+
+
+def test_handle_msg_auto_audio_skips_transcription_when_should_not_respond(monkeypatch):
+    from api.message_handler import handle_msg
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    redis_client.lrange.return_value = []
+    mock_send_msg = MagicMock()
+    mock_transcribe = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        _transcribe_audio_file=mock_transcribe,
+        should_gordo_respond=MagicMock(return_value=False),
+        credits_db_service=mock_credits,
+    )
+    message = _private_voice_message(message_id=1, user_id=88, duration=10)
+
+    result = handle_msg(message, deps)
+    assert result == "ok"
+    mock_transcribe.assert_not_called()
+    mock_credits.charge_ai_credits.assert_not_called()
+
+
+def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monkeypatch):
+    from api.message_handler import handle_msg
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    redis_client.lrange.return_value = []
+    mock_send_msg = MagicMock()
+    mock_download = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        download_telegram_file=mock_download,
+        should_gordo_respond=MagicMock(return_value=False),
+        credits_db_service=mock_credits,
+    )
+    message = {
+        "message_id": 1,
+        "chat": {"id": 555, "type": "private"},
+        "from": {"id": 88, "first_name": "Ana", "username": "ana"},
+        "photo": [{"file_id": "photo_123"}],
+    }
+
+    result = handle_msg(message, deps)
+    assert result == "ok"
+    mock_download.assert_not_called()
 
 
 def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypatch):
