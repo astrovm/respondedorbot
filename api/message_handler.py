@@ -148,7 +148,7 @@ class MessageHandlerDeps:
         bool,
     ]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
-    save_message_to_redis: Callable[[str, str, str, Any], None]
+    save_message_to_redis: Callable[..., None]
     ask_ai: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
