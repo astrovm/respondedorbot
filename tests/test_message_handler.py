@@ -1277,6 +1277,8 @@ def test_handle_msg_auto_audio_skips_transcription_when_should_not_respond(monke
     redis_client.lrange.return_value = []
     mock_send_msg = MagicMock()
     mock_transcribe = MagicMock()
+    mock_download = MagicMock()
+    mock_measure = MagicMock()
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
 
@@ -1287,15 +1289,20 @@ def test_handle_msg_auto_audio_skips_transcription_when_should_not_respond(monke
         config_redis=lambda: redis_client,
         send_msg=mock_send_msg,
         _transcribe_audio_file=mock_transcribe,
+        download_telegram_file=mock_download,
+        measure_audio_duration_seconds=mock_measure,
         should_gordo_respond=MagicMock(return_value=False),
         credits_db_service=mock_credits,
     )
-    message = _private_voice_message(message_id=1, user_id=88, duration=10)
+    message = _private_voice_message(message_id=1, user_id=88)
 
     result = handle_msg(message, deps)
     assert result == "ok"
+    mock_download.assert_not_called()
+    mock_measure.assert_not_called()
     mock_transcribe.assert_not_called()
     mock_credits.charge_ai_credits.assert_not_called()
+    mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monkeypatch):
@@ -1329,6 +1336,7 @@ def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monk
     result = handle_msg(message, deps)
     assert result == "ok"
     mock_download.assert_not_called()
+    mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypatch):
