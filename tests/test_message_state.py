@@ -259,6 +259,25 @@ def test_search_chat_history_prioritizes_reply_thread_matches():
     )
 
     assert results[0]["reply_to_message_id"] == "99"
+
+
+def test_search_chat_history_escapes_negative_group_chat_id():
+    import api.message_state as message_state
+    from api.message_state import search_chat_history
+
+    message_state._SEARCH_INDEX_READY = False
+    redis_client = MagicMock()
+    redis_client.execute_command.side_effect = [Exception("Index already exists"), [0]]
+
+    search_chat_history(
+        redis_client,
+        chat_id="-1001234567890",
+        query_text="wallet error",
+        limit=5,
+    )
+
+    query = redis_client.execute_command.call_args_list[1].args[2]
+    assert "@chat_id:{\\-1001234567890}" in query
     assert truncate_text("hello", 1) == "."
     assert truncate_text("hello", 2) == ".."
     assert truncate_text("hello", 3) == "..."
