@@ -1,4 +1,4 @@
-"""price_lookup tool — wraps get_prices for agentic use."""
+"""crypto_prices tool — wraps get_prices (CoinMarketCap) for agentic use."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from typing import Any, Dict
 from api.tools.registry import ToolResult, register_tool
 
 
-def _execute_price_lookup(
+def _execute_crypto_prices(
     params: Dict[str, Any],
     context: Dict[str, Any],
 ) -> ToolResult:
     get_prices_fn = context.get("get_prices")
     if get_prices_fn is None:
-        return ToolResult(output="price lookup not available")
+        return ToolResult(output="crypto price lookup not available")
     symbols = params.get("symbols", "")
     if isinstance(symbols, list):
         symbols = " ".join(symbols)
@@ -24,8 +24,8 @@ def _execute_price_lookup(
 
 
 register_tool(
-    name="price_lookup",
-    description="Get cryptocurrency and stock prices. Pass symbols like 'btc eth' or 'bitcoin ethereum'. Returns current prices with 24h changes.",
+    name="crypto_prices",
+    description="Get cryptocurrency prices from CoinMarketCap. Pass symbols like 'btc eth' or 'bitcoin ethereum'. Returns current prices with 24h changes.",
     parameters={
         "type": "object",
         "properties": {
@@ -36,6 +36,6 @@ register_tool(
         },
         "required": ["symbols"],
     },
-    executor=_execute_price_lookup,
+    executor=_execute_crypto_prices,
     requires_context=["get_prices"],
 )

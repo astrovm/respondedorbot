@@ -53,25 +53,25 @@ class TestCalculateTool:
         assert result.output == "5"
 
 
-class TestPriceLookupTool:
-    def test_price_lookup_calls_get_prices(self):
+class TestCryptoPricesTool:
+    def test_crypto_prices_calls_get_prices(self):
         mock_gp = MagicMock(return_value="BTC: $50000")
         result = execute_tool(
-            "price_lookup",
+            "crypto_prices",
             {"symbols": "BTC"},
             {"get_prices": mock_gp},
         )
         assert result.output == "BTC: $50000"
         mock_gp.assert_called_once_with("BTC")
 
-    def test_price_lookup_no_context(self):
-        result = execute_tool("price_lookup", {"symbols": "ETH"}, {})
+    def test_crypto_prices_no_context(self):
+        result = execute_tool("crypto_prices", {"symbols": "ETH"}, {})
         assert "not available" in result.output
 
-    def test_price_lookup_none_result(self):
+    def test_crypto_prices_none_result(self):
         mock_gp = MagicMock(return_value=None)
         result = execute_tool(
-            "price_lookup",
+            "crypto_prices",
             {"symbols": "BTC"},
             {"get_prices": mock_gp},
         )
