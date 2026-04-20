@@ -932,13 +932,6 @@ def cached_requests(
         return None
 
 
-bcra_service.configure(
-    cached_requests=cached_requests,
-    redis_factory=lambda *args, **kwargs: config_redis(*args, **kwargs),
-    cache_history=get_cache_history,
-)
-
-
 def gen_random(name: str) -> str:
     rand_res = random.randint(0, 1)
     rand_name = random.randint(0, 2)
@@ -1377,9 +1370,9 @@ def get_prices(msg_text: str) -> Optional[str]:
 
         for number in numbers:
             try:
-                number = int(float(number))
-                if number > prices_number:
-                    prices_number = number
+                parsed = int(float(number))
+                if parsed > prices_number:
+                    prices_number = parsed
             except ValueError:
                 # ignore items which aren't integers
                 pass
@@ -2841,7 +2834,7 @@ def _report_unauthorized_config_attempt(
 
 bcra_service.configure(
     cached_requests=cached_requests,
-    redis_factory=lambda *args, **kwargs: config_redis(*args, **kwargs),
+    redis_factory=config_redis,
     admin_reporter=admin_report,
     cache_history=get_cache_history,
 )
@@ -4831,6 +4824,7 @@ def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
                 ],
                 capture_output=True,
                 timeout=60,
+                check=False,
             )
             if result.returncode != 0:
                 print(f"ffmpeg failed: {result.stderr[:500]}")

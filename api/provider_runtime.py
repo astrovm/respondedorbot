@@ -108,7 +108,7 @@ class ProviderRuntime:
                 if not extra_tools or not tool_calls:
                     text = str(message.content or "").strip()
                     if text:
-                        metadata: Dict[str, Any] = {
+                        tool_metadata: Dict[str, Any] = {
                             "provider": "openrouter",
                             "tool_rounds": round_idx + 1,
                         }
@@ -117,7 +117,7 @@ class ProviderRuntime:
                             text=text,
                             model=self._deps.primary_model,
                             response=response,
-                            metadata=metadata,
+                            metadata=tool_metadata,
                         )
                     break
 

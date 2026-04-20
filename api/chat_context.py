@@ -26,8 +26,11 @@ def extract_user_id(message: Mapping[str, Any]) -> Optional[int]:
     user = message.get("from") if message else None
     if not isinstance(user, Mapping):
         return None
+    user_id = user.get("id")
+    if user_id is None:
+        return None
     try:
-        return int(user.get("id"))
+        return int(user_id)
     except (TypeError, ValueError):
         return None
 

@@ -106,7 +106,7 @@ def _admin_report(
 def config_redis(host=None, port=None, password=None):
     try:
         host = host or os.environ.get("REDIS_HOST", "localhost")
-        port = int(port or os.environ.get("REDIS_PORT", 6379))
+        port = int(port or os.environ.get("REDIS_PORT", "6379"))
         password = password or os.environ.get("REDIS_PASSWORD", None)
         redis_client = redis.Redis(
             host=host, port=port, password=password, decode_responses=True
