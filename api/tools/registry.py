@@ -29,6 +29,7 @@ class ToolSchema:
     parameters: Dict[str, Any]
     requires_env: List[str] = field(default_factory=list)
     requires_context: List[str] = field(default_factory=list)
+    task_allowed: bool = True
 
 
 @dataclass
@@ -62,6 +63,7 @@ def register_tool(
     executor: Callable[..., ToolResult],
     requires_env: Optional[List[str]] = None,
     requires_context: Optional[List[str]] = None,
+    task_allowed: bool = True,
 ) -> None:
     schema = ToolSchema(
         name=name,
@@ -69,6 +71,7 @@ def register_tool(
         parameters=parameters,
         requires_env=list(requires_env) if requires_env else [],
         requires_context=list(requires_context) if requires_context else [],
+        task_allowed=task_allowed,
     )
     _TOOL_REGISTRY[name] = (schema, executor)
     _invalidate_schema_cache()
@@ -101,6 +104,8 @@ def _tool_is_available(
 
 def get_all_tool_schemas(
     context: Optional[Dict[str, Any]] = None,
+    *,
+    task_mode: bool = False,
 ) -> List[Dict[str, Any]]:
     global _tool_schemas_cache
 
@@ -109,7 +114,7 @@ def get_all_tool_schemas(
             _tool_schema_to_dict(s) for s, _ in _TOOL_REGISTRY.values()
         ]
 
-    if context is None:
+    if context is None and not task_mode:
         return list(_tool_schemas_cache)
 
     return [
@@ -118,6 +123,7 @@ def get_all_tool_schemas(
             (s for s, _ in _TOOL_REGISTRY.values()), _tool_schemas_cache
         )
         if _tool_is_available(schema, context)
+        and (not task_mode or schema.task_allowed)
     ]
 
 

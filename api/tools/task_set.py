@@ -215,4 +215,5 @@ register_tool(
         "required": ["text"],
     },
     executor=_execute_task_set,
+    task_allowed=False,
 )
