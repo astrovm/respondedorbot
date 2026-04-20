@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from api.task_executor import (
     _strip_response_marker as _task_executor_strip_response_marker,
     build_task_executor,
+    TaskExecutor,
 )
 
 _scheduler_instance: Optional[Any] = None
@@ -261,7 +262,7 @@ def get_scheduler() -> Any:
         job_defaults = {
             "misfire_grace_time": 300,
             "coalesce": True,
-            "max_instances": 3,
+            "max_instances": 100,
         }
         _scheduler_instance = BackgroundScheduler(
             jobstores=jobstores,
@@ -326,8 +327,20 @@ def _fire_task(task_id: str) -> None:
         print(f"task_scheduler: invalid JSON for {task_id}")
         return
 
-    if _get_task_executor() is not None and _get_task_executor().execute(data):
-        _delete_task(key, task_id, redis_client)
+    executor = _get_task_executor()
+    if executor is None:
+        return
+
+    executor._pool.submit(_execute_and_cleanup, executor, data, key, task_id)
+
+
+def _execute_and_cleanup(
+    executor: TaskExecutor, data: Mapping[str, Any], key: str, task_id: str
+) -> None:
+    if executor.execute(data):
+        redis_client = _get_redis()
+        if redis_client is not None:
+            _delete_task(key, task_id, redis_client)
 
 
 def schedule_task(
