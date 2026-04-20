@@ -4064,18 +4064,12 @@ NOTICIAS DE HACKER NEWS:
 {news_info}
 """
 
-    formatting_reminder = (
-        "\nIMPORTANTE: todo tu texto de respuesta debe ir en minusculas, "
-        "sin emojis, sin punto final, en una sola frase salvo que sea necesario explicar algo complejo. "
-        "usá lenguaje coloquial argentino.\n"
-    )
-
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": task_prefix + contextual_info + base_prompt + formatting_reminder,
+                "text": task_prefix + contextual_info + base_prompt,
             }
         ],
     }
