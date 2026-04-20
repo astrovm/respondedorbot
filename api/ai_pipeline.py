@@ -10,6 +10,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
 LOG_PREVIEW_LIMIT = 160
 
+INSTRUCCIONES_BASE = [
+    "INSTRUCCIONES:",
+    "- mantené el personaje del gordo",
+    "- usá lenguaje coloquial argentino",
+    "- respondé en minúsculas, sin emojis, sin punto final",
+    "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
+]
+
 
 def _preview_for_log(text: Optional[str], limit: int = LOG_PREVIEW_LIMIT) -> str:
     """Return a single-line preview suitable for debug logging."""
