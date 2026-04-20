@@ -7,6 +7,7 @@ validates and dispatches those calls.
 
 from __future__ import annotations
 
+import os
 import json
 from dataclasses import dataclass, field
 from typing import (
@@ -26,6 +27,8 @@ class ToolSchema:
     name: str
     description: str
     parameters: Dict[str, Any]
+    requires_env: List[str] = field(default_factory=list)
+    requires_context: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -44,6 +47,12 @@ class ToolExecutor(Protocol):
 
 
 _TOOL_REGISTRY: Dict[str, Tuple[ToolSchema, Callable[..., ToolResult]]] = {}
+_tool_schemas_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def _invalidate_schema_cache() -> None:
+    global _tool_schemas_cache
+    _tool_schemas_cache = None
 
 
 def register_tool(
@@ -51,25 +60,69 @@ def register_tool(
     description: str,
     parameters: Dict[str, Any],
     executor: Callable[..., ToolResult],
+    requires_env: Optional[List[str]] = None,
+    requires_context: Optional[List[str]] = None,
 ) -> None:
-    schema = ToolSchema(name=name, description=description, parameters=parameters)
+    schema = ToolSchema(
+        name=name,
+        description=description,
+        parameters=parameters,
+        requires_env=list(requires_env) if requires_env else [],
+        requires_context=list(requires_context) if requires_context else [],
+    )
     _TOOL_REGISTRY[name] = (schema, executor)
+    _invalidate_schema_cache()
 
 
-def get_all_tool_schemas() -> List[Dict[str, Any]]:
-    result = []
-    for schema, _ in _TOOL_REGISTRY.values():
-        result.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": schema.name,
-                    "description": schema.description,
-                    "parameters": schema.parameters,
-                },
-            }
+def _tool_schema_to_dict(schema: ToolSchema) -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": schema.name,
+            "description": schema.description,
+            "parameters": schema.parameters,
+        },
+    }
+
+
+def _tool_is_available(
+    schema: ToolSchema,
+    context: Optional[Dict[str, Any]],
+) -> bool:
+    for env_key in schema.requires_env:
+        if os.environ.get(env_key) is None:
+            return False
+    if context is not None:
+        for ctx_key in schema.requires_context:
+            if ctx_key not in context or context[ctx_key] is None:
+                return False
+    return True
+
+
+def get_all_tool_schemas(
+    context: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    global _tool_schemas_cache
+
+    if _tool_schemas_cache is None:
+        _tool_schemas_cache = [
+            _tool_schema_to_dict(s) for s, _ in _TOOL_REGISTRY.values()
+        ]
+
+    if context is None:
+        return list(_tool_schemas_cache)
+
+    return [
+        entry
+        for schema, entry in zip(
+            (s for s, _ in _TOOL_REGISTRY.values()), _tool_schemas_cache
         )
-    return result
+        if _tool_is_available(schema, context)
+    ]
+
+
+def reset_tool_schemas_cache() -> None:
+    _invalidate_schema_cache()
 
 
 def execute_tool(
