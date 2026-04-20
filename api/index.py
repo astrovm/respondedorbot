@@ -2907,6 +2907,7 @@ def ask_ai(
     user_name: Optional[str] = None,
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
+    task_mode: bool = False,
 ) -> str:
     try:
         messages = list(messages or [])
@@ -2918,7 +2919,6 @@ def ask_ai(
             "hacker_news": get_hacker_news_context(),
         }
 
-        extra_tools = get_all_tool_schemas()
         tool_context: Dict[str, Any] = {
             "get_prices": get_prices,
         }
@@ -2930,9 +2930,12 @@ def ask_ai(
         if user_id is not None:
             tool_context["user_id"] = user_id
 
+        extra_tools = get_all_tool_schemas(tool_context)
         system_message = build_system_message(
             context_data,
             tools_active=bool(extra_tools),
+            tool_schemas=extra_tools,
+            task_mode=task_mode,
         )
 
         if image_data:
@@ -3858,6 +3861,8 @@ def build_system_message(
     context: Dict,
     *,
     tools_active: bool = False,
+    tool_schemas: Optional[List[Dict[str, Any]]] = None,
+    task_mode: bool = False,
 ) -> Dict[str, Any]:
     """Build system message with personality and context."""
     config = load_bot_config()
@@ -3870,16 +3875,34 @@ def build_system_message(
 
     base_prompt = config.get("system_prompt", "")
 
+    task_prefix = ""
+    if task_mode:
+        task_prefix = (
+            "EJECUTANDO TAREA PROGRAMADA:\n"
+            "Responde la siguiente instruccion y nada mas.\n"
+            "No hagas preguntas, no ofrezcas seguimientos, no pidas confirmacion.\n"
+            "Genera tu respuesta y terminá.\n\n"
+        )
+
     tool_instruction = ""
     if tools_active:
-        tool_summaries = (
-            "- price_lookup: Get cryptocurrency and stock prices by symbol.\n"
-            "- calculate: Evaluate a math expression safely (+, -, *, /, %, **).\n"
-            "- web_fetch: Fetch and extract text content from a URL.\n"
-            "- task_set: Create a scheduled task (one-shot or recurring).\n"
-            "- task_list: List all tasks for the current chat.\n"
-            "- task_cancel: Cancel a task by its ID.\n"
-        )
+        if tool_schemas:
+            summaries = []
+            for entry in tool_schemas:
+                fn = entry.get("function", {})
+                name = fn.get("name", "")
+                desc = fn.get("description", "")
+                summaries.append(f"- {name}: {desc}")
+            tool_summaries = "\n".join(summaries) + "\n"
+        else:
+            tool_summaries = (
+                "- price_lookup: Get cryptocurrency and stock prices by symbol.\n"
+                "- calculate: Evaluate a math expression safely (+, -, *, /, %, **).\n"
+                "- web_fetch: Fetch and extract text content from a URL.\n"
+                "- task_set: Create a scheduled task (one-shot or recurring).\n"
+                "- task_list: List all tasks for the current chat.\n"
+                "- task_cancel: Cancel a task by its ID.\n"
+            )
         tool_instruction = (
             f"\n\nHERRAMIENTAS DISPONIBLES:\n{tool_summaries}"
             "Llamalas directamente, sin pedir permiso ni narrar antes.\n"
@@ -3920,7 +3943,7 @@ NOTICIAS DE HACKER NEWS:
         "content": [
             {
                 "type": "text",
-                "text": base_prompt + contextual_info,
+                "text": task_prefix + base_prompt + contextual_info,
             }
         ],
     }

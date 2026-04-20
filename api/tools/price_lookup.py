@@ -37,4 +37,5 @@ register_tool(
         "required": ["symbols"],
     },
     executor=_execute_price_lookup,
+    requires_context=["get_prices"],
 )

@@ -6,11 +6,14 @@ from typing import Any, Callable, Dict, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
 
+_FALLBACK_MARKER = "[[AI_FALLBACK]]"
+_MAX_FALLBACK_RETRIES = 1
+_MAX_EMPTY_RETRIES = 1
+
 
 def _strip_response_marker(response: str) -> str:
-    marker = "[[AI_FALLBACK]]"
-    if response.startswith(marker):
-        return response[len(marker) :].lstrip()
+    if response.startswith(_FALLBACK_MARKER):
+        return response[len(_FALLBACK_MARKER) :].lstrip()
     return response
 
 
@@ -74,7 +77,6 @@ class TaskExecutor:
 
         messages = [{"role": "user", "content": text}]
         response_meta: dict[str, Any] = {}
-        is_fallback = False
 
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
             messages=messages,
@@ -88,39 +90,71 @@ class TaskExecutor:
             print(f"task_scheduler: {task_id} no credits, skipping: {charge_error}")
             return should_delete
 
-        try:
-            print(f"task_scheduler: {task_id} calling ask_ai...")
-            response = self._ask_ai(
-                messages,
-                response_meta=response_meta,
-                enable_web_search=True,
-                chat_id=chat_id,
-                user_name=user_name,
-                user_id=user_id,
-            )
-            is_fallback = response.startswith("[[AI_FALLBACK]]")
-            if response:
+        fallback_retries = 0
+        empty_retries = 0
+
+        while True:
+            try:
+                print(f"task_scheduler: {task_id} calling ask_ai...")
+                response = self._ask_ai(
+                    messages,
+                    response_meta=response_meta,
+                    enable_web_search=True,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                    user_id=user_id,
+                    task_mode=True,
+                )
+
+                if not response or not response.strip():
+                    if empty_retries < _MAX_EMPTY_RETRIES:
+                        empty_retries += 1
+                        print(
+                            f"task_scheduler: {task_id} empty response, "
+                            f"retry {empty_retries}/{_MAX_EMPTY_RETRIES}"
+                        )
+                        messages.append(
+                            {"role": "system", "content": "respondé la tarea, es obligatorio."}
+                        )
+                        continue
+                    print(f"task_scheduler: {task_id} empty after retries")
+                    billing.refund_reserved_ai_credits(charge_meta, reason="task_empty")
+                    return should_delete
+
+                is_fallback = response.startswith(_FALLBACK_MARKER)
+                if is_fallback and fallback_retries < _MAX_FALLBACK_RETRIES:
+                    fallback_retries += 1
+                    print(
+                        f"task_scheduler: {task_id} fallback, "
+                        f"retry {fallback_retries}/{_MAX_FALLBACK_RETRIES}"
+                    )
+                    messages.append(
+                        {"role": "system", "content": "tenés que responder. no hay opcion de no responder."}
+                    )
+                    continue
+
                 response = _strip_response_marker(response)
                 self._send_msg(chat_id, f"{display}, tarea programada: {response}")
                 print(f"task_scheduler: {task_id} completed successfully")
-        except Exception as e:
-            print(f"task_scheduler: {task_id} ask_ai failed: {e}")
-            billing.refund_reserved_ai_credits(charge_meta, reason="task_error")
-            self._admin_report(
-                f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
-            )
-        else:
-            if is_fallback:
-                billing.refund_reserved_ai_credits(charge_meta, reason="task_fallback")
-            else:
-                segments = list(response_meta.get("billing_segments") or [])
-                billing.settle_reserved_ai_credits(
-                    charge_meta,
-                    segments,
-                    reason="task_success",
-                )
 
-        return should_delete
+                if is_fallback:
+                    billing.refund_reserved_ai_credits(charge_meta, reason="task_fallback")
+                else:
+                    segments = list(response_meta.get("billing_segments") or [])
+                    billing.settle_reserved_ai_credits(
+                        charge_meta,
+                        segments,
+                        reason="task_success",
+                    )
+                return should_delete
+
+            except Exception as e:
+                print(f"task_scheduler: {task_id} ask_ai failed: {e}")
+                billing.refund_reserved_ai_credits(charge_meta, reason="task_error")
+                self._admin_report(
+                    f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
+                )
+                return should_delete
 
 
 def build_task_executor(
