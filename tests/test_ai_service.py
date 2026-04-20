@@ -10,6 +10,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
     ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=False),
         has_openrouter_fallback=MagicMock(return_value=True),
@@ -67,6 +68,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=False),
         has_openrouter_fallback=MagicMock(return_value=True),
@@ -113,3 +115,60 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     assert handled is True
     assert response_msg == "🖼️ en la imagen veo: todo piola"
     handle_ai_response.assert_called_once()
+
+
+def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
+    from api.ai_billing import AIMessageBilling
+    from api.ai_service import AIConversationRequest, build_ai_service
+    from api.message_handler import PreparedMessage
+
+    build_ai_messages = MagicMock(return_value=[{"role": "user", "content": "hola"}])
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], "summary abc", [{"text": "old hit"}], 0)),
+        build_ai_messages=build_ai_messages,
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(return_value="no"),
+        handle_ai_response=MagicMock(return_value="ok"),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+
+    billing_helper = AIMessageBilling(
+        credits_db_service=MagicMock(),
+        admin_reporter=MagicMock(),
+        gen_random_fn=lambda _: "random",
+        build_insufficient_credits_message_fn=lambda **_: "insufficient",
+        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+        command="/ask",
+        chat_id="559",
+        chat_type="private",
+        user_id=103,
+        numeric_chat_id=559,
+        message={"from": {"first_name": "Ana"}},
+    )
+
+    ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="559",
+            message={"chat": {"id": 559, "type": "private"}},
+            user_id=None,
+            prepared_message=PreparedMessage(
+                message_text="hola",
+                photo_file_id=None,
+                audio_file_id=None,
+                resized_image_data=None,
+            ),
+            billing_helper=billing_helper,
+            prompt_text="que paso hoy",
+            reply_context_text=None,
+            user_identity="103",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert build_ai_messages.call_args.kwargs["summary_text"] == "summary abc"
+    assert build_ai_messages.call_args.kwargs["retrieved_messages"] == [{"text": "old hit"}]

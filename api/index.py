@@ -162,12 +162,18 @@ from api.telegram_gateway import TelegramGateway
 from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
+    CHAT_HISTORY_MAX_MESSAGES,
     build_reply_context_text as _state_build_reply_context_text,
     format_user_message as _state_format_user_message,
     get_bot_message_metadata as _state_get_bot_message_metadata,
+    get_chat_compacted_until as _state_get_chat_compacted_until,
     get_chat_history as _state_get_chat_history,
+    get_chat_summary as _state_get_chat_summary,
+    save_chat_compacted_until as _state_save_chat_compacted_until,
+    save_chat_summary as _state_save_chat_summary,
     save_bot_message_metadata as _state_save_bot_message_metadata,
     save_message_to_redis as _state_save_message_to_redis,
+    search_chat_history as _state_search_chat_history,
     truncate_text as _state_truncate_text,
 )
 from api.random_replies import build_random_reply
@@ -2927,22 +2933,9 @@ def ask_ai(
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
     task_mode: bool = False,
-) -> str:
+    ) -> str:
     try:
         messages = [_sanitize_bot_message(m) for m in messages or []]
-
-        if len(messages) > COMPACTION_THRESHOLD:
-            dropped = messages[: -COMPACTION_KEEP]
-            dropped_text = _format_messages_for_summary(dropped)
-            summary, summary_cost = _compact_conversation(dropped_text)
-            if summary:
-                messages = [
-                    {"role": "user", "content": f"[resumen del contexto anterior: {summary}]"}
-                ] + messages[-COMPACTION_KEEP:]
-                if summary_cost > 0:
-                    _append_billing_segment(response_meta, _make_summary_result(summary_cost))
-            else:
-                messages = messages[-COMPACTION_KEEP:]
 
         context_data = {
             "market": get_market_context(),
@@ -3859,6 +3852,87 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
+def compact_chat_memory(
+    redis_client: Optional[redis.Redis],
+    chat_id: Optional[str],
+    messages: List[Dict[str, Any]],
+    existing_summary: Optional[str],
+    compacted_until: Optional[str],
+    compact_fn: Callable[[str], Tuple[str, int]] = _compact_conversation,
+) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[str], int]:
+    if not messages:
+        return existing_summary, [], compacted_until, 0
+
+    start_idx = 0
+    if compacted_until:
+        for idx, msg in enumerate(messages):
+            if str(msg.get("id")) == compacted_until:
+                start_idx = idx + 1
+                break
+
+    visible_messages = messages[start_idx:]
+    if len(visible_messages) <= COMPACTION_THRESHOLD:
+        return existing_summary, visible_messages, compacted_until, 0
+
+    dropped = visible_messages[: -COMPACTION_KEEP]
+    dropped_text = _format_messages_for_summary(dropped)
+    summary_input = dropped_text
+    if existing_summary:
+        summary_input = f"resumen acumulado previo:\n{existing_summary}\n\nmensajes nuevos:\n{dropped_text}"
+
+    summary, summary_cost = compact_fn(summary_input)
+    if not summary:
+        return existing_summary, visible_messages[-COMPACTION_KEEP:], compacted_until, 0
+
+    new_marker = str(dropped[-1].get("id")) if dropped else compacted_until
+    if redis_client is not None and chat_id:
+        _state_save_chat_summary(redis_client, chat_id, summary)
+        if new_marker:
+            _state_save_chat_compacted_until(redis_client, chat_id, new_marker)
+    return summary, visible_messages[-COMPACTION_KEEP:], new_marker, summary_cost
+
+
+def prepare_chat_memory(
+    redis_client: Optional[redis.Redis],
+    chat_id: Optional[str],
+    chat_history: List[Dict[str, Any]],
+    query_text: str,
+    reply_to_message_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]:
+    summary_text = (
+        _state_get_chat_summary(redis_client, chat_id)
+        if redis_client is not None and chat_id
+        else None
+    )
+    compacted_until = (
+        _state_get_chat_compacted_until(redis_client, chat_id)
+        if redis_client is not None and chat_id
+        else None
+    )
+    summary_text, visible_history, _, summary_cost = compact_chat_memory(
+        redis_client,
+        chat_id,
+        chat_history,
+        summary_text,
+        compacted_until,
+    )
+    recent_ids = {str(msg.get("id")) for msg in visible_history if msg.get("id") is not None}
+    retrieved_messages = (
+        _state_search_chat_history(
+            redis_client,
+            chat_id,
+            query_text,
+            reply_to_message_id=reply_to_message_id,
+            limit=5,
+            exclude_message_ids=recent_ids,
+            admin_reporter=admin_report,
+        )
+        if redis_client is not None and chat_id and query_text.strip()
+        else []
+    )
+    return visible_history, summary_text, retrieved_messages, summary_cost
+
+
 def _estimate_summary_cost_usd_micros(
     input_tokens: int, output_tokens: int, model: str
 ) -> int:
@@ -4226,8 +4300,33 @@ def build_ai_messages(
     message_text: str,
     reply_context: Optional[str] = None,
     enable_web_search: bool = True,
+    summary_text: Optional[str] = None,
+    retrieved_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict]:
     messages = []
+
+    if summary_text:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"RESUMEN ACUMULADO DEL CHAT:\n{summary_text}",
+            }
+        )
+
+    if retrieved_messages:
+        retrieval_lines = ["MENSAJES ANTERIORES RELEVANTES:"]
+        for item in retrieved_messages:
+            role = str(item.get("role") or "user")
+            text = str(item.get("text") or "")
+            if text:
+                retrieval_lines.append(f"- {role}: {text}")
+        if len(retrieval_lines) > 1:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "\n".join(retrieval_lines),
+                }
+            )
 
     # Add chat history messages (which already includes replies)
     for msg in chat_history:
@@ -4296,7 +4395,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-20:]
+    return messages
 
 
 def _noop_command() -> str:
@@ -4350,7 +4449,16 @@ def truncate_text(text: Optional[str], max_length: int = 512) -> str:
 
 
 def save_message_to_redis(
-    chat_id: str, message_id: str, text: str, redis_client: redis.Redis
+    chat_id: str,
+    message_id: str,
+    text: str,
+    redis_client: redis.Redis,
+    *,
+    role: Optional[str] = None,
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    reply_to_message_id: Optional[str] = None,
+    mentions_bot: bool = False,
 ) -> None:
     _state_save_message_to_redis(
         chat_id,
@@ -4358,17 +4466,48 @@ def save_message_to_redis(
         text,
         redis_client,
         admin_reporter=admin_report,
+        role=role,
+        user_id=user_id,
+        username=username,
+        reply_to_message_id=reply_to_message_id,
+        mentions_bot=mentions_bot,
     )
 
 
 def get_chat_history(
-    chat_id: str, redis_client: redis.Redis, max_messages: int = 4
+    chat_id: str,
+    redis_client: redis.Redis,
+    max_messages: int = CHAT_HISTORY_MAX_MESSAGES,
 ) -> List[Dict]:
     return _state_get_chat_history(
         chat_id,
         redis_client,
         admin_reporter=admin_report,
         max_messages=max_messages,
+    )
+
+
+def get_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    return _state_get_chat_summary(redis_client, chat_id)
+
+
+def search_chat_history(
+    redis_client: redis.Redis,
+    chat_id: str,
+    query_text: str,
+    *,
+    reply_to_message_id: Optional[str] = None,
+    limit: int = 5,
+    exclude_message_ids: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    return _state_search_chat_history(
+        redis_client,
+        chat_id,
+        query_text,
+        reply_to_message_id=reply_to_message_id,
+        limit=limit,
+        exclude_message_ids=exclude_message_ids,
+        admin_reporter=admin_report,
     )
 
 
@@ -5889,6 +6028,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
     ai_svc = build_ai_service(
         credits_db_service=credits_db_service,
         get_chat_history=get_chat_history,
+        prepare_chat_memory=prepare_chat_memory,
         build_ai_messages=build_ai_messages,
         check_provider_available=check_provider_available,
         has_openrouter_fallback=has_openrouter_fallback,

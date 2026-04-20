@@ -161,6 +161,104 @@ def test_truncate_text_edge_cases():
     assert truncated.endswith("...")
 
     # Test with very small max_length
+
+
+def test_save_and_get_chat_summary_round_trip():
+    from api.message_state import get_chat_summary, save_chat_summary
+
+    redis_client = MagicMock()
+    store = {}
+
+    redis_client.setex.side_effect = lambda key, ttl, value: store.__setitem__(key, value)
+    redis_client.get.side_effect = lambda key: store.get(key)
+
+    save_chat_summary(redis_client, "123", "summary text")
+
+    assert get_chat_summary(redis_client, "123") == "summary text"
+
+
+def test_save_and_get_chat_compacted_until_round_trip():
+    from api.message_state import get_chat_compacted_until, save_chat_compacted_until
+
+    redis_client = MagicMock()
+    store = {}
+
+    redis_client.setex.side_effect = lambda key, ttl, value: store.__setitem__(key, value)
+    redis_client.get.side_effect = lambda key: store.get(key)
+
+    save_chat_compacted_until(redis_client, "123", "msg_55")
+
+    assert get_chat_compacted_until(redis_client, "123") == "msg_55"
+
+
+def test_save_message_to_redis_writes_search_document():
+    from api.message_state import save_message_to_redis
+
+    redis_client = MagicMock()
+    pipe = MagicMock()
+    pipe.execute.return_value = [None, None, None, None, None, None, []]
+    redis_client.pipeline.return_value = pipe
+    redis_client.sismember.return_value = False
+    redis_client.smembers.return_value = set()
+    redis_client.execute_command.side_effect = Exception("Index already exists")
+
+    save_message_to_redis(
+        "chat1",
+        "42",
+        "astro: hola mundo",
+        redis_client,
+        admin_reporter=MagicMock(),
+        role="user",
+    )
+
+    pipe.hset.assert_called()
+    pipe.expire.assert_any_call("chatmsg:chat1:42", ANY)
+
+
+def test_search_chat_history_prioritizes_reply_thread_matches():
+    import api.message_state as message_state
+    from api.message_state import search_chat_history
+
+    message_state._SEARCH_INDEX_READY = False
+    redis_client = MagicMock()
+    redis_client.execute_command.side_effect = [
+        Exception("Index already exists"),
+        [
+            2,
+            "chatmsg:1:10",
+            [
+                "message_id",
+                "10",
+                "text",
+                "wallet error happened",
+                "reply_to_message_id",
+                "99",
+                "timestamp",
+                "10",
+            ],
+            "chatmsg:1:11",
+            [
+                "message_id",
+                "11",
+                "text",
+                "wallet error generic",
+                "reply_to_message_id",
+                "1",
+                "timestamp",
+                "11",
+            ],
+        ],
+    ]
+
+    results = search_chat_history(
+        redis_client,
+        chat_id="1",
+        query_text="wallet error",
+        reply_to_message_id="99",
+        limit=5,
+    )
+
+    assert results[0]["reply_to_message_id"] == "99"
     assert truncate_text("hello", 1) == "."
     assert truncate_text("hello", 2) == ".."
     assert truncate_text("hello", 3) == "..."
