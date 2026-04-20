@@ -231,7 +231,7 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
-SUMMARY_MODEL = "google/gemini-2.5-flash-lite-preview"
+SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
@@ -2570,7 +2570,7 @@ def summarize_conversation(
             sender = "bot" if role == "assistant" else "user"
             formatted.append(f"{sender}: {content}")
 
-    instruction = custom_instruction or "resumí esta conversación en español, capturando los puntos clave, temas discutidos y conclusiones. sé conciso."
+    instruction = custom_instruction or "summarize this conversation, capturing the key points, topics discussed, and conclusions. be concise. respond in the same language as the conversation."
     messages = [
         {"role": "system", "content": "sos un asistente que resume conversaciones de telegram."},
         {"role": "user", "content": f"{instruction}\n\nConversación:\n" + "\n".join(formatted)},
@@ -2978,8 +2978,8 @@ def ask_ai(
     try:
         messages = list(messages or [])
 
-        if len(messages) > 15:
-            keep = 7
+        if len(messages) > 8:
+            keep = 5
             dropped = messages[: -keep]
             dropped_text = _format_messages_for_summary(dropped)
             summary = _compact_conversation(dropped_text)
