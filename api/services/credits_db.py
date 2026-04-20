@@ -68,7 +68,7 @@ def is_configured() -> bool:
 
 def _load_psycopg() -> Any:
     try:
-        import psycopg  # type: ignore
+        import psycopg
     except Exception as exc:  # pragma: no cover - import path depends on env
         raise CreditsDBError(
             "psycopg is required for AI billing, install psycopg[binary]"
