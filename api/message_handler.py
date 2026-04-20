@@ -1374,6 +1374,9 @@ def _handle_non_ai_command(
     chat_id: str,
     redis_client: Any,
     billing_helper: AIMessageBilling,
+    user_id: Optional[int] = None,
+    user_identity: str = "",
+    timezone_offset: int = -3,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
     if command not in commands:
         return None, None, False, None
@@ -1383,25 +1386,32 @@ def _handle_non_ai_command(
         return None, None, False, None
 
     if command in ("/resumen", "/summary"):
-        from api.index import summarize_conversation
-
-        num_messages = 50
         custom_instruction = None
         parts = sanitized_message_text.strip().split(None, 1)
-        if parts and parts[0].isdigit():
-            num_messages = min(int(parts[0]), 200)
-            if len(parts) > 1:
-                custom_instruction = parts[1]
-        elif parts:
+        if parts and parts[0].isdigit() and len(parts) > 1:
+            custom_instruction = parts[1]
+        elif parts and not parts[0].isdigit():
             custom_instruction = sanitized_message_text.strip()
 
-        result = summarize_conversation(
+        prompt_text = "resumí toda esta conversación. sé conciso."
+        if custom_instruction:
+            prompt_text = f"{custom_instruction}. resumí toda esta conversación. sé conciso."
+
+        response_msg, response_uses_ai = _run_ai_flow(
+            deps=deps,
             chat_id=chat_id,
+            message=message,
+            user_id=user_id,
+            prepared_message=PreparedMessage(message_text=prompt_text),
+            billing_helper=billing_helper,
+            prompt_text=prompt_text,
+            reply_context_text=None,
+            user_identity=user_identity,
+            handler_func=deps.ask_ai,
             redis_client=redis_client,
-            num_messages=num_messages,
-            custom_instruction=custom_instruction,
+            timezone_offset=timezone_offset,
         )
-        return result, None, False, command
+        return response_msg, response_uses_ai, False, command
 
     if command == "/transcribe":
         reserve_credits = 0
@@ -1623,6 +1633,9 @@ def _handle_known_command(
             chat_id=chat_id,
             redis_client=redis_client,
             billing_helper=billing_helper,
+            user_id=user_id,
+            user_identity=user_identity,
+            timezone_offset=timezone_offset,
         )
         return response_msg, response_markup, False, response_command
 
