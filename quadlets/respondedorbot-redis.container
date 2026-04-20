@@ -3,12 +3,12 @@ Description=respondedorbot Redis cache
 After=network-online.target
 
 [Container]
-Image=docker.io/redis:7-alpine
+Image=docker.io/redis/redis-stack-server:latest
 ContainerName=respondedorbot-redis
 Volume=respondedorbot-redis.volume:/data
 Network=respondedorbot.network
 AutoUpdate=registry
-Exec=redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+Environment="REDIS_ARGS=--maxmemory 256mb --maxmemory-policy allkeys-lru"
 
 [Service]
 Restart=always

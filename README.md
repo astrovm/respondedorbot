@@ -90,6 +90,7 @@ cp quadlets/* ~/.config/containers/systemd/
 mkdir -p ~/respondedorbot
 cp .env.example ~/respondedorbot/.env
 # Edit ~/respondedorbot/.env — set REDIS_HOST=respondedorbot-redis
+# Quadlet Redis uses redis-stack-server because the bot needs RediSearch (FT.CREATE / FT.SEARCH)
 
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus
@@ -98,6 +99,8 @@ systemctl --user daemon-reload
 systemctl --user start respondedorbot-redis.service
 systemctl --user start respondedorbot.service
 ```
+
+The bundled Redis Quadlet uses `redis/redis-stack-server`, not plain `redis`, because chat memory search and compaction require RediSearch commands. The unit intentionally does not override the container command; it passes Redis tuning through `REDIS_ARGS` so the image can boot Redis Stack with its modules enabled.
 
 ### Persist across reboots
 
