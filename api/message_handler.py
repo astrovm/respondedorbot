@@ -284,6 +284,7 @@ class MessageRuntime:
     bot_name: str
     billing_helper: AIMessageBilling
     prepared_message: PreparedMessage
+    auto_process_media: bool = False
 
 
 @dataclass(frozen=True)
@@ -340,7 +341,9 @@ def _initialize_message_runtime(
     chat_config = deps.get_chat_config(redis_client, context.chat_id)
     commands = deps.initialize_commands()
     bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-    raw_message_text, _, _ = deps.extract_message_content(message)
+    raw_message_text, photo_file_id, audio_file_id = _probe_message_content(
+        message, deps=deps
+    )
     command, _ = deps.parse_command(raw_message_text, bot_name)
     auto_process_media = deps.should_auto_process_media(
         commands,
@@ -364,12 +367,10 @@ def _initialize_message_runtime(
             )
         ),
     )
-    prepared_message = _prepare_message_content(
-        message,
-        auto_process_media=auto_process_media,
-        deps=deps,
-        billing_helper=billing_helper,
-        redis_client=redis_client,
+    prepared_message = PreparedMessage(
+        message_text=raw_message_text,
+        photo_file_id=photo_file_id,
+        audio_file_id=audio_file_id,
     )
     return MessageRuntime(
         redis_client=redis_client,
@@ -378,6 +379,7 @@ def _initialize_message_runtime(
         bot_name=bot_name,
         billing_helper=billing_helper,
         prepared_message=prepared_message,
+        auto_process_media=auto_process_media,
     )
 
 
@@ -626,16 +628,29 @@ def _run_ai_flow(
     )
 
 
-def _prepare_message_content(
+def _probe_message_content(
     message: Dict[str, Any],
     *,
+    deps: MessageHandlerDeps,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Extract raw text and media file_ids without any network calls."""
+    return deps.extract_message_content(message)
+
+
+def _process_message_media(
+    prepared: PreparedMessage,
+    *,
+    message: Dict[str, Any],
     auto_process_media: bool,
     deps: MessageHandlerDeps,
     billing_helper: AIMessageBilling,
-    redis_client: Any,
 ) -> PreparedMessage:
-    message_text, photo_file_id, audio_file_id = deps.extract_message_content(message)
-    audio_duration_seconds = 0.0
+    """Transcribe audio and resize images. Expensive — only call after should_respond."""
+    message_text = prepared.message_text
+    photo_file_id = prepared.photo_file_id
+    audio_file_id = prepared.audio_file_id
+    audio_duration_seconds = prepared.audio_duration_seconds
+    resized_image_data: Optional[bytes] = None
 
     if (
         auto_process_media
@@ -650,19 +665,19 @@ def _prepare_message_content(
             deps=deps,
         )
         if resolved_audio_duration is None:
-            if message_text:
+            if not message_text:
                 return PreparedMessage(
                     message_text=message_text,
                     photo_file_id=photo_file_id,
                     audio_file_id=audio_file_id,
                     audio_duration_seconds=0.0,
+                    early_response="ok",
                 )
             return PreparedMessage(
                 message_text=message_text,
                 photo_file_id=photo_file_id,
                 audio_file_id=audio_file_id,
                 audio_duration_seconds=0.0,
-                early_response="ok",
             )
         audio_duration_seconds = resolved_audio_duration
         if (
@@ -719,7 +734,6 @@ def _prepare_message_content(
                 or "mandame texto que no soy alexa, boludo"
             )
 
-    resized_image_data: Optional[bytes] = None
     if (
         auto_process_media
         and photo_file_id
@@ -741,6 +755,32 @@ def _prepare_message_content(
         audio_file_id=audio_file_id,
         resized_image_data=resized_image_data,
         audio_duration_seconds=audio_duration_seconds,
+    )
+
+
+def _prepare_message_content(
+    message: Dict[str, Any],
+    *,
+    auto_process_media: bool,
+    deps: MessageHandlerDeps,
+    billing_helper: AIMessageBilling,
+    redis_client: Any,
+) -> PreparedMessage:
+    """Probe + process media in one call. Kept for backward compatibility."""
+    message_text, photo_file_id, audio_file_id = _probe_message_content(
+        message, deps=deps
+    )
+    probe = PreparedMessage(
+        message_text=message_text,
+        photo_file_id=photo_file_id,
+        audio_file_id=audio_file_id,
+    )
+    return _process_message_media(
+        probe,
+        message=message,
+        auto_process_media=auto_process_media,
+        deps=deps,
+        billing_helper=billing_helper,
     )
 
 
@@ -1714,6 +1754,21 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             )
             return "ok"
 
+        prepared_message = _process_message_media(
+            runtime.prepared_message,
+            message=message,
+            auto_process_media=runtime.auto_process_media,
+            deps=deps,
+            billing_helper=runtime.billing_helper,
+        )
+        if prepared_message.early_response:
+            deps.send_msg(
+                context.chat_id,
+                prepared_message.early_response,
+                context.message_id,
+            )
+            return "ok"
+
         _save_replied_message_context(
             deps,
             message=message,
@@ -1732,7 +1787,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
                 chat_type=context.chat_type,
                 user_id=context.user_id,
                 numeric_chat_id=context.numeric_chat_id,
-                prepared_message=runtime.prepared_message,
+                prepared_message=prepared_message,
                 billing_helper=runtime.billing_helper,
                 reply_context_text=intent.reply_context_text,
                 user_identity=context.user_identity,
@@ -1745,7 +1800,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             deps,
             context=context,
             message=message,
-            prepared_message=runtime.prepared_message,
+            prepared_message=prepared_message,
             reply_context_text=intent.reply_context_text,
             redis_client=runtime.redis_client,
             response_msg=response_msg,
