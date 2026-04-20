@@ -2579,7 +2579,7 @@ def summarize_conversation(
         {"role": "user", "content": f"{instruction}\n\nConversación:\n" + "\n".join(formatted)},
     ]
 
-    response = _call_summary_model(messages)
+    response, _ = _call_summary_model(messages)
     if not response:
         return "no pude resumir la conversación"
     return response
