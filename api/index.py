@@ -105,7 +105,7 @@ from api.ai_pricing import (
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-import api.tools.price_lookup
+import api.tools.crypto_prices
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
@@ -3916,7 +3916,7 @@ def build_system_message(
             tool_summaries = "\n".join(summaries) + "\n"
         else:
             tool_summaries = (
-                "- price_lookup: Get cryptocurrency and stock prices by symbol.\n"
+                "- crypto_prices: Get cryptocurrency prices from CoinMarketCap by symbol.\n"
                 "- calculate: Evaluate a math expression safely (+, -, *, /, %, **).\n"
                 "- web_fetch: Fetch and extract text content from a URL.\n"
                 "- task_set: Create a scheduled task (one-shot or recurring).\n"
