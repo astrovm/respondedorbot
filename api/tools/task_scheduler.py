@@ -355,7 +355,6 @@ def schedule_task(
     task_id = str(uuid.uuid4())[:8]
 
     run_date = None
-    _is_recurring = bool(interval_seconds or trigger_config)
 
     if delay_seconds is not None:
         run_date = datetime.fromtimestamp(
