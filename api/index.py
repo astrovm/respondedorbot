@@ -2912,6 +2912,26 @@ def ask_ai(
     try:
         messages = list(messages or [])
 
+        if len(messages) > 15:
+            keep = 7
+            dropped = messages[: -keep]
+            summary_parts = []
+            for msg in dropped:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                if isinstance(content, str) and content:
+                    summary_parts.append(f"{role}: {content[:200]}")
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            summary_parts.append(f"{role}: {part['text'][:200]}")
+            summary = "Historial resumido de mensajes anteriores:\n" + "\n".join(
+                summary_parts
+            )
+            messages = [
+                {"role": "system", "content": summary}
+            ] + messages[-keep:]
+
         context_data = {
             "market": get_market_context(),
             "weather": get_weather_context(),
@@ -2930,7 +2950,7 @@ def ask_ai(
         if user_id is not None:
             tool_context["user_id"] = user_id
 
-        extra_tools = get_all_tool_schemas(tool_context)
+        extra_tools = get_all_tool_schemas(tool_context, task_mode=task_mode)
         system_message = build_system_message(
             context_data,
             tools_active=bool(extra_tools),
