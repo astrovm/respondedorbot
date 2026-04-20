@@ -1215,6 +1215,8 @@ def test_get_oil_price_success_without_csv_header():
     with patch("api.index.requests.get") as mock_get:
         mock_get.side_effect = [
             MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
+            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
+            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
             MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
         ]
 

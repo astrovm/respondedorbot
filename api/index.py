@@ -2425,25 +2425,6 @@ esto es lo que sé hacer, boludo:
 """
 
 
-def _parse_stooq_quote(raw_response: str) -> Optional[Tuple[float, float]]:
-    rows = [line.strip() for line in raw_response.splitlines() if line.strip()]
-    if not rows:
-        return None
-    row = [field.strip() for field in rows[-1].split(",")]
-    if len(row) < 7 or row[0].lower() == "symbol":
-        return None
-    open_price = row[3]
-    close_price = row[6]
-    if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
-        return None
-    current_value = float(close_price)
-    open_value = float(open_price)
-    if open_value == 0:
-        return None
-    variation = ((current_value - open_value) / open_value) * 100
-    return current_value, variation
-
-
 def get_oil_price() -> str:
     """Return latest Brent and WTI oil prices in USD with daily variation."""
 
@@ -2494,17 +2475,21 @@ def get_oil_price() -> str:
             parsed = parse_daily_rows(rows)
 
             if not parsed:
-                parsed = _parse_stooq_quote(daily_response.text)
+                parsed = fetch_stooq_price(symbol)
 
             if not parsed:
                 quote_response = requests.get(
                     f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
                 )
                 quote_response.raise_for_status()
-                parsed = _parse_stooq_quote(quote_response.text)
+                parsed = fetch_stooq_price(symbol)
 
             if not parsed:
                 continue
+            current_value, variation = parsed
+            prices[name] = {"price": current_value, "variation": variation}
+        except Exception:
+            continue
             current_value, variation = parsed
             prices[name] = {"price": current_value, "variation": variation}
         except Exception:
@@ -3587,7 +3572,6 @@ def _invoke_provider(
             )
             print(f"{display_name} rate limit detected; backing off for {remaining}s")
         return None
-        return None
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -3825,9 +3809,11 @@ def _get_openrouter_ai_response_result(
 def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:
     client = _get_openrouter_client()
     if client is None:
+        print("summary model: OpenRouter client not available")
         return None, 0
     for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
         try:
+            print(f"summary model calling {model}")
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -3841,6 +3827,7 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
                 cost = _estimate_summary_cost_usd_micros(
                     input_tokens, output_tokens, model
                 )
+                print(f"summary model {model} ok: {input_tokens}+{output_tokens} tokens, cost={cost}")
                 return text, cost
         except Exception as e:
             print(f"summary model {model} error: {e}")
