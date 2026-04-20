@@ -138,7 +138,7 @@ def execute_tool(
     entry = _TOOL_REGISTRY.get(name)
     if entry is None:
         return ToolResult(output=f"Unknown tool: {name}")
-    _schema, executor = entry
+    _, executor = entry
     try:
         return executor(params, context or {})
     except Exception as e:

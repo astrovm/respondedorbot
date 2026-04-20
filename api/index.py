@@ -2470,13 +2470,6 @@ def get_oil_price() -> str:
                 parsed = fetch_stooq_price(symbol)
 
             if not parsed:
-                quote_response = requests.get(
-                    f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
-                )
-                quote_response.raise_for_status()
-                parsed = fetch_stooq_price(symbol)
-
-            if not parsed:
                 continue
             current_value, variation = parsed
             prices[name] = {"price": current_value, "variation": variation}
@@ -2498,10 +2491,48 @@ def get_oil_price() -> str:
     return "\n".join(lines)
 
 
+_YAHOO_SCREENER_URL = "https://query1.finance.yahoo.com/v1/finance/screener"
+
+
+def _fetch_top_stocks_by_market_cap() -> List[str]:
+    """Fetch top 10 US stocks by market cap from Yahoo Finance screener."""
+    try:
+        payload = {
+            "offset": 0,
+            "size": 10,
+            "sortField": "intradaymarketcap",
+            "sortType": "DESC",
+            "quoteType": "EQUITY",
+            "query": {
+                "operator": "and",
+                "operands": [
+                    {"operator": "eq", "operands": ["region", "us"]},
+                    {"operator": "gte", "operands": ["intradaymarketcap", 100000000000]},
+                ],
+            },
+            "userId": "",
+            "userIdType": "guid",
+        }
+        resp = requests.post(
+            _YAHOO_SCREENER_URL,
+            json=payload,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        return [q["symbol"] for q in quotes if q.get("symbol")]
+    except Exception:
+        return []
+
+
 def get_stock_prices(msg_text: str) -> str:
     symbols = [s.strip() for s in str(msg_text or "").split() if s.strip()]
     if not symbols:
-        return "pasame los simbolos, ejemplo: /acciones aapl tsla googl"
+        symbols = _fetch_top_stocks_by_market_cap()
+        if not symbols:
+            return "no pude traer el top de acciones, probá de nuevo"
 
     lines: List[str] = []
     for sym in symbols:
