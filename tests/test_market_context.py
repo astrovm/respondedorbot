@@ -1405,23 +1405,28 @@ def test_get_weather_description_unknown():
 
 
 def test_get_oil_price_falls_back_to_stooq_quote_endpoint_when_daily_is_empty():
-    class MockResponse:
-        def __init__(self, text):
-            self.text = text
+    brent_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [107.6, 98.15]}]}
+            }],
+            "error": None,
+        }
+    }
+    wti_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [106.75, 95.45]}]}
+            }],
+            "error": None,
+        }
+    }
 
-        def raise_for_status(self):
-            return None
-
-    def fake_get(url, timeout=5):
-        if "q/d/l" in url:
-            return MockResponse("")
-        if "s=cb.f" in url:
-            return MockResponse("CB.F,20260309,165822,107.6,119.46,97.65,98.15,,\r\n")
-        if "s=cl.f" in url:
-            return MockResponse("CL.F,20260309,165820,106.75,119.43,94.71,95.45,,\r\n")
-        raise AssertionError(f"unexpected url {url}")
-
-    with patch("api.index.requests.get", side_effect=fake_get):
+    with patch("api.index.requests.get") as mock_get:
+        mock_get.side_effect = [
+            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
+            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
+        ]
         result = get_oil_price()
 
     assert "Brent: 98.15 USD (-8.78% 24hs)" in result

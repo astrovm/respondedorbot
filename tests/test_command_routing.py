@@ -1176,48 +1176,66 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
 
 
 def test_get_oil_price_success():
-    mock_text_brent = (
-        "Date,Open,High,Low,Close,Volume\n"
-        "2026-03-08,100,102,99,103.23,10\n"
-        "2026-03-09,100,102,99,101.17,10\n"
-    )
-    mock_text_wti = (
-        "Date,Open,High,Low,Close,Volume\n"
-        "2026-03-08,100,102,99,92.31,10\n"
-        "2026-03-09,100,102,99,98.77,10\n"
-    )
+    brent_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [100.0, 101.17]}]}
+            }],
+            "error": None,
+        }
+    }
+    wti_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [100.0, 98.77]}]}
+            }],
+            "error": None,
+        }
+    }
 
     with patch("api.index.requests.get") as mock_get:
         mock_get.side_effect = [
-            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
-            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
+            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
+            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
         ]
 
         result = get_oil_price()
 
     assert result.splitlines() == [
-        "Brent: 101.17 USD (-2% 24hs)",
-        "WTI: 98.77 USD (+7% 24hs)",
+        "Brent: 101.17 USD (+1.17% 24hs)",
+        "WTI: 98.77 USD (-1.23% 24hs)",
     ]
 
 
 def test_get_oil_price_success_without_csv_header():
-    mock_text_brent = "CB.F,20260309,161651,103.23,119.46,100.02,101.17,,\n"
-    mock_text_wti = "CL.F,20260309,161655,92.31,119.43,96.45,98.77,,\n"
+    brent_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [100.0, 101.17]}]}
+            }],
+            "error": None,
+        }
+    }
+    wti_json = {
+        "chart": {
+            "result": [{
+                "indicators": {"quote": [{"close": [100.0, 98.77]}]}
+            }],
+            "error": None,
+        }
+    }
 
     with patch("api.index.requests.get") as mock_get:
         mock_get.side_effect = [
-            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
-            MagicMock(text=mock_text_brent, raise_for_status=lambda: None),
-            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
-            MagicMock(text=mock_text_wti, raise_for_status=lambda: None),
+            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
+            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
         ]
 
         result = get_oil_price()
 
     assert result.splitlines() == [
-        "Brent: 101.17 USD (-2% 24hs)",
-        "WTI: 98.77 USD (+7% 24hs)",
+        "Brent: 101.17 USD (+1.17% 24hs)",
+        "WTI: 98.77 USD (-1.23% 24hs)",
     ]
 
 
