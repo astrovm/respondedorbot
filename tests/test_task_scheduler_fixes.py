@@ -18,7 +18,6 @@ from api.tools.task_scheduler import (
     shutdown_scheduler,
     _get_task_executor,
 )
-import time
 
 
 def _flush_task_pool():
