@@ -1402,7 +1402,11 @@ def _handle_non_ai_command(
             chat_id=chat_id,
             message=message,
             user_id=user_id,
-            prepared_message=PreparedMessage(message_text=prompt_text),
+            prepared_message=PreparedMessage(
+                message_text=prompt_text,
+                photo_file_id=None,
+                audio_file_id=None,
+            ),
             billing_helper=billing_helper,
             prompt_text=prompt_text,
             reply_context_text=None,
@@ -1411,7 +1415,7 @@ def _handle_non_ai_command(
             redis_client=redis_client,
             timezone_offset=timezone_offset,
         )
-        return response_msg, response_uses_ai, False, command
+        return response_msg, None, response_uses_ai, command
 
     if command == "/transcribe":
         reserve_credits = 0
@@ -1624,7 +1628,7 @@ def _handle_known_command(
             )
             return response_msg, response_markup, response_uses_ai, response_command
 
-        response_msg, response_markup, _, response_command = _handle_non_ai_command(
+        response_msg, response_markup, response_uses_ai, response_command = _handle_non_ai_command(
             deps,
             command=command,
             commands=commands,
@@ -1637,7 +1641,7 @@ def _handle_known_command(
             user_identity=user_identity,
             timezone_offset=timezone_offset,
         )
-        return response_msg, response_markup, False, response_command
+        return response_msg, response_markup, response_uses_ai, response_command
 
     response_msg, response_uses_ai = _run_ai_flow(
         deps,
