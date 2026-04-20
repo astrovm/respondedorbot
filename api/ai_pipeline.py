@@ -223,6 +223,7 @@ def handle_ai_response(
 
 
 __all__ = [
+    "INSTRUCCIONES_BASE",
     "clean_duplicate_response",
     "handle_ai_response",
     "remove_gordo_prefix",
