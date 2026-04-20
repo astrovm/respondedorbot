@@ -93,3 +93,16 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     assert [msg["id"] for msg in visible_history] == ["m96", "m97", "m98", "m99", "m100"]
     assert retrieved_messages == [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}]
     assert summary_cost == 1
+
+
+def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
+    from api.message_state import fetch_chat_messages_for_compaction
+
+    redis_client = MagicMock()
+    redis_client.execute_command.side_effect = [[0], [0]]
+
+    fetch_chat_messages_for_compaction(redis_client, "5162530")
+
+    query = redis_client.execute_command.call_args_list[1].args[2]
+    assert query == "@chat_id:{5162530}"
+    assert "*" not in query
