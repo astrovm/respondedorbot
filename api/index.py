@@ -4075,7 +4075,7 @@ NOTICIAS DE HACKER NEWS:
         "content": [
             {
                 "type": "text",
-                "text": task_prefix + contextual_info + base_prompt,
+                "text": task_prefix + base_prompt + contextual_info,
             }
         ],
     }
