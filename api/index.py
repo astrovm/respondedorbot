@@ -2511,7 +2511,7 @@ def get_stock_prices(msg_text: str) -> str:
         if parsed:
             price, var = parsed
             sign = "+" if var >= 0 else ""
-            lines.append(f"{sym.upper()}: {price:.4f} USD ({sign}{var:.2f}% 24h)")
+            lines.append(f"{sym.upper()}: {price:.2f} USD ({sign}{var:.2f}% 24h)")
         else:
             lines.append(f"{sym.upper()}: no se pudo obtener")
 
