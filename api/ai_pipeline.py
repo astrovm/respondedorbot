@@ -48,7 +48,7 @@ def clean_duplicate_response(response: str) -> str:
         return response
 
     lines = response.split("\n")
-    cleaned_lines = []
+    cleaned_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
         if stripped and (not cleaned_lines or stripped != cleaned_lines[-1]):
@@ -56,7 +56,7 @@ def clean_duplicate_response(response: str) -> str:
 
     cleaned_response = "\n".join(cleaned_lines)
     sentences = cleaned_response.split(". ")
-    cleaned_sentences = []
+    cleaned_sentences: list[str] = []
     for sentence in sentences:
         stripped = sentence.strip()
         if stripped and (not cleaned_sentences or stripped != cleaned_sentences[-1]):
