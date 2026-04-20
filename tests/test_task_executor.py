@@ -94,7 +94,7 @@ class TestTaskExecutor:
         should_delete = executor.execute(task)
 
         assert should_delete is True
-        ask_ai.assert_called_once()
+        assert ask_ai.call_count == 2
         send_msg.assert_called_once_with("123", "astro, tarea programada: respuesta")
         billing.refund_reserved_ai_credits.assert_called_once()
         billing.settle_reserved_ai_credits.assert_not_called()
