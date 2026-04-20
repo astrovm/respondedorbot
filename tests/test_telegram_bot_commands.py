@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_build_commands_list_sorts_deduplicates_and_skips_undocumented_aliases():

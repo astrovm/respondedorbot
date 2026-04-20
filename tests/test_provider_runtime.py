@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 class _FakeChoice:

@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():

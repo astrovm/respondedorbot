@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_index_handle_msg_balance_uses_real_wiring(monkeypatch):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional
 
 from api.command_registry import CommandTuple
 

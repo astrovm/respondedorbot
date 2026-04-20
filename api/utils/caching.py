@@ -1,6 +1,6 @@
 """Lightweight helpers to work with in-memory caches that mirror Redis."""
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any, Dict, Optional, Tuple
 import time
 
@@ -13,7 +13,7 @@ __all__ = [
 
 def now_utc_iso() -> str:
     """Return the current UTC timestamp rendered as ISO-8601."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def update_local_cache(

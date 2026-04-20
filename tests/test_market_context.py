@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_get_rulo():
@@ -530,7 +530,7 @@ def test_get_market_context_success():
             "data": {"oficial": {"price": 1000}, "blue": {"price": 1200}}
         }
 
-        def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
+        def mock_requests_side_effect(url, *_args, **_kwargs):
             if "coinmarketcap" in url:
                 return crypto_response
             elif "criptoya" in url:
@@ -559,7 +559,7 @@ def test_get_market_context_crypto_fail():
         # Mock dollar response only
         dollar_response = {"data": {"oficial": {"price": 1000}}}
 
-        def mock_requests_side_effect(url, *_args, **_kwargs):  # noqa: ARG001
+        def mock_requests_side_effect(url, *_args, **_kwargs):
             if "coinmarketcap" in url:
                 return None  # Crypto fails
             elif "criptoya" in url:
@@ -751,7 +751,6 @@ def test_get_fallback_response():
 
 def test_build_system_message():
     from api.index import build_system_message
-    import api.index
 
     # Reset global cache to ensure clean state
     config_module.reset_cache()
@@ -806,7 +805,6 @@ def test_build_system_message():
 
 def test_build_system_message_empty_context():
     from api.index import build_system_message
-    import api.index
 
     # Reset global cache to ensure clean state
     config_module.reset_cache()

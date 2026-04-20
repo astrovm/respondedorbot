@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_convert_to_command():
@@ -155,7 +155,6 @@ def test_parse_command_hangul_filler_alias():
 
 
 def test_should_gordo_respond():
-    import api.index
 
     # Reset global cache to ensure clean state
     config_module.reset_cache()
@@ -221,7 +220,6 @@ def test_should_gordo_respond():
 
 
 def test_should_gordo_respond_ignores_link_fix_reply_when_toggle_enabled():
-    import api.index
 
     config_module.reset_cache()
     commands = {"/test": (lambda x: x, False, False)}
@@ -259,7 +257,6 @@ def test_should_gordo_respond_ignores_link_fix_reply_when_toggle_enabled():
 
 
 def test_should_gordo_respond_allows_link_fix_reply_when_toggle_disabled():
-    import api.index
 
     config_module.reset_cache()
     commands = {"/test": (lambda x: x, False, False)}
@@ -298,7 +295,6 @@ def test_should_gordo_respond_allows_link_fix_reply_when_toggle_disabled():
 
 
 def test_should_gordo_respond_allows_commands_on_link_fix_replies():
-    import api.index
 
     config_module.reset_cache()
     commands = {"/ask": (lambda x: x, True, True)}
@@ -576,7 +572,6 @@ def test_groq_backoff_is_marked_and_cleared():
         is_provider_cooled_down,
         clear_all_cooldowns,
         get_provider_cooldown_remaining,
-        clear_provider_cooldown,
     )
 
     clear_all_cooldowns()
@@ -592,7 +587,6 @@ def test_groq_backoff_is_marked_and_cleared():
 def test_groq_backoff_only_extends_not_shortens():
     from api.provider_backoff import (
         mark_provider_cooldown,
-        is_provider_cooled_down,
         get_provider_cooldown_remaining,
         clear_all_cooldowns,
     )
@@ -807,7 +801,6 @@ def test_parse_command_complex_cases():
 
 
 def test_should_gordo_respond_complex_cases():
-    import api.index
     from api.index import should_gordo_respond
 
     config_module.set_cache(
@@ -1091,7 +1084,7 @@ def test_cached_requests_retries_on_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    def fake_get(url, params=None, headers=None, timeout=5, verify=True):  # noqa: ARG001
+    def fake_get(url, params=None, headers=None, timeout=5, verify=True):
         calls["n"] += 1
         if calls["n"] == 1:
             raise requests.RequestException("boom")

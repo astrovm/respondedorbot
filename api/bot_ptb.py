@@ -114,11 +114,11 @@ def create_application(
     resolved_redis = redis_client if redis_client is not None else config_redis()
 
     telegram_ext = importlib.import_module("telegram.ext")
-    ApplicationBuilder = getattr(telegram_ext, "ApplicationBuilder")
-    CallbackQueryHandler = getattr(telegram_ext, "CallbackQueryHandler")
-    MessageHandler = getattr(telegram_ext, "MessageHandler")
-    PreCheckoutQueryHandler = getattr(telegram_ext, "PreCheckoutQueryHandler")
-    filters = getattr(telegram_ext, "filters")
+    ApplicationBuilder = telegram_ext.ApplicationBuilder
+    CallbackQueryHandler = telegram_ext.CallbackQueryHandler
+    MessageHandler = telegram_ext.MessageHandler
+    PreCheckoutQueryHandler = telegram_ext.PreCheckoutQueryHandler
+    filters = telegram_ext.filters
 
     application = (
         ApplicationBuilder()

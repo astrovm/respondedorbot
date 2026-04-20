@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 @pytest.mark.parametrize(
@@ -306,7 +306,6 @@ def test_cache_bcra_variables_exception():
 
 
 def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
-    from api import index as index_module
     from api.index import cache_bcra_variables, get_or_refresh_bcra_variables
 
     test_data = {"Tipo de cambio mayorista": {"value": "1000", "date": "01/09/2025"}}
@@ -334,7 +333,6 @@ def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
 
 
 def test_get_currency_band_limits_reuses_stale_after_failure():
-    from api import index as index_module
     from api.index import get_currency_band_limits
 
     band_data = {"lower": 950.0, "upper": 1200.0, "date": "22/09/2025"}
@@ -937,7 +935,7 @@ def test_calculate_tcrm_100_success():
         mock_itcrm_details.return_value = (120.0, "01/01/24")
 
         # Simulate cached mayorista for 2024-01-01
-        def redis_side_effect(_client, key):  # noqa: ARG001
+        def redis_side_effect(_client, key):
             if key == "bcra_mayorista:2024-01-01":
                 return {"value": 1000.0}
             return None
@@ -965,10 +963,10 @@ def test_calculate_tcrm_100_caches_missing_mayorista():
         redis_client = MagicMock()
         mock_cfg.return_value = redis_client
 
-        def get_json_side_effect(_client, key):  # noqa: ARG001
+        def get_json_side_effect(_client, key):
             return cache.get(key)
 
-        def setex_side_effect(_client, key, ttl, value):  # noqa: ARG001
+        def setex_side_effect(_client, key, ttl, value):
             cache[key] = value
             return True
 
@@ -1010,7 +1008,7 @@ def test_get_cached_tcrm_100_backfills_missing_history():
         mock_set_json.return_value = True
         mock_latest.return_value = (150.0, "02/01/24")
 
-        def redis_get_json_side_effect(_client, key):  # noqa: ARG001
+        def redis_get_json_side_effect(_client, key):
             if key == "tcrm_100":
                 return None
             if key == "latest_itcrm_details":
@@ -1067,7 +1065,7 @@ def test_get_cached_tcrm_100_skips_fetch_when_mayorista_missing():
         mock_cfg.return_value = redis_client
         mock_history.return_value = None
 
-        def get_json_side_effect(_client, key):  # noqa: ARG001
+        def get_json_side_effect(_client, key):
             if key == "tcrm_100":
                 return None
             if key == "latest_itcrm_details":
@@ -1122,7 +1120,7 @@ def test_sort_dollar_rates_with_tcrm():
 
 
 def test_format_dollar_rates_includes_currency_band_limits():
-    from api.index import format_dollar_rates, fmt_num
+    from api.index import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.5, "history": 0.5},

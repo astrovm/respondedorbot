@@ -1,5 +1,5 @@
 from contextvars import ContextVar, Token
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, UTC
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from html import unescape
@@ -23,7 +23,6 @@ from typing import (
     Mapping,
     Sequence,
     TypeVar,
-    NamedTuple,
     TYPE_CHECKING,
     Literal,
 )
@@ -85,13 +84,15 @@ from api.ai_billing import (
     BalanceFormatter,
     build_insufficient_credits_message as _billing_build_insufficient_credits_message,
     build_topup_keyboard as _billing_build_topup_keyboard,
-    extract_numeric_chat_id as _billing_extract_numeric_chat_id,
-    extract_user_id as _billing_extract_user_id,
     get_ai_billing_pack as _billing_get_ai_billing_pack,
     get_ai_billing_packs as _billing_get_ai_billing_packs,
     get_ai_onboarding_credits as _billing_get_ai_onboarding_credits,
     maybe_grant_onboarding_credits as _billing_maybe_grant_onboarding_credits,
     parse_topup_payload as _billing_parse_topup_payload,
+)
+from api.chat_context import (
+    extract_numeric_chat_id as _billing_extract_numeric_chat_id,
+    extract_user_id as _billing_extract_user_id,
 )
 from api.ai_pricing import (
     CHAT_OUTPUT_TOKEN_LIMIT,
@@ -107,13 +108,12 @@ from api.ai_pricing import (
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-import api.tools.crypto_prices
 from api.tools.stock_prices import fetch_stooq_price
+# Side-effect imports: modules register tools at import time via register_tool()
+import api.tools.crypto_prices
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
-import api.tools.task_list
-import api.tools.task_cancel
 from api.tools import get_all_tool_schemas
 from api.tool_runtime import ToolRuntime
 from api.tools.task_scheduler import (
@@ -122,9 +122,7 @@ from api.tools.task_scheduler import (
     format_task_summary,
 )
 from api.ai_pipeline import (
-    clean_duplicate_response as _ai_clean_duplicate_response,
     handle_ai_response as _ai_handle_response,
-    remove_gordo_prefix as _ai_remove_gordo_prefix,
 )
 from api.chat_settings import (
     TIMEZONE_OFFSET_MAX,
@@ -748,8 +746,8 @@ def _parse_retry_window_seconds(value: Optional[str]) -> Optional[int]:
     except Exception:
         return None
     if parsed_dt.tzinfo is None:
-        parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
-    return max(0, int((parsed_dt - datetime.now(timezone.utc)).total_seconds()))
+        parsed_dt = parsed_dt.replace(tzinfo=UTC)
+    return max(0, int((parsed_dt - datetime.now(UTC)).total_seconds()))
 
 
 def _extract_rate_limit_backoff_seconds(
@@ -903,7 +901,7 @@ def cached_requests(
             try:
                 return make_request()
             except Exception as e:
-                print(f"[CACHE] Error requesting {api_url}: {str(e)}")
+                print(f"[CACHE] Error requesting {api_url}: {e!s}")
                 return None
         else:
             cached_data = cast(Dict[str, Any], redis_response)
@@ -916,7 +914,7 @@ def cached_requests(
                 try:
                     return make_request()
                 except Exception as e:
-                    print(f"[CACHE] Error updating cache for {api_url}: {str(e)}")
+                    print(f"[CACHE] Error updating cache for {api_url}: {e!s}")
                     return cached_data
             else:
                 return cached_data
@@ -928,7 +926,7 @@ def cached_requests(
             "headers": headers,
             "expiration_time": expiration_time,
         }
-        error_msg = f"Error in cached_requests: {str(e)}"
+        error_msg = f"Error in cached_requests: {e!s}"
         print(error_msg)
         admin_report(error_msg, e, error_context)
         return None
@@ -1177,7 +1175,7 @@ def get_polymarket_argentina_election() -> str:
 
         timestamp = latest_stream_timestamp or response_timestamp
         if isinstance(timestamp, int):
-            updated_at_utc = datetime.fromtimestamp(timestamp, timezone.utc)
+            updated_at_utc = datetime.fromtimestamp(timestamp, UTC)
             updated_at_ba = updated_at_utc.astimezone(BA_TZ)
             lines.extend(
                 [
@@ -2181,8 +2179,8 @@ def handle_transcribe() -> str:
 
 
 def powerlaw() -> str:
-    today = datetime.now(timezone.utc)
-    since = datetime(day=4, month=1, year=2009).replace(tzinfo=timezone.utc)
+    today = datetime.now(UTC)
+    since = datetime(day=4, month=1, year=2009).replace(tzinfo=UTC)
     days_since = (today - since).days
 
     # Giovanni Santostasi Bitcoin Power Law model
@@ -2204,8 +2202,8 @@ def powerlaw() -> str:
 
 
 def rainbow() -> str:
-    today = datetime.now(timezone.utc)
-    since = datetime(day=9, month=1, year=2009).replace(tzinfo=timezone.utc)
+    today = datetime.now(UTC)
+    since = datetime(day=9, month=1, year=2009).replace(tzinfo=UTC)
     days_since = (today - since).days
     value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
 
@@ -2791,7 +2789,7 @@ def admin_report(
     # Add error details if provided
     if error:
         error_details = f"\n\ntipo de error: {type(error).__name__}"
-        error_details += f"\nmensaje de error: {str(error)}"
+        error_details += f"\nmensaje de error: {error!s}"
 
         error_details += f"\n\ntraceback:\n{traceback.format_exc()}"
 
@@ -2901,7 +2899,7 @@ def get_weather() -> dict:
             }
         return {}
     except Exception as e:
-        print(f"Error getting weather: {str(e)}")
+        print(f"Error getting weather: {e!s}")
         return {}
 
 def _sanitize_bot_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2996,7 +2994,7 @@ def ask_ai(
                             last_message["content"] + f"\n\n{image_context}"
                         )
 
-                print(f"Image described, continuing with normal AI flow...")
+                print("Image described, continuing with normal AI flow...")
             else:
                 print("Failed to describe image, continuing without description...")
 
@@ -4520,9 +4518,9 @@ def _send_stars_invoice(
 def extract_message_text(message: Dict) -> str:
     """Extract text content from different message types"""
     # Prioritize text, then caption, then poll question
-    if "text" in message and message["text"]:
+    if message.get("text"):
         return str(message["text"]).strip()
-    if "caption" in message and message["caption"]:
+    if message.get("caption"):
         return str(message["caption"]).strip()
     if "poll" in message and isinstance(message["poll"], dict):
         return str(message["poll"].get("question", "")).strip()
@@ -4537,51 +4535,51 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
     photo_file_id = None
 
     # First, check for photo in the main message
-    if "photo" in message and message["photo"]:
+    if message.get("photo"):
         # Telegram sends array of photos in different resolutions
         # Take the last one (highest resolution)
         photo_file_id = message["photo"][-1]["file_id"]
 
     # Check for sticker in the main message
-    elif "sticker" in message and message["sticker"]:
+    elif message.get("sticker"):
         photo_file_id = message["sticker"]["file_id"]
         print(f"Found sticker: {photo_file_id}")
 
     # If no photo/sticker in main message, check in replied message
-    elif "reply_to_message" in message and message["reply_to_message"]:
+    elif message.get("reply_to_message"):
         replied_msg = message["reply_to_message"]
-        if "photo" in replied_msg and replied_msg["photo"]:
+        if replied_msg.get("photo"):
             photo_file_id = replied_msg["photo"][-1]["file_id"]
             print(f"Found photo in quoted message: {photo_file_id}")
-        elif "sticker" in replied_msg and replied_msg["sticker"]:
+        elif replied_msg.get("sticker"):
             photo_file_id = replied_msg["sticker"]["file_id"]
             print(f"Found sticker in quoted message: {photo_file_id}")
 
     # Extract audio/voice/video
     audio_file_id = None
-    if "voice" in message and message["voice"]:
+    if message.get("voice"):
         audio_file_id = message["voice"]["file_id"]
-    elif "audio" in message and message["audio"]:
+    elif message.get("audio"):
         audio_file_id = message["audio"]["file_id"]
-    elif "video" in message and message["video"]:
+    elif message.get("video"):
         audio_file_id = message["video"]["file_id"]
         print(f"Found video: {audio_file_id}")
-    elif "video_note" in message and message["video_note"]:
+    elif message.get("video_note"):
         audio_file_id = message["video_note"]["file_id"]
         print(f"Found video_note: {audio_file_id}")
     # Also check for audio/video in replied message
-    elif "reply_to_message" in message and message["reply_to_message"]:
+    elif message.get("reply_to_message"):
         replied_msg = message["reply_to_message"]
-        if "voice" in replied_msg and replied_msg["voice"]:
+        if replied_msg.get("voice"):
             audio_file_id = replied_msg["voice"]["file_id"]
             print(f"Found voice in quoted message: {audio_file_id}")
-        elif "audio" in replied_msg and replied_msg["audio"]:
+        elif replied_msg.get("audio"):
             audio_file_id = replied_msg["audio"]["file_id"]
             print(f"Found audio in quoted message: {audio_file_id}")
-        elif "video" in replied_msg and replied_msg["video"]:
+        elif replied_msg.get("video"):
             audio_file_id = replied_msg["video"]["file_id"]
             print(f"Found video in quoted message: {audio_file_id}")
-        elif "video_note" in replied_msg and replied_msg["video_note"]:
+        elif replied_msg.get("video_note"):
             audio_file_id = replied_msg["video_note"]["file_id"]
             print(f"Found video_note in quoted message: {audio_file_id}")
 

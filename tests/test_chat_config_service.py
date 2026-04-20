@@ -1,7 +1,6 @@
 import json
 from unittest.mock import Mock
 
-import redis
 
 from api.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import ChatConfigRepository
