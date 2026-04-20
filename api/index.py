@@ -108,7 +108,7 @@ from api.ai_pricing import (
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
 import api.tools.crypto_prices
-import api.tools.stock_prices
+from api.tools.stock_prices import fetch_stooq_price
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
@@ -235,6 +235,9 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
 SUMMARY_FALLBACK_MODEL = "minimax/minimax-m2.5:free"
+COMPACTION_THRESHOLD = 8
+COMPACTION_KEEP = 5
+COMPACTION_TRUNCATE_LINES = 20
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
@@ -2529,19 +2532,12 @@ def get_stock_prices(msg_text: str) -> str:
 
     lines: List[str] = []
     for sym in symbols:
-        try:
-            resp = requests.get(
-                f"https://stooq.com/q/l/?s={sym.upper()}&i=d", timeout=5
-            )
-            resp.raise_for_status()
-            parsed = _parse_stooq_quote(resp.text)
-            if parsed:
-                price, var = parsed
-                sign = "+" if var >= 0 else ""
-                lines.append(f"{sym.upper()}: ${price:.2f} ({sign}{var:.2f}% dia)")
-            else:
-                lines.append(f"{sym.upper()}: no se pudo obtener")
-        except Exception:
+        parsed = fetch_stooq_price(sym.upper())
+        if parsed:
+            price, var = parsed
+            sign = "+" if var >= 0 else ""
+            lines.append(f"{sym.upper()}: ${price:.2f} ({sign}{var:.2f}% dia)")
+        else:
             lines.append(f"{sym.upper()}: no se pudo obtener")
 
     return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
@@ -2943,15 +2939,14 @@ def ask_ai(
     try:
         messages = list(messages or [])
 
-        if len(messages) > 8:
-            keep = 5
-            dropped = messages[: -keep]
+        if len(messages) > COMPACTION_THRESHOLD:
+            dropped = messages[: -COMPACTION_KEEP]
             dropped_text = _format_messages_for_summary(dropped)
             summary, summary_cost = _compact_conversation(dropped_text)
             if summary:
                 messages = [
                     {"role": "system", "content": summary}
-                ] + messages[-keep:]
+                ] + messages[-COMPACTION_KEEP:]
                 if summary_cost > 0:
                     _append_billing_segment(response_meta, _make_summary_result(summary_cost))
             else:
@@ -3866,7 +3861,7 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     if result:
         return f"Conversation history summary:\n{result}", cost
     lines = dropped_text.split("\n")
-    truncated = "\n".join(lines[:20])
+    truncated = "\n".join(lines[:COMPACTION_TRUNCATE_LINES])
     return f"Earlier conversation (truncated):\n{truncated}", 0
 
 
@@ -4356,7 +4351,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
             "tasks_command": tasks_command,
-            "summary_command": lambda: "",
+            "summary_command": _noop_command,
         }
     )
 
