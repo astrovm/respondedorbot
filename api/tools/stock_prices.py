@@ -9,7 +9,7 @@ import requests
 from api.tools.registry import ToolResult, register_tool
 
 
-def _fetch_stooq_price(symbol: str) -> Optional[Tuple[float, float]]:
+def fetch_stooq_price(symbol: str) -> Optional[Tuple[float, float]]:
     try:
         resp = requests.get(
             f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
@@ -48,7 +48,7 @@ def _execute_stock_prices(
 
     results: List[str] = []
     for sym in symbols:
-        parsed = _fetch_stooq_price(sym.upper())
+        parsed = fetch_stooq_price(sym.upper())
         if parsed:
             price, var = parsed
             sign = "+" if var >= 0 else ""
