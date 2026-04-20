@@ -1382,6 +1382,28 @@ def _handle_non_ai_command(
     if uses_ai:
         return None, None, False, None
 
+    if command in ("/resumen", "/summary"):
+        from api.index import summarize_conversation
+
+        num_messages = 50
+        custom_instruction = None
+        parts = sanitized_message_text.strip().split(None, 1)
+        if parts and parts[0].isdigit():
+            num_messages = min(int(parts[0]), 200)
+            if len(parts) > 1:
+                custom_instruction = parts[1]
+        elif parts:
+            custom_instruction = sanitized_message_text.strip()
+
+        result = summarize_conversation(
+            chat_id=chat_id,
+            redis_client=redis_client,
+            ask_ai_fn=deps.ask_ai,
+            num_messages=num_messages,
+            custom_instruction=custom_instruction,
+        )
+        return result, None, False, command
+
     if command == "/transcribe":
         reserve_credits = 0
         replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})

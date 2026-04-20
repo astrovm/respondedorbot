@@ -57,6 +57,8 @@ COMMAND_DESCRIPTIONS: Dict[str, str] = {
     "gn": "gif de buenas noches",
     "tareas": "listado de tareas programadas",
     "tasks": "listado de tareas programadas",
+    "resumen": "resumí la conversación [N mensajes]",
+    "summary": "resumí la conversación [N mensajes]",
 }
 
 
