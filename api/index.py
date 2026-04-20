@@ -2491,38 +2491,53 @@ def get_oil_price() -> str:
     return "\n".join(lines)
 
 
-_YAHOO_SCREENER_URL = "https://query1.finance.yahoo.com/v1/finance/screener"
+_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
-def _fetch_top_stocks_by_market_cap() -> List[str]:
-    """Fetch top 10 US stocks by market cap from Yahoo Finance screener."""
+def _fetch_yahoo_stock_price(symbol: str) -> Optional[Tuple[float, float]]:
     try:
-        payload = {
-            "offset": 0,
-            "size": 10,
-            "sortField": "intradaymarketcap",
-            "sortType": "DESC",
-            "quoteType": "EQUITY",
-            "query": {
-                "operator": "and",
-                "operands": [
-                    {"operator": "eq", "operands": ["region", "us"]},
-                    {"operator": "gte", "operands": ["intradaymarketcap", 100000000000]},
-                ],
-            },
-            "userId": "",
-            "userIdType": "guid",
-        }
-        resp = requests.post(
-            _YAHOO_SCREENER_URL,
-            json=payload,
+        resp = requests.get(
+            _YAHOO_CHART_URL.format(symbol=symbol),
+            params={"range": "5d", "interval": "1d"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
-        return [q["symbol"] for q in quotes if q.get("symbol")]
+        result = data.get("chart", {}).get("result", [{}])[0]
+        quotes = result.get("indicators", {}).get("quote", [{}])[0]
+        closes = [c for c in quotes.get("close", []) if c is not None]
+        if len(closes) < 2:
+            return None
+        prev_close = closes[-2]
+        current = closes[-1]
+        if prev_close == 0:
+            return None
+        change_pct = ((current - prev_close) / prev_close) * 100
+        return current, change_pct
+    except Exception:
+        return None
+
+
+_FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
+
+
+def _fetch_top_stocks_by_market_cap() -> List[str]:
+    try:
+        resp = requests.get(
+            _FINVIZ_SCREENER_URL,
+            params={"v": "152", "f": "cap_mega", "o": "-marketcap"},
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        seen: set[str] = set()
+        result: List[str] = []
+        for sym in re.findall(r'data-boxover-ticker="([A-Z.]+)"', resp.text):
+            if sym not in seen and len(result) < 10:
+                seen.add(sym)
+                result.append(sym)
+        return result
     except Exception:
         return []
 
@@ -2536,7 +2551,7 @@ def get_stock_prices(msg_text: str) -> str:
 
     lines: List[str] = []
     for sym in symbols:
-        parsed = fetch_stooq_price(sym.upper())
+        parsed = _fetch_yahoo_stock_price(sym.upper())
         if parsed:
             price, var = parsed
             sign = "+" if var >= 0 else ""
