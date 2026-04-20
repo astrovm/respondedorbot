@@ -15,6 +15,13 @@ _admin_reporter: Optional[AdminReporter] = None
 _WORKSPACE_DIR: Optional[Path] = None
 
 
+def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
+    """Register optional admin reporter callbacks."""
+
+    global _admin_reporter
+    _admin_reporter = admin_reporter
+
+
 def _resolve_workspace_dir() -> Path:
     global _WORKSPACE_DIR
     if _WORKSPACE_DIR is not None:
@@ -87,13 +94,6 @@ def load_bot_config() -> Dict[str, Any]:
     }
 
     return _bot_config
-
-
-def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
-    """Register optional admin reporter callbacks."""
-
-    global _admin_reporter
-    _admin_reporter = admin_reporter
 
 
 def _admin_report(
