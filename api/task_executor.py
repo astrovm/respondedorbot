@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Tuple
+import concurrent.futures
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
 from api.ai_pipeline import (
@@ -25,7 +26,6 @@ def _strip_response_marker(response: str) -> str:
 
 
 def _clean_task_response(response: str) -> str:
-    """Apply the same cleanup pipeline as handle_ai_response for task output."""
     response = remove_gordo_prefix(response)
     response = clean_duplicate_response(response)
     return response.strip()
@@ -43,6 +43,7 @@ class TaskExecutor:
         build_insufficient_credits_message_fn: Callable[..., str],
         estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
         billing_factory: Callable[..., AIMessageBilling] = AIMessageBilling,
+        max_workers: int = 5,
     ) -> None:
         self._ask_ai = ask_ai
         self._send_msg = send_msg
@@ -54,6 +55,10 @@ class TaskExecutor:
         )
         self._estimate_ai_base_reserve_credits = estimate_ai_base_reserve_credits
         self._billing_factory = billing_factory
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="task",
+        )
 
     def execute(self, task: Mapping[str, Any]) -> bool:
         task_id = str(task.get("id", ""))
@@ -171,6 +176,25 @@ class TaskExecutor:
                 )
                 return should_delete
 
+    def execute_many(self, tasks: List[Mapping[str, Any]]) -> List[bool]:
+        """Execute multiple tasks in parallel, returning delete flags."""
+        if not tasks:
+            return []
+        futures = {
+            self._pool.submit(self.execute, task): task
+            for task in tasks
+        }
+        results = []
+        for future in concurrent.futures.as_completed(futures):
+            task = futures[future]
+            task_id = task.get("id", "")
+            try:
+                results.append(future.result())
+            except Exception as e:
+                print(f"task_scheduler: {task_id} parallel execution error: {e}")
+                results.append(False)
+        return results
+
 
 def build_task_executor(
     *,
@@ -182,6 +206,7 @@ def build_task_executor(
     build_insufficient_credits_message_fn: Callable[..., str],
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     billing_factory: Callable[..., AIMessageBilling] = AIMessageBilling,
+    max_workers: int = 5,
 ) -> TaskExecutor:
     return TaskExecutor(
         ask_ai=ask_ai,
@@ -192,4 +217,5 @@ def build_task_executor(
         build_insufficient_credits_message_fn=build_insufficient_credits_message_fn,
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         billing_factory=billing_factory,
+        max_workers=max_workers,
     )
