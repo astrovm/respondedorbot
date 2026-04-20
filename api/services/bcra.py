@@ -8,6 +8,11 @@ import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, UTC
 from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
+
+from api.logging_config import get_logger
+
+logger = get_logger(__name__)
 from typing import (
     Any,
     Callable,
@@ -219,7 +224,7 @@ def _load_cached_entry(
         redis_client = _config_redis()
     except Exception as exc:
         if redis_error_message:
-            print(f"{redis_error_message}: {exc}")
+            logger.warning("%s: %s", redis_error_message, exc)
         redis_client = None
 
     if redis_client is not None:
@@ -687,7 +692,7 @@ def fetch_currency_band_limits(
 
         return _parse_currency_band_rows(rows)
     except Exception as exc:
-        print(f"Error fetching BCRA currency bands via API: {exc}")
+        logger.error("Error fetching BCRA currency bands via API: %s", exc)
         return None
 
 
@@ -740,7 +745,7 @@ def bcra_fetch_latest_variables() -> Optional[Dict[str, Dict[str, str]]]:
             variables[name] = {"value": to_es_number(val), "date": to_ddmmyy(date_iso)}
         return variables
     except Exception as exc:
-        print(f"Error fetching BCRA variables via API: {exc}")
+        logger.error("Error fetching BCRA variables via API: %s", exc)
         return None
 
 
@@ -823,7 +828,7 @@ def cache_bcra_variables(variables: Dict[str, Any], ttl: int = TTL_BCRA) -> None
         return
 
     def _log_cache_error(exc: Exception) -> None:
-        print(f"Error caching BCRA variables: {exc}")
+        logger.error("Error caching BCRA variables: %s", exc)
 
     def _store_mayorista(
         redis_client: redis.Redis, payload_data: Dict[str, Any], _: str
@@ -976,7 +981,7 @@ def _get_itcrm_value_for_date(target_dt: datetime) -> Optional[Tuple[float, date
 
         return None
     except Exception as exc:
-        print(f"Error finding ITCRM value for {target_dt.date()}: {exc}")
+        logger.error("Error finding ITCRM value for %s: %s", target_dt.date(), exc)
         return None
 
 
@@ -1125,7 +1130,7 @@ def calculate_tcrm_100(
                 pass
         return result
     except Exception as exc:
-        print(f"Error calculating TCRM 100: {exc}")
+        logger.error("Error calculating TCRM 100: %s", exc)
         return None
 
 
@@ -1264,7 +1269,7 @@ def get_cached_tcrm_100(
 
         return current_value, change
     except Exception as exc:
-        print(f"Error getting cached TCRM 100: {exc}")
+        logger.error("Error getting cached TCRM 100: %s", exc)
         return None, None
 
 
@@ -1331,7 +1336,7 @@ def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
                 return val, date_str
         return None
     except Exception as exc:
-        print(f"Error fetching ITCRM details: {exc}")
+        logger.error("Error fetching ITCRM details: %s", exc)
         return None
 
 
@@ -1394,7 +1399,7 @@ def _fetch_country_risk_direct() -> Optional[Mapping[str, Any]]:
         if isinstance(data, Mapping):
             return data
     except Exception as exc:
-        print(f"Fallback request for country risk failed: {exc}")
+        logger.error("Fallback request for country risk failed: %s", exc)
     return None
 
 
@@ -1416,7 +1421,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             if isinstance(candidate_payload, Mapping):
                 response_payload = candidate_payload
             else:
-                print("Country risk payload missing or invalid")
+                logger.warning("Country risk payload missing or invalid")
         else:
             print(
                 "Unexpected response while fetching country risk: "

@@ -61,6 +61,9 @@ def main() -> int:
         print("FATAL: TELEGRAM_TOKEN not set", file=sys.stderr)
         return 1
 
+    from api.logging_config import setup_logging
+    setup_logging()
+
     from api import index
     from api.bot_ptb import run_polling
     from api.tools.task_scheduler import get_scheduler, init_scheduler
