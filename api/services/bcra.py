@@ -1423,12 +1423,12 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             else:
                 logger.warning("Country risk payload missing or invalid")
         else:
-            print(
-                "Unexpected response while fetching country risk: "
-                f"{type(response).__name__}"
+            logger.warning(
+                "Unexpected response while fetching country risk: %s",
+                type(response).__name__,
             )
     except Exception as exc:
-        print(f"Error requesting country risk data: {exc}")
+        logger.error("Error requesting country risk data: %s", exc)
 
     if response_payload is None:
         response_payload = _fetch_country_risk_direct()
@@ -1439,7 +1439,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
     try:
         value_bps = float(value)
     except Exception as exc:
-        print(f"Invalid country risk value: {value} ({exc})")
+        logger.warning("Invalid country risk value: %s (%s)", value, exc)
         return None
 
     delta_raw = None
@@ -1452,7 +1452,7 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
         try:
             delta_value = float(delta_raw)
         except Exception as exc:
-            print(f"Invalid delta for country risk: {delta_raw} ({exc})")
+            logger.warning("Invalid delta for country risk: %s (%s)", delta_raw, exc)
             delta_value = None
 
     valuation_dt: Optional[datetime] = None
@@ -1460,8 +1460,8 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
         try:
             valuation_dt = _parse_iso_datetime(response_payload.get(key))
         except Exception as exc:
-            print(
-                f"Error parsing country risk valuation datetime from key '{key}': {exc}"
+            logger.warning(
+                "Error parsing country risk valuation datetime from key '%s': %s", key, exc
             )
             valuation_dt = None
         if valuation_dt:
