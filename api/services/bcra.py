@@ -8,11 +8,6 @@ import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, UTC
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
-
-from api.logging_config import get_logger
-
-logger = get_logger(__name__)
 from typing import (
     Any,
     Callable,
@@ -32,6 +27,7 @@ import requests
 from openpyxl import load_workbook
 from urllib3.exceptions import InsecureRequestWarning
 
+from api.logging_config import get_logger
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.utils import (
@@ -44,6 +40,8 @@ from api.utils import (
     to_es_number,
     update_local_cache,
 )
+
+logger = get_logger(__name__)
 
 CachedRequestFn = Callable[..., Optional[Dict[str, Any]]]
 RedisFactoryFn = Callable[..., redis.Redis]
