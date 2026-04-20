@@ -3799,11 +3799,9 @@ def _get_openrouter_ai_response_result(
 def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:
     client = _get_openrouter_client()
     if client is None:
-        print("summary model: OpenRouter client not available")
         return None, 0
     for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
         try:
-            print(f"summary model calling {model}")
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -3817,10 +3815,9 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
                 cost = _estimate_summary_cost_usd_micros(
                     input_tokens, output_tokens, model
                 )
-                print(f"summary model {model} ok: {input_tokens}+{output_tokens} tokens, cost={cost}")
                 return text, cost
-        except Exception as e:
-            print(f"summary model {model} error: {e}")
+        except Exception:
+            pass
     return None, 0
 
 

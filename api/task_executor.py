@@ -11,6 +11,9 @@ from api.ai_pipeline import (
     clean_duplicate_response,
     remove_gordo_prefix,
 )
+from api.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _FALLBACK_MARKER = "[[AI_FALLBACK]]"
 _MAX_FALLBACK_RETRIES = 1
@@ -71,11 +74,11 @@ class TaskExecutor:
         should_delete = not interval and not trigger_cfg
 
         if not chat_id or not text:
-            print(f"task_scheduler: {task_id} missing chat_id or text")
+            logger.warning("task %s missing chat_id or text", task_id)
             return False
 
         if not user_name:
-            print(f"task_scheduler: {task_id} missing user_name, skipping")
+            logger.warning("task %s missing user_name, skipping", task_id)
             return False
 
         display = user_name
@@ -106,7 +109,7 @@ class TaskExecutor:
             metadata={"task_id": task_id, "chat_id": chat_id, **reserve_meta},
         )
         if charge_error:
-            print(f"task_scheduler: {task_id} no credits, skipping: {charge_error}")
+            logger.info("task %s no credits, skipping: %s", task_id, charge_error)
             return should_delete
 
         fallback_retries = 0
@@ -114,7 +117,7 @@ class TaskExecutor:
 
         while True:
             try:
-                print(f"task_scheduler: {task_id} calling ask_ai...")
+                logger.info("task %s calling ask_ai", task_id)
                 response = self._ask_ai(
                     messages,
                     response_meta=response_meta,
@@ -128,24 +131,24 @@ class TaskExecutor:
                 if not response or not response.strip():
                     if empty_retries < _MAX_EMPTY_RETRIES:
                         empty_retries += 1
-                        print(
-                            f"task_scheduler: {task_id} empty response, "
-                            f"retry {empty_retries}/{_MAX_EMPTY_RETRIES}"
+                        logger.warning(
+                            "task %s empty response, retry %d/%d",
+                            task_id, empty_retries, _MAX_EMPTY_RETRIES,
                         )
                         messages.append(
                             {"role": "system", "content": "respondé la tarea, es obligatorio."}
                         )
                         continue
-                    print(f"task_scheduler: {task_id} empty after retries")
+                    logger.warning("task %s empty after retries", task_id)
                     billing.refund_reserved_ai_credits(charge_meta, reason="task_empty")
                     return should_delete
 
                 is_fallback = response.startswith(_FALLBACK_MARKER)
                 if is_fallback and fallback_retries < _MAX_FALLBACK_RETRIES:
                     fallback_retries += 1
-                    print(
-                        f"task_scheduler: {task_id} fallback, "
-                        f"retry {fallback_retries}/{_MAX_FALLBACK_RETRIES}"
+                    logger.warning(
+                        "task %s fallback, retry %d/%d",
+                        task_id, fallback_retries, _MAX_FALLBACK_RETRIES,
                     )
                     messages.append(
                         {"role": "system", "content": "tenés que responder. no hay opcion de no responder."}
@@ -155,7 +158,7 @@ class TaskExecutor:
                 response = _strip_response_marker(response)
                 response = _clean_task_response(response)
                 self._send_msg(chat_id, f"{display}, tarea programada: {response}")
-                print(f"task_scheduler: {task_id} completed successfully")
+                logger.info("task %s completed successfully", task_id)
 
                 if is_fallback:
                     billing.refund_reserved_ai_credits(charge_meta, reason="task_fallback")
@@ -169,7 +172,7 @@ class TaskExecutor:
                 return should_delete
 
             except Exception as e:
-                print(f"task_scheduler: {task_id} ask_ai failed: {e}")
+                logger.error("task %s ask_ai failed: %s", task_id, e, exc_info=True)
                 billing.refund_reserved_ai_credits(charge_meta, reason="task_error")
                 self._admin_report(
                     f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
@@ -191,7 +194,7 @@ class TaskExecutor:
             try:
                 results.append(future.result())
             except Exception as e:
-                print(f"task_scheduler: {task_id} parallel execution error: {e}")
+                logger.error("task %s parallel execution error: %s", task_id, e, exc_info=True)
                 results.append(False)
         return results
 

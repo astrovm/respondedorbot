@@ -11,11 +11,14 @@ import uuid
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from api.logging_config import get_logger
 from api.task_executor import (
     _strip_response_marker as _task_executor_strip_response_marker,
     build_task_executor,
     TaskExecutor,
 )
+
+logger = get_logger(__name__)
 
 _scheduler_instance: Optional[Any] = None
 _redis_client: Optional[Any] = None
@@ -45,13 +48,12 @@ def init_scheduler(
     _redis_client = redis_factory()
     _task_executor = build_task_executor(**task_executor_deps)
     status = get_scheduler_runtime_status()
-    print(
-        "task_scheduler: runtime"
-        f" ready={status['ready']}"
-        f" scheduler={status['scheduler']}"
-        f" redis={status['redis']}"
-        f" executor={status['executor']}"
-        f" reason={status['reason'] or 'ok'}"
+    logger.info(
+        "runtime ready: scheduler=%s redis=%s executor=%s reason=%s",
+        status["scheduler"],
+        status["redis"],
+        status["executor"],
+        status["reason"] or "ok",
     )
 
 
@@ -79,7 +81,7 @@ def _ensure_runtime_deps() -> None:
             },
         )
     except Exception as error:
-        print(f"task_scheduler: failed to initialize runtime deps: {error}")
+        logger.error("failed to initialize runtime deps: %s", error)
 
 
 def _get_task_executor() -> Any:
@@ -269,10 +271,10 @@ def get_scheduler() -> Any:
             job_defaults=job_defaults,
         )
         _scheduler_instance.start()
-        print(f"task_scheduler: started with {len(jobstores)} jobstores")
+        logger.info("started with %d jobstores", len(jobstores))
         return _scheduler_instance
     except Exception as e:
-        print(f"task_scheduler: failed to initialize APScheduler: {e}")
+        logger.error("failed to initialize APScheduler: %s", e)
         return None
 
 
@@ -308,23 +310,23 @@ def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None
 
 
 def _fire_task(task_id: str) -> None:
-    print(f"task_scheduler: firing task {task_id}")
+    logger.info("firing task %s", task_id)
 
     redis_client = _get_redis()
     if redis_client is None:
-        print(f"task_scheduler: no redis, cannot fire {task_id}")
+        logger.warning("no redis, cannot fire %s", task_id)
         return
 
     key = f"{TASK_REDIS_PREFIX}{task_id}"
     raw = redis_client.get(key)
     if not raw:
-        print(f"task_scheduler: no data for {task_id} in redis")
+        logger.warning("no data for %s in redis", task_id)
         return
 
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        print(f"task_scheduler: invalid JSON for {task_id}")
+        logger.warning("invalid JSON for %s", task_id)
         return
 
     executor = _get_task_executor()
@@ -362,7 +364,7 @@ def schedule_task(
 
     redis_client = _get_redis()
     if redis_client is None:
-        print("task_scheduler: no redis, cannot schedule task")
+        logger.warning("no redis, cannot schedule task")
         return None
 
     task_id = str(uuid.uuid4())[:8]
@@ -391,7 +393,7 @@ def schedule_task(
     try:
         redis_client.setex(redis_key, ttl, json.dumps(data))
     except Exception as e:
-        print(f"task_scheduler: failed to persist task {task_id}: {e}")
+        logger.error("failed to persist task %s: %s", task_id, e)
         return None
 
     try:
@@ -445,7 +447,7 @@ def schedule_task(
                 replace_existing=True,
             )
     except Exception as e:
-        print(f"task_scheduler: add_job failed for {task_id}: {e}")
+        logger.error("add_job failed for %s: %s", task_id, e)
         if redis_client is not None:
             try:
                 redis_client.delete(redis_key)
@@ -502,7 +504,7 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
                 }
             )
     except Exception as e:
-        print(f"list_tasks error: {e}")
+        logger.error("list_tasks error: %s", e)
 
     return results
 
