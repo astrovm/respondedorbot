@@ -1,6 +1,5 @@
-from unittest.mock import call
 
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_handle_msg_topup_private_returns_keyboard():

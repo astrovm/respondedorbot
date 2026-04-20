@@ -17,7 +17,6 @@ from api.chat_config_defaults import (
 from api.chat_config_service import (
     build_chat_config_service,
     decode_redis_value,
-    load_chat_config_from_redis,
 )
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 from api.storage.chat_config_repository import build_chat_config_repository
@@ -141,7 +140,7 @@ def coerce_bool(value: Any, *, default: bool) -> bool:
             return False
     if isinstance(value, (int, float)):
         return bool(value)
-    return default if value is None else default
+    return default
 
 
 def _format_utc_offset(offset: int) -> str:

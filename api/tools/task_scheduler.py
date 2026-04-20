@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, List, Optional
 
 from api.task_executor import (
@@ -230,7 +230,7 @@ def _format_run_time(raw: str, timezone_offset: int = -3) -> str:
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         local = dt.astimezone(timezone(timedelta(hours=timezone_offset)))
         return local.strftime("%d/%m %H:%M")
     except (ValueError, TypeError):
@@ -355,12 +355,12 @@ def schedule_task(
     task_id = str(uuid.uuid4())[:8]
 
     run_date = None
-    is_recurring = bool(interval_seconds or trigger_config)
+    _is_recurring = bool(interval_seconds or trigger_config)
 
     if delay_seconds is not None:
         run_date = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + delay_seconds,
-            tz=timezone.utc,
+            datetime.now(UTC).timestamp() + delay_seconds,
+            tz=UTC,
         )
 
     redis_key = f"{TASK_REDIS_PREFIX}{task_id}"

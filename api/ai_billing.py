@@ -17,13 +17,10 @@ from typing import (
 )
 
 from api.chat_context import (
-    extract_numeric_chat_id,
-    extract_user_id,
     is_group_chat_type,
 )
 from api.credit_units import (
     format_credit_units,
-    parse_credit_units,
     whole_credits_to_units,
 )
 from api.ai_pricing import calculate_billing_for_segments

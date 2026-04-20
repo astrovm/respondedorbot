@@ -1,4 +1,4 @@
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def test_format_user_message():
