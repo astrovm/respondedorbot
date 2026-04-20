@@ -2487,12 +2487,13 @@ def _fetch_top_stocks_by_market_cap() -> List[str]:
             timeout=10,
         )
         resp.raise_for_status()
-        seen: set[str] = set()
+        seen_companies: set[str] = set()
         result: List[str] = []
-        for sym in re.findall(r'data-boxover-ticker="([A-Z.]+)"', resp.text):
-            if sym not in seen and len(result) < 10:
-                seen.add(sym)
-                result.append(sym)
+        for match in re.finditer(r'data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)"', resp.text):
+            symbol, company = match.group(1), match.group(2)
+            if company not in seen_companies and len(result) < 10:
+                seen_companies.add(company)
+                result.append(symbol)
         return result
     except Exception:
         return []
