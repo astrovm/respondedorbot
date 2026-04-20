@@ -9,17 +9,7 @@ from api.command_registry import CommandTuple
 
 @dataclass(frozen=True)
 class RoutingPolicy:
-    base_policy: Callable[
-        [
-            Mapping[str, CommandTuple],
-            str,
-            str,
-            Mapping[str, Any],
-            Mapping[str, Any],
-            Optional[Mapping[str, Any]],
-        ],
-        bool,
-    ]
+    base_policy: Callable[..., bool]
     has_ai_credits_for_random_reply: Callable[[Mapping[str, Any]], bool]
     load_bot_config_fn: Callable[[], Mapping[str, Any]]
 
