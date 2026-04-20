@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import (
     Any,
@@ -29,6 +30,10 @@ ExtractMessageText = Callable[[Dict[str, Any]], str]
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
 CHAT_HISTORY_MAX_MESSAGES = 20
+CHAT_SUMMARY_TTL = CHAT_STATE_TTL
+CHAT_SEARCH_INDEX = "idx:chat_messages"
+
+_SEARCH_INDEX_READY = False
 
 
 def truncate_text(text: Optional[str], max_length: int = 1024) -> str:
@@ -45,6 +50,99 @@ def truncate_text(text: Optional[str], max_length: int = 1024) -> str:
     return text[: max_length - 3] + "..."
 
 
+def _search_doc_key(chat_id: str, message_id: str) -> str:
+    return f"chatmsg:{chat_id}:{message_id}"
+
+
+def _summary_key(chat_id: str) -> str:
+    return f"chat_summary:{chat_id}"
+
+
+def _compacted_until_key(chat_id: str) -> str:
+    return f"chat_compacted_until:{chat_id}"
+
+
+def _decode_redis_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _ensure_search_index(redis_client: redis.Redis) -> None:
+    global _SEARCH_INDEX_READY
+    if _SEARCH_INDEX_READY:
+        return
+    try:
+        redis_client.execute_command(
+            "FT.CREATE",
+            CHAT_SEARCH_INDEX,
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            "chatmsg:",
+            "SCHEMA",
+            "chat_id",
+            "TAG",
+            "role",
+            "TAG",
+            "user_id",
+            "TAG",
+            "reply_to_message_id",
+            "TAG",
+            "mentions_bot",
+            "TAG",
+            "username",
+            "TEXT",
+            "text",
+            "TEXT",
+            "timestamp",
+            "NUMERIC",
+            "SORTABLE",
+        )
+    except Exception as error:
+        if "Index already exists" not in str(error):
+            raise
+    _SEARCH_INDEX_READY = True
+
+
+def _escape_search_text(query_text: str) -> str:
+    tokens = [re.sub(r"[^\w@.-]", "", token) for token in str(query_text or "").split()]
+    tokens = [token for token in tokens if token]
+    return " ".join(tokens)
+
+
+def _parse_search_result_row(key: Any, fields: Any) -> Dict[str, Any]:
+    parsed_fields = list(fields or [])
+    data: Dict[str, Any] = {
+        "key": _decode_redis_text(key) or "",
+    }
+    for idx in range(0, len(parsed_fields), 2):
+        field = _decode_redis_text(parsed_fields[idx]) or ""
+        value = _decode_redis_text(parsed_fields[idx + 1]) if idx + 1 < len(parsed_fields) else None
+        if field:
+            data[field] = value
+    return data
+
+
+def get_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    return _decode_redis_text(redis_client.get(_summary_key(chat_id)))
+
+
+def save_chat_summary(redis_client: redis.Redis, chat_id: str, summary: str) -> None:
+    redis_client.setex(_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
+
+
+def get_chat_compacted_until(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    return _decode_redis_text(redis_client.get(_compacted_until_key(chat_id)))
+
+
+def save_chat_compacted_until(redis_client: redis.Redis, chat_id: str, marker: str) -> None:
+    redis_client.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
+
+
 def save_message_to_redis(
     chat_id: str,
     message_id: str,
@@ -52,6 +150,11 @@ def save_message_to_redis(
     redis_client: redis.Redis,
     *,
     admin_reporter: AdminReporter,
+    role: Optional[str] = None,
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    reply_to_message_id: Optional[str] = None,
+    mentions_bot: bool = False,
 ) -> None:
     """Persist a chat message while deduplicating message ids."""
 
@@ -62,20 +165,41 @@ def save_message_to_redis(
         if redis_client.sismember(message_ids_key, message_id):
             return
 
+        effective_role = role or ("assistant" if str(message_id).startswith("bot_") else "user")
         history_entry = json.dumps(
             {
                 "id": message_id,
                 "text": truncate_text(text),
                 "timestamp": int(time.time()),
+                "role": effective_role,
             }
         )
 
         pipe = redis_client.pipeline()
+        try:
+            _ensure_search_index(redis_client)
+        except Exception:
+            pass
         pipe.lpush(chat_history_key, history_entry)
         pipe.sadd(message_ids_key, message_id)
         pipe.ltrim(chat_history_key, 0, max(0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1))
         pipe.expire(chat_history_key, CHAT_STATE_TTL)
         pipe.expire(message_ids_key, CHAT_STATE_TTL)
+        pipe.hset(
+            _search_doc_key(chat_id, message_id),
+            mapping={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "role": effective_role,
+                "user_id": str(user_id or ""),
+                "username": str(username or ""),
+                "text": truncate_text(text),
+                "timestamp": int(time.time()),
+                "reply_to_message_id": str(reply_to_message_id or ""),
+                "mentions_bot": "1" if mentions_bot else "0",
+            },
+        )
+        pipe.expire(_search_doc_key(chat_id, message_id), CHAT_STATE_TTL)
         pipe.lrange(chat_history_key, 0, -1)
         results = pipe.execute()
 
@@ -135,8 +259,9 @@ def get_chat_history(
         for entry in history:
             try:
                 msg = json.loads(entry)
-                is_bot = str(msg["id"]).startswith("bot_")
-                msg["role"] = "assistant" if is_bot else "user"
+                if "role" not in msg:
+                    is_bot = str(msg["id"]).startswith("bot_")
+                    msg["role"] = "assistant" if is_bot else "user"
                 messages.append(msg)
             except json.JSONDecodeError as decode_error:
                 admin_reporter(
@@ -152,6 +277,67 @@ def get_chat_history(
             error,
             {"chat_id": chat_id, "max_messages": max_messages},
         )
+        return []
+
+
+def search_chat_history(
+    redis_client: redis.Redis,
+    chat_id: str,
+    query_text: str,
+    *,
+    reply_to_message_id: Optional[str] = None,
+    limit: int = 8,
+    exclude_message_ids: Optional[Set[str]] = None,
+    admin_reporter: Optional[AdminReporter] = None,
+) -> List[Dict[str, Any]]:
+    search_text = _escape_search_text(query_text)
+    if not search_text:
+        return []
+    try:
+        _ensure_search_index(redis_client)
+        query = f"@chat_id:{{{chat_id}}} {search_text}"
+        raw = redis_client.execute_command(
+            "FT.SEARCH",
+            CHAT_SEARCH_INDEX,
+            query,
+            "SORTBY",
+            "timestamp",
+            "DESC",
+            "LIMIT",
+            "0",
+            str(max(limit * 3, 10)),
+        )
+        if not isinstance(raw, list) or len(raw) <= 1:
+            return []
+        results: List[Dict[str, Any]] = []
+        excluded = exclude_message_ids or set()
+        query_tokens = set(search_text.lower().split())
+        for idx in range(1, len(raw), 2):
+            row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
+            message_id = str(row.get("message_id") or "")
+            if message_id and message_id in excluded:
+                continue
+            row["timestamp"] = int(row.get("timestamp") or 0)
+            row["_reply_score"] = 1 if reply_to_message_id and row.get("reply_to_message_id") == reply_to_message_id else 0
+            text_tokens = set(str(row.get("text") or "").lower().split())
+            row["_overlap_score"] = len(query_tokens & text_tokens)
+            results.append(row)
+        results.sort(
+            key=lambda item: (
+                int(item.get("_reply_score") or 0),
+                int(item.get("_overlap_score") or 0),
+                int(item.get("timestamp") or 0),
+            ),
+            reverse=True,
+        )
+        return results[:limit]
+    except Exception as error:
+        if admin_reporter is not None:
+            admin_reporter(
+                f"Error searching chat history: {error}",
+                error,
+                {"chat_id": chat_id, "query_text": query_text, "limit": limit},
+            )
         return []
 
 
@@ -285,11 +471,17 @@ def format_user_message(
 
 __all__ = [
     "BOT_MESSAGE_META_TTL",
+    "CHAT_HISTORY_MAX_MESSAGES",
     "build_reply_context_text",
     "format_user_message",
     "get_bot_message_metadata",
+    "get_chat_compacted_until",
     "get_chat_history",
+    "get_chat_summary",
+    "save_chat_compacted_until",
+    "save_chat_summary",
     "save_bot_message_metadata",
     "save_message_to_redis",
+    "search_chat_history",
     "truncate_text",
 ]

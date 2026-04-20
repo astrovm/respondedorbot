@@ -1891,6 +1891,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
     deps.ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=False),
         has_openrouter_fallback=MagicMock(return_value=True),
@@ -1948,6 +1949,7 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
     deps.ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=False),
         has_openrouter_fallback=MagicMock(return_value=True),
@@ -2072,6 +2074,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         ),
         "save_message_to_redis": MagicMock(),
         "get_chat_history": MagicMock(return_value=[]),
+        "prepare_chat_memory": MagicMock(return_value=([], None, [], 0)),
         "build_ai_messages": MagicMock(
             return_value=[{"role": "user", "content": "hola"}]
         ),
@@ -2122,6 +2125,7 @@ def _build_test_ai_service(flat_defaults):
     return build_ai_service(
         credits_db_service=flat_defaults["credits_db_service"],
         get_chat_history=flat_defaults["get_chat_history"],
+        prepare_chat_memory=flat_defaults["prepare_chat_memory"],
         build_ai_messages=flat_defaults["build_ai_messages"],
         check_provider_available=flat_defaults["check_provider_available"],
         has_openrouter_fallback=flat_defaults["has_openrouter_fallback"],
@@ -2634,9 +2638,11 @@ def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeyp
 
     assert result == "ok"
     deps.send_msg.assert_not_called()
-    deps.save_message_to_redis.assert_called_once_with(
-        "556", "402", "Ana: hola gordo", redis_client
-    )
+    deps.save_message_to_redis.assert_called_once()
+    args, kwargs = deps.save_message_to_redis.call_args
+    assert args == ("556", "402", "Ana: hola gordo", redis_client)
+    assert kwargs["role"] == "user"
+    assert kwargs["user_id"] == "1002"
 
 
 def test_handle_msg_with_unknown_command():
