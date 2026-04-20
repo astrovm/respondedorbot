@@ -16,7 +16,6 @@ _WORKSPACE_DIR: Optional[Path] = None
 
 
 def _resolve_workspace_dir() -> Path:
-    """Locate the workspace/ directory containing AGENTS.md, SOUL.md, TOOLS.md."""
     global _WORKSPACE_DIR
     if _WORKSPACE_DIR is not None:
         return _WORKSPACE_DIR
@@ -36,7 +35,6 @@ def _resolve_workspace_dir() -> Path:
 
 
 def _read_bootstrap_file(name: str) -> Optional[str]:
-    """Read a workspace bootstrap file, return None if missing."""
     path = _resolve_workspace_dir() / name
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
@@ -44,7 +42,6 @@ def _read_bootstrap_file(name: str) -> Optional[str]:
 
 
 def _build_system_prompt_from_workspace() -> Optional[str]:
-    """Compose system prompt from SOUL.md + AGENTS.md. Returns None if files missing."""
     soul = _read_bootstrap_file("SOUL.md")
     agents = _read_bootstrap_file("AGENTS.md")
 
@@ -60,8 +57,6 @@ def _build_system_prompt_from_workspace() -> Optional[str]:
 
 
 def load_bot_config() -> Dict[str, Any]:
-    """Load bot configuration."""
-
     global _bot_config
 
     if _bot_config is not None:

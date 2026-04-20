@@ -48,12 +48,12 @@ class ToolExecutor(Protocol):
 
 
 _TOOL_REGISTRY: Dict[str, Tuple[ToolSchema, Callable[..., ToolResult]]] = {}
-_tool_schemas_cache: Optional[List[Dict[str, Any]]] = None
+_schema_cache: Optional[List[Tuple[ToolSchema, Dict[str, Any]]]] = None
 
 
 def _invalidate_schema_cache() -> None:
-    global _tool_schemas_cache
-    _tool_schemas_cache = None
+    global _schema_cache
+    _schema_cache = None
 
 
 def register_tool(
@@ -77,15 +77,21 @@ def register_tool(
     _invalidate_schema_cache()
 
 
-def _tool_schema_to_dict(schema: ToolSchema) -> Dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": schema.name,
-            "description": schema.description,
-            "parameters": schema.parameters,
-        },
-    }
+def _get_schema_cache() -> List[Tuple[ToolSchema, Dict[str, Any]]]:
+    global _schema_cache
+    if _schema_cache is None:
+        _schema_cache = [
+            (s, {
+                "type": "function",
+                "function": {
+                    "name": s.name,
+                    "description": s.description,
+                    "parameters": s.parameters,
+                },
+            })
+            for s, _ in _TOOL_REGISTRY.values()
+        ]
+    return _schema_cache
 
 
 def _tool_is_available(
@@ -107,21 +113,14 @@ def get_all_tool_schemas(
     *,
     task_mode: bool = False,
 ) -> List[Dict[str, Any]]:
-    global _tool_schemas_cache
-
-    if _tool_schemas_cache is None:
-        _tool_schemas_cache = [
-            _tool_schema_to_dict(s) for s, _ in _TOOL_REGISTRY.values()
-        ]
+    cache = _get_schema_cache()
 
     if context is None and not task_mode:
-        return list(_tool_schemas_cache)
+        return [entry for _, entry in cache]
 
     return [
         entry
-        for schema, entry in zip(
-            (s for s, _ in _TOOL_REGISTRY.values()), _tool_schemas_cache
-        )
+        for schema, entry in cache
         if _tool_is_available(schema, context)
         and (not task_mode or schema.task_allowed)
     ]

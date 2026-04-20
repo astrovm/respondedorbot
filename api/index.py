@@ -2419,6 +2419,25 @@ esto es lo que sé hacer, boludo:
 """
 
 
+def _parse_stooq_quote(raw_response: str) -> Optional[Tuple[float, float]]:
+    rows = [line.strip() for line in raw_response.splitlines() if line.strip()]
+    if not rows:
+        return None
+    row = [field.strip() for field in rows[-1].split(",")]
+    if len(row) < 7 or row[0].lower() == "symbol":
+        return None
+    open_price = row[3]
+    close_price = row[6]
+    if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
+        return None
+    current_value = float(close_price)
+    open_value = float(open_price)
+    if open_value == 0:
+        return None
+    variation = ((current_value - open_value) / open_value) * 100
+    return current_value, variation
+
+
 def get_oil_price() -> str:
     """Return latest Brent and WTI oil prices in USD with daily variation."""
 
@@ -2447,28 +2466,6 @@ def get_oil_price() -> str:
         variation = ((current_value - previous_value) / previous_value) * 100
         return current_value, variation
 
-    def parse_stooq_quote(raw_response: str) -> Optional[Tuple[float, float]]:
-        rows = [line.strip() for line in raw_response.splitlines() if line.strip()]
-        if not rows:
-            return None
-
-        row = [field.strip() for field in rows[-1].split(",")]
-        if len(row) < 7 or row[0].lower() == "symbol":
-            return None
-
-        open_price = row[3]
-        close_price = row[6]
-        if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
-            return None
-
-        current_value = float(close_price)
-        open_value = float(open_price)
-        if open_value == 0:
-            return None
-
-        variation = ((current_value - open_value) / open_value) * 100
-        return current_value, variation
-
     symbols = {
         "Brent": "cb.f",
         "WTI": "cl.f",
@@ -2491,14 +2488,14 @@ def get_oil_price() -> str:
             parsed = parse_daily_rows(rows)
 
             if not parsed:
-                parsed = parse_stooq_quote(daily_response.text)
+                parsed = _parse_stooq_quote(daily_response.text)
 
             if not parsed:
                 quote_response = requests.get(
                     f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
                 )
                 quote_response.raise_for_status()
-                parsed = parse_stooq_quote(quote_response.text)
+                parsed = _parse_stooq_quote(quote_response.text)
 
             if not parsed:
                 continue
@@ -2534,27 +2531,13 @@ def get_stock_prices(msg_text: str) -> str:
                 f"https://stooq.com/q/l/?s={sym.upper()}&i=d", timeout=5
             )
             resp.raise_for_status()
-            rows = [line.strip() for line in resp.text.splitlines() if line.strip()]
-            if not rows:
+            parsed = _parse_stooq_quote(resp.text)
+            if parsed:
+                price, var = parsed
+                sign = "+" if var >= 0 else ""
+                lines.append(f"{sym.upper()}: ${price:.2f} ({sign}{var:.2f}% dia)")
+            else:
                 lines.append(f"{sym.upper()}: no se pudo obtener")
-                continue
-            row = [field.strip() for field in rows[-1].split(",")]
-            if len(row) < 7 or row[0].lower() == "symbol":
-                lines.append(f"{sym.upper()}: no se pudo obtener")
-                continue
-            open_price = row[3]
-            close_price = row[6]
-            if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
-                lines.append(f"{sym.upper()}: no se pudo obtener")
-                continue
-            current = float(close_price)
-            opening = float(open_price)
-            if opening == 0:
-                lines.append(f"{sym.upper()}: no se pudo obtener")
-                continue
-            variation = ((current - opening) / opening) * 100
-            sign = "+" if variation >= 0 else ""
-            lines.append(f"{sym.upper()}: ${current:.2f} ({sign}{variation:.2f}% dia)")
         except Exception:
             lines.append(f"{sym.upper()}: no se pudo obtener")
 
@@ -3893,8 +3876,15 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
 
 
 def _compact_conversation(dropped_text: str) -> str:
+    prompt = (
+        "summarize this conversation concisely in one paragraph. "
+        "capture the main topics, user questions, bot responses, "
+        "and any conclusions or pending actions. "
+        "skip greetings and casual chat. "
+        "match the language of the conversation."
+    )
     messages = [
-        {"role": "system", "content": "summarize this conversation concisely in one paragraph. capture the main topics, user questions, bot responses, and any conclusions or pending actions. skip greetings and casual chat. match the language of the conversation."},
+        {"role": "system", "content": prompt},
         {"role": "user", "content": dropped_text},
     ]
     result = _call_summary_model(messages)
@@ -4368,7 +4358,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
             "tasks_command": tasks_command,
-            "summary_command": lambda: "usá /resumen para resumir la conversación",
+            "summary_command": lambda: "",
         }
     )
 
