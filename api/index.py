@@ -3817,8 +3817,11 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
                     input_tokens, output_tokens, model
                 )
                 return text, cost
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("respondedorbot.api.index").warning(
+                "summary model %s failed: %s", model, e
+            )
     return None, 0
 
 
