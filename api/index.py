@@ -4309,6 +4309,8 @@ def build_ai_messages(
         "INSTRUCCIONES:",
         "- mantené el personaje del gordo",
         "- usá lenguaje coloquial argentino",
+        "- respondé en minúsculas, sin emojis, sin punto final",
+        "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
     ]
     if enable_web_search:
         instructions.append("- si no estás seguro de algo podes buscarlo en internet")
