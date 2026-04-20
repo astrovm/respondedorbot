@@ -2998,19 +2998,8 @@ def ask_ai(
         if len(messages) > 15:
             keep = 7
             dropped = messages[: -keep]
-            summary_parts = []
-            for msg in dropped:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                if isinstance(content, str) and content:
-                    summary_parts.append(f"{role}: {content[:200]}")
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            summary_parts.append(f"{role}: {part['text'][:200]}")
-            summary = "Historial resumido de mensajes anteriores:\n" + "\n".join(
-                summary_parts
-            )
+            dropped_text = _format_messages_for_summary(dropped)
+            summary = _compact_conversation(dropped_text)
             messages = [
                 {"role": "system", "content": summary}
             ] + messages[-keep:]
@@ -3884,6 +3873,32 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Optional[str]:
     except Exception as e:
         print(f"summary model error: {e}")
     return None
+
+
+def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, str) and content:
+            parts.append(f"{role}: {content}")
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(f"{role}: {part['text']}")
+    return "\n".join(parts)
+
+
+def _compact_conversation(dropped_text: str) -> str:
+    fallback = "Historial resumido de mensajes anteriores:\n" + dropped_text[:3000]
+    messages = [
+        {"role": "system", "content": "resumí esta conversación en español en un párrafo conciso. capturá los temas principales, preguntas del usuario, respuestas del bot y cualquier conclusión o acción pendiente. no incluyas saludos ni charla casual."},
+        {"role": "user", "content": dropped_text},
+    ]
+    result = _call_summary_model(messages)
+    if result:
+        return f"Resumen del historial de conversación:\n{result}"
+    return fallback
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
