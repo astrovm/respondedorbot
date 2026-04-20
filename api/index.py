@@ -3892,7 +3892,9 @@ def _compact_conversation(dropped_text: str) -> str:
     result = _call_summary_model(messages)
     if result:
         return f"Conversation history summary:\n{result}"
-    return ""
+    lines = dropped_text.split("\n")
+    truncated = "\n".join(lines[:20])
+    return f"Earlier conversation (truncated):\n{truncated}"
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
