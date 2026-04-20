@@ -2419,7 +2419,7 @@ esto es lo que sé hacer, boludo:
 
 - /tareas, /tasks: listado de tareas programadas con botones para borrar (el gordo agenda recordatorios y tareas recurrentes cuando le pedis)
 
-- /resumen, /summary: resumí la conversación (opcional: /resumen 50 o /resumen focus en crypto)
+- /resumen, /summary: resumí la conversación (opcional: /resumen focus en crypto)
 
 - /acciones, /stocks: precios de acciones [aapl tsla googl]
 """
