@@ -2923,6 +2923,22 @@ def get_weather() -> dict:
         print(f"Error getting weather: {str(e)}")
         return {}
 
+def _sanitize_bot_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+    if msg.get("role") != "assistant":
+        return msg
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        content = content.lower()
+        content = "".join(c for c in content if not (0x1F000 <= ord(c) <= 0x1FFFF))
+        content = content.rstrip(".")
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                part["text"] = part["text"].lower()
+                part["text"] = "".join(c for c in part["text"] if not (0x1F000 <= ord(c) <= 0x1FFFF))
+                part["text"] = part["text"].rstrip(".")
+    return {**msg, "content": content}
+
 
 def ask_ai(
     messages: List[Dict[str, Any]],
@@ -2937,7 +2953,7 @@ def ask_ai(
     task_mode: bool = False,
 ) -> str:
     try:
-        messages = list(messages or [])
+        messages = [_sanitize_bot_message(m) for m in messages or []]
 
         if len(messages) > COMPACTION_THRESHOLD:
             dropped = messages[: -COMPACTION_KEEP]
@@ -4048,12 +4064,18 @@ NOTICIAS DE HACKER NEWS:
 {news_info}
 """
 
+    formatting_reminder = (
+        "\nIMPORTANTE: todo tu texto de respuesta debe ir en minusculas, "
+        "sin emojis, sin punto final, en una sola frase salvo que sea necesario explicar algo complejo. "
+        "usá lenguaje coloquial argentino.\n"
+    )
+
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": task_prefix + contextual_info + base_prompt,
+                "text": task_prefix + contextual_info + base_prompt + formatting_reminder,
             }
         ],
     }
