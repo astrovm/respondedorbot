@@ -106,6 +106,7 @@ from api.ai_pricing import (
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
 import api.tools.crypto_prices
+import api.tools.stock_prices
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
@@ -2516,6 +2517,45 @@ def get_oil_price() -> str:
     return "\n".join(lines)
 
 
+def get_stock_prices(msg_text: str) -> str:
+    symbols = [s.strip() for s in str(msg_text or "").split() if s.strip()]
+    if not symbols:
+        return "pasame los simbolos, ejemplo: /acciones aapl tsla googl"
+
+    lines: List[str] = []
+    for sym in symbols:
+        try:
+            resp = requests.get(
+                f"https://stooq.com/q/l/?s={sym.upper()}&i=d", timeout=5
+            )
+            resp.raise_for_status()
+            rows = [line.strip() for line in resp.text.splitlines() if line.strip()]
+            if not rows:
+                lines.append(f"{sym.upper()}: no se pudo obtener")
+                continue
+            row = [field.strip() for field in rows[-1].split(",")]
+            if len(row) < 7 or row[0].lower() == "symbol":
+                lines.append(f"{sym.upper()}: no se pudo obtener")
+                continue
+            open_price = row[3]
+            close_price = row[6]
+            if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
+                lines.append(f"{sym.upper()}: no se pudo obtener")
+                continue
+            current = float(close_price)
+            opening = float(open_price)
+            if opening == 0:
+                lines.append(f"{sym.upper()}: no se pudo obtener")
+                continue
+            variation = ((current - opening) / opening) * 100
+            sign = "+" if variation >= 0 else ""
+            lines.append(f"{sym.upper()}: ${current:.2f} ({sign}{variation:.2f}% dia)")
+        except Exception:
+            lines.append(f"{sym.upper()}: no se pudo obtener")
+
+    return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+
+
 def get_instance_name() -> str:
     instance = environ.get("FRIENDLY_INSTANCE_NAME")
     return f"estoy corriendo en {instance} boludo"
@@ -4240,6 +4280,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_prices": get_prices,
             "get_dollar_rates": get_dollar_rates,
             "get_oil_price": get_oil_price,
+            "get_stock_prices": get_stock_prices,
             "get_polymarket_argentina_election": get_polymarket_argentina_election,
             "get_rulo": get_rulo,
             "get_devo": get_devo,
