@@ -2950,7 +2950,7 @@ def ask_ai(
                 if summary_cost > 0:
                     _append_billing_segment(response_meta, _make_summary_result(summary_cost))
             else:
-                messages = messages[-keep:]
+                messages = messages[-COMPACTION_KEEP:]
 
         context_data = {
             "market": get_market_context(),
