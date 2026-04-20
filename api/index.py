@@ -98,10 +98,12 @@ from api.ai_pricing import (
     AIUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
+    credit_units_from_usd_micros,
     estimate_chat_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
     ensure_mapping,
+    MODEL_PRICING_USD_MICROS,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -2983,11 +2985,13 @@ def ask_ai(
             keep = 5
             dropped = messages[: -keep]
             dropped_text = _format_messages_for_summary(dropped)
-            summary = _compact_conversation(dropped_text)
+            summary, summary_cost = _compact_conversation(dropped_text)
             if summary:
                 messages = [
                     {"role": "system", "content": summary}
                 ] + messages[-keep:]
+                if summary_cost > 0:
+                    _append_billing_segment(response_meta, _make_summary_result(summary_cost))
             else:
                 messages = messages[-keep:]
 
@@ -3845,10 +3849,10 @@ def _get_openrouter_ai_response_result(
     )
 
 
-def _call_summary_model(messages: List[Dict[str, Any]]) -> Optional[str]:
+def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:
     client = _get_openrouter_client()
     if client is None:
-        return None
+        return None, 0
     for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
         try:
             resp = client.chat.completions.create(
@@ -3857,10 +3861,17 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Optional[str]:
                 max_tokens=512,
             )
             if resp and resp.choices and resp.choices[0].message:
-                return str(resp.choices[0].message.content or "").strip()
+                text = str(resp.choices[0].message.content or "").strip()
+                usage = resp.usage or {}
+                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                cost = _estimate_summary_cost_usd_micros(
+                    input_tokens, output_tokens, model
+                )
+                return text, cost
         except Exception as e:
             print(f"summary model {model} error: {e}")
-    return None
+    return None, 0
 
 
 def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
@@ -3877,7 +3888,7 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def _compact_conversation(dropped_text: str) -> str:
+def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     prompt = (
         "summarize this conversation concisely in one paragraph. "
         "capture the main topics, user questions, bot responses, "
@@ -3889,12 +3900,33 @@ def _compact_conversation(dropped_text: str) -> str:
         {"role": "system", "content": prompt},
         {"role": "user", "content": dropped_text},
     ]
-    result = _call_summary_model(messages)
+    result, cost = _call_summary_model(messages)
     if result:
-        return f"Conversation history summary:\n{result}"
+        return f"Conversation history summary:\n{result}", cost
     lines = dropped_text.split("\n")
     truncated = "\n".join(lines[:20])
-    return f"Earlier conversation (truncated):\n{truncated}"
+    return f"Earlier conversation (truncated):\n{truncated}", 0
+
+
+def _estimate_summary_cost_usd_micros(
+    input_tokens: int, output_tokens: int, model: str
+) -> int:
+    pricing = MODEL_PRICING_USD_MICROS.get(model, {})
+    input_rate = pricing.get("input_per_million", 100_000)
+    output_rate = pricing.get("output_per_million", 400_000)
+    return (input_tokens * input_rate + output_tokens * output_rate) // 1_000_000
+
+
+def _make_summary_result(cost_usd_micros: int) -> Dict[str, Any]:
+    return {
+        "kind": "summary",
+        "text": "context compaction",
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "billing": {
+            "raw_usd_micros": cost_usd_micros,
+            "charged_credit_units": credit_units_from_usd_micros(cost_usd_micros),
+        },
+    }
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
