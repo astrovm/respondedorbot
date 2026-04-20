@@ -3872,9 +3872,21 @@ def build_system_message(
 
     tool_instruction = ""
     if tools_active:
+        tool_summaries = (
+            "- price_lookup: Get cryptocurrency and stock prices by symbol.\n"
+            "- calculate: Evaluate a math expression safely (+, -, *, /, %, **).\n"
+            "- web_fetch: Fetch and extract text content from a URL.\n"
+            "- task_set: Create a scheduled task (one-shot or recurring).\n"
+            "- task_list: List all tasks for the current chat.\n"
+            "- task_cancel: Cancel a task by its ID.\n"
+        )
         tool_instruction = (
-            "\n\nHERRAMIENTAS: price_lookup, calculate, web_fetch, task_set, task_list, task_cancel.\n"
-            "task_set: create scheduled tasks. params: text, y opcionalmente delay_seconds/interval_seconds o trigger_config.\n"
+            f"\n\nHERRAMIENTAS DISPONIBLES:\n{tool_summaries}"
+            "Llamalas directamente, sin pedir permiso ni narrar antes.\n"
+            "No expliques que vas a hacer antes de usar una herramienta simple.\n"
+            "Usa las herramientas exactamente como estan nombradas arriba.\n"
+            "\n"
+            "task_set detalles:\n"
             "- task_set.text debe contener solo el contenido a ejecutar despues.\n"
             "- no incluyas tiempo ni frecuencia en text si ya van en delay_seconds, interval_seconds o trigger_config.\n"
             "- no reescribas pronombres ni cambies sujeto al guardar la tarea.\n"
@@ -3886,7 +3898,6 @@ def build_system_message(
             "- trigger_config con type='cron', hour, minute para horarios especificos.\n"
             "- cron puede tener day_of_week='lun,mie,vie' o 'mon,wed,fri'; se normaliza internamente. Tambien puede usar day=1 para primer dia del mes.\n"
             "- si no especificas hora para cron, elegi una hora razonable segun el contexto.\n"
-            "Usa herramientas cuando sean utiles, sino responde normal.\n"
         )
 
     contextual_info = f"""

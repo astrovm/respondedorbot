@@ -3,25 +3,60 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import redis
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
-
 _bot_config: Optional[Dict[str, Any]] = None
 _admin_reporter: Optional[AdminReporter] = None
+_WORKSPACE_DIR: Optional[Path] = None
 
 
-def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
-    """Register optional admin reporter callbacks."""
+def _resolve_workspace_dir() -> Path:
+    """Locate the workspace/ directory containing AGENTS.md, SOUL.md, TOOLS.md."""
+    global _WORKSPACE_DIR
+    if _WORKSPACE_DIR is not None:
+        return _WORKSPACE_DIR
 
-    global _admin_reporter
-    _admin_reporter = admin_reporter
+    candidate = Path(__file__).resolve().parent.parent / "workspace"
+    if candidate.is_dir():
+        _WORKSPACE_DIR = candidate
+        return candidate
+
+    candidate = Path.cwd() / "workspace"
+    if candidate.is_dir():
+        _WORKSPACE_DIR = candidate
+        return candidate
+
+    _WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
+    return _WORKSPACE_DIR
 
 
-_SYSTEM_PROMPT = """[historical bot personality removed]"""
+def _read_bootstrap_file(name: str) -> Optional[str]:
+    """Read a workspace bootstrap file, return None if missing."""
+    path = _resolve_workspace_dir() / name
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return None
+
+
+def _build_system_prompt_from_workspace() -> Optional[str]:
+    """Compose system prompt from SOUL.md + AGENTS.md. Returns None if files missing."""
+    soul = _read_bootstrap_file("SOUL.md")
+    agents = _read_bootstrap_file("AGENTS.md")
+
+    if not soul and not agents:
+        return None
+
+    parts = []
+    if soul:
+        parts.append(soul)
+    if agents:
+        parts.append(agents)
+    return "\n\n".join(parts)
 
 
 def load_bot_config() -> Dict[str, Any]:
@@ -32,6 +67,18 @@ def load_bot_config() -> Dict[str, Any]:
     if _bot_config is not None:
         return _bot_config
 
+    env_prompt = os.environ.get("BOT_SYSTEM_PROMPT")
+    if env_prompt:
+        system_prompt = env_prompt
+    else:
+        workspace_prompt = _build_system_prompt_from_workspace()
+        if not workspace_prompt:
+            raise RuntimeError(
+                "workspace/ directory missing. "
+                "Create workspace/SOUL.md and workspace/AGENTS.md, or set BOT_SYSTEM_PROMPT env var."
+            )
+        system_prompt = workspace_prompt
+
     _bot_config = {
         "trigger_words": [
             "gordo",
@@ -41,10 +88,17 @@ def load_bot_config() -> Dict[str, Any]:
             "dogor",
             "bot",
         ],
-        "system_prompt": _SYSTEM_PROMPT,
+        "system_prompt": system_prompt,
     }
 
     return _bot_config
+
+
+def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
+    """Register optional admin reporter callbacks."""
+
+    global _admin_reporter
+    _admin_reporter = admin_reporter
 
 
 def _admin_report(
@@ -79,8 +133,9 @@ def config_redis(host=None, port=None, password=None):
 def reset_cache() -> None:
     """Clear cached configuration (used primarily in tests)."""
 
-    global _bot_config
+    global _bot_config, _WORKSPACE_DIR
     _bot_config = None
+    _WORKSPACE_DIR = None
 
 
 def set_cache(config: Optional[Dict[str, Any]]) -> None:
