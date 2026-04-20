@@ -29,7 +29,7 @@ ExtractMessageText = Callable[[Dict[str, Any]], str]
 
 BOT_MESSAGE_META_PREFIX = "bot_message_meta:"
 BOT_MESSAGE_META_TTL = 3 * 24 * 60 * 60
-CHAT_HISTORY_MAX_MESSAGES = 20
+CHAT_HISTORY_MAX_MESSAGES = 100
 CHAT_SUMMARY_TTL = CHAT_STATE_TTL
 CHAT_SEARCH_INDEX = "idx:chat_messages"
 
