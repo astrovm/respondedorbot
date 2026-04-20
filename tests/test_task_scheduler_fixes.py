@@ -16,7 +16,20 @@ from api.tools.task_scheduler import (
     set_task_executor,
     set_redis_client,
     shutdown_scheduler,
+    _get_task_executor,
 )
+import time
+
+
+def _flush_task_pool():
+    """Wait for the executor's thread pool to finish all submitted work."""
+    executor = _get_task_executor()
+    if executor is not None and hasattr(executor, "_pool"):
+        executor._pool.shutdown(wait=True)
+        import concurrent.futures
+        executor._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=5, thread_name_prefix="task"
+        )
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -132,6 +145,7 @@ class TestFireTaskStripsMarker:
         set_task_executor(executor)
 
         _fire_task("abc123")
+        _flush_task_pool()
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
@@ -160,6 +174,7 @@ class TestFireTaskStripsMarker:
         set_task_executor(executor)
 
         _fire_task("abc123")
+        _flush_task_pool()
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
@@ -188,6 +203,7 @@ class TestFireTaskStripsMarker:
         set_task_executor(executor)
 
         _fire_task("abc123")
+        _flush_task_pool()
 
         sent_text = mock_send.call_args[0][1]
         assert "aca tenes las noticias pedazo de bobi" in sent_text
@@ -214,6 +230,7 @@ class TestFireTaskStripsMarker:
         set_task_executor(executor)
 
         _fire_task("abc123")
+        _flush_task_pool()
 
         sent_text = mock_send.call_args[0][1]
         assert "tarea programada:" in sent_text
@@ -251,6 +268,7 @@ class TestFireTaskCleanup:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
@@ -278,6 +296,7 @@ class TestFireTaskCleanup:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_not_called()
 
@@ -312,6 +331,7 @@ class TestFireTaskCleanup:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         billing.refund_reserved_ai_credits.assert_called_once()
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
@@ -349,6 +369,7 @@ class TestFireTaskBilling:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
@@ -373,6 +394,7 @@ class TestFireTaskBilling:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_not_called()
 
@@ -397,6 +419,7 @@ class TestFireTaskBilling:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
@@ -458,6 +481,7 @@ class TestFireTaskBilling:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         assert captured_init_kwargs, "AIMessageBilling was not instantiated"
         init_kwargs = captured_init_kwargs[0]
@@ -490,6 +514,7 @@ class TestFireTaskBillingUnavailable:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
@@ -515,6 +540,7 @@ class TestFireTaskBillingUnavailable:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         redis_client.delete.assert_not_called()
 
@@ -560,6 +586,7 @@ class TestFireTaskAIFailure:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         admin_report.assert_called_once()
         call_args = admin_report.call_args[0]
@@ -597,6 +624,7 @@ class TestFireTaskAIFailure:
         set_task_executor(executor)
 
         _fire_task("x1")
+        _flush_task_pool()
 
         billing.settle_reserved_ai_credits.assert_not_called()
         billing.refund_reserved_ai_credits.assert_called_once_with(
