@@ -3000,9 +3000,12 @@ def ask_ai(
             dropped = messages[: -keep]
             dropped_text = _format_messages_for_summary(dropped)
             summary = _compact_conversation(dropped_text)
-            messages = [
-                {"role": "system", "content": summary}
-            ] + messages[-keep:]
+            if summary:
+                messages = [
+                    {"role": "system", "content": summary}
+                ] + messages[-keep:]
+            else:
+                messages = messages[-keep:]
 
         context_data = {
             "market": get_market_context(),
