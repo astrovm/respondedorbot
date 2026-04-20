@@ -9,7 +9,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from api.ai_pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+from api.ai_pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE, credit_units_from_usd_micros
+
+
+def _make_summary_billing_segment(cost_usd_micros: int) -> Dict[str, Any]:
+    return {
+        "kind": "summary",
+        "text": "context compaction",
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "billing": {
+            "raw_usd_micros": cost_usd_micros,
+            "charged_credit_units": credit_units_from_usd_micros(cost_usd_micros),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -146,6 +158,8 @@ class AIService:
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
+        if summary_cost > 0:
+            billing_segments.insert(0, _make_summary_billing_segment(summary_cost))
         if (
             response_msg == "me quedé reculando y no te pude responder, probá de nuevo"
             or bool(ai_response_meta.get("ai_fallback"))

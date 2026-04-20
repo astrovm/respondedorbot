@@ -114,6 +114,10 @@ def _escape_search_text(query_text: str) -> str:
     return " ".join(tokens)
 
 
+def _escape_tag_value(value: str) -> str:
+    return re.sub(r"([^A-Za-z0-9_])", r"\\\1", str(value or ""))
+
+
 def _parse_search_result_row(key: Any, fields: Any) -> Dict[str, Any]:
     parsed_fields = list(fields or [])
     data: Dict[str, Any] = {
@@ -141,6 +145,45 @@ def get_chat_compacted_until(redis_client: redis.Redis, chat_id: str) -> Optiona
 
 def save_chat_compacted_until(redis_client: redis.Redis, chat_id: str, marker: str) -> None:
     redis_client.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
+
+
+def fetch_chat_messages_for_compaction(
+    redis_client: redis.Redis,
+    chat_id: str,
+    *,
+    limit: int = 500,
+    admin_reporter: Optional[AdminReporter] = None,
+) -> List[Dict[str, Any]]:
+    try:
+        _ensure_search_index(redis_client)
+        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} *"
+        raw = redis_client.execute_command(
+            "FT.SEARCH",
+            CHAT_SEARCH_INDEX,
+            query,
+            "SORTBY",
+            "timestamp",
+            "ASC",
+            "LIMIT",
+            "0",
+            str(limit),
+        )
+        if not isinstance(raw, list) or len(raw) <= 1:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for idx in range(1, len(raw), 2):
+            row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
+            row["timestamp"] = int(row.get("timestamp") or 0)
+            rows.append(row)
+        return rows
+    except Exception as error:
+        if admin_reporter is not None:
+            admin_reporter(
+                f"Error fetching chat messages for compaction: {error}",
+                error,
+                {"chat_id": chat_id, "limit": limit},
+            )
+        return []
 
 
 def save_message_to_redis(
@@ -295,7 +338,7 @@ def search_chat_history(
         return []
     try:
         _ensure_search_index(redis_client)
-        query = f"@chat_id:{{{chat_id}}} {search_text}"
+        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} {search_text}"
         raw = redis_client.execute_command(
             "FT.SEARCH",
             CHAT_SEARCH_INDEX,
@@ -474,6 +517,7 @@ __all__ = [
     "CHAT_HISTORY_MAX_MESSAGES",
     "build_reply_context_text",
     "format_user_message",
+    "fetch_chat_messages_for_compaction",
     "get_bot_message_metadata",
     "get_chat_compacted_until",
     "get_chat_history",

@@ -165,6 +165,7 @@ from api.message_state import (
     CHAT_HISTORY_MAX_MESSAGES,
     build_reply_context_text as _state_build_reply_context_text,
     format_user_message as _state_format_user_message,
+    fetch_chat_messages_for_compaction as _state_fetch_chat_messages_for_compaction,
     get_bot_message_metadata as _state_get_bot_message_metadata,
     get_chat_compacted_until as _state_get_chat_compacted_until,
     get_chat_history as _state_get_chat_history,
@@ -3904,6 +3905,16 @@ def prepare_chat_memory(
         if redis_client is not None and chat_id
         else None
     )
+    searchable_history = (
+        _state_fetch_chat_messages_for_compaction(
+            redis_client,
+            chat_id,
+            admin_reporter=admin_report,
+        )
+        if redis_client is not None and chat_id
+        else []
+    )
+    base_history = searchable_history if len(searchable_history) > len(chat_history) else chat_history
     compacted_until = (
         _state_get_chat_compacted_until(redis_client, chat_id)
         if redis_client is not None and chat_id
@@ -3912,7 +3923,7 @@ def prepare_chat_memory(
     summary_text, visible_history, _, summary_cost = compact_chat_memory(
         redis_client,
         chat_id,
-        chat_history,
+        base_history,
         summary_text,
         compacted_until,
     )
