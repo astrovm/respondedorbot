@@ -2490,10 +2490,6 @@ def get_oil_price() -> str:
             prices[name] = {"price": current_value, "variation": variation}
         except Exception:
             continue
-            current_value, variation = parsed
-            prices[name] = {"price": current_value, "variation": variation}
-        except Exception:
-            continue
 
     if not prices:
         return "no pude traer el precio del petróleo boludo"
