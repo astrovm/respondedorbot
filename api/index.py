@@ -2411,6 +2411,10 @@ esto es lo que sé hacer, boludo:
 - /transfer 1.5: le pasás 1.5 créditos tuyos al grupo
 
 - /tareas, /tasks: listado de tareas programadas con botones para borrar (el gordo agenda recordatorios y tareas recurrentes cuando le pedis)
+
+- /resumen, /summary: resumí la conversación (opcional: /resumen 50 o /resumen focus en crypto)
+
+- /acciones, /stocks: precios de acciones [aapl tsla googl]
 """
 
 
@@ -2554,6 +2558,52 @@ def get_stock_prices(msg_text: str) -> str:
             lines.append(f"{sym.upper()}: no se pudo obtener")
 
     return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+
+
+def summarize_conversation(
+    chat_id: str,
+    redis_client: Any,
+    ask_ai_fn: Callable,
+    num_messages: int = 50,
+    custom_instruction: Optional[str] = None,
+) -> str:
+    from api.message_state import get_chat_history
+
+    history = get_chat_history(chat_id, redis_client, max_messages=num_messages)
+    if not history:
+        return "no hay mensajes en el chat para resumir"
+
+    formatted = []
+    for msg in history:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    parts.append(p["text"])
+            content = " ".join(parts)
+        if content:
+            sender = "bot" if role == "assistant" else "user"
+            formatted.append(f"{sender}: {content}")
+
+    instruction = custom_instruction or "resumí esta conversación en español, capturando los puntos clave, temas discutidos y conclusiones. sé conciso."
+    prompt = f"{instruction}\n\nConversación:\n" + "\n".join(formatted)
+
+    messages = [{"role": "user", "content": prompt}]
+    response_meta: dict = {}
+    try:
+        response = ask_ai_fn(
+            messages,
+            response_meta=response_meta,
+            enable_web_search=False,
+            chat_id=chat_id,
+        )
+        if response.startswith("[[AI_FALLBACK]]"):
+            return "no pude resumir la conversación"
+        return response
+    except Exception:
+        return "error al resumir la conversación"
 
 
 def get_instance_name() -> str:
@@ -4301,6 +4351,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_good_morning": get_good_morning,
             "get_good_night": get_good_night,
             "tasks_command": tasks_command,
+            "summary_command": lambda: "usá /resumen para resumir la conversación",
         }
     )
 

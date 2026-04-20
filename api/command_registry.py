@@ -65,6 +65,7 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
     (("/gm",), "get_good_morning", False, False),
     (("/gn",), "get_good_night", False, False),
     (("/tareas", "/tasks"), "tasks_command", False, False),
+    (("/resumen", "/summary"), "summary_command", False, True),
 )
 
 LINK_REPLACEMENT_DOMAINS = (
