@@ -3890,15 +3890,14 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
 
 
 def _compact_conversation(dropped_text: str) -> str:
-    fallback = "Historial resumido de mensajes anteriores:\n" + dropped_text[:3000]
     messages = [
-        {"role": "system", "content": "resumí esta conversación en español en un párrafo conciso. capturá los temas principales, preguntas del usuario, respuestas del bot y cualquier conclusión o acción pendiente. no incluyas saludos ni charla casual."},
+        {"role": "system", "content": "summarize this conversation concisely in one paragraph. capture the main topics, user questions, bot responses, and any conclusions or pending actions. skip greetings and casual chat. match the language of the conversation."},
         {"role": "user", "content": dropped_text},
     ]
     result = _call_summary_model(messages)
     if result:
-        return f"Resumen del historial de conversación:\n{result}"
-    return fallback
+        return f"Conversation history summary:\n{result}"
+    return ""
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
@@ -4020,24 +4019,14 @@ def build_system_message(
         )
 
     tool_instruction = ""
-    if tools_active:
-        if tool_schemas:
-            summaries = []
-            for entry in tool_schemas:
-                fn = entry.get("function", {})
-                name = fn.get("name", "")
-                desc = fn.get("description", "")
-                summaries.append(f"- {name}: {desc}")
-            tool_summaries = "\n".join(summaries) + "\n"
-        else:
-            tool_summaries = (
-                "- crypto_prices: Get cryptocurrency prices from CoinMarketCap by symbol.\n"
-                "- calculate: Evaluate a math expression safely (+, -, *, /, %, **).\n"
-                "- web_fetch: Fetch and extract text content from a URL.\n"
-                "- task_set: Create a scheduled task (one-shot or recurring).\n"
-                "- task_list: List all tasks for the current chat.\n"
-                "- task_cancel: Cancel a task by its ID.\n"
-            )
+    if tools_active and tool_schemas:
+        summaries = []
+        for entry in tool_schemas:
+            fn = entry.get("function", {})
+            name = fn.get("name", "")
+            desc = fn.get("description", "")
+            summaries.append(f"- {name}: {desc}")
+        tool_summaries = "\n".join(summaries) + "\n"
         tool_instruction = (
             f"\n\nHERRAMIENTAS DISPONIBLES:\n{tool_summaries}"
             "Llamalas directamente, sin pedir permiso ni narrar antes.\n"
