@@ -1,21 +1,22 @@
-from unittest.mock import ANY, MagicMock, patch
-import json
-import os
-import random
-import re
-import requests
-import sys
-import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, cast
+from typing import Any, Dict, Mapping, Optional
 
-import pytest
+import json  # noqa: F401
+import os  # noqa: F401
+import random  # noqa: F401
+import re  # noqa: F401
+import sys  # noqa: F401
+import time  # noqa: F401
+from datetime import datetime, timedelta, timezone  # noqa: F401
+
+import pytest  # noqa: F401
 import redis
+import requests  # noqa: F401
+from unittest.mock import ANY, MagicMock, patch  # noqa: F401
 
-from api import config as config_module
+from api import config as config_module  # noqa: F401
 from api import index
-from api.ai_pipeline import remove_gordo_prefix
-from api.chat_settings import (
+from api.ai_pipeline import remove_gordo_prefix  # noqa: F401
+from api.chat_settings import (  # noqa: F401
     CHAT_ADMIN_STATUS_TTL,
     CHAT_CONFIG_DEFAULTS,
     build_config_keyboard as _build_config_keyboard,
@@ -37,7 +38,7 @@ from api.message_state import (
     save_bot_message_metadata as _save_bot_message_metadata,
     truncate_text as _truncate_text,
 )
-from api.services import bcra as bcra_service
+from api.services import bcra as bcra_service  # noqa: F401
 
 convert_to_command = index.convert_to_command
 config_redis = index.config_redis

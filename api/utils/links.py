@@ -7,7 +7,6 @@ from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import ParseResult, urlparse, urlunparse
 
-import requests
 from requests.exceptions import RequestException
 
 from api.utils.http import request_with_ssl_fallback

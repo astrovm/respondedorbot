@@ -1,0 +1,45 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
+ignore = [
+    "B023",
+    "B905",
+    "E501",
+    "S101",
+    "S106",
+    "S110",
+    "S112",
+    "S307",
+    "S314",
+    "S311",
+    "S501",
+    "S603",
+    "S607",
+    "S608",
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+    "UP047",
+    "RUF001",
+    "RUF005",
+    "RUF012",
+    "RUF013",
+    "RUF022",
+    "B007",
+    "B011",
+    "SIM102",
+    "SIM103",
+    "SIM105",
+    "SIM108",
+    "SIM114",
+    "SIM117",
+    "I001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"api/index.py" = ["F401"]
+"tests/**" = ["E712", "F403", "F405", "F841", "RUF059", "RUF100"]

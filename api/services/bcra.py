@@ -6,7 +6,7 @@ import time
 import unicodedata
 import warnings
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, UTC
 from decimal import Decimal
 from typing import (
     Any,
@@ -1373,7 +1373,7 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
         normalized = value.replace("Z", "+00:00")
         dt = datetime.fromisoformat(normalized)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(BA_TZ)
     except Exception:
         return None

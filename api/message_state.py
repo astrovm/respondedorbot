@@ -11,7 +11,6 @@ from typing import (
     List,
     Mapping,
     Optional,
-    Sequence,
     Set,
     Union,
     cast,

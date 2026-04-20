@@ -391,18 +391,17 @@ def charge_ai_credits(
     charge_amount = int(amount)
     metadata_dict = dict(metadata or {})
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            user_balance = _get_balance_for_update(cur, "user", user_id)
-            chat_balance = 0
-            if chat_id is not None:
-                chat_balance = _get_balance_for_update(cur, "chat", chat_id)
+    with connect() as conn, conn.cursor() as cur:
+        user_balance = _get_balance_for_update(cur, "user", user_id)
+        chat_balance = 0
+        if chat_id is not None:
+            chat_balance = _get_balance_for_update(cur, "chat", chat_id)
 
-            if user_balance >= charge_amount:
-                user_balance -= charge_amount
-                _set_balance(cur, "user", user_id, user_balance)
-                cur.execute(
-                    """
+        if user_balance >= charge_amount:
+            user_balance -= charge_amount
+            _set_balance(cur, "user", user_id, user_balance)
+            cur.execute(
+                """
                     INSERT INTO credit_ledger (
                         event_type,
                         actor_user_id,
@@ -413,68 +412,68 @@ def charge_ai_credits(
                     )
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
-                    (
-                        str(event_type or "ai_charge"),
-                        int(user_id),
-                        int(user_id),
-                        int(chat_id) if chat_id is not None else None,
-                        -charge_amount,
-                        json.dumps({"source": "user", **metadata_dict}),
-                    ),
-                )
-                conn.commit()
-                return {
-                    "ok": True,
-                    "source": "user",
-                    "user_balance": user_balance,
-                    "chat_balance": chat_balance,
-                    "user_balance_credit_units": user_balance,
-                    "chat_balance_credit_units": chat_balance,
-                }
-
-            if chat_id is not None and chat_balance >= charge_amount:
-                chat_balance -= charge_amount
-                _set_balance(cur, "chat", chat_id, chat_balance)
-                cur.execute(
-                    """
-                    INSERT INTO credit_ledger (
-                        event_type,
-                        actor_user_id,
-                        user_id,
-                        chat_id,
-                        amount,
-                        metadata
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                    """,
-                    (
-                        str(event_type or "ai_charge"),
-                        int(user_id),
-                        int(user_id),
-                        int(chat_id),
-                        -charge_amount,
-                        json.dumps({"source": "chat", **metadata_dict}),
-                    ),
-                )
-                conn.commit()
-                return {
-                    "ok": True,
-                    "source": "chat",
-                    "user_balance": user_balance,
-                    "chat_balance": chat_balance,
-                    "user_balance_credit_units": user_balance,
-                    "chat_balance_credit_units": chat_balance,
-                }
-
+                (
+                    str(event_type or "ai_charge"),
+                    int(user_id),
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    -charge_amount,
+                    json.dumps({"source": "user", **metadata_dict}),
+                ),
+            )
             conn.commit()
             return {
-                "ok": False,
-                "source": None,
+                "ok": True,
+                "source": "user",
                 "user_balance": user_balance,
                 "chat_balance": chat_balance,
                 "user_balance_credit_units": user_balance,
                 "chat_balance_credit_units": chat_balance,
             }
+
+        if chat_id is not None and chat_balance >= charge_amount:
+            chat_balance -= charge_amount
+            _set_balance(cur, "chat", chat_id, chat_balance)
+            cur.execute(
+                """
+                    INSERT INTO credit_ledger (
+                        event_type,
+                        actor_user_id,
+                        user_id,
+                        chat_id,
+                        amount,
+                        metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                (
+                    str(event_type or "ai_charge"),
+                    int(user_id),
+                    int(user_id),
+                    int(chat_id),
+                    -charge_amount,
+                    json.dumps({"source": "chat", **metadata_dict}),
+                ),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "source": "chat",
+                "user_balance": user_balance,
+                "chat_balance": chat_balance,
+                "user_balance_credit_units": user_balance,
+                "chat_balance_credit_units": chat_balance,
+            }
+
+        conn.commit()
+        return {
+            "ok": False,
+            "source": None,
+            "user_balance": user_balance,
+            "chat_balance": chat_balance,
+            "user_balance_credit_units": user_balance,
+            "chat_balance_credit_units": chat_balance,
+        }
 
 
 def refund_ai_charge(
@@ -492,16 +491,15 @@ def refund_ai_charge(
     refund_amount = int(amount)
     metadata_dict = dict(metadata or {})
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            if source == "chat" and chat_id is not None:
-                chat_balance = (
-                    _get_balance_for_update(cur, "chat", chat_id) + refund_amount
-                )
-                _set_balance(cur, "chat", chat_id, chat_balance)
-                user_balance = _get_balance_for_update(cur, "user", user_id)
-                cur.execute(
-                    """
+    with connect() as conn, conn.cursor() as cur:
+        if source == "chat" and chat_id is not None:
+            chat_balance = (
+                _get_balance_for_update(cur, "chat", chat_id) + refund_amount
+            )
+            _set_balance(cur, "chat", chat_id, chat_balance)
+            user_balance = _get_balance_for_update(cur, "user", user_id)
+            cur.execute(
+                """
                     INSERT INTO credit_ledger (
                         event_type,
                         actor_user_id,
@@ -512,29 +510,29 @@ def refund_ai_charge(
                     )
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
-                    (
-                        str(event_type or "ai_refund"),
-                        int(user_id),
-                        int(user_id),
-                        int(chat_id),
-                        refund_amount,
-                        json.dumps({"source": "chat", **metadata_dict}),
-                    ),
-                )
-                conn.commit()
-                return {
-                    "user_balance": int(user_balance),
-                    "chat_balance": int(chat_balance),
-                }
+                (
+                    str(event_type or "ai_refund"),
+                    int(user_id),
+                    int(user_id),
+                    int(chat_id),
+                    refund_amount,
+                    json.dumps({"source": "chat", **metadata_dict}),
+                ),
+            )
+            conn.commit()
+            return {
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
-            user_balance = _get_balance_for_update(cur, "user", user_id) + refund_amount
-            _set_balance(cur, "user", user_id, user_balance)
-            chat_balance = 0
-            if chat_id is not None:
-                chat_balance = _get_balance_for_update(cur, "chat", chat_id)
+        user_balance = _get_balance_for_update(cur, "user", user_id) + refund_amount
+        _set_balance(cur, "user", user_id, user_balance)
+        chat_balance = 0
+        if chat_id is not None:
+            chat_balance = _get_balance_for_update(cur, "chat", chat_id)
 
-            cur.execute(
-                """
+        cur.execute(
+            """
                 INSERT INTO credit_ledger (
                     event_type,
                     actor_user_id,
@@ -545,21 +543,21 @@ def refund_ai_charge(
                 )
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
-                (
-                    str(event_type or "ai_refund"),
-                    int(user_id),
-                    int(user_id),
-                    int(chat_id) if chat_id is not None else None,
-                    refund_amount,
-                    json.dumps({"source": "user", **metadata_dict}),
-                ),
-            )
-            conn.commit()
+            (
+                str(event_type or "ai_refund"),
+                int(user_id),
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                refund_amount,
+                json.dumps({"source": "user", **metadata_dict}),
+            ),
+        )
+        conn.commit()
 
-            return {
-                "user_balance": int(user_balance),
-                "chat_balance": int(chat_balance),
-            }
+        return {
+            "user_balance": int(user_balance),
+            "chat_balance": int(chat_balance),
+        }
 
 
 def apply_ai_debt(
@@ -577,16 +575,15 @@ def apply_ai_debt(
     debt_amount = int(amount)
     metadata_dict = dict(metadata or {})
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            if source == "chat" and chat_id is not None:
-                chat_balance = (
-                    _get_balance_for_update(cur, "chat", chat_id) - debt_amount
-                )
-                _set_balance(cur, "chat", chat_id, chat_balance)
-                user_balance = _get_balance_for_update(cur, "user", user_id)
-                cur.execute(
-                    """
+    with connect() as conn, conn.cursor() as cur:
+        if source == "chat" and chat_id is not None:
+            chat_balance = (
+                _get_balance_for_update(cur, "chat", chat_id) - debt_amount
+            )
+            _set_balance(cur, "chat", chat_id, chat_balance)
+            user_balance = _get_balance_for_update(cur, "user", user_id)
+            cur.execute(
+                """
                     INSERT INTO credit_ledger (
                         event_type,
                         actor_user_id,
@@ -597,29 +594,29 @@ def apply_ai_debt(
                     )
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
-                    (
-                        str(event_type or "ai_settlement_debt"),
-                        int(user_id),
-                        int(user_id),
-                        int(chat_id),
-                        -debt_amount,
-                        json.dumps({"source": "chat", **metadata_dict}),
-                    ),
-                )
-                conn.commit()
-                return {
-                    "user_balance": int(user_balance),
-                    "chat_balance": int(chat_balance),
-                }
+                (
+                    str(event_type or "ai_settlement_debt"),
+                    int(user_id),
+                    int(user_id),
+                    int(chat_id),
+                    -debt_amount,
+                    json.dumps({"source": "chat", **metadata_dict}),
+                ),
+            )
+            conn.commit()
+            return {
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
-            user_balance = _get_balance_for_update(cur, "user", user_id) - debt_amount
-            _set_balance(cur, "user", user_id, user_balance)
-            chat_balance = 0
-            if chat_id is not None:
-                chat_balance = _get_balance_for_update(cur, "chat", chat_id)
+        user_balance = _get_balance_for_update(cur, "user", user_id) - debt_amount
+        _set_balance(cur, "user", user_id, user_balance)
+        chat_balance = 0
+        if chat_id is not None:
+            chat_balance = _get_balance_for_update(cur, "chat", chat_id)
 
-            cur.execute(
-                """
+        cur.execute(
+            """
                 INSERT INTO credit_ledger (
                     event_type,
                     actor_user_id,
@@ -630,21 +627,21 @@ def apply_ai_debt(
                 )
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
-                (
-                    str(event_type or "ai_settlement_debt"),
-                    int(user_id),
-                    int(user_id),
-                    int(chat_id) if chat_id is not None else None,
-                    -debt_amount,
-                    json.dumps({"source": "user", **metadata_dict}),
-                ),
-            )
-            conn.commit()
+            (
+                str(event_type or "ai_settlement_debt"),
+                int(user_id),
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                -debt_amount,
+                json.dumps({"source": "user", **metadata_dict}),
+            ),
+        )
+        conn.commit()
 
-            return {
-                "user_balance": int(user_balance),
-                "chat_balance": int(chat_balance),
-            }
+        return {
+            "user_balance": int(user_balance),
+            "chat_balance": int(chat_balance),
+        }
 
 
 def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, Any]:
@@ -653,75 +650,74 @@ def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, 
     ensure_schema()
     transfer_amount = int(amount)
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            user_balance = _get_balance_for_update(cur, "user", user_id)
-            chat_balance = _get_balance_for_update(cur, "chat", chat_id)
+    with connect() as conn, conn.cursor() as cur:
+        user_balance = _get_balance_for_update(cur, "user", user_id)
+        chat_balance = _get_balance_for_update(cur, "chat", chat_id)
 
-            if user_balance < transfer_amount:
-                conn.commit()
-                return {
-                    "ok": False,
-                    "error": "insufficient",
-                    "user_balance": user_balance,
-                    "chat_balance": chat_balance,
-                }
-
-            user_balance -= transfer_amount
-            chat_balance += transfer_amount
-            _set_balance(cur, "user", user_id, user_balance)
-            _set_balance(cur, "chat", chat_id, chat_balance)
-
-            cur.execute(
-                """
-                INSERT INTO credit_ledger (
-                    event_type,
-                    actor_user_id,
-                    user_id,
-                    chat_id,
-                    amount,
-                    metadata
-                )
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                """,
-                (
-                    "transfer_user_to_chat",
-                    int(user_id),
-                    int(user_id),
-                    int(chat_id),
-                    -transfer_amount,
-                    json.dumps({"direction": "user_to_chat"}),
-                ),
-            )
-            cur.execute(
-                """
-                INSERT INTO credit_ledger (
-                    event_type,
-                    actor_user_id,
-                    user_id,
-                    chat_id,
-                    amount,
-                    metadata
-                )
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                """,
-                (
-                    "transfer_user_to_chat",
-                    int(user_id),
-                    int(user_id),
-                    int(chat_id),
-                    transfer_amount,
-                    json.dumps({"direction": "chat_from_user"}),
-                ),
-            )
+        if user_balance < transfer_amount:
             conn.commit()
-
             return {
-                "ok": True,
-                "error": None,
+                "ok": False,
+                "error": "insufficient",
                 "user_balance": user_balance,
                 "chat_balance": chat_balance,
             }
+
+        user_balance -= transfer_amount
+        chat_balance += transfer_amount
+        _set_balance(cur, "user", user_id, user_balance)
+        _set_balance(cur, "chat", chat_id, chat_balance)
+
+        cur.execute(
+            """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+            (
+                "transfer_user_to_chat",
+                int(user_id),
+                int(user_id),
+                int(chat_id),
+                -transfer_amount,
+                json.dumps({"direction": "user_to_chat"}),
+            ),
+        )
+        cur.execute(
+            """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+            (
+                "transfer_user_to_chat",
+                int(user_id),
+                int(user_id),
+                int(chat_id),
+                transfer_amount,
+                json.dumps({"direction": "chat_from_user"}),
+            ),
+        )
+        conn.commit()
+
+        return {
+            "ok": True,
+            "error": None,
+            "user_balance": user_balance,
+            "chat_balance": chat_balance,
+        }
 
 
 def mint_user_credits(
@@ -809,10 +805,9 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
     ensure_schema()
     normalized_limit = max(1, min(int(limit or 10), 50))
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
                 SELECT
                     id,
                     event_type,
@@ -827,9 +822,9 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
                 ORDER BY created_at DESC, id DESC
                 LIMIT %s
                 """,
-                ("ai_settlement_result", normalized_limit),
-            )
-            rows = cur.fetchall() or []
+            ("ai_settlement_result", normalized_limit),
+        )
+        rows = cur.fetchall() or []
 
     results: List[Dict[str, Any]] = []
     for row in rows:

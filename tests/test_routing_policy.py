@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from tests.support import *  # noqa: F401,F403
+from tests.support import *
 
 
 def _build_policy(has_credits_fn):

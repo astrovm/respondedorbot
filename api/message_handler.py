@@ -1622,7 +1622,7 @@ def _handle_known_command(
         return response
 
     if command in commands:
-        handler_func, uses_ai, takes_params = commands[command]
+        handler_func, uses_ai, _takes_params = commands[command]
         response_command = command
 
         if uses_ai:

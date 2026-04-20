@@ -96,7 +96,7 @@ def fetch_youtube_transcript(
         return None, "could not retrieve transcript"
     except Exception as e:
         print(f"[YOUTUBE_TRANSCRIPT] Unexpected error: {e}")
-        return None, f"error: {str(e)}"
+        return None, f"error: {e!s}"
 
 
 def format_youtube_transcript_for_context(
