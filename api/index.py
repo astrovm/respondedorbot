@@ -4324,7 +4324,7 @@ def build_ai_messages(
         }
     )
 
-    return messages[-8:]
+    return messages[-20:]
 
 
 def _noop_command() -> str:
