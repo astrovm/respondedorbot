@@ -108,7 +108,6 @@ from api.ai_pricing import (
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-from api.tools.stock_prices import fetch_stooq_price
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
 import api.tools.calculate
@@ -2420,61 +2419,18 @@ esto es lo que sé hacer, boludo:
 def get_oil_price() -> str:
     """Return latest Brent and WTI oil prices in USD with daily variation."""
 
-    def parse_daily_rows(rows: List[str]) -> Optional[Tuple[float, float]]:
-        data_rows = rows
-        if rows and rows[0].lower().startswith("date"):
-            data_rows = rows[1:]
-        if len(data_rows) < 2:
-            return None
-
-        latest_row = [field.strip() for field in data_rows[-1].split(",")]
-        previous_row = [field.strip() for field in data_rows[-2].split(",")]
-        if len(latest_row) < 5 or len(previous_row) < 5:
-            return None
-
-        close_price = latest_row[4]
-        previous_close = previous_row[4]
-        if close_price in {"N/D", ""} or previous_close in {"N/D", ""}:
-            return None
-
-        current_value = float(close_price)
-        previous_value = float(previous_close)
-        if previous_value == 0:
-            return None
-
-        variation = ((current_value - previous_value) / previous_value) * 100
-        return current_value, variation
-
     symbols = {
-        "Brent": "cb.f",
-        "WTI": "cl.f",
+        "Brent": "BZ=F",
+        "WTI": "CL=F",
     }
     prices: Dict[str, Dict[str, float]] = {}
 
     for name, symbol in symbols.items():
-        try:
-            parsed = None
-
-            daily_response = requests.get(
-                f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=5
-            )
-            daily_response.raise_for_status()
-            rows = [
-                line.strip()
-                for line in daily_response.text.splitlines()
-                if line.strip()
-            ]
-            parsed = parse_daily_rows(rows)
-
-            if not parsed:
-                parsed = fetch_stooq_price(symbol)
-
-            if not parsed:
-                continue
-            current_value, variation = parsed
-            prices[name] = {"price": current_value, "variation": variation}
-        except Exception:
+        parsed = _fetch_yahoo_stock_price(symbol)
+        if not parsed:
             continue
+        current_value, variation = parsed
+        prices[name] = {"price": current_value, "variation": variation}
 
     if not prices:
         return "no pude traer el precio del petróleo boludo"
@@ -2555,7 +2511,7 @@ def get_stock_prices(msg_text: str) -> str:
         if parsed:
             price, var = parsed
             sign = "+" if var >= 0 else ""
-            lines.append(f"{sym.upper()}: ${price:.2f} ({sign}{var:.2f}% dia)")
+            lines.append(f"{sym.upper()}: {price:.4f} USD ({sign}{var:.2f}% 24h)")
         else:
             lines.append(f"{sym.upper()}: no se pudo obtener")
 

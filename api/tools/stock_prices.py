@@ -1,4 +1,4 @@
-"""stock_prices tool — fetches stock prices from Stooq for agentic use."""
+"""stock_prices tool — fetches stock prices from Yahoo Finance for agentic use."""
 
 from __future__ import annotations
 
@@ -8,29 +8,30 @@ import requests
 
 from api.tools.registry import ToolResult, register_tool
 
+_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
-def fetch_stooq_price(symbol: str) -> Optional[Tuple[float, float]]:
+
+def _fetch_yahoo_price(symbol: str) -> Optional[Tuple[float, float]]:
     try:
         resp = requests.get(
-            f"https://stooq.com/q/l/?s={symbol}&i=d", timeout=5
+            _YAHOO_CHART_URL.format(symbol=symbol),
+            params={"range": "5d", "interval": "1d"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
         )
         resp.raise_for_status()
-        rows = [line.strip() for line in resp.text.splitlines() if line.strip()]
-        if not rows:
+        data = resp.json()
+        result = data.get("chart", {}).get("result", [{}])[0]
+        quotes = result.get("indicators", {}).get("quote", [{}])[0]
+        closes = [c for c in quotes.get("close", []) if c is not None]
+        if len(closes) < 2:
             return None
-        row = [field.strip() for field in rows[-1].split(",")]
-        if len(row) < 7 or row[0].lower() == "symbol":
+        prev_close = closes[-2]
+        current = closes[-1]
+        if prev_close == 0:
             return None
-        open_price = row[3]
-        close_price = row[6]
-        if open_price in {"N/D", ""} or close_price in {"N/D", ""}:
-            return None
-        current = float(close_price)
-        opening = float(open_price)
-        if opening == 0:
-            return None
-        variation = ((current - opening) / opening) * 100
-        return current, variation
+        change_pct = ((current - prev_close) / prev_close) * 100
+        return current, change_pct
     except Exception:
         return None
 
@@ -48,7 +49,7 @@ def _execute_stock_prices(
 
     results: List[str] = []
     for sym in symbols:
-        parsed = fetch_stooq_price(sym.upper())
+        parsed = _fetch_yahoo_price(sym.upper())
         if parsed:
             price, var = parsed
             sign = "+" if var >= 0 else ""
@@ -61,7 +62,7 @@ def _execute_stock_prices(
 
 register_tool(
     name="stock_prices",
-    description="Get stock prices from Stooq. Pass ticker symbols like 'aapl tsla googl'. Returns current price and daily variation.",
+    description="Get stock prices from Yahoo Finance. Pass ticker symbols like 'aapl tsla googl'. Returns current price and daily variation.",
     parameters={
         "type": "object",
         "properties": {
