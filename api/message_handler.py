@@ -62,7 +62,7 @@ class MessageStateDeps:
     build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
     build_message_links_context: Callable[[Mapping[str, Any]], str]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
-    save_message_to_redis: Callable[[str, str, str, Any], None]
+    save_message_to_redis: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -499,12 +499,28 @@ def _store_user_message_if_present(
 ) -> None:
     if not message_text:
         return
+    sender = cast(Mapping[str, Any], message.get("from", {}))
+    reply_to_message = cast(Optional[Mapping[str, Any]], message.get("reply_to_message"))
     formatted_message = deps.format_user_message(
         message,
         message_text,
         reply_context_text,
     )
-    deps.save_message_to_redis(chat_id, message_id, formatted_message, redis_client)
+    deps.save_message_to_redis(
+        chat_id,
+        message_id,
+        formatted_message,
+        redis_client,
+        role="user",
+        user_id=str(sender.get("id") or ""),
+        username=str(sender.get("username") or ""),
+        reply_to_message_id=(
+            str(reply_to_message.get("message_id"))
+            if isinstance(reply_to_message, Mapping) and reply_to_message.get("message_id") is not None
+            else None
+        ),
+        mentions_bot=("@" in message_text or message_text.startswith("/")),
+    )
 
 
 def _send_response_and_store_metadata(
@@ -532,6 +548,7 @@ def _send_response_and_store_metadata(
         key,
         response_msg,
         redis_client,
+        role="assistant",
     )
     if sent_message_id is None:
         return

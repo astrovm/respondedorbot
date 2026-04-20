@@ -16,6 +16,7 @@ from api.ai_pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
 class AIService:
     credits_db_service: Any
     get_chat_history: Callable[[str, Any], List[Dict[str, Any]]]
+    prepare_chat_memory: Callable[..., Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]]
     build_ai_messages: Callable[..., List[Dict[str, Any]]]
     check_provider_available: Callable[..., bool]
     has_openrouter_fallback: Callable[[], bool]
@@ -36,11 +37,26 @@ class AIService:
             return ("ok", False) if request.is_spontaneous else billing_unavailable
 
         chat_history = self.get_chat_history(request.chat_id, request.redis_client)
-        ai_messages = self.build_ai_messages(
-            request.message,
+        reply_to_message = request.message.get("reply_to_message") if request.message else None
+        reply_to_message_id = None
+        if isinstance(reply_to_message, dict):
+            raw_reply_to_id = reply_to_message.get("message_id")
+            if raw_reply_to_id is not None:
+                reply_to_message_id = str(raw_reply_to_id)
+        visible_history, summary_text, retrieved_messages, summary_cost = self.prepare_chat_memory(
+            request.redis_client,
+            request.chat_id,
             chat_history,
             request.prompt_text,
+            reply_to_message_id=reply_to_message_id,
+        )
+        ai_messages = self.build_ai_messages(
+            request.message,
+            visible_history,
+            request.prompt_text,
             request.reply_context_text,
+            summary_text=summary_text,
+            retrieved_messages=retrieved_messages,
         )
 
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
@@ -63,6 +79,7 @@ class AIService:
             main_reserve_credits,
             metadata={
                 "estimated_prompt_messages": len(ai_messages),
+                "summary_cost": summary_cost,
                 **reserve_meta,
             },
         )
@@ -175,6 +192,7 @@ def build_ai_service(
     *,
     credits_db_service: Any,
     get_chat_history: Callable[[str, Any], List[Dict[str, Any]]],
+    prepare_chat_memory: Callable[..., Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]],
     build_ai_messages: Callable[..., List[Dict[str, Any]]],
     check_provider_available: Callable[..., bool],
     has_openrouter_fallback: Callable[[], bool],
@@ -186,6 +204,7 @@ def build_ai_service(
     return AIService(
         credits_db_service=credits_db_service,
         get_chat_history=get_chat_history,
+        prepare_chat_memory=prepare_chat_memory,
         build_ai_messages=build_ai_messages,
         check_provider_available=check_provider_available,
         has_openrouter_fallback=has_openrouter_fallback,
