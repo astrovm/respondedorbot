@@ -21,7 +21,7 @@ def test_format_user_message_with_reply_context():
 
 def test_save_message_to_redis():
     from api.index import save_message_to_redis
-    from api.message_state import CHAT_STATE_TTL
+    from api.message_state import CHAT_HISTORY_MAX_MESSAGES, CHAT_STATE_TTL
 
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -43,9 +43,18 @@ def test_save_message_to_redis():
         mock_instance.pipeline.assert_called_once()
         pipeline.lpush.assert_called_once()
         pipeline.ltrim.assert_called_once()
+        pipeline.ltrim.assert_called_once_with(
+            f"chat_history:{chat_id}", 0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1
+        )
         pipeline.expire.assert_any_call(f"chat_history:{chat_id}", CHAT_STATE_TTL)
         pipeline.expire.assert_any_call(f"chat_message_ids:{chat_id}", CHAT_STATE_TTL)
         pipeline.execute.assert_called_once()
+
+
+def test_chat_history_limit_increased_for_busy_groups():
+    from api.message_state import CHAT_HISTORY_MAX_MESSAGES
+
+    assert CHAT_HISTORY_MAX_MESSAGES == 100
 
 
 def test_get_chat_history():
