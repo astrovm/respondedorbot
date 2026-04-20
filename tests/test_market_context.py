@@ -849,7 +849,18 @@ def test_build_system_message_task_tool_instructions_preserve_perspective():
         "hacker_news": [],
     }
 
-    result = build_system_message(context, tools_active=True)
+    tool_schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "task_set",
+                "description": "Create a scheduled task.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    result = build_system_message(context, tools_active=True, tool_schemas=tool_schemas)
 
     content_text = result["content"][0]["text"]
     assert (
