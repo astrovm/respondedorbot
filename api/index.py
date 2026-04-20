@@ -3859,10 +3859,10 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     ]
     result, cost = _call_summary_model(messages)
     if result:
-        return f"Conversation history summary:\n{result}", cost
+        return f"[contexto anterior: {result}]", cost
     lines = dropped_text.split("\n")
     truncated = "\n".join(lines[:COMPACTION_TRUNCATE_LINES])
-    return f"Earlier conversation (truncated):\n{truncated}", 0
+    return f"[contexto anterior truncado: {truncated}]", 0
 
 
 def _estimate_summary_cost_usd_micros(
@@ -4053,7 +4053,7 @@ NOTICIAS DE HACKER NEWS:
         "content": [
             {
                 "type": "text",
-                "text": task_prefix + base_prompt + contextual_info,
+                "text": task_prefix + contextual_info + base_prompt,
             }
         ],
     }
