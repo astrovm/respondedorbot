@@ -2,20 +2,20 @@
 
 - Read before editing. Test before declaring done.
 - Prefer small edits over rewrites.
-- Reproduce before fixing issues that depend on runtime behavior or external services.
-- Unproven concerns are risks, not bugs. Say so if you haven't reproduced it.
-- Simplest working solution. No over-engineering, no speculative features, no abstractions for single-use ops.
+- Reproduce before fixing runtime or external issues.
+- Unproven concerns are risks, not bugs. Say so if not reproduced.
+- Simplest working solution. No over-engineering, speculative features, or single-use abstractions.
 
 ## Output
 
-- Code first. Explanation and comments only when logic is non-obvious.
-- No filler, no boilerplate, no suggestions outside scope.
+- Code first. Explain only non-obvious logic.
+- No filler, boilerplate, or out-of-scope suggestions.
 
 ## Code
 
-- Remove unused imports, variables, parameters, dead branches, dead functions in files you edit.
+- Remove unused imports, variables, parameters, dead branches, and dead functions from edited files.
 - No error handling for impossible scenarios.
-- All imports at top of file. No imports inside functions unless strictly required to break circular dependencies.
+- All imports at top of file. None inside functions unless strictly required to break circular dependencies.
 - Code and comments in English. User-facing strings stay in their original language.
 
 ## Debugging
@@ -26,13 +26,20 @@
 ## Verification
 
 - Smallest proof first, then broader checks.
-- Use the language's standard toolchain. Default checks: format, lint (warnings as errors), tests. Skip only with stated reason.
+- Use the standard toolchain. Default checks: format, lint (warnings as errors), tests. Skip only with stated reason.
 - No "fixed/safe/ready" claims without fresh command output.
 
 ## Git
 
-- Ask before pushing every time, even if previously approved. No batch commit+push. No force push or hard reset without approval.
+- Ask before pushing every time, even if previously approved.
+- No batch commit+push. No force push or hard reset without approval.
 - Merge to `main` with a single squashed commit. Commit messages in English.
+
+## Configuration
+
+- Environment variables only for secrets and external credentials.
+- Prioritize sane defaults, zero-config, and easy maintenance. Hardcode sensible defaults for internal URLs, ports, and feature flags.
+- When adding a dependency, verify the actual latest version from the registry or official source. Never rely on model memory.
 
 ## Formatting
 
