@@ -293,6 +293,34 @@ def test_search_chat_history_escapes_negative_group_chat_id():
     assert truncate_text("hello", 4) == "h..."
 
 
+def test_escape_search_text_escapes_at_sign():
+    from api.message_state import _escape_search_text
+
+    assert _escape_search_text("@playtimbabot") == "\\@playtimbabot"
+    assert _escape_search_text("hello @user world") == "hello \\@user world"
+    assert _escape_search_text("no at sign here") == "no at sign here"
+
+
+def test_search_chat_history_escapes_at_sign_in_query():
+    import api.message_state as message_state
+    from api.message_state import search_chat_history
+
+    message_state._SEARCH_INDEX_READY = False
+    redis_client = MagicMock()
+    redis_client.execute_command.side_effect = [Exception("Index already exists"), [0]]
+
+    search_chat_history(
+        redis_client,
+        chat_id="-1002201300982",
+        query_text="explica que es el trading de futuros y porque esa chica dice que perdió sus ahorros por no saber operar sin medir el riesgo, y porque eso no tiene nada que ver con perder la guita en el coinflip de @playtimbabot",
+        limit=5,
+    )
+
+    query = redis_client.execute_command.call_args_list[1].args[2]
+    assert "\\@playtimbabot" in query
+    assert "@chat_id:{\\-1002201300982}" in query
+
+
 def test_truncate_text_more_edge_cases():
     from api.index import truncate_text
 
