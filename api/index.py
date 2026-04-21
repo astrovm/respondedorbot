@@ -240,8 +240,9 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
 SUMMARY_FALLBACK_MODEL = "minimax/minimax-m2.5:free"
-COMPACTION_THRESHOLD = 8
-COMPACTION_KEEP = 5
+SUMMARY_MAX_TOKENS = 512
+COMPACTION_THRESHOLD = 20
+COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
 GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
@@ -3800,7 +3801,7 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=512,
+                max_tokens=SUMMARY_MAX_TOKENS,
             )
             if resp and resp.choices and resp.choices[0].message:
                 text = str(resp.choices[0].message.content or "").strip()
@@ -3835,11 +3836,14 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
 
 def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     prompt = (
-        "summarize this conversation concisely in one paragraph. "
-        "capture the main topics, user questions, bot responses, "
-        "and any conclusions or pending actions. "
-        "skip greetings and casual chat. "
-        "match the language of the conversation."
+        "actualizá el resumen previo con los mensajes nuevos. "
+        "usá formato denso y estructurado para maximizar información en poco espacio: "
+        "- temas: [lista breve de temas tratados] "
+        "- hechos: [datos clave, números, nombres, fechas] "
+        "- decisiones: [lo acordado o decidido] "
+        "- pendientes: [preguntas o tareas sin resolver] "
+        "- usuarios: [quién dijo qué, solo lo relevante]. "
+        "omití saludos y chat casual. mantené el idioma original."
     )
     messages = [
         {"role": "system", "content": prompt},
@@ -3959,16 +3963,7 @@ def _estimate_summary_cost_usd_micros(
     return (input_tokens * input_rate + output_tokens * output_rate) // 1_000_000
 
 
-def _make_summary_result(cost_usd_micros: int) -> Dict[str, Any]:
-    return {
-        "kind": "summary",
-        "text": "context compaction",
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-        "billing": {
-            "raw_usd_micros": cost_usd_micros,
-            "charged_credit_units": credit_units_from_usd_micros(cost_usd_micros),
-        },
-    }
+
 
 
 def get_fallback_response(messages: List[Dict]) -> str:
