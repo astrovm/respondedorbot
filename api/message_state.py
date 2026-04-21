@@ -110,7 +110,7 @@ def _ensure_search_index(redis_client: redis.Redis) -> None:
 
 def _escape_search_text(query_text: str) -> str:
     tokens = [re.sub(r"[^\w@.-]", "", token) for token in str(query_text or "").split()]
-    tokens = [token for token in tokens if token]
+    tokens = [token.replace("@", "\\@") for token in tokens if token]
     return " ".join(tokens)
 
 
