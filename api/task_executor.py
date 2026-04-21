@@ -19,7 +19,16 @@ _FALLBACK_MARKER = "[[AI_FALLBACK]]"
 _MAX_FALLBACK_RETRIES = 1
 _MAX_EMPTY_RETRIES = 1
 
-_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(INSTRUCCIONES_BASE)
+_TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
+    [
+        "INSTRUCCIONES:",
+        "- mantené el personaje del gordo",
+        "- usá lenguaje coloquial argentino",
+        "- respondé en minúsculas, sin emojis, sin punto final",
+        "- si la respuesta tiene varios temas, usá listas con viñetas, párrafos cortos y saltos de línea entre secciones",
+        "- no la pongas toda en una sola frase: estructurala para que sea fácil de leer",
+    ]
+)
 
 
 def _strip_response_marker(response: str) -> str:
@@ -97,7 +106,7 @@ class TaskExecutor:
             message=task_message,
         )
 
-        messages = [{"role": "user", "content": text + _FORMATTING_INSTRUCTIONS}]
+        messages = [{"role": "user", "content": text + _TASK_FORMATTING_INSTRUCTIONS}]
         response_meta: dict[str, Any] = {}
 
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
