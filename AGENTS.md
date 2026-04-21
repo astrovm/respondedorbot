@@ -18,6 +18,11 @@
 - All imports at top of file. None inside functions unless strictly required to break circular dependencies.
 - Code and comments in English. User-facing strings stay in their original language.
 
+## Maintenance
+
+- Remove old code when introducing replacements. No backward compatibility shims without explicit authorization.
+- Do not preserve feature flags for shipped features or abstractions that serve a single caller.
+
 ## Debugging
 
 - Read code before explaining. Prove with direct evidence: failing test, reproduced run, or concrete probe.
@@ -28,6 +33,12 @@
 - Smallest proof first, then broader checks.
 - Use the standard toolchain. Default checks: format, lint (warnings as errors), tests. Skip only with stated reason.
 - No "fixed/safe/ready" claims without fresh command output.
+- Fix every issue you encounter. There are no pre-existing bugs or errors to ignore.
+
+## Tests
+
+- If the project has tests, run them before committing or declaring work complete. No exceptions.
+- A failing test is a blocking issue. Fix it before moving on.
 
 ## Git
 
