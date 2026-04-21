@@ -3860,6 +3860,8 @@ def compact_chat_memory(
     existing_summary: Optional[str],
     compacted_until: Optional[str],
     compact_fn: Callable[[str], Tuple[str, int]] = _compact_conversation,
+    compaction_threshold: int = COMPACTION_THRESHOLD,
+    compaction_keep: int = COMPACTION_KEEP,
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[str], int]:
     if not messages:
         return existing_summary, [], compacted_until, 0
@@ -3872,10 +3874,10 @@ def compact_chat_memory(
                 break
 
     visible_messages = messages[start_idx:]
-    if len(visible_messages) <= COMPACTION_THRESHOLD:
+    if len(visible_messages) <= compaction_threshold:
         return existing_summary, visible_messages, compacted_until, 0
 
-    dropped = visible_messages[: -COMPACTION_KEEP]
+    dropped = visible_messages[: -compaction_keep]
     dropped_text = _format_messages_for_summary(dropped)
     summary_input = dropped_text
     if existing_summary:
@@ -3883,14 +3885,14 @@ def compact_chat_memory(
 
     summary, summary_cost = compact_fn(summary_input)
     if not summary:
-        return existing_summary, visible_messages[-COMPACTION_KEEP:], compacted_until, 0
+        return existing_summary, visible_messages[-compaction_keep:], compacted_until, 0
 
     new_marker = str(dropped[-1].get("id")) if dropped else compacted_until
     if redis_client is not None and chat_id:
         _state_save_chat_summary(redis_client, chat_id, summary)
         if new_marker:
             _state_save_chat_compacted_until(redis_client, chat_id, new_marker)
-    return summary, visible_messages[-COMPACTION_KEEP:], new_marker, summary_cost
+    return summary, visible_messages[-compaction_keep:], new_marker, summary_cost
 
 
 def prepare_chat_memory(
@@ -3899,6 +3901,8 @@ def prepare_chat_memory(
     chat_history: List[Dict[str, Any]],
     query_text: str,
     reply_to_message_id: Optional[str] = None,
+    compaction_threshold: int = COMPACTION_THRESHOLD,
+    compaction_keep: int = COMPACTION_KEEP,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]:
     summary_text = (
         _state_get_chat_summary(redis_client, chat_id)
@@ -3926,6 +3930,8 @@ def prepare_chat_memory(
         base_history,
         summary_text,
         compacted_until,
+        compaction_threshold=compaction_threshold,
+        compaction_keep=compaction_keep,
     )
     recent_ids = {str(msg.get("id")) for msg in visible_history if msg.get("id") is not None}
     retrieved_messages = (

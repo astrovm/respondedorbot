@@ -61,6 +61,8 @@ class AIService:
             chat_history,
             request.prompt_text,
             reply_to_message_id=reply_to_message_id,
+            compaction_threshold=request.compaction_threshold,
+            compaction_keep=request.compaction_keep,
         )
         ai_messages = self.build_ai_messages(
             request.message,
@@ -200,6 +202,8 @@ class AIConversationRequest:
     redis_client: Any
     timezone_offset: int = -3
     is_spontaneous: bool = False
+    compaction_threshold: int = 8
+    compaction_keep: int = 5
 
 
 def build_ai_service(

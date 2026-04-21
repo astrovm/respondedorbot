@@ -12,6 +12,11 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
+from api.message_state import (
+    fetch_chat_messages_for_compaction,
+    save_chat_compacted_until,
+    save_chat_summary,
+)
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -626,6 +631,8 @@ def _run_ai_flow(
     redis_client: Any,
     timezone_offset: int = -3,
     is_spontaneous: bool = False,
+    compaction_threshold: int = 8,
+    compaction_keep: int = 5,
 ) -> Tuple[str, bool]:
     return _get_ai_service(deps).run_conversation(
         AIConversationRequest(
@@ -641,6 +648,8 @@ def _run_ai_flow(
             redis_client=redis_client,
             timezone_offset=timezone_offset,
             is_spontaneous=is_spontaneous,
+            compaction_threshold=compaction_threshold,
+            compaction_keep=compaction_keep,
         )
     )
 
@@ -1424,9 +1433,16 @@ def _handle_non_ai_command(
         elif parts and not parts[0].isdigit():
             custom_instruction = sanitized_message_text.strip()
 
-        prompt_text = "resumí toda esta conversación. sé conciso."
+        base_prompt = (
+            "actualizá el resumen anterior con los mensajes nuevos. "
+            "incluí todos los temas tratados, quién dijo qué, las conclusiones, "
+            "las decisiones pendientes y cualquier dato relevante. "
+            "no seas conciso: sé exhaustivo, detallado y estructurado."
+        )
         if custom_instruction:
-            prompt_text = f"{custom_instruction}. resumí toda esta conversación. sé conciso."
+            prompt_text = f"{custom_instruction}. {base_prompt}"
+        else:
+            prompt_text = base_prompt
 
         response_msg, response_uses_ai = _run_ai_flow(
             deps=deps,
@@ -1445,7 +1461,18 @@ def _handle_non_ai_command(
             handler_func=deps.ask_ai,
             redis_client=redis_client,
             timezone_offset=timezone_offset,
+            compaction_threshold=999999,
+            compaction_keep=999999,
         )
+        if response_msg and response_uses_ai and redis_client is not None:
+            save_chat_summary(redis_client, chat_id, response_msg)
+            all_messages = fetch_chat_messages_for_compaction(
+                redis_client, chat_id, limit=500
+            )
+            if all_messages:
+                last_msg_id = str(all_messages[-1].get("id") or "")
+                if last_msg_id:
+                    save_chat_compacted_until(redis_client, chat_id, last_msg_id)
         return response_msg, None, response_uses_ai, command
 
     if command == "/transcribe":
