@@ -1,6 +1,86 @@
 from tests.support import *
 
 
+def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
+    from types import SimpleNamespace
+
+    from api.providers.openrouter import OpenRouterProvider
+
+    create_calls: list[dict[str, Any]] = []
+
+    def create(**kwargs):
+        create_calls.append(kwargs)
+        return [
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="ho"))]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="la"))]
+            ),
+        ]
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=lambda *a, **k: None,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {},
+        build_usage_result=lambda **kwargs: MagicMock(),
+        extract_usage_map=lambda r: {},
+        primary_model="test-model",
+    )
+
+    chunks = list(
+        provider.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=False,
+        )
+    )
+
+    assert chunks == ["ho", "la"]
+    assert create_calls[0]["stream"] is True
+    assert "tools" not in create_calls[0]
+
+
+def test_openrouter_stream_uses_complete_path_when_tools_present():
+    from api.ai_pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = AssertionError("native stream path used")
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=lambda *a, **k: None,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {},
+        build_usage_result=lambda **kwargs: MagicMock(),
+        extract_usage_map=lambda r: {},
+        primary_model="test-model",
+    )
+    provider._runtime.complete = MagicMock(
+        return_value=AIUsageResult(
+            kind="chat",
+            text="hola final",
+            model="test-model",
+            usage={},
+        )
+    )
+
+    chunks = list(
+        provider.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=False,
+            extra_tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    )
+
+    assert chunks == ["hola final"]
+    provider._runtime.complete.assert_called_once()
+    client.chat.completions.create.assert_not_called()
+
+
 def test_stream_to_telegram_sends_first_token_without_placeholder():
     from api.streaming import stream_to_telegram
 
