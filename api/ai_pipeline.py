@@ -138,6 +138,7 @@ def handle_ai_response(
     response_meta: Optional[Dict[str, Any]] = None,
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
+    reply_to_message_id: Optional[str] = None,
     send_typing_fn: Callable[[str, str], None],
     telegram_token: Optional[str],
     reset_request_count_fn: Callable[[], Any],
@@ -181,9 +182,14 @@ def handle_ai_response(
                 timezone_offset=timezone_offset,
             )
         else:
+            kwargs: Dict[str, Any] = {}
             if response_meta is not None:
+                kwargs["response_meta"] = response_meta
+            if reply_to_message_id is not None:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            if kwargs:
                 try:
-                    response = handler_func(messages, response_meta=response_meta)
+                    response = handler_func(messages, **kwargs)
                 except TypeError:
                     response = handler_func(messages)
             else:

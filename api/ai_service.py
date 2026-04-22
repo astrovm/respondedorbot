@@ -157,6 +157,7 @@ class AIService:
             response_meta=ai_response_meta,
             user_id=request.user_id,
             timezone_offset=request.timezone_offset,
+            reply_to_message_id=request.reply_to_message_id,
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
@@ -204,6 +205,7 @@ class AIConversationRequest:
     is_spontaneous: bool = False
     compaction_threshold: Optional[int] = None
     compaction_keep: Optional[int] = None
+    reply_to_message_id: Optional[str] = None
 
 
 def build_ai_service(
