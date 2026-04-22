@@ -85,6 +85,7 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
             next_marker="m2",
         ),
     )
+    monkeypatch.setattr("api.index.load_bot_config", lambda: {"system_prompt": "bot personality"})
 
     seen_summary_messages = {}
 
@@ -96,8 +97,9 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
 
     result = handle_summary_command("chat-1", MagicMock(), "instruccion")
 
+    expected_prompt = f"bot personality\n\n{SUMMARY_GENERATION_PROMPT}"
     assert seen_summary_messages["messages"] == [
-        {"role": "system", "content": SUMMARY_GENERATION_PROMPT},
+        {"role": "system", "content": expected_prompt},
         {
             "role": "user",
             "content": "resumen acumulado previo:\nresumen previo\n\nmensajes nuevos:\nassistant: nuevo",
@@ -132,6 +134,7 @@ def test_handle_summary_command_ignores_custom_prompt_uses_generation_prompt(mon
             next_marker="m1",
         ),
     )
+    monkeypatch.setattr("api.index.load_bot_config", lambda: {"system_prompt": "bot personality"})
 
     calls = {"summary_messages": None}
 
@@ -143,10 +146,11 @@ def test_handle_summary_command_ignores_custom_prompt_uses_generation_prompt(mon
 
     result = handle_summary_command("chat-1", MagicMock(), custom_focus)
 
+    expected_prompt = f"bot personality\n\n{SUMMARY_GENERATION_PROMPT}"
     assert calls["summary_messages"] is not None
     assert calls["summary_messages"][0] == {
         "role": "system",
-        "content": SUMMARY_GENERATION_PROMPT,
+        "content": expected_prompt,
     }
     assert calls["summary_messages"][1] == {
         "role": "user",
