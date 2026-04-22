@@ -116,3 +116,64 @@ def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
     assert response == ("hola final", None, True, None)
     assert run_ai_flow.call_args.kwargs["handler_func"] is deps.handle_ai_stream
     assert run_ai_flow.call_args.kwargs["is_spontaneous"] is True
+
+
+def test_handle_ai_stream_response_passes_reply_to_message_id(monkeypatch):
+    from api.index import handle_ai_stream_response
+
+    response_meta: dict[str, Any] = {}
+    token_iterator = iter([("openrouter", "ho"), ("openrouter", "la")])
+
+    with patch("api.index.ask_ai_stream", return_value=token_iterator):
+        with patch(
+            "api.index.stream_to_telegram",
+            return_value=("hola", "777"),
+        ) as stream_to_telegram:
+            result = handle_ai_stream_response(
+                [{"role": "user", "content": "hola"}],
+                response_meta=response_meta,
+                chat_id="123",
+                user_id=55,
+                user_name="@ana",
+                timezone_offset=-3,
+                reply_to_message_id="99",
+            )
+
+    assert result == "hola"
+    assert stream_to_telegram.call_args.kwargs["reply_to_message_id"] == "99"
+
+
+def test_run_ai_flow_uses_user_message_id_not_reply_to_message_id():
+    from api.message_handler import _run_ai_flow
+    from api.ai_service import AIConversationRequest
+
+    mock_service = MagicMock()
+    mock_service.run_conversation.return_value = ("respuesta", True)
+
+    deps = MagicMock()
+    deps.ai_service = mock_service
+
+    message = {
+        "message_id": 42,
+        "reply_to_message": {"message_id": 10},
+        "chat": {"id": "456"},
+        "from": {"id": 9},
+    }
+
+    _run_ai_flow(
+        deps,
+        chat_id="456",
+        message=message,
+        user_id=9,
+        prepared_message=MagicMock(),
+        billing_helper=MagicMock(),
+        prompt_text="hola",
+        reply_context_text=None,
+        user_identity="Ana",
+        handler_func=MagicMock(),
+        redis_client=MagicMock(),
+    )
+
+    request_arg = mock_service.run_conversation.call_args[0][0]
+    assert isinstance(request_arg, AIConversationRequest)
+    assert request_arg.reply_to_message_id == "42"
