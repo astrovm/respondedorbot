@@ -107,13 +107,10 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
 
     result = handle_summary_command("chat-1", MagicMock(), "instruccion")
 
-    expected_prompt = "bot personality\n\ninstruccion"
     assert seen_summary_messages["messages"] == [
-        {"role": "system", "content": expected_prompt},
-        {
-            "role": "user",
-            "content": "resumen acumulado previo:\nresumen previo\n\nmensajes nuevos:\nassistant: nuevo",
-        },
+        {"role": "system", "content": "bot personality"},
+        {"role": "assistant", "content": "nuevo"},
+        {"role": "user", "content": "instruccion"},
     ]
     assert result.response_text == "canon actualizado"
     assert result.pending_summary == "canon actualizado"
@@ -156,15 +153,18 @@ def test_handle_summary_command_uses_custom_prompt_with_personality(monkeypatch)
 
     result = handle_summary_command("chat-1", MagicMock(), custom_focus)
 
-    expected_prompt = "bot personality\n\nenfocate solo en riesgos y proximos pasos"
     assert calls["summary_messages"] is not None
     assert calls["summary_messages"][0] == {
         "role": "system",
-        "content": expected_prompt,
+        "content": "bot personality",
     }
     assert calls["summary_messages"][1] == {
         "role": "user",
-        "content": "user: mensaje nuevo",
+        "content": "mensaje nuevo",
+    }
+    assert calls["summary_messages"][2] == {
+        "role": "user",
+        "content": custom_focus,
     }
     assert result.response_text == "canon"
     assert result.pending_summary == "canon"
