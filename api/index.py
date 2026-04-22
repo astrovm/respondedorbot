@@ -3907,6 +3907,8 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
+        if not content:
+            content = msg.get("text", "")
         if isinstance(content, str) and content:
             parts.append(f"{role}: {content}")
         elif isinstance(content, list):
