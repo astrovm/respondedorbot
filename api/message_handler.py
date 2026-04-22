@@ -12,6 +12,7 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
+from api.message_state import DISABLE_COMPACTION_SENTINEL
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -626,6 +627,8 @@ def _run_ai_flow(
     redis_client: Any,
     timezone_offset: int = -3,
     is_spontaneous: bool = False,
+    compaction_threshold: Optional[int] = None,
+    compaction_keep: Optional[int] = None,
 ) -> Tuple[str, bool]:
     return _get_ai_service(deps).run_conversation(
         AIConversationRequest(
@@ -641,6 +644,8 @@ def _run_ai_flow(
             redis_client=redis_client,
             timezone_offset=timezone_offset,
             is_spontaneous=is_spontaneous,
+            compaction_threshold=compaction_threshold,
+            compaction_keep=compaction_keep,
         )
     )
 
@@ -1424,9 +1429,16 @@ def _handle_non_ai_command(
         elif parts and not parts[0].isdigit():
             custom_instruction = sanitized_message_text.strip()
 
-        prompt_text = "resumí toda esta conversación. sé conciso."
+        base_prompt = (
+            "actualizá el resumen anterior con los mensajes nuevos. "
+            "incluí todos los temas tratados, quién dijo qué, las conclusiones, "
+            "las decisiones pendientes y cualquier dato relevante. "
+            "no seas conciso: sé exhaustivo, detallado y estructurado."
+        )
         if custom_instruction:
-            prompt_text = f"{custom_instruction}. resumí toda esta conversación. sé conciso."
+            prompt_text = f"{custom_instruction}. {base_prompt}"
+        else:
+            prompt_text = base_prompt
 
         response_msg, response_uses_ai = _run_ai_flow(
             deps=deps,
@@ -1445,6 +1457,8 @@ def _handle_non_ai_command(
             handler_func=deps.ask_ai,
             redis_client=redis_client,
             timezone_offset=timezone_offset,
+            compaction_threshold=DISABLE_COMPACTION_SENTINEL,
+            compaction_keep=DISABLE_COMPACTION_SENTINEL,
         )
         return response_msg, None, response_uses_ai, command
 
