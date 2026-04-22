@@ -246,8 +246,7 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
-SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
-SUMMARY_FALLBACK_MODEL = "minimax/minimax-m2.5:free"
+SUMMARY_MODEL = "minimax/minimax-m2.7"
 SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
@@ -3892,44 +3891,43 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
         prompt_tokens,
     )
 
-    for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=SUMMARY_MAX_TOKENS,
+    try:
+        resp = client.chat.completions.create(
+            model=SUMMARY_MODEL,
+            messages=messages,
+            max_tokens=SUMMARY_MAX_TOKENS,
+        )
+        if resp and resp.choices and resp.choices[0].message:
+            text = str(resp.choices[0].message.content or "").strip()
+            usage = resp.usage or {}
+            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            finish_reason = resp.choices[0].finish_reason
+            cost = _estimate_summary_cost_usd_micros(
+                input_tokens, output_tokens, SUMMARY_MODEL
             )
-            if resp and resp.choices and resp.choices[0].message:
-                text = str(resp.choices[0].message.content or "").strip()
-                usage = resp.usage or {}
-                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                finish_reason = resp.choices[0].finish_reason
-                cost = _estimate_summary_cost_usd_micros(
-                    input_tokens, output_tokens, model
+            _summary_logger.info(
+                "summary: model=%s input=%d output=%d finish_reason=%s cost_usd_micros=%d text_len=%d",
+                SUMMARY_MODEL,
+                input_tokens,
+                output_tokens,
+                finish_reason,
+                cost,
+                len(text),
+            )
+            if not text:
+                _summary_logger.warning("summary: model=%s returned empty text", SUMMARY_MODEL)
+            elif finish_reason == "length":
+                _summary_logger.warning(
+                    "summary: model=%s hit max_tokens, output truncated", SUMMARY_MODEL
                 )
-                _summary_logger.info(
-                    "summary: model=%s input=%d output=%d finish_reason=%s cost_usd_micros=%d text_len=%d",
-                    model,
-                    input_tokens,
-                    output_tokens,
-                    finish_reason,
-                    cost,
-                    len(text),
-                )
-                if not text:
-                    _summary_logger.warning("summary: model=%s returned empty text", model)
-                elif finish_reason == "length":
-                    _summary_logger.warning(
-                        "summary: model=%s hit max_tokens, output truncated", model
-                    )
-                return text, cost
-            else:
-                _summary_logger.warning("summary: model=%s returned empty response", model)
-        except Exception as e:
-            _summary_logger.warning("summary: model=%s failed: %s", model, e)
+            return text, cost
+        else:
+            _summary_logger.warning("summary: model=%s returned empty response", SUMMARY_MODEL)
+    except Exception as e:
+        _summary_logger.warning("summary: model=%s failed: %s", SUMMARY_MODEL, e)
 
-    _summary_logger.error("summary: all models failed")
+    _summary_logger.error("summary: model failed")
     return None, 0
 
 
