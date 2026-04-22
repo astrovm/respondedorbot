@@ -659,12 +659,8 @@ def _run_ai_flow(
     compaction_threshold: Optional[int] = None,
     compaction_keep: Optional[int] = None,
 ) -> Tuple[str, bool]:
-    reply_to_message = message.get("reply_to_message")
-    reply_to_message_id: Optional[str] = None
-    if isinstance(reply_to_message, Mapping):
-        raw_reply_id = reply_to_message.get("message_id")
-        if raw_reply_id is not None:
-            reply_to_message_id = str(raw_reply_id)
+    raw_message_id = message.get("message_id")
+    reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
     return _get_ai_service(deps).run_conversation(
         AIConversationRequest(
             chat_id=chat_id,
