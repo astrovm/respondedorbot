@@ -248,21 +248,6 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "minimax/minimax-m2.7"
 SUMMARY_MAX_TOKENS = 2048
-SUMMARY_GENERATION_PROMPT = (
-    "resumí la siguiente conversación de forma exhaustiva. "
-    "incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes. "
-    "no omitas nada.\n\n"
-    "REGLAS DE FORMATO OBLIGATORIAS:\n"
-    "- SIEMPRE respondé en MINÚSCULAS\n"
-    "- NUNCA uses emojis\n"
-    "- NUNCA uses punto final\n"
-    "- NUNCA uses markdown: no # headers, no ## subheaders, no tablas, no bullets con - o *\n"
-    "- NUNCA respondas de forma formal o corporativa\n"
-    "- SIEMPRE usá lenguaje coloquial argentino\n"
-    "- SIEMPRE sé directo, crudo y honesto\n"
-    "- cuando sea posible, contá la historia en UNA SOLA FRASE por tema\n"
-    "- nunca rompas el personaje de bot argentino informal"
-)
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
@@ -4039,7 +4024,7 @@ def handle_summary_command(
 
     summary_system_prompt = (
         f"{bot_personality}\n\n"
-        f"{SUMMARY_GENERATION_PROMPT}"
+        f"{prompt_text}"
     )
 
     canonical_summary: Optional[str] = None
