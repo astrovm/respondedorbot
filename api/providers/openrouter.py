@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from api.ai_pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -16,12 +16,12 @@ class OpenRouterProvider(StreamingAIProvider):
     def __init__(
         self,
         *,
-        get_client: callable,
-        admin_report: callable,
-        increment_request_count: callable,
-        build_web_search_tool: callable,
-        build_usage_result: callable,
-        extract_usage_map: callable,
+        get_client: Callable[[], Any],
+        admin_report: Callable[..., Any],
+        increment_request_count: Callable[[], Any],
+        build_web_search_tool: Callable[[], Dict[str, Any]],
+        build_usage_result: Callable[..., AIUsageResult],
+        extract_usage_map: Callable[[Any], Dict[str, Any]],
         primary_model: str,
         max_tool_rounds: int = 5,
         tool_runtime: Optional[ToolRuntime] = None,

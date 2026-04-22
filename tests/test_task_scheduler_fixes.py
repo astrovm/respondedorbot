@@ -67,7 +67,7 @@ def _build_executor_for_tests(
     ask_ai_fn: MagicMock,
     send_msg_fn: MagicMock,
     billing_factory=None,
-) -> MagicMock:
+):
     """Build a TaskExecutor-like mock injected into the scheduler."""
     from api.task_executor import TaskExecutor
 
@@ -986,13 +986,11 @@ def test_get_scheduler_uses_integer_misfire_grace_time(monkeypatch):
     shutdown_scheduler()
 
 
-# ---------------------------------------------------------------------------
-# _get_openrouter_ai_response_result -- unknown tool call filtering
-# ---------------------------------------------------------------------------
-
-
 class TestToolCallFiltering:
-    """_get_openrouter_ai_response_result should skip unknown tool calls."""
+    def _build_runtime(self, *, client, tool_runtime=None):
+        from tests.test_ai_pipeline import _build_provider_runtime
+
+        return _build_provider_runtime(client=client, tool_runtime=tool_runtime)
 
     def _build_tool_call_response(
         self, tool_name, tool_args='{"query": "test"}', content=None
@@ -1035,14 +1033,13 @@ class TestToolCallFiltering:
         return response
 
     def test_skips_openrouter_web_search_and_extracts_content(self):
-        from api.index import _get_openrouter_ai_response_result
-
         tool_response = self._build_tool_call_response(
             "openrouter_web_search",
             content="aca tenes las noticias boludo",
         )
         client = MagicMock()
         client.chat.completions.create.return_value = tool_response
+        runtime = self._build_runtime(client=client)
 
         extra_tools = [
             {
@@ -1055,26 +1052,24 @@ class TestToolCallFiltering:
             }
         ]
 
-        with patch("api.index._get_openrouter_client", return_value=client):
-            result = _get_openrouter_ai_response_result(
-                {"role": "system", "content": "sys"},
-                [{"role": "user", "content": "noticias linux"}],
-                enable_web_search=True,
-                extra_tools=extra_tools,
-            )
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "noticias linux"}],
+            enable_web_search=True,
+            extra_tools=extra_tools,
+        )
 
         assert result is not None
         assert result.text == "aca tenes las noticias boludo"
 
     def test_skips_unknown_tool_and_breaks_when_no_content(self):
-        from api.index import _get_openrouter_ai_response_result
-
         tool_response = self._build_tool_call_response(
             "openrouter_web_search",
             content=None,
         )
         client = MagicMock()
         client.chat.completions.create.return_value = tool_response
+        runtime = self._build_runtime(client=client)
 
         extra_tools = [
             {
@@ -1087,17 +1082,16 @@ class TestToolCallFiltering:
             }
         ]
 
-        with patch("api.index._get_openrouter_client", return_value=client):
-            result = _get_openrouter_ai_response_result(
-                {"role": "system", "content": "sys"},
-                [{"role": "user", "content": "hola"}],
-                extra_tools=extra_tools,
-            )
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            extra_tools=extra_tools,
+        )
 
         assert result is None
 
     def test_executes_known_tool_call(self):
-        from api.index import _get_openrouter_ai_response_result
+        from api.tool_runtime import ToolRuntime
 
         tool_response = self._build_tool_call_response(
             "calculate",
@@ -1106,6 +1100,13 @@ class TestToolCallFiltering:
         stop_response = self._build_stop_response("el resultado es 4")
         client = MagicMock()
         client.chat.completions.create.side_effect = [tool_response, stop_response]
+        tool_runtime = ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=MagicMock(output="4")),
+            parse_tool_call_arguments_fn=json.loads,
+            tool_registry={"calculate": object()},
+            print_fn=lambda *_args: None,
+        )
+        runtime = self._build_runtime(client=client, tool_runtime=tool_runtime)
 
         extra_tools = [
             {
@@ -1118,19 +1119,18 @@ class TestToolCallFiltering:
             }
         ]
 
-        with patch("api.index._get_openrouter_client", return_value=client):
-            result = _get_openrouter_ai_response_result(
-                {"role": "system", "content": "sys"},
-                [{"role": "user", "content": "cuanto es 2+2"}],
-                extra_tools=extra_tools,
-            )
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "cuanto es 2+2"}],
+            extra_tools=extra_tools,
+        )
 
         assert result is not None
         assert result.text == "el resultado es 4"
         assert client.chat.completions.create.call_count == 2
 
     def test_mixed_known_and_unknown_tool_calls(self):
-        from api.index import _get_openrouter_ai_response_result
+        from api.tool_runtime import ToolRuntime
 
         fn1 = MagicMock()
         fn1.name = "openrouter_web_search"
@@ -1161,6 +1161,13 @@ class TestToolCallFiltering:
         stop_response = self._build_stop_response("2")
         client = MagicMock()
         client.chat.completions.create.side_effect = [tool_response, stop_response]
+        tool_runtime = ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=MagicMock(output="2")),
+            parse_tool_call_arguments_fn=json.loads,
+            tool_registry={"calculate": object()},
+            print_fn=lambda *_args: None,
+        )
+        runtime = self._build_runtime(client=client, tool_runtime=tool_runtime)
 
         extra_tools = [
             {
@@ -1173,12 +1180,11 @@ class TestToolCallFiltering:
             }
         ]
 
-        with patch("api.index._get_openrouter_client", return_value=client):
-            result = _get_openrouter_ai_response_result(
-                {"role": "system", "content": "sys"},
-                [{"role": "user", "content": "test"}],
-                extra_tools=extra_tools,
-            )
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "test"}],
+            extra_tools=extra_tools,
+        )
 
         assert result is not None
         assert result.text == "2"

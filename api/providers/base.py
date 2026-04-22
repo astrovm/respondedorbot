@@ -4,10 +4,8 @@ Provides a unified interface for multiple AI backends (OpenRouter, Groq, etc.)
 with support for both completion and streaming modes.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from api.ai_pricing import AIUsageResult
 
@@ -36,6 +34,7 @@ class AIProvider(Protocol):
         ...
 
 
+@runtime_checkable
 class StreamingAIProvider(AIProvider, Protocol):
     """Provider that also supports token streaming."""
 

@@ -108,7 +108,6 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
-from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.providers import OpenRouterProvider, GroqChatProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
@@ -3867,36 +3866,6 @@ def _build_groq_usage_result(
 
 _MAX_TOOL_ROUNDS = 5
 _TOOL_RUNTIME = ToolRuntime()
-
-
-def _get_openrouter_ai_response_result(
-    system_msg: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    *,
-    enable_web_search: bool = True,
-    extra_tools: Optional[List[Dict[str, Any]]] = None,
-    tool_context: Optional[Dict[str, Any]] = None,
-) -> Optional[AIUsageResult]:
-    runtime = ProviderRuntime(
-        ProviderRuntimeDeps(
-            get_client=_get_openrouter_client,
-            admin_report=admin_report,
-            increment_request_count=_increment_ai_provider_request_count,
-            build_web_search_tool=_build_openrouter_web_search_tool,
-            build_usage_result=_build_groq_usage_result,
-            extract_usage_map=_extract_groq_usage_map,
-            primary_model=PRIMARY_CHAT_MODEL,
-            max_tool_rounds=_MAX_TOOL_ROUNDS,
-        ),
-        _TOOL_RUNTIME,
-    )
-    return runtime.complete(
-        system_msg,
-        messages,
-        enable_web_search=enable_web_search,
-        extra_tools=extra_tools,
-        tool_context=tool_context,
-    )
 
 
 def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:

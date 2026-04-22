@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from api.ai_pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT
 from api.provider_backoff import (
@@ -20,11 +20,11 @@ class GroqChatProvider(AIProvider):
     def __init__(
         self,
         *,
-        get_client: callable,
-        admin_report: callable,
-        increment_request_count: callable,
-        build_usage_result: callable,
-        extract_usage_map: callable,
+        get_client: Callable[[], Any],
+        admin_report: Callable[..., Any],
+        increment_request_count: Callable[[], Any],
+        build_usage_result: Callable[..., AIUsageResult],
+        extract_usage_map: Callable[[Any], Dict[str, Any]],
         primary_model: str = "llama-3.1-70b-versatile",
         max_tool_rounds: int = 5,
         backoff_key: str = "groq:chat",
