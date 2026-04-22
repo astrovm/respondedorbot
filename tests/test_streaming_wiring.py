@@ -214,6 +214,143 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
     )
 
 
+def test_ask_ai_stream_end_to_end_with_internal_tool():
+    from api.ai_pricing import AIUsageResult
+    from api.index import ask_ai_stream
+    from api.providers.base import ProviderChain
+
+    class FakeToolProvider:
+        @property
+        def name(self) -> str:
+            return "fake-tool-provider"
+
+        def is_available(self) -> bool:
+            return True
+
+        def complete(self, system_message, messages, **kwargs):
+            if kwargs.get("extra_tools"):
+                return AIUsageResult(
+                    kind="chat",
+                    text="tool result: hola",
+                    model="fake",
+                    usage={},
+                    metadata={},
+                )
+            return AIUsageResult(
+                kind="chat",
+                text="normal assistant text",
+                model="fake",
+                usage={},
+                metadata={},
+            )
+
+    messages = [{"role": "user", "content": "hola"}]
+    chain = ProviderChain([FakeToolProvider()])
+
+    with patch(
+        "api.index._build_ai_request",
+        return_value=(
+            {"role": "system", "content": "sys"},
+            messages,
+            [{"type": "function", "function": {"name": "echo"}}],
+            {"chat_id": "123"},
+        ),
+    ):
+        with patch("api.index.get_provider_chain", return_value=chain):
+            tokens = list(
+                ask_ai_stream(
+                    messages,
+                    chat_id="123",
+                    user_name="@ana",
+                    user_id=55,
+                    timezone_offset=-3,
+                )
+            )
+
+    final_text = "".join(token for _, token in tokens)
+    assert "tool result: hola" in final_text
+    assert_no_raw_tool_syntax(final_text)
+
+
+def test_ask_ai_stream_end_to_end_with_web_search():
+    from api.ai_pricing import AIUsageResult
+    from api.index import ask_ai_stream
+    from api.providers.base import ProviderChain
+
+    class FakeToolProvider:
+        @property
+        def name(self) -> str:
+            return "fake-tool-provider"
+
+        def is_available(self) -> bool:
+            return True
+
+        def complete(self, system_message, messages, **kwargs):
+            if kwargs.get("enable_web_search"):
+                return AIUsageResult(
+                    kind="chat",
+                    text="normal assistant text",
+                    model="fake",
+                    usage={},
+                    metadata={},
+                )
+            return None
+
+    messages = [{"role": "user", "content": "hola"}]
+    chain = ProviderChain([FakeToolProvider()])
+
+    with patch(
+        "api.index._build_ai_request",
+        return_value=(
+            {"role": "system", "content": "sys"},
+            messages,
+            [],
+            {"chat_id": "123"},
+        ),
+    ):
+        with patch("api.index.get_provider_chain", return_value=chain):
+            tokens = list(
+                ask_ai_stream(
+                    messages,
+                    enable_web_search=True,
+                    chat_id="123",
+                    user_name="@ana",
+                    user_id=55,
+                    timezone_offset=-3,
+                )
+            )
+
+    final_text = "".join(token for _, token in tokens)
+    assert "normal assistant text" in final_text
+    assert_no_raw_tool_syntax(final_text)
+
+
+def test_handle_ai_stream_response_end_to_end_no_tool_leak():
+    from api.index import handle_ai_stream_response
+
+    response_meta: dict[str, Any] = {}
+    token_iterator = iter([("openrouter", "tool result: "), ("openrouter", "hola")])
+
+    with patch("api.index.ask_ai_stream", return_value=token_iterator):
+        with patch(
+            "api.index.stream_to_telegram",
+            return_value=("tool result: hola", "777"),
+        ) as stream_to_telegram:
+            result = handle_ai_stream_response(
+                [{"role": "user", "content": "hola"}],
+                response_meta=response_meta,
+                chat_id="123",
+                user_id=55,
+                user_name="@ana",
+                timezone_offset=-3,
+            )
+
+    assert result == "tool result: hola"
+    assert_no_raw_tool_syntax(result)
+    assert response_meta["streamed_text"] == result
+    stream_to_telegram.assert_called_once()
+
+
 def test_stream_with_providers_forwards_extra_tools_and_tool_context():
     from api.index import stream_with_providers
 
