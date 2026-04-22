@@ -9,8 +9,9 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
     estimate_transcribe_reserve_credits,
 )
-from api.ai_service import AIConversationRequest, AIService
+from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
+from api.message_state import save_chat_summary, save_chat_compacted_until
 from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import extract_stream_metadata
 
@@ -71,7 +72,6 @@ class MessageAIDeps:
     ai_service: AIService
     balance_formatter: Any
     handle_ai_stream: Callable[..., str]
-    handle_summary_command: Callable[[str, Any, str], Any]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
@@ -151,7 +151,6 @@ class MessageHandlerDeps:
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
     handle_ai_stream: Callable[..., str]
-    handle_summary_command: Callable[[str, Any, str], Any]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
@@ -224,7 +223,6 @@ def build_message_handler_deps(
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
         handle_ai_stream=ai.handle_ai_stream,
-        handle_summary_command=ai.handle_summary_command,
         gen_random=ai.gen_random,
         build_insufficient_credits_message=ai.build_insufficient_credits_message,
         build_topup_keyboard=ai.build_topup_keyboard,
@@ -1477,10 +1475,20 @@ def _handle_non_ai_command(
         else:
             prompt_text = base_prompt
 
-        response_msg = deps.handle_summary_command(
-            chat_id, redis_client, prompt_text
+        response = deps.ai_service.run_summary_command(
+            SummaryCommandRequest(
+                chat_id=chat_id,
+                message=message,
+                billing_helper=billing_helper,
+                prompt_text=prompt_text,
+                redis_client=redis_client,
+            )
         )
-        return response_msg, None, True, command
+        if not response.is_fallback and response.pending_summary is not None:
+            save_chat_summary(redis_client, chat_id, response.pending_summary)
+            if response.pending_marker is not None:
+                save_chat_compacted_until(redis_client, chat_id, response.pending_marker)
+        return response.text, None, True, command
 
     if command == "/transcribe":
         reserve_credits = 0
