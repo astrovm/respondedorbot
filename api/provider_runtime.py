@@ -35,14 +35,29 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AIUsageResult]:
+        print(f"Trying OpenRouter chat with model={self._deps.primary_model}...")
+        return self._run_tool_rounds(
+            current_messages=list(messages),
+            system_message=system_message,
+            enable_web_search=enable_web_search,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+        )
+
+    def _run_tool_rounds(
+        self,
+        *,
+        current_messages: List[Dict[str, Any]],
+        system_message: Dict[str, Any],
+        enable_web_search: bool,
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+    ) -> Optional[AIUsageResult]:
         client = self._deps.get_client()
         if client is None:
             return None
 
-        print(f"Trying OpenRouter chat with model={self._deps.primary_model}...")
         self._deps.increment_request_count()
-
-        current_messages = list(messages)
         for round_idx in range(self._deps.max_tool_rounds):
             try:
                 request_kwargs: Dict[str, Any] = {

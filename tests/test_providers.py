@@ -151,3 +151,64 @@ def test_groq_provider_available_when_not_cooled_down():
     )
 
     assert provider.is_available() is True
+
+
+def test_provider_chain_stream_forwards_extra_tools_and_tool_context():
+    from api.ai_pricing import AIUsageResult
+
+    extra_tools = [{"type": "function", "function": {"name": "echo"}}]
+    tool_context = {"chat_id": "123"}
+
+    class FakeStreamingProvider:
+        @property
+        def name(self) -> str:
+            return "streamer"
+
+        def is_available(self) -> bool:
+            return True
+
+        def complete(self, system_message, messages, **kwargs):
+            self.last_complete_kwargs = kwargs
+            return AIUsageResult(
+                kind="chat",
+                text="done",
+                model="test",
+                usage={},
+                metadata={},
+            )
+
+        def stream(
+            self,
+            system_message,
+            messages,
+            *,
+            enable_web_search=True,
+            extra_tools=None,
+            tool_context=None,
+        ):
+            self.last_stream_kwargs = {
+                "enable_web_search": enable_web_search,
+                "extra_tools": extra_tools,
+                "tool_context": tool_context,
+            }
+            yield "ok"
+
+    provider = FakeStreamingProvider()
+    chain = ProviderChain([provider])
+
+    result = list(
+        chain.stream(
+            {"role": "system", "content": "test"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=False,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+        )
+    )
+
+    assert result == [("streamer", ""), ("streamer", "done")]
+    assert provider.last_complete_kwargs == {
+        "enable_web_search": False,
+        "extra_tools": extra_tools,
+        "tool_context": tool_context,
+    }
