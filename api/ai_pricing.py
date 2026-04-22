@@ -45,6 +45,10 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "input_per_million": 325_000,
         "output_per_million": 1_950_000,
     },
+    "minimax/minimax-m2.7": {
+        "input_per_million": 300_000,
+        "output_per_million": 1_200_000,
+    },
 }
 
 
