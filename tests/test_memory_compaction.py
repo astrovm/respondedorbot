@@ -154,3 +154,83 @@ def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     query = redis_client.execute_command.call_args_list[1].args[2]
     assert query == "@chat_id:{5162530}"
     assert "*" not in query
+
+
+def test_format_messages_prefers_content_field():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "hello"},
+        {"id": "m2", "role": "assistant", "content": "world"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == "user: hello\nassistant: world"
+
+
+def test_format_messages_falls_back_to_text_field():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user", "text": "redis stored text"},
+        {"id": "m2", "role": "assistant", "text": "assistant reply"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == "user: redis stored text\nassistant: assistant reply"
+
+
+def test_format_messages_prefers_content_over_text():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "real content", "text": "ignored text"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == "user: real content"
+
+
+def test_format_messages_skips_empty_messages():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user", "content": ""},
+        {"id": "m2", "role": "assistant", "text": ""},
+        {"id": "m3", "role": "user"},
+        {"id": "m4", "role": "assistant", "content": "valid"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == "assistant: valid"
+
+
+def test_format_messages_handles_mixed_fields():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "openai format"},
+        {"id": "m2", "role": "assistant", "text": "redis format"},
+        {"id": "m3", "role": "user", "content": "", "text": "fallback works"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == "user: openai format\nassistant: redis format\nuser: fallback works"
+
+
+def test_format_messages_empty_result_warns_on_real_history():
+    from api.index import _format_messages_for_summary
+
+    messages = [
+        {"id": "m1", "role": "user"},
+        {"id": "m2", "role": "assistant"},
+    ]
+    result = _format_messages_for_summary(messages)
+    assert result == ""
+
+
+def test_build_incremental_summary_source_formats_delta_with_text_field():
+    from api.index import _build_incremental_summary_source
+
+    history = [
+        {"id": "m1", "role": "user", "text": "hola"},
+        {"id": "m2", "role": "assistant", "text": "chau"},
+    ]
+    source = _build_incremental_summary_source(history, None, None)
+    assert source.formatted_delta == "user: hola\nassistant: chau"
+    assert source.is_zero_delta is False
