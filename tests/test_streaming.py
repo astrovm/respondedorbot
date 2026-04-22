@@ -1,6 +1,19 @@
 from tests.support import *
 
 
+RAW_TOOL_LEAKS = (
+    'web_fetch(',
+    '"tool_calls"',
+    '"function_call"',
+    '"arguments":',
+)
+
+
+def _assert_no_raw_tool_syntax(text: str) -> None:
+    for leak in RAW_TOOL_LEAKS:
+        assert leak not in text
+
+
 def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
     from types import SimpleNamespace
 
@@ -39,6 +52,7 @@ def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
     )
 
     assert chunks == ["ho", "la"]
+    _assert_no_raw_tool_syntax("".join(chunks))
     assert create_calls[0]["stream"] is True
     assert "tools" not in create_calls[0]
 
@@ -79,6 +93,55 @@ def test_openrouter_stream_uses_complete_path_when_tools_present():
     assert chunks == ["hola final"]
     provider._runtime.complete.assert_called_once()
     client.chat.completions.create.assert_not_called()
+
+
+def test_openrouter_stream_uses_web_search_branch_when_enabled():
+    from types import SimpleNamespace
+
+    from api.ai_pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+
+    create_calls: list[dict[str, Any]] = []
+
+    def create(**kwargs):
+        create_calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="web answer", annotations=[]),
+                )
+            ]
+        )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=lambda *a, **k: None,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {"type": "web_search"},
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage={},
+            metadata=kwargs.get("metadata") or {},
+        ),
+        extract_usage_map=lambda r: {},
+        primary_model="test-model",
+    )
+
+    chunks = list(
+        provider.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=True,
+        )
+    )
+
+    assert chunks == ["web answer"]
+    _assert_no_raw_tool_syntax("".join(chunks))
+    assert create_calls[0]["tools"] == [{"type": "web_search"}]
 
 
 def test_stream_to_telegram_sends_first_token_without_placeholder():
