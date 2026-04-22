@@ -184,6 +184,7 @@ from api.message_state import (
     search_chat_history as _state_search_chat_history,
     truncate_text as _state_truncate_text,
 )
+from api.logging_config import get_logger
 from api.random_replies import build_random_reply
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
@@ -3874,10 +3875,23 @@ _MAX_TOOL_ROUNDS = 5
 _TOOL_RUNTIME = ToolRuntime()
 
 
+_summary_logger = get_logger(__name__)
+
+
 def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:
     client = _get_openrouter_client()
     if client is None:
+        _summary_logger.warning("summary: no openrouter client available")
         return None, 0
+
+    prompt_tokens = len(str(messages).split())
+    _summary_logger.info(
+        "summary: calling model=%s max_tokens=%d prompt_tokens_est=%d",
+        SUMMARY_MODEL,
+        SUMMARY_MAX_TOKENS,
+        prompt_tokens,
+    )
+
     for model in (SUMMARY_MODEL, SUMMARY_FALLBACK_MODEL):
         try:
             resp = client.chat.completions.create(
@@ -3890,15 +3904,32 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
                 usage = resp.usage or {}
                 input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                finish_reason = resp.choices[0].finish_reason
                 cost = _estimate_summary_cost_usd_micros(
                     input_tokens, output_tokens, model
                 )
+                _summary_logger.info(
+                    "summary: model=%s input=%d output=%d finish_reason=%s cost_usd_micros=%d text_len=%d",
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    finish_reason,
+                    cost,
+                    len(text),
+                )
+                if not text:
+                    _summary_logger.warning("summary: model=%s returned empty text", model)
+                elif finish_reason == "length":
+                    _summary_logger.warning(
+                        "summary: model=%s hit max_tokens, output truncated", model
+                    )
                 return text, cost
+            else:
+                _summary_logger.warning("summary: model=%s returned empty response", model)
         except Exception as e:
-            import logging
-            logging.getLogger("respondedorbot.api.index").warning(
-                "summary model %s failed: %s", model, e
-            )
+            _summary_logger.warning("summary: model=%s failed: %s", model, e)
+
+    _summary_logger.error("summary: all models failed")
     return None, 0
 
 
@@ -3915,7 +3946,14 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     parts.append(f"{role}: {part['text']}")
-    return "\n".join(parts)
+    result = "\n".join(parts)
+    _summary_logger.info(
+        "summary_format: messages=%d parts=%d result_len=%d",
+        len(messages),
+        len(parts),
+        len(result),
+    )
+    return result
 
 
 def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
@@ -3951,11 +3989,18 @@ def handle_summary_command(
     redis_client: redis.Redis,
     prompt_text: str,
 ) -> SummaryCommandResult:
+    _summary_logger.info(
+        "summary_cmd: chat_id=%s existing_summary=%s compacted_until=%s",
+        chat_id,
+        "yes" if _state_get_chat_summary(redis_client, chat_id) else "no",
+        _state_get_chat_compacted_until(redis_client, chat_id) or "none",
+    )
     existing_summary = _state_get_chat_summary(redis_client, chat_id)
     compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 
     if not history:
+        _summary_logger.info("summary_cmd: no history for chat_id=%s", chat_id)
         return SummaryCommandResult(
             response_text="no hay mensajes para resumir",
             pending_summary=None,
@@ -3966,11 +4011,19 @@ def handle_summary_command(
         )
 
     source = _build_incremental_summary_source(history, existing_summary, compacted_until)
+    _summary_logger.info(
+        "summary_cmd: history=%d delta=%d zero_delta=%s has_prior=%s",
+        len(history),
+        len(source.delta_messages),
+        source.is_zero_delta,
+        "yes" if source.prior_summary else "no",
+    )
 
     canonical_summary: Optional[str] = None
     summary_cost = 0
     if source.is_zero_delta and source.prior_summary:
         canonical_summary = source.prior_summary
+        _summary_logger.info("summary_cmd: reusing existing summary, len=%d", len(canonical_summary))
     elif not source.is_zero_delta:
         summary_input = source.formatted_delta
         if source.prior_summary:
@@ -3978,6 +4031,11 @@ def handle_summary_command(
                 f"resumen acumulado previo:\n{source.prior_summary}"
                 f"\n\nmensajes nuevos:\n{source.formatted_delta}"
             )
+        _summary_logger.info(
+            "summary_cmd: generating summary input_len=%d prompt_len=%d",
+            len(summary_input),
+            len(prompt_text),
+        )
         canonical_summary, summary_cost = _call_summary_model(
             [
                 {"role": "system", "content": prompt_text},
@@ -3986,6 +4044,7 @@ def handle_summary_command(
         )
 
     if not canonical_summary:
+        _summary_logger.error("summary_cmd: no canonical_summary generated")
         return SummaryCommandResult(
             response_text="no pude generar el resumen",
             pending_summary=None,
@@ -3995,6 +4054,11 @@ def handle_summary_command(
             is_fallback=True,
         )
 
+    _summary_logger.info(
+        "summary_cmd: success summary_len=%d cost=%d",
+        len(canonical_summary),
+        summary_cost,
+    )
     return SummaryCommandResult(
         response_text=canonical_summary,
         pending_summary=canonical_summary,
