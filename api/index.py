@@ -4035,9 +4035,8 @@ def handle_summary_command(
                 f"\n\nmensajes nuevos:\n{source.formatted_delta}"
             )
         _summary_logger.info(
-            "summary_cmd: generating summary input_len=%d prompt_len=%d",
+            "summary_cmd: generating summary input_len=%d",
             len(summary_input),
-            len(prompt_text),
         )
         canonical_summary, summary_cost = _call_summary_model(
             [
@@ -4058,54 +4057,17 @@ def handle_summary_command(
         )
 
     _summary_logger.info(
-        "summary_cmd: canonical summary ready, len=%d, calling qwen for presentation",
+        "summary_cmd: summary ready, len=%d cost=%d",
         len(canonical_summary),
-    )
-
-    response_meta: Dict[str, Any] = {}
-    try:
-        bot_personality = load_bot_config().get("system_prompt", "")
-    except Exception:
-        bot_personality = ""
-    presentation_system = (
-        f"{bot_personality}\n\n"
-        f"INSTRUCCIÓN ADICIONAL: {prompt_text}\n\n"
-        f"SE TE VA A DAR UN RESUMEN DE CONVERSACIÓN ABAJO. "
-        f"Tu única tarea es comunicar ese resumen al usuario de forma directa y natural, "
-        f"usando TU PROPIA VOZ Y PERSONALIDAD (la que te fue dada arriba). "
-        f"REGLAS ABSOLUTAS: "
-        f"1. NO uses títulos, headers, ni numeración de secciones. "
-        f"2. NO uses bullets, asteriscos para listas, ni markdown estructurado. "
-        f"3. NO agregues meta-comentarios como 'aquí tienes el resumen' o 'según lo solicitado'. "
-        f"4. NO expliques el proceso de cómo se hizo el resumen. "
-        f"5. NO inventes nada que no esté en el resumen. "
-        f"6. Mantené TODO el contenido factual: quién dijo qué, temas, decisiones, datos. "
-        f"7. Usá tu propio estilo y voz, pero contá la historia tal cual está."
-    )
-    final_response = complete_with_providers(
-        {"role": "system", "content": presentation_system},
-        [{"role": "user", "content": canonical_summary}],
-        response_meta=response_meta,
-        enable_web_search=False,
-    )
-
-    if not final_response:
-        _summary_logger.warning("summary_cmd: qwen presentation returned empty, falling back to canonical")
-        final_response = canonical_summary
-
-    _summary_logger.info(
-        "summary_cmd: final response ready, len=%d",
-        len(final_response),
+        summary_cost,
     )
     return SummaryCommandResult(
-        response_text=final_response,
+        response_text=canonical_summary,
         pending_summary=canonical_summary,
         pending_marker=source.next_marker,
         summary_cost=summary_cost,
-        billing_segments=cast(
-            List[Dict[str, Any]], response_meta.get("billing_segments", [])
-        ),
-        is_fallback=not final_response,
+        billing_segments=[],
+        is_fallback=False,
     )
 
 
