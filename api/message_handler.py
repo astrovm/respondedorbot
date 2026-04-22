@@ -12,7 +12,6 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
-from api.message_state import DISABLE_COMPACTION_SENTINEL
 from api.streaming import extract_stream_metadata
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
