@@ -1,17 +1,5 @@
 from tests.support import *
-
-
-RAW_TOOL_LEAKS = (
-    'web_fetch(',
-    '"tool_calls"',
-    '"function_call"',
-    '"arguments":',
-)
-
-
-def _assert_no_raw_tool_syntax(text: str) -> None:
-    for leak in RAW_TOOL_LEAKS:
-        assert leak not in text
+from tests.support import assert_no_raw_tool_syntax
 
 
 def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
@@ -52,7 +40,7 @@ def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
     )
 
     assert chunks == ["ho", "la"]
-    _assert_no_raw_tool_syntax("".join(chunks))
+    assert_no_raw_tool_syntax("".join(chunks))
     assert create_calls[0]["stream"] is True
     assert "tools" not in create_calls[0]
 
@@ -140,7 +128,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
     )
 
     assert chunks == ["web answer"]
-    _assert_no_raw_tool_syntax("".join(chunks))
+    assert_no_raw_tool_syntax("".join(chunks))
     assert create_calls[0]["tools"] == [{"type": "web_search"}]
 
 
