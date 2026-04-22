@@ -1,18 +1,6 @@
 from tests.support import *
+from tests.support import assert_no_raw_tool_syntax
 from tests.test_message_handler import _build_message_handler_deps
-
-
-RAW_TOOL_LEAKS = (
-    'web_fetch(',
-    '"tool_calls"',
-    '"function_call"',
-    '"arguments":',
-)
-
-
-def _assert_no_raw_tool_syntax(text: str) -> None:
-    for leak in RAW_TOOL_LEAKS:
-        assert leak not in text
 
 
 def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata(monkeypatch):
@@ -36,7 +24,7 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
             )
 
     assert result == "hola"
-    _assert_no_raw_tool_syntax(result)
+    assert_no_raw_tool_syntax(result)
     ask_stream.assert_called_once_with(
         [{"role": "user", "content": "hola"}],
         chat_id="123",
