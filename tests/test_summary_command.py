@@ -52,7 +52,6 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
         lambda *_: IncrementalSummarySource(
             prior_summary="resumen previo",
             delta_messages=[],
-            formatted_delta="",
             is_zero_delta=True,
             next_marker=None,
         ),
@@ -90,7 +89,6 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
         lambda *_: IncrementalSummarySource(
             prior_summary="resumen previo",
             delta_messages=[{"id": "m2", "role": "assistant", "content": "nuevo"}],
-            formatted_delta="assistant: nuevo",
             is_zero_delta=False,
             next_marker="m2",
         ),
@@ -136,7 +134,6 @@ def test_handle_summary_command_uses_custom_prompt_with_personality(monkeypatch)
         lambda *_: IncrementalSummarySource(
             prior_summary=None,
             delta_messages=[{"id": "m1", "role": "user", "content": "mensaje nuevo"}],
-            formatted_delta="user: mensaje nuevo",
             is_zero_delta=False,
             next_marker="m1",
         ),
