@@ -202,8 +202,8 @@ class AIConversationRequest:
     redis_client: Any
     timezone_offset: int = -3
     is_spontaneous: bool = False
-    compaction_threshold: int = 8
-    compaction_keep: int = 5
+    compaction_threshold: Optional[int] = None
+    compaction_keep: Optional[int] = None
 
 
 def build_ai_service(

@@ -12,11 +12,6 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
-from api.message_state import (
-    fetch_chat_messages_for_compaction,
-    save_chat_compacted_until,
-    save_chat_summary,
-)
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -631,8 +626,8 @@ def _run_ai_flow(
     redis_client: Any,
     timezone_offset: int = -3,
     is_spontaneous: bool = False,
-    compaction_threshold: int = 8,
-    compaction_keep: int = 5,
+    compaction_threshold: Optional[int] = None,
+    compaction_keep: Optional[int] = None,
 ) -> Tuple[str, bool]:
     return _get_ai_service(deps).run_conversation(
         AIConversationRequest(
@@ -1464,15 +1459,6 @@ def _handle_non_ai_command(
             compaction_threshold=999999,
             compaction_keep=999999,
         )
-        if response_msg and response_uses_ai and redis_client is not None:
-            save_chat_summary(redis_client, chat_id, response_msg)
-            all_messages = fetch_chat_messages_for_compaction(
-                redis_client, chat_id, limit=500
-            )
-            if all_messages:
-                last_msg_id = str(all_messages[-1].get("id") or "")
-                if last_msg_id:
-                    save_chat_compacted_until(redis_client, chat_id, last_msg_id)
         return response_msg, None, response_uses_ai, command
 
     if command == "/transcribe":

@@ -3837,12 +3837,7 @@ def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
 def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     prompt = (
         "actualizá el resumen previo con los mensajes nuevos. "
-        "usá formato denso y estructurado para maximizar información en poco espacio: "
-        "- temas: [lista breve de temas tratados] "
-        "- hechos: [datos clave, números, nombres, fechas] "
-        "- decisiones: [lo acordado o decidido] "
-        "- pendientes: [preguntas o tareas sin resolver] "
-        "- usuarios: [quién dijo qué, solo lo relevante]. "
+        "usá formato denso: temas, hechos clave, decisiones y pendientes. "
         "omití saludos y chat casual. mantené el idioma original."
     )
     messages = [
@@ -3864,9 +3859,11 @@ def compact_chat_memory(
     existing_summary: Optional[str],
     compacted_until: Optional[str],
     compact_fn: Callable[[str], Tuple[str, int]] = _compact_conversation,
-    compaction_threshold: int = COMPACTION_THRESHOLD,
-    compaction_keep: int = COMPACTION_KEEP,
+    compaction_threshold: Optional[int] = None,
+    compaction_keep: Optional[int] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[str], int]:
+    compaction_threshold = compaction_threshold if compaction_threshold is not None else COMPACTION_THRESHOLD
+    compaction_keep = compaction_keep if compaction_keep is not None else COMPACTION_KEEP
     if not messages:
         return existing_summary, [], compacted_until, 0
 
@@ -3905,9 +3902,11 @@ def prepare_chat_memory(
     chat_history: List[Dict[str, Any]],
     query_text: str,
     reply_to_message_id: Optional[str] = None,
-    compaction_threshold: int = COMPACTION_THRESHOLD,
-    compaction_keep: int = COMPACTION_KEEP,
+    compaction_threshold: Optional[int] = None,
+    compaction_keep: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]:
+    compaction_threshold = compaction_threshold if compaction_threshold is not None else COMPACTION_THRESHOLD
+    compaction_keep = compaction_keep if compaction_keep is not None else COMPACTION_KEEP
     summary_text = (
         _state_get_chat_summary(redis_client, chat_id)
         if redis_client is not None and chat_id
