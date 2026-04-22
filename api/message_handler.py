@@ -12,6 +12,7 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
+from api.message_state import DISABLE_COMPACTION_SENTINEL
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -1456,8 +1457,8 @@ def _handle_non_ai_command(
             handler_func=deps.ask_ai,
             redis_client=redis_client,
             timezone_offset=timezone_offset,
-            compaction_threshold=999999,
-            compaction_keep=999999,
+            compaction_threshold=DISABLE_COMPACTION_SENTINEL,
+            compaction_keep=DISABLE_COMPACTION_SENTINEL,
         )
         return response_msg, None, response_uses_ai, command
 

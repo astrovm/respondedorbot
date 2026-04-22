@@ -3852,6 +3852,16 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
+def _resolve_compaction_params(
+    threshold: Optional[int] = None,
+    keep: Optional[int] = None,
+) -> Tuple[int, int]:
+    return (
+        threshold if threshold is not None else COMPACTION_THRESHOLD,
+        keep if keep is not None else COMPACTION_KEEP,
+    )
+
+
 def compact_chat_memory(
     redis_client: Optional[redis.Redis],
     chat_id: Optional[str],
@@ -3862,8 +3872,9 @@ def compact_chat_memory(
     compaction_threshold: Optional[int] = None,
     compaction_keep: Optional[int] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[str], int]:
-    compaction_threshold = compaction_threshold if compaction_threshold is not None else COMPACTION_THRESHOLD
-    compaction_keep = compaction_keep if compaction_keep is not None else COMPACTION_KEEP
+    compaction_threshold, compaction_keep = _resolve_compaction_params(
+        compaction_threshold, compaction_keep
+    )
     if not messages:
         return existing_summary, [], compacted_until, 0
 
@@ -3905,8 +3916,9 @@ def prepare_chat_memory(
     compaction_threshold: Optional[int] = None,
     compaction_keep: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]:
-    compaction_threshold = compaction_threshold if compaction_threshold is not None else COMPACTION_THRESHOLD
-    compaction_keep = compaction_keep if compaction_keep is not None else COMPACTION_KEEP
+    compaction_threshold, compaction_keep = _resolve_compaction_params(
+        compaction_threshold, compaction_keep
+    )
     summary_text = (
         _state_get_chat_summary(redis_client, chat_id)
         if redis_client is not None and chat_id
