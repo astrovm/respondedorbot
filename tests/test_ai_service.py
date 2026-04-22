@@ -220,7 +220,7 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
     assert any(segment.get("kind") == "summary" for segment in billing_segments)
 
 
-def test_run_summary_command_bills_summary_and_qwen_segments():
+def test_run_summary_command_bills_summary_segment_only():
     from api.ai_service import SummaryCommandRequest, build_ai_service
 
     handle_summary_command = MagicMock()
@@ -229,7 +229,7 @@ def test_run_summary_command_bills_summary_and_qwen_segments():
         pending_summary="canonical summary",
         pending_marker="m5",
         summary_cost=500,
-        billing_segments=[{"kind": "chat", "provider": "qwen"}],
+        billing_segments=[],
         is_fallback=False,
     )
 
@@ -267,12 +267,12 @@ def test_run_summary_command_bills_summary_and_qwen_segments():
 
     settle_args = billing_helper.settle_reserved_ai_credits_batch.call_args.args
     billing_segments = settle_args[1]
+    assert len(billing_segments) == 1
     assert billing_segments[0].get("kind") == "summary"
     assert billing_segments[0]["billing"]["raw_usd_micros"] == 500
-    assert any(segment.get("kind") == "chat" for segment in billing_segments)
 
 
-def test_run_summary_command_refunds_on_qwen_fallback():
+def test_run_summary_command_refunds_on_fallback():
     from api.ai_service import SummaryCommandRequest, build_ai_service
 
     handle_summary_command = MagicMock()
@@ -320,7 +320,7 @@ def test_run_summary_command_refunds_on_qwen_fallback():
     billing_helper.settle_reserved_ai_credits_batch.assert_not_called()
 
 
-def test_run_summary_command_zero_delta_settles_only_qwen_segments():
+def test_run_summary_command_zero_delta_settles_without_summary_cost():
     from api.ai_service import SummaryCommandRequest, build_ai_service
 
     handle_summary_command = MagicMock()
@@ -329,7 +329,7 @@ def test_run_summary_command_zero_delta_settles_only_qwen_segments():
         pending_summary="canonical summary",
         pending_marker="m5",
         summary_cost=0,
-        billing_segments=[{"kind": "chat", "provider": "qwen"}],
+        billing_segments=[],
         is_fallback=False,
     )
 
@@ -365,7 +365,6 @@ def test_run_summary_command_zero_delta_settles_only_qwen_segments():
     settle_args = billing_helper.settle_reserved_ai_credits_batch.call_args.args
     billing_segments = settle_args[1]
     assert not any(segment.get("kind") == "summary" for segment in billing_segments)
-    assert any(segment.get("kind") == "chat" for segment in billing_segments)
 
 
 def test_run_summary_command_bails_when_billing_unavailable():
