@@ -1,4 +1,5 @@
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date, UTC
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -3933,53 +3934,125 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
+@dataclass
+class SummaryCommandResult:
+    response_text: str
+    pending_summary: Optional[str]
+    pending_marker: Optional[str]
+    summary_cost: int
+    billing_segments: List[Dict[str, Any]]
+    is_fallback: bool
+
+
 def handle_summary_command(
     chat_id: str,
     redis_client: redis.Redis,
     prompt_text: str,
-) -> str:
+) -> SummaryCommandResult:
     existing_summary = _state_get_chat_summary(redis_client, chat_id)
     compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 
     if not history:
-        return "no hay mensajes para resumir"
+        return SummaryCommandResult(
+            response_text="no hay mensajes para resumir",
+            pending_summary=None,
+            pending_marker=None,
+            summary_cost=0,
+            billing_segments=[],
+            is_fallback=False,
+        )
 
+    source = _build_incremental_summary_source(history, existing_summary, compacted_until)
+
+    canonical_summary: Optional[str] = None
+    summary_cost = 0
+    if source.is_zero_delta and source.prior_summary:
+        canonical_summary = source.prior_summary
+    elif not source.is_zero_delta:
+        summary_input = source.formatted_delta
+        if source.prior_summary:
+            summary_input = (
+                f"resumen acumulado previo:\n{source.prior_summary}"
+                f"\n\nmensajes nuevos:\n{source.formatted_delta}"
+            )
+        canonical_summary, summary_cost = _call_summary_model(
+            [
+                {
+                    "role": "system",
+                    "content": "resumí la siguiente conversación de forma exhaustiva y técnica. incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes.",
+                },
+                {"role": "user", "content": summary_input},
+            ]
+        )
+
+    if not canonical_summary:
+        return SummaryCommandResult(
+            response_text="no pude generar el resumen",
+            pending_summary=None,
+            pending_marker=source.next_marker,
+            summary_cost=summary_cost,
+            billing_segments=[],
+            is_fallback=True,
+        )
+
+    response_meta: Dict[str, Any] = {}
+    final_response = complete_with_providers(
+        {"role": "system", "content": prompt_text},
+        [{"role": "user", "content": canonical_summary}],
+        response_meta=response_meta,
+        enable_web_search=False,
+    )
+
+    return SummaryCommandResult(
+        response_text=final_response or "no pude generar el resumen",
+        pending_summary=canonical_summary,
+        pending_marker=source.next_marker,
+        summary_cost=summary_cost,
+        billing_segments=cast(
+            List[Dict[str, Any]], response_meta.get("billing_segments", [])
+        ),
+        is_fallback=not final_response,
+    )
+
+
+@dataclass
+class IncrementalSummarySource:
+    prior_summary: Optional[str]
+    delta_messages: List[Dict[str, Any]]
+    formatted_delta: str
+    is_zero_delta: bool
+    next_marker: Optional[str]
+
+
+def _build_incremental_summary_source(
+    history: List[Dict[str, Any]],
+    existing_summary: Optional[str],
+    compacted_until: Optional[str],
+) -> IncrementalSummarySource:
     start_idx = 0
+    marker_found = False
     if compacted_until:
         for idx, msg in enumerate(history):
             if str(msg.get("id")) == compacted_until:
                 start_idx = idx + 1
+                marker_found = True
                 break
+    if compacted_until and not marker_found:
+        start_idx = 0
 
-    visible_messages = history[start_idx:] or history
-    formatted = _format_messages_for_summary(visible_messages)
+    delta_messages = history[start_idx:]
+    is_zero_delta = len(delta_messages) == 0
+    formatted_delta = _format_messages_for_summary(delta_messages)
+    next_marker = str(delta_messages[-1].get("id")) if delta_messages else None
 
-    summary_input = formatted
-    if existing_summary:
-        summary_input = f"resumen acumulado previo:\n{existing_summary}\n\nmensajes nuevos:\n{formatted}"
-
-    raw_summary, _cost = _call_summary_model([
-        {"role": "system", "content": "resumí la siguiente conversación de forma exhaustiva y técnica. incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes."},
-        {"role": "user", "content": summary_input},
-    ])
-
-    if not raw_summary:
-        return "no pude generar el resumen"
-
-    _state_save_chat_summary(redis_client, chat_id, raw_summary)
-    if visible_messages:
-        _state_save_chat_compacted_until(
-            redis_client, chat_id, str(visible_messages[-1].get("id"))
-        )
-
-    final_response = complete_with_providers(
-        {"role": "system", "content": prompt_text},
-        [{"role": "user", "content": raw_summary}],
-        enable_web_search=False,
+    return IncrementalSummarySource(
+        prior_summary=existing_summary,
+        delta_messages=delta_messages,
+        formatted_delta=formatted_delta,
+        is_zero_delta=is_zero_delta,
+        next_marker=next_marker,
     )
-
-    return final_response or "no pude generar el resumen"
 
 
 def _resolve_compaction_params(
@@ -4008,33 +4081,26 @@ def compact_chat_memory(
     if not messages:
         return existing_summary, [], compacted_until, 0
 
-    start_idx = 0
-    if compacted_until:
-        for idx, msg in enumerate(messages):
-            if str(msg.get("id")) == compacted_until:
-                start_idx = idx + 1
-                break
+    source = _build_incremental_summary_source(messages, existing_summary, compacted_until)
+    if source.is_zero_delta or len(source.delta_messages) <= compaction_threshold:
+        return existing_summary, source.delta_messages, compacted_until, 0
 
-    visible_messages = messages[start_idx:]
-    if len(visible_messages) <= compaction_threshold:
-        return existing_summary, visible_messages, compacted_until, 0
-
-    dropped = visible_messages[: -compaction_keep]
+    dropped = source.delta_messages[: -compaction_keep]
     dropped_text = _format_messages_for_summary(dropped)
     summary_input = dropped_text
-    if existing_summary:
-        summary_input = f"resumen acumulado previo:\n{existing_summary}\n\nmensajes nuevos:\n{dropped_text}"
+    if source.prior_summary:
+        summary_input = f"resumen acumulado previo:\n{source.prior_summary}\n\nmensajes nuevos:\n{dropped_text}"
 
     summary, summary_cost = compact_fn(summary_input)
     if not summary:
-        return existing_summary, visible_messages[-compaction_keep:], compacted_until, 0
+        return existing_summary, source.delta_messages[-compaction_keep:], compacted_until, 0
 
     new_marker = str(dropped[-1].get("id")) if dropped else compacted_until
     if redis_client is not None and chat_id:
         _state_save_chat_summary(redis_client, chat_id, summary)
         if new_marker:
             _state_save_chat_compacted_until(redis_client, chat_id, new_marker)
-    return summary, visible_messages[-compaction_keep:], new_marker, summary_cost
+    return summary, source.delta_messages[-compaction_keep:], new_marker, summary_cost
 
 
 def prepare_chat_memory(
@@ -6223,7 +6289,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             ai_service=ai_svc,
             balance_formatter=BalanceFormatter(credits_db_service),
             handle_ai_stream=handle_ai_stream_response,
-            handle_summary_command=handle_summary_command,
+            handle_summary_command=cast(Any, handle_summary_command),
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
             build_topup_keyboard=build_topup_keyboard,
