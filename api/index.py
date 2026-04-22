@@ -4022,33 +4022,29 @@ def handle_summary_command(
     except Exception:
         bot_personality = ""
 
-    summary_system_prompt = (
-        f"{bot_personality}\n\n"
-        f"{prompt_text}"
-    )
-
     canonical_summary: Optional[str] = None
     summary_cost = 0
     if source.is_zero_delta and source.prior_summary:
         canonical_summary = source.prior_summary
         _summary_logger.info("summary_cmd: reusing existing summary, len=%d", len(canonical_summary))
     elif not source.is_zero_delta:
-        summary_input = source.formatted_delta
-        if source.prior_summary:
-            summary_input = (
-                f"resumen acumulado previo:\n{source.prior_summary}"
-                f"\n\nmensajes nuevos:\n{source.formatted_delta}"
-            )
+        api_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": bot_personality}
+        ]
+        for msg in source.delta_messages:
+            content = msg.get("content") or msg.get("text", "")
+            if content:
+                api_messages.append({
+                    "role": msg.get("role", "user"),
+                    "content": content,
+                })
+        api_messages.append({"role": "user", "content": prompt_text})
+
         _summary_logger.info(
-            "summary_cmd: generating summary input_len=%d",
-            len(summary_input),
+            "summary_cmd: generating summary messages=%d",
+            len(api_messages),
         )
-        canonical_summary, summary_cost = _call_summary_model(
-            [
-                {"role": "system", "content": summary_system_prompt},
-                {"role": "user", "content": summary_input},
-            ]
-        )
+        canonical_summary, summary_cost = _call_summary_model(api_messages)
 
     if not canonical_summary:
         _summary_logger.error("summary_cmd: no canonical_summary generated")
