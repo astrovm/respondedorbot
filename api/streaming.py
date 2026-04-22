@@ -7,7 +7,7 @@ import time
 from typing import Callable, Iterator, Optional, Tuple
 
 
-SendMessageFn = Callable[[str, str], Optional[int]]
+SendMessageFn = Callable[[str, str, Optional[str]], Optional[int]]
 EditMessageFn = Callable[[str, str, str], None]
 
 
@@ -41,6 +41,7 @@ class TelegramMessageStreamer:
         min_edit_interval_ms: float = 400.0,
         min_chars_between_edits: int = 15,
         placeholder: str = "...",
+        reply_to_message_id: Optional[str] = None,
     ) -> None:
         self._chat_id = chat_id
         self._send_message = send_message_fn
@@ -48,6 +49,7 @@ class TelegramMessageStreamer:
         self._min_interval = min_edit_interval_ms / 1000.0
         self._min_chars = min_chars_between_edits
         self._placeholder = placeholder
+        self._reply_to_message_id = reply_to_message_id
         self._buffer = ""
         self._sent_text = ""
         self._message_id: Optional[str] = None
@@ -56,7 +58,9 @@ class TelegramMessageStreamer:
 
     def start(self) -> str:
         """Send the initial placeholder message and return its message ID."""
-        message_id = self._send_message(self._chat_id, self._placeholder)
+        message_id = self._send_message(
+            self._chat_id, self._placeholder, self._reply_to_message_id
+        )
         self._message_id = str(message_id) if message_id is not None else None
         self._last_edit_time = time.time()
         return self._message_id or ""
@@ -105,6 +109,7 @@ def stream_to_telegram(
     edit_message_fn: EditMessageFn,
     *,
     placeholder: str = "...",
+    reply_to_message_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Consume a token iterator and stream the result to Telegram.
 
@@ -114,6 +119,7 @@ def stream_to_telegram(
         send_message_fn: Function to send the initial Telegram message.
         edit_message_fn: Function to edit a Telegram message.
         placeholder: Initial placeholder text.
+        reply_to_message_id: Optional message ID to reply to.
 
     Returns:
         The final accumulated text and Telegram message ID.
@@ -123,6 +129,7 @@ def stream_to_telegram(
         send_message_fn,
         edit_message_fn,
         placeholder=placeholder,
+        reply_to_message_id=reply_to_message_id,
     )
     message_id = streamer.start()
 
