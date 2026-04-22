@@ -6315,12 +6315,23 @@ def handle_ai_stream_response(
         timezone_offset=timezone_offset,
     )
 
-    final_text, message_id = stream_to_telegram(
-        chat_id,
-        token_iterator,
-        _send_message_for_stream,
-        _edit_message_for_stream,
-    )
+    try:
+        final_text, message_id = stream_to_telegram(
+            chat_id,
+            token_iterator,
+            _send_message_for_stream,
+            _edit_message_for_stream,
+        )
+    except RuntimeError:
+        final_text = ask_ai(
+            messages,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+        )
+        message_id = _send_message_for_stream(chat_id, final_text)
+
     set_streamed_response_metadata(message_id or None, final_text)
     if response_meta is not None:
         response_meta["billing_segments"] = list(

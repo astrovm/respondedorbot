@@ -119,7 +119,7 @@ class ProviderChain:
         """Stream from the first available streaming provider.
 
         Yields (provider_name, token) tuples.
-        Falls back to non-streaming if no streaming provider is available.
+        Raises RuntimeError if no streaming provider is available.
         """
         for provider in self.available_providers:
             if not isinstance(provider, StreamingAIProvider):
@@ -137,4 +137,4 @@ class ProviderChain:
                 print(f"Streaming provider {provider.name} failed: {e}")
                 continue
 
-        yield "none", ""
+        raise RuntimeError("No streaming providers available")
