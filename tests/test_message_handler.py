@@ -2550,7 +2550,7 @@ def test_handle_non_ai_command_summary_uses_billed_summary_runner():
         timezone_offset=-3,
     )
 
-    assert response == ("resumen listo", None, True, "/resumen")
+    assert response == ("resumen listo", None, False, "/resumen")
     deps.ai_service.run_summary_command.assert_called_once()
     call_args = deps.ai_service.run_summary_command.call_args
     assert call_args[0][0].chat_id == "123"

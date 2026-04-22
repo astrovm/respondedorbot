@@ -205,6 +205,20 @@ class ProviderRuntime:
                     metadata=metadata,
                 )
 
+            if finish_reason == "length":
+                message = choice.message
+                return self._deps.build_usage_result(
+                    kind="chat",
+                    text=str(message.content or ""),
+                    model=self._deps.primary_model,
+                    response=response,
+                    metadata={
+                        "provider": "openrouter",
+                        "truncated": True,
+                        "tool_rounds": round_idx + 1,
+                    },
+                )
+
             print(
                 f"provider_runtime: unexpected finish_reason={finish_reason!r} model={self._deps.primary_model}"
             )

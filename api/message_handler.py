@@ -1488,7 +1488,7 @@ def _handle_non_ai_command(
             save_chat_summary(redis_client, chat_id, response.pending_summary)
             if response.pending_marker is not None:
                 save_chat_compacted_until(redis_client, chat_id, response.pending_marker)
-        return response.text, None, True, command
+        return response.text, None, False, command
 
     if command == "/transcribe":
         reserve_credits = 0
