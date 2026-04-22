@@ -3931,44 +3931,45 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
     return None, 0
 
 
-def _format_messages_for_summary(messages: List[Dict[str, Any]]) -> str:
-    parts = []
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if not content:
-            content = msg.get("text", "")
-        if isinstance(content, str) and content:
-            parts.append(f"{role}: {content}")
-        elif isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    parts.append(f"{role}: {part['text']}")
-    result = "\n".join(parts)
-    _summary_logger.info(
-        "summary_format: messages=%d parts=%d result_len=%d",
-        len(messages),
-        len(parts),
-        len(result),
-    )
-    return result
+def _compact_conversation(
+    messages: List[Dict[str, Any]],
+    prior_summary: Optional[str] = None,
+) -> Tuple[str, int]:
+    try:
+        bot_personality = load_bot_config().get("system_prompt", "")
+    except Exception:
+        bot_personality = ""
 
-
-def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
-    prompt = (
-        "actualizá el resumen previo con los mensajes nuevos. "
-        "usá formato denso: temas, hechos clave, decisiones y pendientes. "
-        "omití saludos y chat casual. mantené el idioma original."
-    )
-    messages = [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": dropped_text},
+    api_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": bot_personality}
     ]
-    result, cost = _call_summary_model(messages)
+    if prior_summary:
+        api_messages.append({"role": "assistant", "content": prior_summary})
+    for msg in messages:
+        content = msg.get("content") or msg.get("text", "")
+        if content:
+            api_messages.append({
+                "role": msg.get("role", "user"),
+                "content": content,
+            })
+    api_messages.append({
+        "role": "user",
+        "content": (
+            "actualizá el resumen previo con los mensajes nuevos. "
+            "usá formato denso: temas, hechos clave, decisiones y pendientes. "
+            "omití saludos y chat casual. mantené el idioma original."
+        ),
+    })
+
+    result, cost = _call_summary_model(api_messages)
     if result:
         return f"[contexto anterior: {result}]", cost
-    lines = dropped_text.split("\n")
-    truncated = "\n".join(lines[:COMPACTION_TRUNCATE_LINES])
+    fallback_lines = []
+    for msg in messages:
+        content = msg.get("content") or msg.get("text", "")
+        if content:
+            fallback_lines.append(f"{msg.get('role', 'user')}: {content}")
+    truncated = "\n".join(fallback_lines[:COMPACTION_TRUNCATE_LINES])
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
@@ -4076,7 +4077,6 @@ def handle_summary_command(
 class IncrementalSummarySource:
     prior_summary: Optional[str]
     delta_messages: List[Dict[str, Any]]
-    formatted_delta: str
     is_zero_delta: bool
     next_marker: Optional[str]
 
@@ -4099,13 +4099,11 @@ def _build_incremental_summary_source(
 
     delta_messages = history[start_idx:]
     is_zero_delta = len(delta_messages) == 0
-    formatted_delta = _format_messages_for_summary(delta_messages)
     next_marker = str(delta_messages[-1].get("id")) if delta_messages else None
 
     return IncrementalSummarySource(
         prior_summary=existing_summary,
         delta_messages=delta_messages,
-        formatted_delta=formatted_delta,
         is_zero_delta=is_zero_delta,
         next_marker=next_marker,
     )
@@ -4127,7 +4125,7 @@ def compact_chat_memory(
     messages: List[Dict[str, Any]],
     existing_summary: Optional[str],
     compacted_until: Optional[str],
-    compact_fn: Callable[[str], Tuple[str, int]] = _compact_conversation,
+    compact_fn: Callable[[List[Dict[str, Any]], Optional[str]], Tuple[str, int]] = _compact_conversation,
     compaction_threshold: Optional[int] = None,
     compaction_keep: Optional[int] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[str], int]:
@@ -4142,12 +4140,7 @@ def compact_chat_memory(
         return existing_summary, source.delta_messages, compacted_until, 0
 
     dropped = source.delta_messages[: -compaction_keep]
-    dropped_text = _format_messages_for_summary(dropped)
-    summary_input = dropped_text
-    if source.prior_summary:
-        summary_input = f"resumen acumulado previo:\n{source.prior_summary}\n\nmensajes nuevos:\n{dropped_text}"
-
-    summary, summary_cost = compact_fn(summary_input)
+    summary, summary_cost = compact_fn(dropped, source.prior_summary)
     if not summary:
         return existing_summary, source.delta_messages[-compaction_keep:], compacted_until, 0
 
