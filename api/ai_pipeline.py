@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
+IDENTITY_USER_PATTERN = re.compile(r"\(@?(\w+)\)")
 LOG_PREVIEW_LIMIT = 160
 
 INSTRUCCIONES_BASE = [
@@ -17,6 +18,18 @@ INSTRUCCIONES_BASE = [
     "- respondé en minúsculas, sin emojis, sin punto final",
     "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
 ]
+
+
+def _extract_user_name(user_identity: Optional[str]) -> str:
+    if not user_identity:
+        return ""
+    m = IDENTITY_USER_PATTERN.search(user_identity)
+    if m:
+        return f"@{m.group(1)}"
+    stripped = user_identity.strip()
+    if stripped:
+        return stripped.split()[0]
+    return ""
 
 
 def _preview_for_log(text: Optional[str], limit: int = LOG_PREVIEW_LIMIT) -> str:
@@ -144,13 +157,7 @@ def handle_ai_response(
     if is_ask_ai_handler:
         request_count_token = reset_request_count_fn()
 
-    user_name = ""
-    if user_identity:
-        m = re.search(r"\(@?(\w+)\)", user_identity)
-        if m:
-            user_name = f"@{m.group(1)}"
-        elif user_identity.strip():
-            user_name = user_identity.strip().split()[0]
+    user_name = _extract_user_name(user_identity)
 
     try:
         if image_data and is_ask_ai_handler:
