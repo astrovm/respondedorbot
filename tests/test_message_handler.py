@@ -237,6 +237,49 @@ def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
     assert "mandalo bien: /transfer <monto>" in mock_send_msg.call_args[0][1]
 
 
+def test_handle_msg_streamed_response_saves_final_text_to_redis():
+    from api.message_handler import handle_msg
+
+    message = {
+        "message_id": "10",
+        "chat": {"id": "100", "type": "private"},
+        "from": {"id": 7, "first_name": "Ana", "username": "ana"},
+        "text": "/ask hola",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    mock_send_msg = MagicMock()
+    mock_save_message = MagicMock()
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        save_message_to_redis=mock_save_message,
+        handle_ai_stream=MagicMock(),
+    )
+
+    with patch(
+        "api.message_handler._run_ai_flow",
+        return_value=("__streamed__", True),
+    ):
+        with patch(
+            "api.message_handler._extract_stream_metadata",
+            return_value=("777", "hola final"),
+        ):
+            result = handle_msg(message, deps)
+
+    assert result == "ok"
+    mock_send_msg.assert_not_called()
+    mock_save_message.assert_any_call(
+        "100",
+        "bot_777",
+        "hola final",
+        redis_client,
+        role="assistant",
+    )
+
+
 def test_handle_msg_printcredits_requires_admin(monkeypatch):
     from api.message_handler import handle_msg
 
@@ -2188,6 +2231,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             ai_service=ai_service,
             balance_formatter=flat_defaults["balance_formatter"],
             ask_ai=flat_defaults["ask_ai"],
+            handle_ai_stream=flat_defaults.get("handle_ai_stream", flat_defaults["ask_ai"]),
             gen_random=flat_defaults["gen_random"],
             build_insufficient_credits_message=flat_defaults[
                 "build_insufficient_credits_message"
@@ -2302,6 +2346,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
         ai=MessageAIDeps(
             ai_service=ai_service,
             ask_ai=MagicMock(),
+            handle_ai_stream=MagicMock(return_value="streamed response"),
             gen_random=MagicMock(),
             build_insufficient_credits_message=MagicMock(),
             build_topup_keyboard=MagicMock(),
@@ -2518,10 +2563,13 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
-    mock_ask_ai = MagicMock(return_value="respuesta ok")
+    mock_handle_ai_stream = MagicMock(return_value="respuesta ok")
 
     make_deps, redis_client = _build_message_handler_deps()
-    deps = make_deps(send_msg=MagicMock(return_value=999))
+    deps = make_deps(
+        send_msg=MagicMock(return_value=999),
+        handle_ai_stream=mock_handle_ai_stream,
+    )
 
     message = {
         "message_id": 401,
@@ -2530,11 +2578,10 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
         "text": "/ask hola",
     }
 
-    with patch("api.index.ask_ai", mock_ask_ai):
-        result = handle_msg(message, deps)
+    result = handle_msg(message, deps)
 
     assert result == "ok"
-    assert mock_ask_ai.called
+    assert mock_handle_ai_stream.called
     deps.send_msg.assert_called_once_with(
         "555", "respuesta ok", "401", reply_markup=None
     )

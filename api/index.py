@@ -25,6 +25,7 @@ from typing import (
     TypeVar,
     TYPE_CHECKING,
     Literal,
+    Iterator,
 )
 import base64
 import concurrent.futures
@@ -108,6 +109,7 @@ from api.ai_pricing import (
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
 from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+from api.providers import OpenRouterProvider, GroqChatProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
 import api.tools.calculate
@@ -124,6 +126,7 @@ from api.ai_pipeline import (
     INSTRUCCIONES_BASE,
     handle_ai_response as _ai_handle_response,
 )
+from api.streaming import stream_to_telegram
 from api.chat_settings import (
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
@@ -153,8 +156,10 @@ from api.message_handler import (
     MessageMediaDeps,
     MessageRoutingDeps,
     MessageStateDeps,
+    _STREAMED_SENTINEL,
     build_message_handler_deps,
     handle_msg as _handle_msg_impl,
+    set_streamed_response_metadata,
 )
 from api.ai_service import build_ai_service
 from api.routing_policy import RoutingPolicy
@@ -3024,6 +3029,92 @@ def ask_ai(
         return _mark_ai_fallback_response(get_fallback_response(messages))
 
 
+def ask_ai_stream(
+    messages: List[Dict[str, Any]],
+    *,
+    enable_web_search: bool = True,
+    chat_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    user_id: Optional[int] = None,
+    timezone_offset: int = -3,
+) -> Iterator[Tuple[str, str]]:
+    messages = [_sanitize_bot_message(m) for m in messages or []]
+
+    context_data = {
+        "market": get_market_context(),
+        "weather": get_weather_context(),
+        "time": get_time_context(),
+        "hacker_news": get_hacker_news_context(),
+    }
+
+    tool_context: Dict[str, Any] = {
+        "get_prices": get_prices,
+    }
+    if chat_id:
+        tool_context["chat_id"] = chat_id
+    tool_context["timezone_offset"] = timezone_offset
+    if user_name:
+        tool_context["user_name"] = user_name
+    if user_id is not None:
+        tool_context["user_id"] = user_id
+
+    extra_tools = get_all_tool_schemas(tool_context, task_mode=False)
+    system_message = build_system_message(
+        context_data,
+        tools_active=bool(extra_tools),
+        tool_schemas=extra_tools,
+        task_mode=False,
+    )
+
+    fetched_contents = (
+        _fetch_urls_from_latest_message(messages) if enable_web_search else ""
+    )
+    if fetched_contents:
+        messages = list(messages) + [
+            {"role": "system", "content": fetched_contents}
+        ]
+
+    return stream_with_providers(
+        system_message,
+        messages,
+        enable_web_search=enable_web_search,
+    )
+
+
+def _build_provider_chain() -> ProviderChain:
+    openrouter = OpenRouterProvider(
+        get_client=_get_openrouter_client,
+        admin_report=admin_report,
+        increment_request_count=_increment_ai_provider_request_count,
+        build_web_search_tool=_build_openrouter_web_search_tool,
+        build_usage_result=_build_groq_usage_result,
+        extract_usage_map=_extract_groq_usage_map,
+        primary_model=PRIMARY_CHAT_MODEL,
+        max_tool_rounds=_MAX_TOOL_ROUNDS,
+        tool_runtime=_TOOL_RUNTIME,
+    )
+    groq = GroqChatProvider(
+        get_client=lambda: _get_groq_client("paid"),
+        admin_report=admin_report,
+        increment_request_count=_increment_ai_provider_request_count,
+        build_usage_result=_build_groq_usage_result,
+        extract_usage_map=_extract_groq_usage_map,
+        primary_model="llama-3.3-70b-versatile",
+        max_tool_rounds=_MAX_TOOL_ROUNDS,
+    )
+    return ProviderChain([openrouter, groq])
+
+
+_provider_chain: Optional[ProviderChain] = None
+
+
+def get_provider_chain() -> ProviderChain:
+    global _provider_chain
+    if _provider_chain is None:
+        _provider_chain = _build_provider_chain()
+    return _provider_chain
+
+
 def complete_with_providers(
     system_message: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -3033,21 +3124,37 @@ def complete_with_providers(
     extra_tools: Optional[List[Dict[str, Any]]] = None,
     tool_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Try OpenRouter chat models and return the first response."""
-
-    result = _get_openrouter_ai_response_result(
+    chain = get_provider_chain()
+    provider_result = chain.complete(
         system_message,
         messages,
         enable_web_search=enable_web_search,
         extra_tools=extra_tools,
         tool_context=tool_context,
     )
-    if result:
+    if provider_result.result:
         if response_meta is not None:
-            _append_billing_segment(response_meta, result)
-        print("complete_with_providers: got response from OpenRouter")
-        return result.text
+            _append_billing_segment(response_meta, provider_result.result)
+        print(
+            f"complete_with_providers: got response from {provider_result.provider_name}"
+            f" fallback={provider_result.fallback_used}"
+        )
+        return provider_result.result.text
     return None
+
+
+def stream_with_providers(
+    system_message: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    enable_web_search: bool = True,
+) -> Iterator[Tuple[str, str]]:
+    chain = get_provider_chain()
+    return chain.stream(
+        system_message,
+        messages,
+        enable_web_search=enable_web_search,
+    )
 
 
 class _HtmlMetadataExtractor(HTMLParser):
@@ -6093,6 +6200,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             ai_service=ai_svc,
             balance_formatter=BalanceFormatter(credits_db_service),
             ask_ai=ask_ai,
+            handle_ai_stream=handle_ai_stream_response,
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
             build_topup_keyboard=build_topup_keyboard,
@@ -6153,9 +6261,35 @@ def handle_ai_response(
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
 ) -> str:
+    effective_handler = handler_func
+    if handler_func is handle_ai_stream_response:
+        user_name = ""
+        if user_identity:
+            m = re.search(r"\(@?(\w+)\)", user_identity)
+            if m:
+                user_name = f"@{m.group(1)}"
+            elif user_identity.strip():
+                user_name = user_identity.strip().split()[0]
+
+        def _stream_handler(
+            handler_messages: List[Dict[str, Any]],
+            *,
+            response_meta: Optional[Dict[str, Any]] = None,
+        ) -> str:
+            return handle_ai_stream_response(
+                handler_messages,
+                response_meta=response_meta,
+                chat_id=chat_id,
+                user_id=user_id,
+                user_name=user_name or None,
+                timezone_offset=timezone_offset,
+            )
+
+        effective_handler = _stream_handler
+
     return _ai_handle_response(
         chat_id,
-        handler_func,
+        effective_handler,
         messages,
         image_data=image_data,
         image_file_id=image_file_id,
@@ -6171,6 +6305,61 @@ def handle_ai_response(
         get_request_count_fn=_get_ai_provider_request_count,
         strip_ai_fallback_marker_fn=_strip_ai_fallback_marker,
     )
+
+
+def _send_message_for_stream(chat_id: str, text: str) -> Optional[int]:
+    try:
+        return send_msg(chat_id, text)
+    except Exception:
+        return None
+
+
+def _edit_message_for_stream(chat_id: str, text: str, message_id: str) -> None:
+    try:
+        edit_message(chat_id, int(message_id), text)
+    except Exception:
+        pass
+
+
+def handle_ai_stream_response(
+    messages: List[Dict[str, Any]],
+    *,
+    response_meta: Optional[Dict[str, Any]] = None,
+    chat_id: Optional[str] = None,
+    user_id: Optional[int] = None,
+    user_name: Optional[str] = None,
+    timezone_offset: int = -3,
+    **_: Any,
+) -> str:
+    if not chat_id:
+        return "me quedé reculando y no te pude responder, probá de nuevo"
+
+    token = environ.get("TELEGRAM_TOKEN")
+    if token:
+        send_typing(token, chat_id)
+
+    token_iterator = ask_ai_stream(
+        messages,
+        chat_id=chat_id,
+        user_name=user_name,
+        user_id=user_id,
+        timezone_offset=timezone_offset,
+    )
+
+    final_text, message_id = stream_to_telegram(
+        chat_id,
+        token_iterator,
+        _send_message_for_stream,
+        _edit_message_for_stream,
+    )
+    set_streamed_response_metadata(message_id or None, final_text)
+    if response_meta is not None:
+        response_meta["billing_segments"] = list(
+            cast(List[Dict[str, Any]], response_meta.get("billing_segments") or [])
+        )
+        response_meta["streamed_text"] = final_text
+        response_meta["streamed_message_id"] = message_id
+    return _STREAMED_SENTINEL
 
 
 def update_telegram_bot_commands() -> bool:

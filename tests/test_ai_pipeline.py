@@ -1,4 +1,5 @@
 from tests.support import *
+from api.providers.base import ProviderResult
 
 
 def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch):
@@ -971,13 +972,16 @@ def test_complete_with_providers_openrouter_success():
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = openrouter_result
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=openrouter_result,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(system_message, messages)
 
         assert result == "OpenRouter response"
-        mock_openrouter.assert_called_once()
+        mock_chain.return_value.complete.assert_called_once()
 
 
 def test_complete_with_providers_returns_none_when_openrouter_fails():
@@ -985,13 +989,16 @@ def test_complete_with_providers_returns_none_when_openrouter_fails():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = None
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=None,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(system_message, messages)
 
         assert result is None
-        mock_openrouter.assert_called_once()
+        mock_chain.return_value.complete.assert_called_once()
 
 
 def test_complete_with_providers_records_openrouter_billing_on_success(monkeypatch):
@@ -1014,8 +1021,11 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = openrouter_result
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=openrouter_result,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(
             system_message, messages, response_meta=response_meta
