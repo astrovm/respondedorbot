@@ -396,8 +396,6 @@ def _finalize_message_response(
     response_markup: Optional[Dict[str, Any]],
     response_uses_ai: bool,
     response_command: Optional[str],
-    streamed_message_id: Optional[str] = None,
-    streamed_response_text: str = "",
 ) -> str:
     if response_msg == "ok" and response_command is None and response_markup is None:
         return "ok"
@@ -413,12 +411,9 @@ def _finalize_message_response(
     )
 
     if response_uses_ai:
-        actual_streamed_message_id = streamed_message_id
-        actual_streamed_response_text = streamed_response_text
-        if not actual_streamed_message_id and not actual_streamed_response_text:
-            actual_streamed_message_id, actual_streamed_response_text = (
-                extract_stream_metadata()
-            )
+        actual_streamed_message_id, actual_streamed_response_text = (
+            extract_stream_metadata()
+        )
         if actual_streamed_message_id:
             deps.save_message_to_redis(
                 context.chat_id,

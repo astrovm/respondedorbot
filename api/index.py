@@ -123,6 +123,7 @@ from api.tools.task_scheduler import (
 )
 from api.ai_pipeline import (
     INSTRUCCIONES_BASE,
+    _extract_user_name,
     handle_ai_response as _ai_handle_response,
 )
 from api.streaming import (
@@ -2929,6 +2930,55 @@ def _sanitize_bot_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     return {**msg, "content": content}
 
 
+def _build_ai_request(
+    messages: List[Dict[str, Any]],
+    *,
+    chat_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    user_id: Optional[int] = None,
+    timezone_offset: int = -3,
+    task_mode: bool = False,
+    enable_web_search: bool = True,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+    messages = [_sanitize_bot_message(m) for m in messages or []]
+
+    context_data = {
+        "market": get_market_context(),
+        "weather": get_weather_context(),
+        "time": get_time_context(),
+        "hacker_news": get_hacker_news_context(),
+    }
+
+    tool_context: Dict[str, Any] = {
+        "get_prices": get_prices,
+    }
+    if chat_id:
+        tool_context["chat_id"] = chat_id
+    tool_context["timezone_offset"] = timezone_offset
+    if user_name:
+        tool_context["user_name"] = user_name
+    if user_id is not None:
+        tool_context["user_id"] = user_id
+
+    extra_tools = get_all_tool_schemas(tool_context, task_mode=task_mode)
+    system_message = build_system_message(
+        context_data,
+        tools_active=bool(extra_tools),
+        tool_schemas=extra_tools,
+        task_mode=task_mode,
+    )
+
+    fetched_contents = (
+        _fetch_urls_from_latest_message(messages) if enable_web_search else ""
+    )
+    if fetched_contents:
+        messages = list(messages) + [
+            {"role": "system", "content": fetched_contents}
+        ]
+
+    return system_message, messages, extra_tools, tool_context
+
+
 def ask_ai(
     messages: List[Dict[str, Any]],
     image_data: Optional[bytes] = None,
@@ -2942,32 +2992,14 @@ def ask_ai(
     task_mode: bool = False,
     ) -> str:
     try:
-        messages = [_sanitize_bot_message(m) for m in messages or []]
-
-        context_data = {
-            "market": get_market_context(),
-            "weather": get_weather_context(),
-            "time": get_time_context(),
-            "hacker_news": get_hacker_news_context(),
-        }
-
-        tool_context: Dict[str, Any] = {
-            "get_prices": get_prices,
-        }
-        if chat_id:
-            tool_context["chat_id"] = chat_id
-        tool_context["timezone_offset"] = timezone_offset
-        if user_name:
-            tool_context["user_name"] = user_name
-        if user_id is not None:
-            tool_context["user_id"] = user_id
-
-        extra_tools = get_all_tool_schemas(tool_context, task_mode=task_mode)
-        system_message = build_system_message(
-            context_data,
-            tools_active=bool(extra_tools),
-            tool_schemas=extra_tools,
+        system_message, messages, extra_tools, tool_context = _build_ai_request(
+            messages,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
             task_mode=task_mode,
+            enable_web_search=enable_web_search,
         )
 
         if image_data:
@@ -2994,14 +3026,6 @@ def ask_ai(
                 print("Image described, continuing with normal AI flow...")
             else:
                 print("Failed to describe image, continuing without description...")
-
-        fetched_contents = (
-            _fetch_urls_from_latest_message(messages) if enable_web_search else ""
-        )
-        if fetched_contents:
-            messages = list(messages) + [
-                {"role": "system", "content": fetched_contents}
-            ]
 
         response = complete_with_providers(
             system_message,
@@ -3038,41 +3062,15 @@ def ask_ai_stream(
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
 ) -> Iterator[Tuple[str, str]]:
-    messages = [_sanitize_bot_message(m) for m in messages or []]
-
-    context_data = {
-        "market": get_market_context(),
-        "weather": get_weather_context(),
-        "time": get_time_context(),
-        "hacker_news": get_hacker_news_context(),
-    }
-
-    tool_context: Dict[str, Any] = {
-        "get_prices": get_prices,
-    }
-    if chat_id:
-        tool_context["chat_id"] = chat_id
-    tool_context["timezone_offset"] = timezone_offset
-    if user_name:
-        tool_context["user_name"] = user_name
-    if user_id is not None:
-        tool_context["user_id"] = user_id
-
-    extra_tools = get_all_tool_schemas(tool_context, task_mode=False)
-    system_message = build_system_message(
-        context_data,
-        tools_active=bool(extra_tools),
-        tool_schemas=extra_tools,
+    system_message, messages, _extra_tools, _tool_context = _build_ai_request(
+        messages,
+        chat_id=chat_id,
+        user_name=user_name,
+        user_id=user_id,
+        timezone_offset=timezone_offset,
         task_mode=False,
+        enable_web_search=enable_web_search,
     )
-
-    fetched_contents = (
-        _fetch_urls_from_latest_message(messages) if enable_web_search else ""
-    )
-    if fetched_contents:
-        messages = list(messages) + [
-            {"role": "system", "content": fetched_contents}
-        ]
 
     return stream_with_providers(
         system_message,
@@ -6232,13 +6230,7 @@ def handle_ai_response(
 ) -> str:
     effective_handler = handler_func
     if handler_func is handle_ai_stream_response:
-        user_name = ""
-        if user_identity:
-            m = re.search(r"\(@?(\w+)\)", user_identity)
-            if m:
-                user_name = f"@{m.group(1)}"
-            elif user_identity.strip():
-                user_name = user_identity.strip().split()[0]
+        user_name = _extract_user_name(user_identity)
 
         def _stream_handler(
             handler_messages: List[Dict[str, Any]],

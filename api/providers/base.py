@@ -45,7 +45,7 @@ class StreamingAIProvider(AIProvider, Protocol):
         *,
         enable_web_search: bool = True,
     ) -> Iterator[str]:
-        """Stream response tokens. Tool calls are disabled during streaming."""
+        """Stream response tokens."""
         ...
 
 

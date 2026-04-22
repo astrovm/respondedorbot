@@ -41,7 +41,9 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
         PreparedMessage,
         _finalize_message_response,
     )
+    from api.streaming import set_streamed_response_metadata
 
+    set_streamed_response_metadata("777", "hola final")
     deps = MagicMock()
 
     result = _finalize_message_response(
@@ -66,8 +68,6 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
         response_markup=None,
         response_uses_ai=True,
         response_command=None,
-        streamed_message_id="777",
-        streamed_response_text="hola final",
     )
 
     assert result == "ok"
