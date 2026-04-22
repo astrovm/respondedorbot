@@ -44,6 +44,7 @@
 
 - Ask before pushing every time, even if previously approved.
 - No batch commit+push. No force push or hard reset without approval.
+- No `git commit --amend` after a commit has been pushed or shared. Always create a new commit instead.
 - Merge to `main` with a single squashed commit. Commit messages in English.
 
 ## Configuration
