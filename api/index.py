@@ -248,6 +248,11 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "minimax/minimax-m2.7"
 SUMMARY_MAX_TOKENS = 2048
+SUMMARY_GENERATION_PROMPT = (
+    "resumí la siguiente conversación de forma exhaustiva. "
+    "incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes. "
+    "no omitas nada."
+)
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
@@ -4036,7 +4041,7 @@ def handle_summary_command(
         )
         canonical_summary, summary_cost = _call_summary_model(
             [
-                {"role": "system", "content": prompt_text},
+                {"role": "system", "content": SUMMARY_GENERATION_PROMPT},
                 {"role": "user", "content": summary_input},
             ]
         )
@@ -4058,18 +4063,24 @@ def handle_summary_command(
     )
 
     response_meta: Dict[str, Any] = {}
+    try:
+        bot_personality = load_bot_config().get("system_prompt", "")
+    except Exception:
+        bot_personality = ""
     presentation_system = (
-        "se te va a dar un resumen de conversación abajo. "
-        "tu única tarea es comunicar ese resumen al usuario "
-        "de forma directa y natural, como si estuvieras charlando en la vereda. "
-        "REGLAS ABSOLUTAS: "
-        "1. NO uses títulos, headers, ni numeración de secciones. "
-        "2. NO uses bullets, asteriscos para listas, ni markdown estructurado. "
-        "3. NO agregues meta-comentarios como 'aquí tienes el resumen' o 'según lo solicitado'. "
-        "4. NO expliques el proceso de cómo se hizo el resumen. "
-        "5. NO inventes nada que no esté en el resumen. "
-        "6. Mantené TODO el contenido factual: quién dijo qué, temas, decisiones, datos. "
-        "7. Usá tu propio estilo y voz, pero contá la historia tal cual está."
+        f"{bot_personality}\n\n"
+        f"INSTRUCCIÓN ADICIONAL: {prompt_text}\n\n"
+        f"SE TE VA A DAR UN RESUMEN DE CONVERSACIÓN ABAJO. "
+        f"Tu única tarea es comunicar ese resumen al usuario de forma directa y natural, "
+        f"usando TU PROPIA VOZ Y PERSONALIDAD (la que te fue dada arriba). "
+        f"REGLAS ABSOLUTAS: "
+        f"1. NO uses títulos, headers, ni numeración de secciones. "
+        f"2. NO uses bullets, asteriscos para listas, ni markdown estructurado. "
+        f"3. NO agregues meta-comentarios como 'aquí tienes el resumen' o 'según lo solicitado'. "
+        f"4. NO expliques el proceso de cómo se hizo el resumen. "
+        f"5. NO inventes nada que no esté en el resumen. "
+        f"6. Mantené TODO el contenido factual: quién dijo qué, temas, decisiones, datos. "
+        f"7. Usá tu propio estilo y voz, pero contá la historia tal cual está."
     )
     final_response = complete_with_providers(
         {"role": "system", "content": presentation_system},

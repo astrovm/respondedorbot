@@ -59,10 +59,12 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
         response_meta["billing_segments"] = [{"usd_micros": 11}]
         assert system_message["role"] == "system"
         assert "REGLAS ABSOLUTAS" in system_message["content"]
+        assert "foco custom" in system_message["content"]
         assert messages == [{"role": "user", "content": "resumen previo"}]
         return "respuesta final"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
+    monkeypatch.setattr("api.index.load_bot_config", lambda: {"system_prompt": "bot personality"})
 
     result = handle_summary_command("chat-1", MagicMock(), "foco custom")
 
@@ -111,16 +113,18 @@ def test_handle_summary_command_calls_qwen_for_presentation(monkeypatch):
         response_meta["billing_segments"] = [{"usd_micros": 22}]
         assert system_message["role"] == "system"
         assert "REGLAS ABSOLUTAS" in system_message["content"]
-        assert "NO uses títulos" in system_message["content"]
+        assert "instruccion" in system_message["content"]
         assert messages == [{"role": "user", "content": "canon actualizado"}]
         return "presentado por qwen"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
+    monkeypatch.setattr("api.index.load_bot_config", lambda: {"system_prompt": "bot personality"})
 
     result = handle_summary_command("chat-1", MagicMock(), "instruccion")
 
+    from api.index import SUMMARY_GENERATION_PROMPT
     assert seen_summary_messages["messages"] == [
-        {"role": "system", "content": "instruccion"},
+        {"role": "system", "content": SUMMARY_GENERATION_PROMPT},
         {
             "role": "user",
             "content": "resumen acumulado previo:\nresumen previo\n\nmensajes nuevos:\nassistant: nuevo",
@@ -172,13 +176,15 @@ def test_handle_summary_command_uses_custom_prompt_for_both_stages(monkeypatch):
         return "respuesta render"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
+    monkeypatch.setattr("api.index.load_bot_config", lambda: {"system_prompt": "bot personality"})
 
     result = handle_summary_command("chat-1", MagicMock(), custom_focus)
 
+    from api.index import SUMMARY_GENERATION_PROMPT
     assert calls["summary_messages"] is not None
     assert calls["summary_messages"][0] == {
         "role": "system",
-        "content": custom_focus,
+        "content": SUMMARY_GENERATION_PROMPT,
     }
     assert calls["summary_messages"][1] == {
         "role": "user",
@@ -187,7 +193,7 @@ def test_handle_summary_command_uses_custom_prompt_for_both_stages(monkeypatch):
     assert calls["render_system"] is not None
     assert calls["render_system"]["role"] == "system"
     assert "REGLAS ABSOLUTAS" in calls["render_system"]["content"]
-    assert "NO uses títulos" in calls["render_system"]["content"]
+    assert custom_focus in calls["render_system"]["content"]
     assert result.response_text == "respuesta render"
     assert result.pending_summary == "canon"
     assert result.summary_cost == 9
