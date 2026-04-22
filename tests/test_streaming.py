@@ -1,10 +1,10 @@
 from tests.support import *
 
 
-def test_stream_to_telegram_sends_placeholder_before_editing():
+def test_stream_to_telegram_sends_first_token_without_placeholder():
     from api.streaming import stream_to_telegram
 
-    sent_messages: list[tuple[str, str]] = []
+    sent_messages: list[tuple[str, str, Optional[str]]] = []
     edits: list[tuple[str, str, str]] = []
 
     def send_message(chat_id: str, text: str, reply_to_message_id: Optional[str] = None) -> Optional[int]:
@@ -23,14 +23,14 @@ def test_stream_to_telegram_sends_placeholder_before_editing():
 
     assert final_text == "hola"
     assert message_id == "321"
-    assert sent_messages == [("chat-1", "...", None)]
+    assert sent_messages == [("chat-1", "ho", None)]
     assert edits == [("chat-1", "hola", "321")]
 
 
 def test_stream_to_telegram_passes_reply_to_message_id():
     from api.streaming import stream_to_telegram
 
-    sent_messages: list[tuple[str, str]] = []
+    sent_messages: list[tuple[str, str, Optional[str]]] = []
     edits: list[tuple[str, str, str]] = []
 
     def send_message(chat_id: str, text: str, reply_to_message_id: Optional[str] = None) -> Optional[int]:
@@ -50,5 +50,5 @@ def test_stream_to_telegram_passes_reply_to_message_id():
 
     assert final_text == "hola"
     assert message_id == "321"
-    assert sent_messages == [("chat-1", "...", "99")]
+    assert sent_messages == [("chat-1", "ho", "99")]
     assert edits == [("chat-1", "hola", "321")]
