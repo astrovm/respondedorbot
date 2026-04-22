@@ -973,7 +973,7 @@ def _save_replied_message_context(
         return
 
     formatted_reply = deps.format_user_message(
-        cast(Dict[str, Any], reply_msg), reply_text
+        cast(Dict[str, Any], reply_msg), reply_text, None
     )
     deps.save_message_to_redis(chat_id, reply_id, formatted_reply, redis_client)
 
@@ -1109,11 +1109,14 @@ def _handle_admin_printcredits_command(
             command,
         )
 
+    if user_id is None:
+        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+
     try:
         mint_result = deps.credits_db_service.mint_user_credits(
-            user_id=int(user_id),
+            user_id=user_id,
             amount=amount,
-            actor_user_id=int(user_id),
+            actor_user_id=user_id,
         )
     except Exception as error:
         deps.admin_report(
