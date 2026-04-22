@@ -6255,6 +6255,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         handle_ai_response=handle_ai_response,
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
+        handle_summary_command=handle_summary_command,
     )
     return build_message_handler_deps(
         chat=MessageChatDeps(

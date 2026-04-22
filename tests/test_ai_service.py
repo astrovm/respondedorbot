@@ -218,3 +218,103 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
     settle_args = billing_helper.settle_reserved_ai_credits_batch.call_args.args
     billing_segments = settle_args[1]
     assert any(segment.get("kind") == "summary" for segment in billing_segments)
+
+
+def test_run_summary_command_bills_summary_and_qwen_segments():
+    from api.ai_service import SummaryCommandRequest, build_ai_service
+
+    handle_summary_command = MagicMock()
+    handle_summary_command.return_value = MagicMock(
+        response_text="resumen final",
+        pending_summary="canonical summary",
+        pending_marker="m5",
+        summary_cost=500,
+        billing_segments=[{"kind": "chat", "provider": "qwen"}],
+        is_fallback=False,
+    )
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(return_value="no boludo"),
+        handle_ai_response=MagicMock(return_value="ok"),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        handle_summary_command=handle_summary_command,
+    )
+
+    billing_helper = MagicMock()
+    billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
+
+    response = ai_service.run_summary_command(
+        SummaryCommandRequest(
+            chat_id="560",
+            message={"chat": {"id": 560, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="resumí todo",
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert response.text == "resumen final"
+    assert response.is_fallback is False
+    assert response.pending_summary == "canonical summary"
+    assert response.pending_marker == "m5"
+
+    settle_args = billing_helper.settle_reserved_ai_credits_batch.call_args.args
+    billing_segments = settle_args[1]
+    assert billing_segments[0].get("kind") == "summary"
+    assert billing_segments[0]["billing"]["raw_usd_micros"] == 500
+    assert any(segment.get("kind") == "chat" for segment in billing_segments)
+
+
+def test_run_summary_command_refunds_on_qwen_fallback():
+    from api.ai_service import SummaryCommandRequest, build_ai_service
+
+    handle_summary_command = MagicMock()
+    handle_summary_command.return_value = MagicMock(
+        response_text="no pude generar el resumen",
+        pending_summary="canonical summary",
+        pending_marker=None,
+        summary_cost=500,
+        billing_segments=[],
+        is_fallback=True,
+    )
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(return_value="no boludo"),
+        handle_ai_response=MagicMock(return_value="ok"),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        handle_summary_command=handle_summary_command,
+    )
+
+    billing_helper = MagicMock()
+    billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
+
+    response = ai_service.run_summary_command(
+        SummaryCommandRequest(
+            chat_id="561",
+            message={"chat": {"id": 561, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="resumí todo",
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert response.text == "no pude generar el resumen"
+    assert response.is_fallback is True
+    assert response.pending_summary is None
+    assert response.pending_marker is None
+    billing_helper.refund_reserved_ai_credits.assert_called_once()
+    billing_helper.settle_reserved_ai_credits_batch.assert_not_called()
