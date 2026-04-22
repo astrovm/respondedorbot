@@ -57,8 +57,10 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
         assert kwargs.get("response_meta") is not None
         response_meta = kwargs["response_meta"]
         response_meta["billing_segments"] = [{"usd_micros": 11}]
-        assert system_message == {"role": "system", "content": "foco custom"}
-        assert messages == [{"role": "user", "content": "resumen previo"}]
+        assert system_message["role"] == "system"
+        assert "foco custom" in system_message["content"]
+        assert "resumen previo" in system_message["content"]
+        assert messages == [{"role": "user", "content": "presentá el resumen"}]
         return "respuesta final"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
@@ -108,8 +110,10 @@ def test_handle_summary_command_updates_canonical_summary_when_new_delta_exists(
         assert kwargs.get("response_meta") is not None
         response_meta = kwargs["response_meta"]
         response_meta["billing_segments"] = [{"usd_micros": 22}]
-        assert system_message == {"role": "system", "content": "instruccion"}
-        assert messages == [{"role": "user", "content": "canon actualizado"}]
+        assert system_message["role"] == "system"
+        assert "instruccion" in system_message["content"]
+        assert "canon actualizado" in system_message["content"]
+        assert messages == [{"role": "user", "content": "presentá el resumen"}]
         return "render final"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
@@ -165,7 +169,7 @@ def test_handle_summary_command_applies_custom_focus_only_to_render_stage(monkey
         calls["render_system"] = system_message
         assert kwargs.get("response_meta") is not None
         kwargs["response_meta"]["billing_segments"] = []
-        assert messages == [{"role": "user", "content": "canon"}]
+        assert messages == [{"role": "user", "content": "presentá el resumen"}]
         return "respuesta render"
 
     monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
@@ -183,5 +187,7 @@ def test_handle_summary_command_applies_custom_focus_only_to_render_stage(monkey
         "content": "user: mensaje nuevo",
     }
     assert custom_focus not in calls["summary_messages"][0]["content"]
-    assert calls["render_system"] == {"role": "system", "content": custom_focus}
+    assert calls["render_system"]["role"] == "system"
+    assert custom_focus in calls["render_system"]["content"]
+    assert "canon" in calls["render_system"]["content"]
     assert result.response_text == "respuesta render"

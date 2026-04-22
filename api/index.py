@@ -3997,9 +3997,17 @@ def handle_summary_command(
         )
 
     response_meta: Dict[str, Any] = {}
+    presentation_prompt = (
+        f"{prompt_text}\n\n"
+        f"a continuación te proporciono el resumen de la conversación. "
+        f"tu tarea es presentarlo exactamente como está, manteniendo su estructura y contenido. "
+        f"no lo analices, no lo critiques, no agregues meta-comentarios. "
+        f"simplemente presenta el resumen de forma clara.\n\n"
+        f"--- RESUMEN ---\n{canonical_summary}\n--- FIN DEL RESUMEN ---"
+    )
     final_response = complete_with_providers(
-        {"role": "system", "content": prompt_text},
-        [{"role": "user", "content": canonical_summary}],
+        {"role": "system", "content": presentation_prompt},
+        [{"role": "user", "content": "presentá el resumen"}],
         response_meta=response_meta,
         enable_web_search=False,
     )
