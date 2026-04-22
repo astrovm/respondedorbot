@@ -3978,10 +3978,7 @@ def handle_summary_command(
             )
         canonical_summary, summary_cost = _call_summary_model(
             [
-                {
-                    "role": "system",
-                    "content": "resumí la siguiente conversación de forma exhaustiva y técnica. incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes.",
-                },
+                {"role": "system", "content": prompt_text},
                 {"role": "user", "content": summary_input},
             ]
         )
@@ -3996,31 +3993,13 @@ def handle_summary_command(
             is_fallback=True,
         )
 
-    response_meta: Dict[str, Any] = {}
-    presentation_prompt = (
-        f"{prompt_text}\n\n"
-        f"a continuación te proporciono el resumen de la conversación. "
-        f"tu tarea es presentarlo exactamente como está, manteniendo su estructura y contenido. "
-        f"no lo analices, no lo critiques, no agregues meta-comentarios. "
-        f"simplemente presenta el resumen de forma clara.\n\n"
-        f"--- RESUMEN ---\n{canonical_summary}\n--- FIN DEL RESUMEN ---"
-    )
-    final_response = complete_with_providers(
-        {"role": "system", "content": presentation_prompt},
-        [{"role": "user", "content": "presentá el resumen"}],
-        response_meta=response_meta,
-        enable_web_search=False,
-    )
-
     return SummaryCommandResult(
-        response_text=final_response or "no pude generar el resumen",
+        response_text=canonical_summary,
         pending_summary=canonical_summary,
         pending_marker=source.next_marker,
         summary_cost=summary_cost,
-        billing_segments=cast(
-            List[Dict[str, Any]], response_meta.get("billing_segments", [])
-        ),
-        is_fallback=not final_response,
+        billing_segments=[],
+        is_fallback=False,
     )
 
 
