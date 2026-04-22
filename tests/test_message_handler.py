@@ -2460,7 +2460,7 @@ def test_handle_non_ai_command_summary_builds_valid_prepared_message_and_tuple()
     prepared_message = run_ai_flow.call_args.kwargs["prepared_message"]
     assert (
         prepared_message.message_text
-        == "focus en crypto. resumí toda esta conversación. sé conciso."
+        == "focus en crypto. actualizá el resumen anterior con los mensajes nuevos. incluí todos los temas tratados, quién dijo qué, las conclusiones, las decisiones pendientes y cualquier dato relevante. no seas conciso: sé exhaustivo, detallado y estructurado."
     )
     assert prepared_message.photo_file_id is None
     assert prepared_message.audio_file_id is None

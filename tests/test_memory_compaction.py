@@ -17,6 +17,8 @@ def test_compact_chat_memory_absorbs_only_uncompacted_messages_once():
         "old summary",
         "m10",
         compact_fn=lambda text: ("new summary", 1),
+        compaction_threshold=8,
+        compaction_keep=5,
     )
 
     assert summary == "new summary"
