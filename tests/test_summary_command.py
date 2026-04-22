@@ -74,7 +74,7 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
 
 
 def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
-    from api.index import IncrementalSummarySource, SUMMARY_GENERATION_PROMPT, handle_summary_command
+    from api.index import IncrementalSummarySource, handle_summary_command
 
     monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: "resumen previo")
     monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m1")
@@ -107,7 +107,7 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
 
     result = handle_summary_command("chat-1", MagicMock(), "instruccion")
 
-    expected_prompt = f"bot personality\n\n{SUMMARY_GENERATION_PROMPT}"
+    expected_prompt = "bot personality\n\ninstruccion"
     assert seen_summary_messages["messages"] == [
         {"role": "system", "content": expected_prompt},
         {
@@ -123,8 +123,8 @@ def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
     assert result.is_fallback is False
 
 
-def test_handle_summary_command_ignores_custom_prompt_uses_generation_prompt(monkeypatch):
-    from api.index import IncrementalSummarySource, SUMMARY_GENERATION_PROMPT, handle_summary_command
+def test_handle_summary_command_uses_custom_prompt_with_personality(monkeypatch):
+    from api.index import IncrementalSummarySource, handle_summary_command
 
     custom_focus = "enfocate solo en riesgos y proximos pasos"
 
@@ -156,7 +156,7 @@ def test_handle_summary_command_ignores_custom_prompt_uses_generation_prompt(mon
 
     result = handle_summary_command("chat-1", MagicMock(), custom_focus)
 
-    expected_prompt = f"bot personality\n\n{SUMMARY_GENERATION_PROMPT}"
+    expected_prompt = "bot personality\n\nenfocate solo en riesgos y proximos pasos"
     assert calls["summary_messages"] is not None
     assert calls["summary_messages"][0] == {
         "role": "system",
