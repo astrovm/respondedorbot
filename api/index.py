@@ -3927,6 +3927,55 @@ def _compact_conversation(dropped_text: str) -> Tuple[str, int]:
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
+def handle_summary_command(
+    chat_id: str,
+    redis_client: redis.Redis,
+    prompt_text: str,
+) -> str:
+    existing_summary = _state_get_chat_summary(redis_client, chat_id)
+    compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
+    history = get_chat_history(chat_id, redis_client)
+
+    if not history:
+        return "no hay mensajes para resumir"
+
+    start_idx = 0
+    if compacted_until:
+        for idx, msg in enumerate(history):
+            if str(msg.get("id")) == compacted_until:
+                start_idx = idx + 1
+                break
+
+    visible_messages = history[start_idx:] or history
+    formatted = _format_messages_for_summary(visible_messages)
+
+    summary_input = formatted
+    if existing_summary:
+        summary_input = f"resumen acumulado previo:\n{existing_summary}\n\nmensajes nuevos:\n{formatted}"
+
+    raw_summary, _cost = _call_summary_model([
+        {"role": "system", "content": "resumí la siguiente conversación de forma exhaustiva y técnica. incluí todos los temas tratados, quién dijo qué, conclusiones, decisiones pendientes y datos relevantes."},
+        {"role": "user", "content": summary_input},
+    ])
+
+    if not raw_summary:
+        return "no pude generar el resumen"
+
+    _state_save_chat_summary(redis_client, chat_id, raw_summary)
+    if visible_messages:
+        _state_save_chat_compacted_until(
+            redis_client, chat_id, str(visible_messages[-1].get("id"))
+        )
+
+    final_response = complete_with_providers(
+        {"role": "system", "content": prompt_text},
+        [{"role": "user", "content": raw_summary}],
+        enable_web_search=False,
+    )
+
+    return final_response or "no pude generar el resumen"
+
+
 def _resolve_compaction_params(
     threshold: Optional[int] = None,
     keep: Optional[int] = None,
@@ -6168,6 +6217,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             ai_service=ai_svc,
             balance_formatter=BalanceFormatter(credits_db_service),
             handle_ai_stream=handle_ai_stream_response,
+            handle_summary_command=handle_summary_command,
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
             build_topup_keyboard=build_topup_keyboard,

@@ -2178,6 +2178,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         return response_text
 
     defaults["handle_ai_stream"] = MagicMock(side_effect=_default_handle_ai_stream)
+    defaults["handle_summary_command"] = MagicMock(return_value="resumen listo")
     return defaults
 
 
@@ -2250,6 +2251,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             ai_service=ai_service,
             balance_formatter=flat_defaults["balance_formatter"],
             handle_ai_stream=flat_defaults["handle_ai_stream"],
+            handle_summary_command=flat_defaults["handle_summary_command"],
             gen_random=flat_defaults["gen_random"],
             build_insufficient_credits_message=flat_defaults[
                 "build_insufficient_credits_message"
@@ -2385,6 +2387,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
         ai=MessageAIDeps(
             ai_service=ai_service,
             handle_ai_stream=MagicMock(return_value="streamed response"),
+            handle_summary_command=MagicMock(return_value="resumen listo"),
             gen_random=MagicMock(),
             build_insufficient_credits_message=MagicMock(),
             build_topup_keyboard=MagicMock(),
@@ -2519,34 +2522,28 @@ def test_handle_non_ai_command_summary_builds_valid_prepared_message_and_tuple()
     from api.message_handler import _handle_non_ai_command
 
     deps = MagicMock()
+    deps.handle_summary_command.return_value = "resumen listo"
     commands = {"/resumen": (MagicMock(), False, True)}
 
-    with patch(
-        "api.message_handler._run_ai_flow",
-        return_value=("resumen listo", True),
-    ) as run_ai_flow:
-        response = _handle_non_ai_command(
-            deps,
-            command="/resumen",
-            commands=commands,
-            sanitized_message_text="focus en crypto",
-            message={"message_id": "10"},
-            chat_id="123",
-            redis_client=MagicMock(),
-            billing_helper=MagicMock(),
-            user_id=7,
-            user_identity="Ana (ana)",
-            timezone_offset=-3,
-        )
+    response = _handle_non_ai_command(
+        deps,
+        command="/resumen",
+        commands=commands,
+        sanitized_message_text="focus en crypto",
+        message={"message_id": "10"},
+        chat_id="123",
+        redis_client=MagicMock(),
+        billing_helper=MagicMock(),
+        user_id=7,
+        user_identity="Ana (ana)",
+        timezone_offset=-3,
+    )
 
     assert response == ("resumen listo", None, True, "/resumen")
-    prepared_message = run_ai_flow.call_args.kwargs["prepared_message"]
-    assert (
-        prepared_message.message_text
-        == "focus en crypto. actualizá el resumen anterior con los mensajes nuevos. incluí todos los temas tratados, quién dijo qué, las conclusiones, las decisiones pendientes y cualquier dato relevante. no seas conciso: sé exhaustivo, detallado y estructurado."
-    )
-    assert prepared_message.photo_file_id is None
-    assert prepared_message.audio_file_id is None
+    deps.handle_summary_command.assert_called_once()
+    call_args = deps.handle_summary_command.call_args
+    assert call_args[0][0] == "123"
+    assert "focus en crypto" in call_args[0][2]
 
 
 def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
