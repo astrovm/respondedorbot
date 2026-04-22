@@ -71,7 +71,7 @@ class MessageAIDeps:
     ai_service: AIService
     balance_formatter: Any
     handle_ai_stream: Callable[..., str]
-    handle_summary_command: Callable[[str, Any, str], str]
+    handle_summary_command: Callable[[str, Any, str], Any]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
@@ -151,7 +151,7 @@ class MessageHandlerDeps:
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
     handle_ai_stream: Callable[..., str]
-    handle_summary_command: Callable[[str, Any, str], str]
+    handle_summary_command: Callable[[str, Any, str], Any]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
