@@ -4055,17 +4055,42 @@ def handle_summary_command(
         )
 
     _summary_logger.info(
-        "summary_cmd: success summary_len=%d cost=%d",
+        "summary_cmd: canonical summary ready, len=%d, calling qwen for presentation",
         len(canonical_summary),
-        summary_cost,
+    )
+
+    response_meta: Dict[str, Any] = {}
+    presentation_system = (
+        f"{prompt_text}\n\n"
+        f"nota: el resumen ya fue generado. tu trabajo es ÚNICAMENTE presentarlo "
+        f"al usuario de forma clara y natural, manteniendo toda la información. "
+        f"no lo reescribas como análisis, no agregues secciones tipo 'contexto' o 'análisis', "
+        f"no describas el proceso. simplemente comunicá el contenido."
+    )
+    final_response = complete_with_providers(
+        {"role": "system", "content": presentation_system},
+        [{"role": "user", "content": canonical_summary}],
+        response_meta=response_meta,
+        enable_web_search=False,
+    )
+
+    if not final_response:
+        _summary_logger.warning("summary_cmd: qwen presentation returned empty, falling back to canonical")
+        final_response = canonical_summary
+
+    _summary_logger.info(
+        "summary_cmd: final response ready, len=%d",
+        len(final_response),
     )
     return SummaryCommandResult(
-        response_text=canonical_summary,
+        response_text=final_response,
         pending_summary=canonical_summary,
         pending_marker=source.next_marker,
         summary_cost=summary_cost,
-        billing_segments=[],
-        is_fallback=False,
+        billing_segments=cast(
+            List[Dict[str, Any]], response_meta.get("billing_segments", [])
+        ),
+        is_fallback=not final_response,
     )
 
 
