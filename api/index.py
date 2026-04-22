@@ -6227,6 +6227,7 @@ def handle_ai_response(
     response_meta: Optional[Dict[str, Any]] = None,
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
+    reply_to_message_id: Optional[str] = None,
 ) -> str:
     effective_handler = handler_func
     if handler_func is handle_ai_stream_response:
@@ -6244,6 +6245,7 @@ def handle_ai_response(
                 user_id=user_id,
                 user_name=user_name or None,
                 timezone_offset=timezone_offset,
+                reply_to_message_id=reply_to_message_id,
             )
 
         effective_handler = _stream_handler
@@ -6259,6 +6261,7 @@ def handle_ai_response(
         response_meta=response_meta,
         user_id=user_id,
         timezone_offset=timezone_offset,
+        reply_to_message_id=reply_to_message_id,
         send_typing_fn=send_typing,
         telegram_token=environ.get("TELEGRAM_TOKEN"),
         reset_request_count_fn=_reset_ai_provider_request_count,
@@ -6268,9 +6271,11 @@ def handle_ai_response(
     )
 
 
-def _send_message_for_stream(chat_id: str, text: str) -> Optional[int]:
+def _send_message_for_stream(
+    chat_id: str, text: str, reply_to_message_id: Optional[str] = None
+) -> Optional[int]:
     try:
-        return send_msg(chat_id, text)
+        return send_msg(chat_id, text, reply_to_message_id or "")
     except Exception:
         return None
 
@@ -6290,6 +6295,7 @@ def handle_ai_stream_response(
     user_id: Optional[int] = None,
     user_name: Optional[str] = None,
     timezone_offset: int = -3,
+    reply_to_message_id: Optional[str] = None,
     **_: Any,
 ) -> str:
     if not chat_id:
@@ -6313,6 +6319,7 @@ def handle_ai_stream_response(
             token_iterator,
             _send_message_for_stream,
             _edit_message_for_stream,
+            reply_to_message_id=reply_to_message_id,
         )
     except RuntimeError:
         final_text = ask_ai(
@@ -6322,7 +6329,9 @@ def handle_ai_stream_response(
             user_id=user_id,
             timezone_offset=timezone_offset,
         )
-        message_id = _send_message_for_stream(chat_id, final_text)
+        message_id = _send_message_for_stream(
+            chat_id, final_text, reply_to_message_id
+        )
 
     streamed_message_id = str(message_id) if message_id is not None else None
     set_streamed_response_metadata(streamed_message_id, final_text)
