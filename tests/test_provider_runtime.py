@@ -1,19 +1,7 @@
 from types import SimpleNamespace
 
 from tests.support import *
-
-
-RAW_TOOL_LEAKS = (
-    'web_fetch(',
-    '"tool_calls"',
-    '"function_call"',
-    '"arguments":',
-)
-
-
-def _assert_no_raw_tool_syntax(text: str) -> None:
-    for leak in RAW_TOOL_LEAKS:
-        assert leak not in text
+from tests.support import assert_no_raw_tool_syntax
 
 
 class _FakeChoice:
@@ -105,7 +93,7 @@ def test_provider_runtime_executes_tool_calls_until_stop():
 
     assert result is not None
     assert result.text == "done"
-    _assert_no_raw_tool_syntax(result.text)
+    assert_no_raw_tool_syntax(result.text)
     assert execute_tool_fn.call_count == 1
     assert client.calls[0]["messages"][0]["content"] == "sys"
     assert client.calls[1]["messages"][-1]["role"] == "tool"
@@ -171,7 +159,7 @@ def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
 
     assert result is not None
     assert result.text == "fallback text"
-    _assert_no_raw_tool_syntax(result.text)
+    assert_no_raw_tool_syntax(result.text)
     execute_tool_fn.assert_not_called()
 
 
@@ -226,7 +214,7 @@ def test_provider_runtime_returns_plain_text_when_tools_never_called():
 
     assert result is not None
     assert result.text == "plain answer"
-    _assert_no_raw_tool_syntax(result.text)
+    assert_no_raw_tool_syntax(result.text)
     assert client.calls[0]["tools"] == [{"type": "web_search"}, {"name": "calc"}]
     execute_tool_fn.assert_not_called()
 
@@ -342,8 +330,8 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     assert complete_result is not None
     assert helper_result is not None
     assert complete_result.text == helper_result.text == "done"
-    _assert_no_raw_tool_syntax(complete_result.text)
-    _assert_no_raw_tool_syntax(helper_result.text)
+    assert_no_raw_tool_syntax(complete_result.text)
+    assert_no_raw_tool_syntax(helper_result.text)
     assert complete_result.metadata == helper_result.metadata
     assert complete_execute_tool_fn.call_count == 2
     assert helper_execute_tool_fn.call_count == 2

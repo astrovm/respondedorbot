@@ -1,21 +1,9 @@
 from tests.support import *
+from tests.support import assert_no_raw_tool_syntax
 
 from api.providers.base import ProviderChain
 from api.providers.openrouter import OpenRouterProvider
 from api.providers.groq import GroqChatProvider
-
-
-RAW_TOOL_LEAKS = (
-    'web_fetch(',
-    '"tool_calls"',
-    '"function_call"',
-    '"arguments":',
-)
-
-
-def _assert_no_raw_tool_syntax(text: str) -> None:
-    for leak in RAW_TOOL_LEAKS:
-        assert leak not in text
 
 
 class FakeProvider:
@@ -274,7 +262,7 @@ def test_provider_chain_stream_falls_back_with_tool_kwargs_preserved():
     )
 
     assert tokens == [("second", ""), ("second", "fallback answer")]
-    _assert_no_raw_tool_syntax("".join(token for _, token in tokens))
+    assert_no_raw_tool_syntax("".join(token for _, token in tokens))
     assert first.complete_calls == [
         {
             "enable_web_search": True,

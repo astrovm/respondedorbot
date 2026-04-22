@@ -178,6 +178,19 @@ def get_bot_message_metadata(redis_client: redis.Redis, chat_id: str, message_id
     )
 
 
+RAW_TOOL_LEAKS = (
+    'web_fetch(',
+    '"tool_calls"',
+    '"function_call"',
+    '"arguments":',
+)
+
+
+def assert_no_raw_tool_syntax(text: str) -> None:
+    for leak in RAW_TOOL_LEAKS:
+        assert leak not in text
+
+
 __all__ = [name for name in globals() if not name.startswith("_")] + [
     "_decode_redis_value"
 ]

@@ -120,10 +120,12 @@ class ProviderChain:
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Tuple[str, str]]:
-        """Stream from the first available streaming provider.
+        """Stream from the first available provider using hybrid behavior.
 
-        Yields (provider_name, token) tuples.
-        Raises RuntimeError if no streaming provider is available.
+        For requests without tools, stream tokens directly from the first available
+        StreamingAIProvider.
+        For tool-capable requests, call provider.complete() so the provider can run
+        any tool rounds, then yield the final assistant text.
         """
         has_tools = bool(extra_tools) or enable_web_search
 
