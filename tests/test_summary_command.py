@@ -53,17 +53,28 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
 
     monkeypatch.setattr("api.index._call_summary_model", _fail_summary_model)
 
+    def _fake_complete(system_message, messages, **kwargs):
+        assert kwargs.get("response_meta") is not None
+        response_meta = kwargs["response_meta"]
+        response_meta["billing_segments"] = [{"usd_micros": 11}]
+        assert system_message["role"] == "system"
+        assert "foco custom" in system_message["content"]
+        assert messages == [{"role": "user", "content": "resumen previo"}]
+        return "respuesta final"
+
+    monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
+
     result = handle_summary_command("chat-1", MagicMock(), "foco custom")
 
-    assert result.response_text == "resumen previo"
+    assert result.response_text == "respuesta final"
     assert result.pending_summary == "resumen previo"
     assert result.pending_marker is None
     assert result.summary_cost == 0
-    assert result.billing_segments == []
+    assert result.billing_segments == [{"usd_micros": 11}]
     assert result.is_fallback is False
 
 
-def test_handle_summary_command_updates_canonical_summary_when_new_delta_exists(monkeypatch):
+def test_handle_summary_command_calls_qwen_for_presentation(monkeypatch):
     from api.index import IncrementalSummarySource, handle_summary_command
 
     monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: "resumen previo")
@@ -94,6 +105,18 @@ def test_handle_summary_command_updates_canonical_summary_when_new_delta_exists(
 
     monkeypatch.setattr("api.index._call_summary_model", _fake_summary_model)
 
+    def _fake_complete(system_message, messages, **kwargs):
+        assert kwargs.get("response_meta") is not None
+        response_meta = kwargs["response_meta"]
+        response_meta["billing_segments"] = [{"usd_micros": 22}]
+        assert system_message["role"] == "system"
+        assert "instruccion" in system_message["content"]
+        assert "nota: el resumen ya fue generado" in system_message["content"]
+        assert messages == [{"role": "user", "content": "canon actualizado"}]
+        return "presentado por qwen"
+
+    monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
+
     result = handle_summary_command("chat-1", MagicMock(), "instruccion")
 
     assert seen_summary_messages["messages"] == [
@@ -103,15 +126,15 @@ def test_handle_summary_command_updates_canonical_summary_when_new_delta_exists(
             "content": "resumen acumulado previo:\nresumen previo\n\nmensajes nuevos:\nassistant: nuevo",
         },
     ]
-    assert result.response_text == "canon actualizado"
+    assert result.response_text == "presentado por qwen"
     assert result.pending_summary == "canon actualizado"
     assert result.pending_marker == "m2"
     assert result.summary_cost == 321
-    assert result.billing_segments == []
+    assert result.billing_segments == [{"usd_micros": 22}]
     assert result.is_fallback is False
 
 
-def test_handle_summary_command_uses_custom_prompt_for_summary_generation(monkeypatch):
+def test_handle_summary_command_uses_custom_prompt_for_both_stages(monkeypatch):
     from api.index import IncrementalSummarySource, handle_summary_command
 
     custom_focus = "enfocate solo en riesgos y proximos pasos"
@@ -133,13 +156,22 @@ def test_handle_summary_command_uses_custom_prompt_for_summary_generation(monkey
         ),
     )
 
-    calls = {"summary_messages": None}
+    calls = {"summary_messages": None, "render_system": None}
 
     def _fake_summary_model(messages):
         calls["summary_messages"] = messages
         return "canon", 9
 
     monkeypatch.setattr("api.index._call_summary_model", _fake_summary_model)
+
+    def _fake_complete(system_message, messages, **kwargs):
+        calls["render_system"] = system_message
+        assert kwargs.get("response_meta") is not None
+        kwargs["response_meta"]["billing_segments"] = []
+        assert messages == [{"role": "user", "content": "canon"}]
+        return "respuesta render"
+
+    monkeypatch.setattr("api.index.complete_with_providers", _fake_complete)
 
     result = handle_summary_command("chat-1", MagicMock(), custom_focus)
 
@@ -152,7 +184,11 @@ def test_handle_summary_command_uses_custom_prompt_for_summary_generation(monkey
         "role": "user",
         "content": "user: mensaje nuevo",
     }
-    assert result.response_text == "canon"
+    assert calls["render_system"] is not None
+    assert calls["render_system"]["role"] == "system"
+    assert custom_focus in calls["render_system"]["content"]
+    assert "nota: el resumen ya fue generado" in calls["render_system"]["content"]
+    assert result.response_text == "respuesta render"
     assert result.pending_summary == "canon"
     assert result.summary_cost == 9
     assert result.billing_segments == []
