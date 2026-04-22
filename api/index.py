@@ -4022,6 +4022,16 @@ def handle_summary_command(
         "yes" if source.prior_summary else "no",
     )
 
+    try:
+        bot_personality = load_bot_config().get("system_prompt", "")
+    except Exception:
+        bot_personality = ""
+
+    summary_system_prompt = (
+        f"{bot_personality}\n\n"
+        f"{SUMMARY_GENERATION_PROMPT}"
+    )
+
     canonical_summary: Optional[str] = None
     summary_cost = 0
     if source.is_zero_delta and source.prior_summary:
@@ -4040,7 +4050,7 @@ def handle_summary_command(
         )
         canonical_summary, summary_cost = _call_summary_model(
             [
-                {"role": "system", "content": SUMMARY_GENERATION_PROMPT},
+                {"role": "system", "content": summary_system_prompt},
                 {"role": "user", "content": summary_input},
             ]
         )
