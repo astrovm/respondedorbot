@@ -4061,11 +4061,17 @@ def handle_summary_command(
 
     response_meta: Dict[str, Any] = {}
     presentation_system = (
-        f"{prompt_text}\n\n"
-        f"nota: el resumen ya fue generado. tu trabajo es ÚNICAMENTE presentarlo "
-        f"al usuario de forma clara y natural, manteniendo toda la información. "
-        f"no lo reescribas como análisis, no agregues secciones tipo 'contexto' o 'análisis', "
-        f"no describas el proceso. simplemente comunicá el contenido."
+        "se te va a dar un resumen de conversación abajo. "
+        "tu única tarea es comunicar ese resumen al usuario "
+        "de forma directa y natural, como si estuvieras charlando en la vereda. "
+        "REGLAS ABSOLUTAS: "
+        "1. NO uses títulos, headers, ni numeración de secciones. "
+        "2. NO uses bullets, asteriscos para listas, ni markdown estructurado. "
+        "3. NO agregues meta-comentarios como 'aquí tienes el resumen' o 'según lo solicitado'. "
+        "4. NO expliques el proceso de cómo se hizo el resumen. "
+        "5. NO inventes nada que no esté en el resumen. "
+        "6. Mantené TODO el contenido factual: quién dijo qué, temas, decisiones, datos. "
+        "7. Usá tu propio estilo y voz, pero contá la historia tal cual está."
     )
     final_response = complete_with_providers(
         {"role": "system", "content": presentation_system},

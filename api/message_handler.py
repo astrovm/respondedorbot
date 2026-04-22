@@ -1468,7 +1468,9 @@ def _handle_non_ai_command(
             "actualizá el resumen anterior con los mensajes nuevos. "
             "incluí todos los temas tratados, quién dijo qué, las conclusiones, "
             "las decisiones pendientes y cualquier dato relevante. "
-            "no seas conciso: sé exhaustivo, detallado y estructurado."
+            "no seas conciso: sé exhaustivo y detallado. "
+            "IMPORTANTE: NO uses títulos, bullets, numeración de secciones, ni markdown estructurado. "
+            "contá la historia de forma directa y continua, como si la estuvieras narrando en una charla."
         )
         if custom_instruction:
             prompt_text = f"{custom_instruction}. {base_prompt}"

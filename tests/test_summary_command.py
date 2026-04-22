@@ -58,7 +58,7 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
         response_meta = kwargs["response_meta"]
         response_meta["billing_segments"] = [{"usd_micros": 11}]
         assert system_message["role"] == "system"
-        assert "foco custom" in system_message["content"]
+        assert "REGLAS ABSOLUTAS" in system_message["content"]
         assert messages == [{"role": "user", "content": "resumen previo"}]
         return "respuesta final"
 
@@ -110,8 +110,8 @@ def test_handle_summary_command_calls_qwen_for_presentation(monkeypatch):
         response_meta = kwargs["response_meta"]
         response_meta["billing_segments"] = [{"usd_micros": 22}]
         assert system_message["role"] == "system"
-        assert "instruccion" in system_message["content"]
-        assert "nota: el resumen ya fue generado" in system_message["content"]
+        assert "REGLAS ABSOLUTAS" in system_message["content"]
+        assert "NO uses títulos" in system_message["content"]
         assert messages == [{"role": "user", "content": "canon actualizado"}]
         return "presentado por qwen"
 
@@ -186,8 +186,8 @@ def test_handle_summary_command_uses_custom_prompt_for_both_stages(monkeypatch):
     }
     assert calls["render_system"] is not None
     assert calls["render_system"]["role"] == "system"
-    assert custom_focus in calls["render_system"]["content"]
-    assert "nota: el resumen ya fue generado" in calls["render_system"]["content"]
+    assert "REGLAS ABSOLUTAS" in calls["render_system"]["content"]
+    assert "NO uses títulos" in calls["render_system"]["content"]
     assert result.response_text == "respuesta render"
     assert result.pending_summary == "canon"
     assert result.summary_cost == 9
