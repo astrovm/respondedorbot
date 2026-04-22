@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
 from api.ai_pipeline import (
-    INSTRUCCIONES_BASE,
     clean_duplicate_response,
     remove_gordo_prefix,
 )
