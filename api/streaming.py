@@ -55,15 +55,14 @@ class TelegramMessageStreamer:
         self._message_id: Optional[str] = None
         self._last_edit_time = 0.0
         self._done = False
+        self._send_attempted = False
 
-    def start(self) -> str:
-        """Send the initial placeholder message and return its message ID."""
-        message_id = self._send_message(
-            self._chat_id, self._placeholder, self._reply_to_message_id
-        )
-        self._message_id = str(message_id) if message_id is not None else None
+    def start(self) -> None:
         self._last_edit_time = time.time()
-        return self._message_id or ""
+
+    @property
+    def message_id(self) -> Optional[str]:
+        return self._message_id
 
     def _should_edit(self) -> bool:
         if self._done or not self._message_id:
@@ -87,14 +86,27 @@ class TelegramMessageStreamer:
         if self._done:
             return
         self._buffer += token
-        if self._should_edit():
+        if not self._message_id and not self._send_attempted:
+            self._send_attempted = True
+            message_id = self._send_message(
+                self._chat_id, self._buffer, self._reply_to_message_id
+            )
+            self._message_id = str(message_id) if message_id is not None else None
+            self._last_edit_time = time.time()
+            self._sent_text = self._buffer
+        elif self._should_edit():
             self._do_edit()
 
     def finalize(self, final_text: Optional[str] = None) -> str:
-        """Return the final text and mark the stream as done."""
         self._done = True
         text = final_text if final_text is not None else self._buffer
-        if self._message_id and text != self._sent_text:
+        if not self._message_id and not self._send_attempted:
+            self._send_attempted = True
+            message_id = self._send_message(
+                self._chat_id, text, self._reply_to_message_id
+            )
+            self._message_id = str(message_id) if message_id is not None else None
+        elif self._message_id and text != self._sent_text:
             try:
                 self._edit_message(self._chat_id, text, self._message_id)
             except Exception as e:
@@ -131,10 +143,10 @@ def stream_to_telegram(
         placeholder=placeholder,
         reply_to_message_id=reply_to_message_id,
     )
-    message_id = streamer.start()
+    streamer.start()
 
     for _provider_name, token in token_iterator:
         if token:
             streamer.feed(token)
 
-    return streamer.finalize(), message_id
+    return streamer.finalize(), streamer.message_id or ""
