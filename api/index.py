@@ -6367,8 +6367,8 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         ai=MessageAIDeps(
             ai_service=ai_svc,
             balance_formatter=BalanceFormatter(credits_db_service),
-                handle_ai_stream=handle_ai_stream_response,
-                gen_random=gen_random,
+            handle_ai_stream=handle_ai_stream_response,
+            gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
             build_topup_keyboard=build_topup_keyboard,
             credits_db_service=credits_db_service,
