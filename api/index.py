@@ -247,7 +247,7 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
 SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
 SUMMARY_FALLBACK_MODEL = "minimax/minimax-m2.5:free"
-SUMMARY_MAX_TOKENS = 512
+SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
