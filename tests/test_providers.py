@@ -5,6 +5,19 @@ from api.providers.openrouter import OpenRouterProvider
 from api.providers.groq import GroqChatProvider
 
 
+RAW_TOOL_LEAKS = (
+    'web_fetch(',
+    '"tool_calls"',
+    '"function_call"',
+    '"arguments":',
+)
+
+
+def _assert_no_raw_tool_syntax(text: str) -> None:
+    for leak in RAW_TOOL_LEAKS:
+        assert leak not in text
+
+
 class FakeProvider:
     def __init__(self, name: str, available: bool = True, result_text: str = ""):
         self._name = name
@@ -212,3 +225,67 @@ def test_provider_chain_stream_forwards_extra_tools_and_tool_context():
         "extra_tools": extra_tools,
         "tool_context": tool_context,
     }
+
+
+def test_provider_chain_stream_falls_back_with_tool_kwargs_preserved():
+    from api.ai_pricing import AIUsageResult
+
+    class FailingProvider:
+        def __init__(self, name: str) -> None:
+            self._name = name
+            self.complete_calls: list[dict[str, Any]] = []
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def is_available(self) -> bool:
+            return True
+
+        def complete(self, system_message, messages, **kwargs) -> Optional[AIUsageResult]:
+            self.complete_calls.append(kwargs)
+            raise RuntimeError("boom")
+
+    class FallbackProvider(FailingProvider):
+        def complete(self, system_message, messages, **kwargs) -> Optional[AIUsageResult]:
+            self.complete_calls.append(kwargs)
+            return AIUsageResult(
+                kind="chat",
+                text="fallback answer",
+                model="test",
+                usage={},
+                metadata={},
+            )
+
+    extra_tools = [{"type": "function", "function": {"name": "web_fetch"}}]
+    tool_context = {"chat_id": "123"}
+    first = FailingProvider("first")
+    second = FallbackProvider("second")
+    chain = ProviderChain([first, second])
+
+    tokens = list(
+        chain.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=True,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+        )
+    )
+
+    assert tokens == [("second", ""), ("second", "fallback answer")]
+    _assert_no_raw_tool_syntax("".join(token for _, token in tokens))
+    assert first.complete_calls == [
+        {
+            "enable_web_search": True,
+            "extra_tools": extra_tools,
+            "tool_context": tool_context,
+        }
+    ]
+    assert second.complete_calls == [
+        {
+            "enable_web_search": True,
+            "extra_tools": extra_tools,
+            "tool_context": tool_context,
+        }
+    ]
