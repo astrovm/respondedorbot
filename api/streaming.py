@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import time
 from typing import Callable, Iterator, Optional, Tuple
 
 
 SendMessageFn = Callable[[str, str], Optional[int]]
 EditMessageFn = Callable[[str, str, str], None]
+
+
+_streamed_response_metadata: ContextVar[Optional[Tuple[Optional[str], str]]] = ContextVar(
+    "streamed_response_metadata",
+    default=None,
+)
+
+
+def set_streamed_response_metadata(message_id: Optional[str], text: str) -> None:
+    _streamed_response_metadata.set((message_id, text))
+
+
+def extract_stream_metadata() -> Tuple[Optional[str], str]:
+    metadata = _streamed_response_metadata.get()
+    _streamed_response_metadata.set(None)
+    if metadata is None:
+        return None, ""
+    return metadata
 
 
 class TelegramMessageStreamer:

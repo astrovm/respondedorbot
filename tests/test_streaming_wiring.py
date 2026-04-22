@@ -2,9 +2,8 @@ from tests.support import *
 from tests.test_message_handler import _build_message_handler_deps
 
 
-def test_handle_ai_stream_response_returns_sentinel_and_stores_stream_metadata(monkeypatch):
+def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata(monkeypatch):
     from api.index import handle_ai_stream_response
-    from api.message_handler import _STREAMED_SENTINEL
 
     response_meta: dict[str, Any] = {}
     token_iterator = iter([("openrouter", "ho"), ("openrouter", "la")])
@@ -23,7 +22,7 @@ def test_handle_ai_stream_response_returns_sentinel_and_stores_stream_metadata(m
                 timezone_offset=-3,
             )
 
-    assert result == _STREAMED_SENTINEL
+    assert result == "hola"
     ask_stream.assert_called_once_with(
         [{"role": "user", "content": "hola"}],
         chat_id="123",
@@ -40,7 +39,6 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
     from api.message_handler import (
         MessageContext,
         PreparedMessage,
-        _STREAMED_SENTINEL,
         _finalize_message_response,
     )
 
@@ -64,7 +62,7 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
         ),
         reply_context_text=None,
         redis_client=MagicMock(),
-        response_msg=_STREAMED_SENTINEL,
+        response_msg="hola final",
         response_markup=None,
         response_uses_ai=True,
         response_command=None,
@@ -91,7 +89,7 @@ def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
 
     with patch(
         "api.message_handler._run_ai_flow",
-        return_value=("__streamed__", True),
+        return_value=("hola final", True),
     ) as run_ai_flow:
         response = _handle_known_command(
             deps,
@@ -115,6 +113,6 @@ def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
             timezone_offset=-3,
         )
 
-    assert response == ("__streamed__", None, True, None)
+    assert response == ("hola final", None, True, None)
     assert run_ai_flow.call_args.kwargs["handler_func"] is deps.handle_ai_stream
     assert run_ai_flow.call_args.kwargs["is_spontaneous"] is True

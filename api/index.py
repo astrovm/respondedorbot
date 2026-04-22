@@ -125,7 +125,10 @@ from api.ai_pipeline import (
     INSTRUCCIONES_BASE,
     handle_ai_response as _ai_handle_response,
 )
-from api.streaming import stream_to_telegram
+from api.streaming import (
+    set_streamed_response_metadata,
+    stream_to_telegram,
+)
 from api.chat_settings import (
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
@@ -155,10 +158,8 @@ from api.message_handler import (
     MessageMediaDeps,
     MessageRoutingDeps,
     MessageStateDeps,
-    _STREAMED_SENTINEL,
     build_message_handler_deps,
     handle_msg as _handle_msg_impl,
-    set_streamed_response_metadata,
 )
 from api.ai_service import build_ai_service
 from api.routing_policy import RoutingPolicy
@@ -6168,7 +6169,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         ai=MessageAIDeps(
             ai_service=ai_svc,
             balance_formatter=BalanceFormatter(credits_db_service),
-            ask_ai=ask_ai,
             handle_ai_stream=handle_ai_stream_response,
             gen_random=gen_random,
             build_insufficient_credits_message=build_insufficient_credits_message,
@@ -6332,14 +6332,15 @@ def handle_ai_stream_response(
         )
         message_id = _send_message_for_stream(chat_id, final_text)
 
-    set_streamed_response_metadata(message_id or None, final_text)
+    streamed_message_id = str(message_id) if message_id is not None else None
+    set_streamed_response_metadata(streamed_message_id, final_text)
     if response_meta is not None:
         response_meta["billing_segments"] = list(
             cast(List[Dict[str, Any]], response_meta.get("billing_segments") or [])
         )
         response_meta["streamed_text"] = final_text
-        response_meta["streamed_message_id"] = message_id
-    return _STREAMED_SENTINEL
+        response_meta["streamed_message_id"] = streamed_message_id
+    return final_text
 
 
 def update_telegram_bot_commands() -> bool:

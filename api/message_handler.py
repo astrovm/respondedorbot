@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
 from dataclasses import dataclass
 from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
@@ -14,12 +13,7 @@ from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 from api.message_state import DISABLE_COMPACTION_SENTINEL
-
-_STREAMED_SENTINEL = "__streamed__"
-_streamed_response_metadata: ContextVar[Optional[Tuple[Optional[str], str]]] = ContextVar(
-    "streamed_response_metadata",
-    default=None,
-)
+from api.streaming import extract_stream_metadata
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -77,7 +71,6 @@ class MessageStateDeps:
 class MessageAIDeps:
     ai_service: AIService
     balance_formatter: Any
-    ask_ai: Callable[..., str]
     handle_ai_stream: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
@@ -123,19 +116,6 @@ class MessageMediaDeps:
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
 
-
-def set_streamed_response_metadata(message_id: Optional[str], text: str) -> None:
-    _streamed_response_metadata.set((message_id, text))
-
-
-def _extract_stream_metadata() -> Tuple[Optional[str], str]:
-    metadata = _streamed_response_metadata.get()
-    _streamed_response_metadata.set(None)
-    if metadata is None:
-        return None, ""
-    return metadata
-
-
 @dataclass(frozen=True)
 class MessageHandlerDeps:
     config_redis: Callable[[], Any]
@@ -170,7 +150,6 @@ class MessageHandlerDeps:
     ]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
-    ask_ai: Callable[..., str]
     handle_ai_stream: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
@@ -243,7 +222,6 @@ def build_message_handler_deps(
         should_gordo_respond=routing.should_gordo_respond,
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
-        ask_ai=ai.ask_ai,
         handle_ai_stream=ai.handle_ai_stream,
         gen_random=ai.gen_random,
         build_insufficient_credits_message=ai.build_insufficient_credits_message,
@@ -434,12 +412,12 @@ def _finalize_message_response(
         redis_client=redis_client,
     )
 
-    if response_msg == _STREAMED_SENTINEL:
+    if response_uses_ai:
         actual_streamed_message_id = streamed_message_id
         actual_streamed_response_text = streamed_response_text
         if not actual_streamed_message_id and not actual_streamed_response_text:
             actual_streamed_message_id, actual_streamed_response_text = (
-                _extract_stream_metadata()
+                extract_stream_metadata()
             )
         if actual_streamed_message_id:
             deps.save_message_to_redis(
@@ -448,6 +426,21 @@ def _finalize_message_response(
                 actual_streamed_response_text,
                 redis_client,
                 role="assistant",
+            )
+            metadata = (
+                {
+                    "type": "command",
+                    "command": response_command,
+                    "uses_ai": True,
+                }
+                if response_command
+                else {"type": "ai"}
+            )
+            deps.save_bot_message_metadata(
+                redis_client,
+                context.chat_id,
+                actual_streamed_message_id,
+                metadata,
             )
         return "ok"
 
@@ -1498,7 +1491,7 @@ def _handle_non_ai_command(
             prompt_text=prompt_text,
             reply_context_text=None,
             user_identity=user_identity,
-            handler_func=deps.ask_ai,
+            handler_func=deps.handle_ai_stream,
             redis_client=redis_client,
             timezone_offset=timezone_offset,
             compaction_threshold=DISABLE_COMPACTION_SENTINEL,

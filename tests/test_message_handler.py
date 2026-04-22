@@ -261,10 +261,10 @@ def test_handle_msg_streamed_response_saves_final_text_to_redis():
 
     with patch(
         "api.message_handler._run_ai_flow",
-        return_value=("__streamed__", True),
+        return_value=("hola final", True),
     ):
         with patch(
-            "api.message_handler._extract_stream_metadata",
+            "api.message_handler.extract_stream_metadata",
             return_value=("777", "hola final"),
         ):
             result = handle_msg(message, deps)
@@ -563,9 +563,16 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handle_ai_response(*args, **kwargs):
+        from api.streaming import set_streamed_response_metadata
+
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
             response_meta["ai_fallback"] = True
+        sent_message_id = mock_send(str(args[0]), "no boludo")
+        set_streamed_response_metadata(
+            str(sent_message_id) if sent_message_id is not None else None,
+            "no boludo",
+        )
         return "no boludo"
 
     make_deps, _ = _build_message_handler_deps()
@@ -797,7 +804,9 @@ def test_handle_msg():
     mock_redis.lrange.return_value = []
 
     mock_send_msg = MagicMock()
-    mock_ask_ai = MagicMock(return_value="test response")
+    mock_handle_ai_stream = MagicMock(
+        side_effect=_simulate_streamed_ai_response(mock_send_msg, "test response")
+    )
     mock_send_typing = MagicMock()
     mock_charge = MagicMock(return_value={"ok": True, "source": "user"})
     mock_credits = MagicMock()
@@ -811,7 +820,7 @@ def test_handle_msg():
     deps = make_deps(
         config_redis=mock_config_redis,
         send_msg=mock_send_msg,
-        ask_ai=mock_ask_ai,
+        handle_ai_stream=mock_handle_ai_stream,
         send_typing=mock_send_typing,
         check_provider_available=MagicMock(side_effect=[True, False]),
         credits_db_service=mock_credits,
@@ -831,13 +840,13 @@ def test_handle_msg():
     mock_send_typing.reset_mock()
     assert handle_msg(message, deps) == "ok"
     mock_send_msg.assert_called_once()
-    mock_ask_ai.assert_called_once()
+    mock_handle_ai_stream.assert_called_once()
 
     mock_send_msg.reset_mock()
     mock_send_typing.reset_mock()
-    mock_ask_ai.reset_mock()
+    mock_handle_ai_stream.reset_mock()
     assert handle_msg(message, deps) == "ok"
-    mock_ask_ai.assert_not_called()
+    mock_handle_ai_stream.assert_not_called()
 
 
 def test_handle_msg_with_crypto_command():
@@ -1221,8 +1230,7 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     )
     message = _private_voice_message(message_id=1, user_id=88, duration=10)
 
-    with patch("api.index.ask_ai", return_value="respuesta ok"):
-        result = handle_msg(message, deps)
+    result = handle_msg(message, deps)
     assert result == "ok"
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
     assert mock_charge.call_count == 2
@@ -1300,8 +1308,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
     )
     message = _private_voice_message(message_id=1, user_id=88)
 
-    with patch("api.index.ask_ai", return_value="respuesta ok"):
-        result = handle_msg(message, deps)
+    result = handle_msg(message, deps)
 
     assert result == "ok"
     mock_download.assert_called_once_with("voice_123")
@@ -1384,22 +1391,6 @@ def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monk
 def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypatch):
     from api.message_handler import handle_msg
 
-    def fake_handle_ai_response(*args, **kwargs):
-        response_meta = kwargs.get("response_meta")
-        if isinstance(response_meta, dict):
-            response_meta["billing_segments"] = [
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                }
-            ]
-        return "respuesta final"
-
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
@@ -1408,6 +1399,22 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypat
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = mock_charge
+
+    fake_handle_ai_response = _simulate_streamed_ai_response(
+        mock_send_msg,
+        "respuesta final",
+        billing_segments=[
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            }
+        ],
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -1474,7 +1481,7 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits(monkey
         credits_db_service=mock_credits,
         get_chat_history=MagicMock(return_value=[]),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
-        handle_ai_response=MagicMock(return_value="todo piola"),
+        handle_ai_response=_simulate_streamed_ai_response(mock_send_msg, "todo piola"),
     )
     message = _private_photo_message(message_id=22, chat_id=555, user_id=99)
 
@@ -1491,36 +1498,6 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
 ):
     from api.message_handler import handle_msg
 
-    def fake_handle_ai_response(*args, **kwargs):
-        response_meta = kwargs.get("response_meta")
-        if isinstance(response_meta, dict):
-            response_meta["billing_segments"] = [
-                {
-                    "kind": "vision",
-                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-            ]
-        return "todo piola x2"
-
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
@@ -1530,6 +1507,36 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = mock_charge
+
+    fake_handle_ai_response = _simulate_streamed_ai_response(
+        mock_send_msg,
+        "todo piola x2",
+        billing_segments=[
+            {
+                "kind": "vision",
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+        ],
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -1560,23 +1567,6 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
 def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
     from api.message_handler import handle_msg
 
-    def fake_handle_ai_response(*args, **kwargs):
-        response_meta = kwargs.get("response_meta")
-        if isinstance(response_meta, dict):
-            response_meta["billing_segments"] = [
-                {
-                    "kind": "vision",
-                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                },
-            ]
-        return "todo piola"
-
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
@@ -1586,6 +1576,23 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = MagicMock(
         return_value={"ok": True, "source": "user"}
+    )
+
+    fake_handle_ai_response = _simulate_streamed_ai_response(
+        mock_send_msg,
+        "todo piola",
+        billing_segments=[
+            {
+                "kind": "vision",
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ],
     )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
@@ -1667,7 +1674,7 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
         build_ai_messages=MagicMock(
             return_value=[{"role": "user", "content": "investigá eso"}]
         ),
-        handle_ai_response=MagicMock(return_value="respuesta ok"),
+        handle_ai_response=_simulate_streamed_ai_response(mock_send_msg, "respuesta ok"),
     )
     message = {
         "message_id": 201,
@@ -1694,31 +1701,6 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
 ):
     from api.message_handler import handle_msg
 
-    def fake_handle_ai_response(*args, **kwargs):
-        response_meta = kwargs.get("response_meta")
-        if isinstance(response_meta, dict):
-            response_meta["billing_segments"] = [
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-            ]
-        return "respuesta ok"
-
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
@@ -1727,6 +1709,31 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = mock_charge
+
+    fake_handle_ai_response = _simulate_streamed_ai_response(
+        mock_send_msg,
+        "respuesta ok",
+        billing_segments=[
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+        ],
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -1763,7 +1770,9 @@ def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_bloc
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
     mock_send_msg = MagicMock()
-    mock_handle_ai_response = MagicMock(return_value="respuesta ok")
+    mock_handle_ai_response = MagicMock(
+        side_effect=_simulate_streamed_ai_response(mock_send_msg, "respuesta ok")
+    )
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = MagicMock(
@@ -1794,47 +1803,11 @@ def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_bloc
 
     assert result == "ok"
     mock_handle_ai_response.assert_called_once()
-    mock_send_msg.assert_called_once_with(
-        "777", "respuesta ok", "301", reply_markup=None
-    )
+    mock_send_msg.assert_called_once_with("777", "respuesta ok")
 
 
 def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeypatch):
     from api.message_handler import handle_msg
-
-    def fake_handle_ai_response(*args, **kwargs):
-        response_meta = kwargs.get("response_meta")
-        if isinstance(response_meta, dict):
-            response_meta["billing_segments"] = [
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-                {
-                    "kind": "chat",
-                    "model": "qwen/qwen3.6-plus",
-                    "usage": {
-                        "input_tokens": 1,
-                        "input_non_cached_tokens": 1,
-                        "output_tokens": 1,
-                    },
-                },
-            ]
-        return "respuesta ok x3"
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1844,6 +1817,40 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.charge_ai_credits = mock_charge
+
+    fake_handle_ai_response = _simulate_streamed_ai_response(
+        mock_send_msg,
+        "respuesta ok x3",
+        billing_segments=[
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+            {
+                "kind": "chat",
+                "model": "qwen/qwen3.6-plus",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_non_cached_tokens": 1,
+                    "output_tokens": 1,
+                },
+            },
+        ],
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -2094,8 +2101,9 @@ def _private_photo_message(*, message_id=1, chat_id=123, user_id=88, file_id="im
 def _build_message_handler_flat_defaults(redis_client, mock_credits):
     from api.command_registry import parse_command as _parse_command
     from api import index as _api_index
+    from api.streaming import set_streamed_response_metadata
 
-    return {
+    defaults = {
         "config_redis": lambda: redis_client,
         "get_chat_config": lambda _rc, _cid: dict(CHAT_CONFIG_DEFAULTS),
         "initialize_commands": _api_index.initialize_commands,
@@ -2122,7 +2130,6 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
             return_value=[{"role": "user", "content": "hola"}]
         ),
         "handle_ai_response": _api_index.handle_ai_response,
-        "ask_ai": MagicMock(return_value="respuesta ok"),
         "gen_random": MagicMock(return_value="random"),
         "build_insufficient_credits_message": MagicMock(
             return_value="insufficient credits"
@@ -2160,6 +2167,18 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "persist_reservation": MagicMock(),
         "clear_persisted_reservation": MagicMock(),
     }
+
+    def _default_handle_ai_stream(messages, *, chat_id=None, **_kwargs):
+        response_text = str(messages[0].get("content") or "respuesta ok")
+        sent_message_id = defaults["send_msg"](str(chat_id or ""), response_text)
+        set_streamed_response_metadata(
+            str(sent_message_id) if sent_message_id is not None else None,
+            response_text,
+        )
+        return response_text
+
+    defaults["handle_ai_stream"] = MagicMock(side_effect=_default_handle_ai_stream)
+    return defaults
 
 
 def _build_test_ai_service(flat_defaults):
@@ -2230,8 +2249,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
         ai=MessageAIDeps(
             ai_service=ai_service,
             balance_formatter=flat_defaults["balance_formatter"],
-            ask_ai=flat_defaults["ask_ai"],
-            handle_ai_stream=flat_defaults.get("handle_ai_stream", flat_defaults["ask_ai"]),
+            handle_ai_stream=flat_defaults["handle_ai_stream"],
             gen_random=flat_defaults["gen_random"],
             build_insufficient_credits_message=flat_defaults[
                 "build_insufficient_credits_message"
@@ -2299,6 +2317,27 @@ def _build_message_handler_deps():
     return make_deps, redis_client
 
 
+def _simulate_streamed_ai_response(mock_send_msg, response_text, billing_segments=None):
+    from api.streaming import set_streamed_response_metadata
+
+    def _fake_handle_ai_response(*args, **kwargs):
+        if args and isinstance(args[0], list):
+            chat_id = str(kwargs.get("chat_id") or "")
+        else:
+            chat_id = str(args[0])
+        response_meta = kwargs.get("response_meta")
+        if isinstance(response_meta, dict) and billing_segments is not None:
+            response_meta["billing_segments"] = billing_segments
+        sent_message_id = mock_send_msg(chat_id, response_text)
+        set_streamed_response_metadata(
+            str(sent_message_id) if sent_message_id is not None else None,
+            response_text,
+        )
+        return response_text
+
+    return _fake_handle_ai_response
+
+
 def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
     from api.message_handler import (
         MessageAIDeps,
@@ -2345,7 +2384,6 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
         ),
         ai=MessageAIDeps(
             ai_service=ai_service,
-            ask_ai=MagicMock(),
             handle_ai_stream=MagicMock(return_value="streamed response"),
             gen_random=MagicMock(),
             build_insufficient_credits_message=MagicMock(),
@@ -2563,12 +2601,18 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
-    mock_handle_ai_stream = MagicMock(return_value="respuesta ok")
-
     make_deps, redis_client = _build_message_handler_deps()
+    mock_send_msg = MagicMock(return_value=999)
+    mock_handle_ai_stream = MagicMock(
+        side_effect=_simulate_streamed_ai_response(mock_send_msg, "respuesta ok")
+    )
+    mock_save_message = MagicMock()
+    mock_save_metadata = MagicMock()
     deps = make_deps(
-        send_msg=MagicMock(return_value=999),
+        send_msg=mock_send_msg,
         handle_ai_stream=mock_handle_ai_stream,
+        save_message_to_redis=mock_save_message,
+        save_bot_message_metadata=mock_save_metadata,
     )
 
     message = {
@@ -2582,13 +2626,15 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
 
     assert result == "ok"
     assert mock_handle_ai_stream.called
-    deps.send_msg.assert_called_once_with(
-        "555", "respuesta ok", "401", reply_markup=None
+    mock_send_msg.assert_called_once()
+    assert mock_send_msg.call_args.args[1] == "respuesta ok"
+    mock_save_message.assert_any_call(
+        "555", "bot_999", "respuesta ok", redis_client, role="assistant"
     )
-    deps.save_bot_message_metadata.assert_called_once_with(
+    mock_save_metadata.assert_called_once_with(
         redis_client,
         "555",
-        999,
+        "999",
         {"type": "command", "command": "/ask", "uses_ai": True},
     )
 
@@ -2596,16 +2642,24 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
 def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
     from api.ai_service import AIConversationRequest
     from api.message_handler import handle_msg
+    from api.streaming import set_streamed_response_metadata
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     ai_service = MagicMock()
-    ai_service.run_conversation.return_value = ("respuesta ai", True)
+    def run_conversation(_request):
+        set_streamed_response_metadata("999", "respuesta ai")
+        return ("respuesta ai", True)
+
+    ai_service.run_conversation.side_effect = run_conversation
 
     make_deps, _ = _build_message_handler_deps()
+    mock_send_msg = MagicMock(return_value=999)
+    mock_save_message = MagicMock()
     deps = make_deps(
         ai_service=ai_service,
-        send_msg=MagicMock(return_value=999),
+        send_msg=mock_send_msg,
+        save_message_to_redis=mock_save_message,
     )
 
     message = {
@@ -2624,24 +2678,34 @@ def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
     assert request.chat_id == "557"
     assert request.prompt_text == "hola"
     assert request.is_spontaneous is False
-    deps.send_msg.assert_called_once_with(
-        "557", "respuesta ai", "501", reply_markup=None
+    assert request.handler_func is deps.handle_ai_stream
+    mock_send_msg.assert_not_called()
+    mock_save_message.assert_any_call(
+        "557", "bot_999", "respuesta ai", ANY, role="assistant"
     )
 
 
 def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypatch):
     from api.ai_service import AIConversationRequest
     from api.message_handler import handle_msg
+    from api.streaming import set_streamed_response_metadata
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     ai_service = MagicMock()
-    ai_service.run_conversation.return_value = ("respuesta espontanea", True)
+    def run_conversation(_request):
+        set_streamed_response_metadata("999", "respuesta espontanea")
+        return ("respuesta espontanea", True)
+
+    ai_service.run_conversation.side_effect = run_conversation
 
     make_deps, _ = _build_message_handler_deps()
+    mock_send_msg = MagicMock(return_value=999)
+    mock_save_message = MagicMock()
     deps = make_deps(
         ai_service=ai_service,
-        send_msg=MagicMock(return_value=999),
+        send_msg=mock_send_msg,
+        save_message_to_redis=mock_save_message,
         should_gordo_respond=MagicMock(return_value=True),
     )
 
@@ -2660,10 +2724,11 @@ def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypa
     assert isinstance(request, AIConversationRequest)
     assert request.chat_id == "558"
     assert request.prompt_text == "hola gordo"
-    assert request.handler_func is deps.ask_ai
+    assert request.handler_func is deps.handle_ai_stream
     assert request.is_spontaneous is True
-    deps.send_msg.assert_called_once_with(
-        "558", "respuesta espontanea", "502", reply_markup=None
+    mock_send_msg.assert_not_called()
+    mock_save_message.assert_any_call(
+        "558", "bot_999", "respuesta espontanea", ANY, role="assistant"
     )
 
 
@@ -2671,7 +2736,13 @@ def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeyp
     from api.message_handler import handle_msg
 
     make_deps, redis_client = _build_message_handler_deps()
-    deps = make_deps(should_gordo_respond=MagicMock(return_value=False))
+    mock_send_msg = MagicMock()
+    mock_save_message = MagicMock()
+    deps = make_deps(
+        should_gordo_respond=MagicMock(return_value=False),
+        send_msg=mock_send_msg,
+        save_message_to_redis=mock_save_message,
+    )
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     message = {
@@ -2684,9 +2755,9 @@ def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeyp
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    deps.send_msg.assert_not_called()
-    deps.save_message_to_redis.assert_called_once()
-    args, kwargs = deps.save_message_to_redis.call_args
+    mock_send_msg.assert_not_called()
+    mock_save_message.assert_called_once()
+    args, kwargs = mock_save_message.call_args
     assert args == ("556", "402", "Ana: hola gordo", redis_client)
     assert kwargs["role"] == "user"
     assert kwargs["user_id"] == "1002"
@@ -2698,11 +2769,12 @@ def test_handle_msg_with_unknown_command():
     mock_config_redis = MagicMock()
     mock_redis = MagicMock()
     mock_config_redis.return_value = mock_redis
+    mock_send_msg = MagicMock()
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(
         config_redis=mock_config_redis,
-        send_msg=MagicMock(),
+        send_msg=mock_send_msg,
         check_provider_available=MagicMock(return_value=True),
         should_gordo_respond=MagicMock(return_value=False),
     )
@@ -2716,7 +2788,7 @@ def test_handle_msg_with_unknown_command():
 
     result = handle_msg(message, deps)
     assert result == "ok"
-    deps.send_msg.assert_not_called()
+    mock_send_msg.assert_not_called()
 
 
 def test_handle_msg_with_exception():
@@ -2760,7 +2832,9 @@ def test_handle_msg_edge_cases(monkeypatch):
 
     mock_send_msg = MagicMock()
     mock_send_typing = MagicMock()
-    mock_ask_ai = MagicMock(return_value="test response")
+    mock_handle_ai_stream = MagicMock(
+        side_effect=_simulate_streamed_ai_response(mock_send_msg, "test response")
+    )
     mock_should_respond = MagicMock(return_value=False)
     mock_admin_report = MagicMock()
     mock_cached_requests = MagicMock(return_value=None)
@@ -2777,7 +2851,7 @@ def test_handle_msg_edge_cases(monkeypatch):
         gen_random=MagicMock(return_value="no boludo"),
         cached_requests=mock_cached_requests,
         admin_report=mock_admin_report,
-        ask_ai=mock_ask_ai,
+        handle_ai_stream=mock_handle_ai_stream,
         should_gordo_respond=mock_should_respond,
         check_provider_available=MagicMock(return_value=True),
         credits_db_service=mock_credits,
@@ -2800,9 +2874,8 @@ def test_handle_msg_edge_cases(monkeypatch):
     message["text"] = "test"
     mock_send_msg.reset_mock()
     assert handle_msg(message, deps) == "ok"
-    mock_send_msg.assert_called_once_with(
-        "456", "test response", "123", reply_markup=None
-    )
+    mock_send_msg.assert_called_once()
+    assert mock_send_msg.call_args.args[1] == "test response"
 
     mock_redis.get.side_effect = lambda key: "invalid json"
     mock_send_msg.reset_mock()
