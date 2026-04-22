@@ -3062,7 +3062,7 @@ def ask_ai_stream(
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
 ) -> Iterator[Tuple[str, str]]:
-    system_message, messages, _extra_tools, _tool_context = _build_ai_request(
+    system_message, messages, extra_tools, tool_context = _build_ai_request(
         messages,
         chat_id=chat_id,
         user_name=user_name,
@@ -3076,6 +3076,8 @@ def ask_ai_stream(
         system_message,
         messages,
         enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
     )
 
 
@@ -3146,12 +3148,16 @@ def stream_with_providers(
     messages: List[Dict[str, Any]],
     *,
     enable_web_search: bool = True,
+    extra_tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> Iterator[Tuple[str, str]]:
     chain = get_provider_chain()
     return chain.stream(
         system_message,
         messages,
         enable_web_search=enable_web_search,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
     )
 
 

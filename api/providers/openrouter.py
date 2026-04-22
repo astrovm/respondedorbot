@@ -80,30 +80,42 @@ class OpenRouterProvider(StreamingAIProvider):
         messages: List[Dict[str, Any]],
         *,
         enable_web_search: bool = True,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         client = self._get_client()
         if client is None:
             return
 
-        self._increment_request_count()
-        request_kwargs: Dict[str, Any] = {
-            "model": self._primary_model,
-            "messages": [system_message] + list(messages),
-            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-            "stream": True,
-        }
-        if enable_web_search:
-            request_kwargs["extra_body"] = {
-                "reasoning": {"effort": "low"}
-            }
+        has_tools = bool(extra_tools) or enable_web_search
 
         try:
-            for chunk in client.chat.completions.create(**request_kwargs):
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    yield delta.content
+            if not has_tools:
+                self._increment_request_count()
+                request_kwargs: Dict[str, Any] = {
+                    "model": self._primary_model,
+                    "messages": [system_message] + list(messages),
+                    "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+                    "stream": True,
+                }
+
+                for chunk in client.chat.completions.create(**request_kwargs):
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        yield delta.content
+                return
+
+            result = self._runtime.complete(
+                system_message,
+                messages,
+                enable_web_search=enable_web_search,
+                extra_tools=extra_tools,
+                tool_context=tool_context,
+            )
+            if result and result.text:
+                yield result.text
         except Exception as error:
             self._admin_report(
                 f"OpenRouter stream error model={self._primary_model}",

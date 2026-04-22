@@ -177,3 +177,125 @@ def test_run_ai_flow_uses_user_message_id_not_reply_to_message_id():
     request_arg = mock_service.run_conversation.call_args[0][0]
     assert isinstance(request_arg, AIConversationRequest)
     assert request_arg.reply_to_message_id == "42"
+
+
+def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
+    from api.index import ask_ai_stream
+
+    system_message = {"role": "system", "content": "sys"}
+    rewritten_messages = [{"role": "user", "content": "hola"}]
+    extra_tools = [{"type": "function", "function": {"name": "echo"}}]
+    tool_context = {"chat_id": "123"}
+    stream_result = iter([("openrouter", "ok")])
+
+    with patch(
+        "api.index._build_ai_request",
+        return_value=(system_message, rewritten_messages, extra_tools, tool_context),
+    ):
+        with patch("api.index.stream_with_providers", return_value=stream_result) as stream_call:
+            result = ask_ai_stream(
+                [{"role": "user", "content": "hola"}],
+                enable_web_search=False,
+                chat_id="123",
+                user_name="@ana",
+                user_id=55,
+                timezone_offset=-3,
+            )
+
+    assert result is stream_result
+    stream_call.assert_called_once_with(
+        system_message,
+        rewritten_messages,
+        enable_web_search=False,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
+    )
+
+
+def test_stream_with_providers_forwards_extra_tools_and_tool_context():
+    from api.index import stream_with_providers
+
+    chain = MagicMock()
+    chain.stream.return_value = iter([("openrouter", "ok")])
+    extra_tools = [{"type": "function", "function": {"name": "echo"}}]
+    tool_context = {"chat_id": "123"}
+
+    with patch("api.index.get_provider_chain", return_value=chain):
+        result = stream_with_providers(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=False,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+        )
+        tokens = list(result)
+
+    assert tokens == [("openrouter", "ok")]
+    chain.stream.assert_called_once_with(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "hola"}],
+        enable_web_search=False,
+        extra_tools=extra_tools,
+        tool_context=tool_context,
+    )
+
+
+def test_provider_chain_stream_uses_complete_fallback_for_tool_requests():
+    from api.ai_pricing import AIUsageResult
+    from api.providers.base import ProviderChain
+
+    class CompleteOnlyProvider:
+        def __init__(self, name: str, result_text: Optional[str]) -> None:
+            self._name = name
+            self._result_text = result_text
+            self.complete_calls: list[dict[str, Any]] = []
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def is_available(self) -> bool:
+            return True
+
+        def complete(self, system_message, messages, **kwargs):
+            self.complete_calls.append(kwargs)
+            if self._result_text is None:
+                return None
+            return AIUsageResult(
+                kind="chat",
+                text=self._result_text,
+                model="test-model",
+                usage={},
+            )
+
+    extra_tools = [{"type": "function", "function": {"name": "echo"}}]
+    tool_context = {"chat_id": "123"}
+    first = CompleteOnlyProvider("first", None)
+    second = CompleteOnlyProvider("second", "hola final")
+    chain = ProviderChain([first, second])
+
+    tokens = list(
+        chain.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=False,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+        )
+    )
+
+    assert tokens == [("second", ""), ("second", "hola final")]
+    assert first.complete_calls == [
+        {
+            "enable_web_search": False,
+            "extra_tools": extra_tools,
+            "tool_context": tool_context,
+        }
+    ]
+    assert second.complete_calls == [
+        {
+            "enable_web_search": False,
+            "extra_tools": extra_tools,
+            "tool_context": tool_context,
+        }
+    ]

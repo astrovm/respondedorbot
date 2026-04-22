@@ -44,6 +44,8 @@ class StreamingAIProvider(AIProvider, Protocol):
         messages: List[Dict[str, Any]],
         *,
         enable_web_search: bool = True,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         """Stream response tokens."""
         ...
@@ -115,23 +117,43 @@ class ProviderChain:
         messages: List[Dict[str, Any]],
         *,
         enable_web_search: bool = True,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Tuple[str, str]]:
         """Stream from the first available streaming provider.
 
         Yields (provider_name, token) tuples.
         Raises RuntimeError if no streaming provider is available.
         """
+        has_tools = bool(extra_tools) or enable_web_search
+
         for provider in self.available_providers:
-            if not isinstance(provider, StreamingAIProvider):
-                continue
             try:
-                yield provider.name, ""
-                for token in provider.stream(
+                if not has_tools:
+                    if not isinstance(provider, StreamingAIProvider):
+                        continue
+                    yield provider.name, ""
+                    for token in provider.stream(
+                        system_message,
+                        messages,
+                        enable_web_search=enable_web_search,
+                        extra_tools=extra_tools,
+                        tool_context=tool_context,
+                    ):
+                        yield provider.name, token
+                    return
+
+                result = provider.complete(
                     system_message,
                     messages,
                     enable_web_search=enable_web_search,
-                ):
-                    yield provider.name, token
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
+                )
+                if result is None:
+                    continue
+                yield provider.name, ""
+                yield provider.name, result.text
                 return
             except Exception as e:
                 print(f"Streaming provider {provider.name} failed: {e}")
