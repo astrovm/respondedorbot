@@ -191,7 +191,7 @@ class ProviderRuntime:
                 )
 
             print(
-                f"_get_openrouter_ai_response_result: unexpected finish_reason={finish_reason!r} model={self._deps.primary_model}"
+                f"provider_runtime: unexpected finish_reason={finish_reason!r} model={self._deps.primary_model}"
             )
             self._deps.admin_report(
                 f"OpenRouter unexpected finish_reason={finish_reason!r}",

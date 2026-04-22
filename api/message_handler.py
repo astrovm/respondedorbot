@@ -13,6 +13,7 @@ from api.ai_service import AIConversationRequest, AIService
 from api.chat_context import format_user_identity
 from api.credit_units import format_credit_units, parse_credit_units
 from api.message_state import DISABLE_COMPACTION_SENTINEL
+from api.streaming import extract_stream_metadata
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -70,7 +71,7 @@ class MessageStateDeps:
 class MessageAIDeps:
     ai_service: AIService
     balance_formatter: Any
-    ask_ai: Callable[..., str]
+    handle_ai_stream: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
@@ -115,7 +116,6 @@ class MessageMediaDeps:
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
 
-
 @dataclass(frozen=True)
 class MessageHandlerDeps:
     config_redis: Callable[[], Any]
@@ -150,7 +150,7 @@ class MessageHandlerDeps:
     ]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
-    ask_ai: Callable[..., str]
+    handle_ai_stream: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
@@ -222,7 +222,7 @@ def build_message_handler_deps(
         should_gordo_respond=routing.should_gordo_respond,
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
-        ask_ai=ai.ask_ai,
+        handle_ai_stream=ai.handle_ai_stream,
         gen_random=ai.gen_random,
         build_insufficient_credits_message=ai.build_insufficient_credits_message,
         build_topup_keyboard=ai.build_topup_keyboard,
@@ -409,6 +409,35 @@ def _finalize_message_response(
         reply_context_text=reply_context_text,
         redis_client=redis_client,
     )
+
+    if response_uses_ai:
+        actual_streamed_message_id, actual_streamed_response_text = (
+            extract_stream_metadata()
+        )
+        if actual_streamed_message_id:
+            deps.save_message_to_redis(
+                context.chat_id,
+                f"bot_{actual_streamed_message_id}",
+                actual_streamed_response_text,
+                redis_client,
+                role="assistant",
+            )
+            metadata = (
+                {
+                    "type": "command",
+                    "command": response_command,
+                    "uses_ai": True,
+                }
+                if response_command
+                else {"type": "ai"}
+            )
+            deps.save_bot_message_metadata(
+                redis_client,
+                context.chat_id,
+                actual_streamed_message_id,
+                metadata,
+            )
+        return "ok"
 
     if response_msg:
         _send_response_and_store_metadata(
@@ -932,7 +961,7 @@ def _save_replied_message_context(
         return
 
     formatted_reply = deps.format_user_message(
-        cast(Dict[str, Any], reply_msg), reply_text
+        cast(Dict[str, Any], reply_msg), reply_text, None
     )
     deps.save_message_to_redis(chat_id, reply_id, formatted_reply, redis_client)
 
@@ -1068,11 +1097,14 @@ def _handle_admin_printcredits_command(
             command,
         )
 
+    if user_id is None:
+        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+
     try:
         mint_result = deps.credits_db_service.mint_user_credits(
-            user_id=int(user_id),
+            user_id=user_id,
             amount=amount,
-            actor_user_id=int(user_id),
+            actor_user_id=user_id,
         )
     except Exception as error:
         deps.admin_report(
@@ -1454,7 +1486,7 @@ def _handle_non_ai_command(
             prompt_text=prompt_text,
             reply_context_text=None,
             user_identity=user_identity,
-            handler_func=deps.ask_ai,
+            handler_func=deps.handle_ai_stream,
             redis_client=redis_client,
             timezone_offset=timezone_offset,
             compaction_threshold=DISABLE_COMPACTION_SENTINEL,
@@ -1541,7 +1573,7 @@ def _handle_non_ai_command(
         else:
             billing_helper.settle_reserved_ai_credits_batch(
                 [media_charge_meta] if media_charge_meta else [],
-                billing_segments,
+                cast(List[Mapping[str, Any]], billing_segments),
                 reason="transcribe_command_success",
             )
         return response_msg, None, False, command
@@ -1653,7 +1685,7 @@ def _handle_known_command(
         return response
 
     if command in commands:
-        handler_func, uses_ai, _ = commands[command]
+        _handler_func, uses_ai, _ = commands[command]
         response_command = command
 
         if uses_ai:
@@ -1667,7 +1699,7 @@ def _handle_known_command(
                 prompt_text=sanitized_message_text,
                 reply_context_text=reply_context_text,
                 user_identity=user_identity,
-                handler_func=handler_func,
+                handler_func=deps.handle_ai_stream,
                 redis_client=redis_client,
                 timezone_offset=timezone_offset,
             )
@@ -1698,7 +1730,7 @@ def _handle_known_command(
         prompt_text=prepared_message.message_text,
         reply_context_text=reply_context_text,
         user_identity=user_identity,
-        handler_func=deps.ask_ai,
+        handler_func=deps.handle_ai_stream,
         redis_client=redis_client,
         timezone_offset=timezone_offset,
         is_spontaneous=True,
@@ -1808,7 +1840,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             prepared_message=prepared_message,
             reply_context_text=intent.reply_context_text,
             redis_client=runtime.redis_client,
-            response_msg=response_msg,
+            response_msg=response_msg or "",
             response_markup=response_markup,
             response_uses_ai=response_uses_ai,
             response_command=response_command,

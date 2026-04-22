@@ -1,4 +1,57 @@
+from types import SimpleNamespace
+
 from tests.support import *
+from api.providers.base import ProviderResult
+
+
+def _build_provider_runtime(*, client, tool_runtime=None):
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    runtime_tool_runtime = tool_runtime or ToolRuntime(print_fn=lambda *_args: None)
+    return ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": "firecrawl",
+                    "max_results": 10,
+                    "max_total_results": 30,
+                },
+            },
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda response: getattr(response, "usage", {}),
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        runtime_tool_runtime,
+    )
+
+
+def _build_chat_response(*, text, finish_reason="stop", annotations=None, usage=None):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(
+                    content=text,
+                    annotations=annotations or [],
+                    tool_calls=[],
+                ),
+            )
+        ],
+        usage=usage or {"prompt_tokens": 0, "completion_tokens": 0},
+    )
 
 
 def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch):
@@ -61,34 +114,30 @@ def test_api_index_does_not_expose_unused_agent_limits():
     assert not hasattr(index, "AGENT_MAX_WEB_SEARCHES")
 
 
-def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
-    from api.index import _get_openrouter_ai_response_result
+def test_api_index_does_not_expose_dead_openrouter_result_helper():
+    from api import index
 
-    message = MagicMock(content="respuesta con busqueda")
-    message.annotations = [
-        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
-        {"type": "url_citation", "url_citation": {"url": "https://example.com/2"}},
-    ]
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=message,
-        )
-    ]
-    response.usage = {
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-    }
+    assert not hasattr(index, "_get_openrouter_ai_response_result")
+
+
+def test_provider_runtime_enables_firecrawl_web_search():
+    response = _build_chat_response(
+        text="respuesta con busqueda",
+        annotations=[
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/2"}},
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 5},
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "btc news"}],
-            enable_web_search=True,
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "btc news"}],
+        enable_web_search=True,
+    )
 
     assert result is not None
     assert result.text == "respuesta con busqueda"
@@ -106,131 +155,102 @@ def test_get_openrouter_ai_response_result_enables_firecrawl_web_search():
     ]
 
 
-def test_get_openrouter_ai_response_result_ignores_invalid_web_search_requests():
-    from api.index import _get_openrouter_ai_response_result
-
-    message = MagicMock(content="respuesta final")
-    message.annotations = []
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=message,
-        )
-    ]
-    response.usage = {
+def test_provider_runtime_ignores_invalid_web_search_requests():
+    response = _build_chat_response(
+        text="respuesta final",
+        usage={
         "prompt_tokens": 7,
         "completion_tokens": 3,
         "server_tool_use": {"web_search_requests": "not-an-int"},
-    }
+        },
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "hola"}],
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "hola"}],
+    )
 
     assert result is not None
     assert result.text == "respuesta final"
     assert result.metadata["provider"] == "openrouter"
+    assert "web_search_requests" not in result.metadata
 
 
-def test_get_openrouter_ai_response_result_server_tool_use_takes_priority():
-    from api.index import _get_openrouter_ai_response_result
-
-    message = MagicMock(content="respuesta con busqueda")
-    message.annotations = [
-        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
-    ]
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=message,
-        )
-    ]
-    response.usage = {
+def test_provider_runtime_server_tool_use_takes_priority():
+    response = _build_chat_response(
+        text="respuesta con busqueda",
+        annotations=[
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+        ],
+        usage={
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "server_tool_use": {"web_search_requests": 3},
-    }
+        },
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "btc news"}],
-            enable_web_search=True,
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "btc news"}],
+        enable_web_search=True,
+    )
 
     assert result is not None
     assert result.metadata["web_search_requests"] == 3
 
 
-def test_get_openrouter_ai_response_result_detects_pydantic_annotation():
-    from api.index import _get_openrouter_ai_response_result
-
+def test_provider_runtime_detects_pydantic_annotation():
     ann = MagicMock()
     ann.type = "url_citation"
     ann.url_citation = MagicMock(url="https://example.com/1")
-
-    message = MagicMock(content="respuesta con busqueda")
-    message.annotations = [ann]
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=message,
-        )
-    ]
-    response.usage = {
+    response = _build_chat_response(
+        text="respuesta con busqueda",
+        annotations=[ann],
+        usage={
         "prompt_tokens": 10,
         "completion_tokens": 5,
-    }
+        },
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "btc news"}],
-            enable_web_search=True,
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "btc news"}],
+        enable_web_search=True,
+    )
 
     assert result is not None
     assert result.metadata["web_search_requests"] == 1
 
 
-def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
-    from api.index import _get_openrouter_ai_response_result
-
-    message = MagicMock(content="respuesta con busqueda")
-    message.annotations = [
-        {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
-    ]
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=message,
-        )
-    ]
-    response.usage = {
+def test_provider_runtime_sets_explicit_web_search_limits():
+    response = _build_chat_response(
+        text="respuesta con busqueda",
+        annotations=[
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/1"}},
+        ],
+        usage={
         "prompt_tokens": 10,
         "completion_tokens": 5,
-    }
+        },
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "btc news"}],
-            enable_web_search=True,
-        )
+    runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "btc news"}],
+        enable_web_search=True,
+    )
 
     assert client.chat.completions.create.call_args.kwargs["tools"] == [
         {
@@ -244,25 +264,19 @@ def test_get_openrouter_ai_response_result_sets_explicit_web_search_limits():
     ]
 
 
-def test_get_openrouter_ai_response_result_includes_web_search_by_default():
-    from api.index import _get_openrouter_ai_response_result
-
-    response = MagicMock()
-    response.choices = [
-        MagicMock(
-            finish_reason="stop",
-            message=MagicMock(content="respuesta normal"),
-        )
-    ]
-    response.usage = {"prompt_tokens": 10, "completion_tokens": 5}
+def test_provider_runtime_includes_web_search_by_default():
+    response = _build_chat_response(
+        text="respuesta normal",
+        usage={"prompt_tokens": 10, "completion_tokens": 5},
+    )
     client = MagicMock()
     client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index._get_openrouter_client", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "hola"}],
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "hola"}],
+    )
 
     assert result is not None
     assert "tools" in client.chat.completions.create.call_args.kwargs
@@ -971,13 +985,16 @@ def test_complete_with_providers_openrouter_success():
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = openrouter_result
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=openrouter_result,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(system_message, messages)
 
         assert result == "OpenRouter response"
-        mock_openrouter.assert_called_once()
+        mock_chain.return_value.complete.assert_called_once()
 
 
 def test_complete_with_providers_returns_none_when_openrouter_fails():
@@ -985,13 +1002,16 @@ def test_complete_with_providers_returns_none_when_openrouter_fails():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = None
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=None,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(system_message, messages)
 
         assert result is None
-        mock_openrouter.assert_called_once()
+        mock_chain.return_value.complete.assert_called_once()
 
 
 def test_complete_with_providers_records_openrouter_billing_on_success(monkeypatch):
@@ -1014,8 +1034,11 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index._get_openrouter_ai_response_result") as mock_openrouter:
-        mock_openrouter.return_value = openrouter_result
+    with patch("api.index.get_provider_chain") as mock_chain:
+        mock_chain.return_value.complete.return_value = ProviderResult(
+            result=openrouter_result,
+            provider_name="openrouter",
+        )
 
         result = complete_with_providers(
             system_message, messages, response_meta=response_meta
@@ -1025,29 +1048,15 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
     assert response_meta["billing_segments"] == [openrouter_result.billing_segment()]
 
 
-def test_get_openrouter_ai_response_result_returns_none_when_primary_model_fails(
-    monkeypatch,
-):
-    from api.index import PRIMARY_CHAT_MODEL, _get_openrouter_ai_response_result
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
-
-    def create_side_effect(*args, **kwargs):
-        if kwargs.get("model") == PRIMARY_CHAT_MODEL:
-            raise Exception("primary failed")
-        raise AssertionError("unexpected secondary model call")
-
+def test_provider_runtime_returns_none_when_primary_model_fails():
     client = MagicMock()
-    client.chat.completions.create.side_effect = create_side_effect
+    client.chat.completions.create.side_effect = Exception("primary failed")
+    runtime = _build_provider_runtime(client=client)
 
-    with patch("api.index.OpenAI", return_value=client):
-        result = _get_openrouter_ai_response_result(
-            {"role": "system", "content": "system"},
-            [{"role": "user", "content": "hola"}],
-        )
+    result = runtime.complete(
+        {"role": "system", "content": "system"},
+        [{"role": "user", "content": "hola"}],
+    )
 
     assert result is None
 
