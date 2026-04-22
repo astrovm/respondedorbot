@@ -85,7 +85,6 @@ class ProviderChain:
         if not available:
             return ProviderResult(result=None, provider_name="none")
 
-        last_error: Optional[Exception] = None
         for idx, provider in enumerate(available):
             try:
                 result = provider.complete(
@@ -103,7 +102,6 @@ class ProviderChain:
                     )
             except Exception as e:
                 print(f"Provider {provider.name} failed: {e}")
-                last_error = e
                 continue
 
         return ProviderResult(

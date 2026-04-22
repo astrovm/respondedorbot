@@ -1,6 +1,6 @@
 from tests.support import *
 
-from api.providers.base import AIProvider, ProviderChain, ProviderResult
+from api.providers.base import ProviderChain
 from api.providers.openrouter import OpenRouterProvider
 from api.providers.groq import GroqChatProvider
 
