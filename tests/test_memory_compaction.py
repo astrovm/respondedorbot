@@ -1,6 +1,52 @@
 from tests.support import *
 
 
+def test_incremental_summary_helper_uses_only_messages_after_marker():
+    from api.index import _build_incremental_summary_source
+
+    history = [
+        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
+        for i in range(1, 6)
+    ]
+
+    source = _build_incremental_summary_source(history, "old summary", "m3")
+
+    assert [msg["id"] for msg in source.delta_messages] == ["m4", "m5"]
+    assert source.is_zero_delta is False
+    assert source.next_marker == "m5"
+
+
+def test_incremental_summary_helper_reports_zero_delta_without_history_fallback():
+    from api.index import _build_incremental_summary_source
+
+    history = [
+        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
+        for i in range(1, 4)
+    ]
+
+    source = _build_incremental_summary_source(history, "old summary", "m3")
+
+    assert source.delta_messages == []
+    assert source.is_zero_delta is True
+    assert source.formatted_delta == ""
+    assert source.next_marker is None
+
+
+def test_incremental_summary_helper_falls_back_to_all_history_when_marker_missing():
+    from api.index import _build_incremental_summary_source
+
+    history = [
+        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
+        for i in range(1, 4)
+    ]
+
+    source = _build_incremental_summary_source(history, "old summary", "m99")
+
+    assert [msg["id"] for msg in source.delta_messages] == ["m1", "m2", "m3"]
+    assert source.is_zero_delta is False
+    assert source.next_marker == "m3"
+
+
 def test_compact_chat_memory_absorbs_only_uncompacted_messages_once():
     from api.index import compact_chat_memory
 
