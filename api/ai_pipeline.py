@@ -144,7 +144,6 @@ def handle_ai_response(
     reset_request_count_fn: Callable[[], Any],
     restore_request_count_fn: Callable[[Any], None],
     get_request_count_fn: Callable[[], int],
-    strip_ai_fallback_marker_fn: Callable[[str], Any],
 ) -> str:
     """Handle AI API responses and apply the response cleanup pipeline."""
 
@@ -201,9 +200,6 @@ def handle_ai_response(
             restore_request_count_fn(request_count_token)
 
     response_text = str(response or "")
-    response_text, used_ai_fallback = strip_ai_fallback_marker_fn(response_text)
-    if response_meta is not None:
-        response_meta["ai_fallback"] = used_ai_fallback
 
     persona_stripped_response = remove_gordo_prefix(response_text)
     context_stripped_response = strip_leading_context(
@@ -215,9 +211,10 @@ def handle_ai_response(
     cleaned_response = clean_duplicate_response(prefix_stripped_response)
 
     if not cleaned_response.strip():
+        was_fallback = bool(response_meta.get("ai_fallback")) if response_meta else False
         print(
             "handle_ai_response: cleaned response empty after normalization "
-            f"handler={handler_name or '<unknown>'} ai_fallback={used_ai_fallback} "
+            f"handler={handler_name or '<unknown>'} ai_fallback={was_fallback} "
             f"raw_len={len(response_text)} "
             f"persona_len={len(persona_stripped_response)} "
             f"context_len={len(context_stripped_response)} "

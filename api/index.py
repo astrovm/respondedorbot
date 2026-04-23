@@ -258,7 +258,7 @@ COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
 VISION_MODEL = "google/gemini-3.1-flash-lite-preview"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
-AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
+
 OPENROUTER_WEB_SEARCH_MAX_RESULTS = 10
 OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 
@@ -3041,7 +3041,9 @@ def ask_ai(
             )
             return response
 
-        return _mark_ai_fallback_response(get_fallback_response(messages))
+        if response_meta is not None:
+            response_meta["ai_fallback"] = True
+        return get_fallback_response(messages)
 
     except Exception as e:
         error_context = {
@@ -3049,7 +3051,9 @@ def ask_ai(
             "messages_preview": [msg.get("content", "")[:100] for msg in messages],
         }
         admin_report("Error in ask_ai", e, error_context)
-        return _mark_ai_fallback_response(get_fallback_response(messages))
+        if response_meta is not None:
+            response_meta["ai_fallback"] = True
+        return get_fallback_response(messages)
 
 
 def ask_ai_stream(
@@ -4217,18 +4221,6 @@ def get_fallback_response(messages: List[Dict]) -> str:
         if "Usuario: " in last_message:
             display_name = last_message.split("Usuario: ")[1].split(" ")[0]
     return gen_random(display_name)
-
-
-def _mark_ai_fallback_response(text: str) -> str:
-    """Attach a private marker so billing logic can detect fallback responses."""
-    return f"{AI_FALLBACK_MARKER}{text}"
-
-
-def _strip_ai_fallback_marker(text: str) -> Tuple[str, bool]:
-    """Remove internal fallback marker and return (clean_text, was_marked)."""
-    if text.startswith(AI_FALLBACK_MARKER):
-        return text[len(AI_FALLBACK_MARKER) :].lstrip(), True
-    return text, False
 
 
 def clean_crypto_data(cryptos: List[Dict]) -> List[Dict]:
@@ -6357,7 +6349,6 @@ def handle_ai_response(
         reset_request_count_fn=_reset_ai_provider_request_count,
         restore_request_count_fn=_restore_ai_provider_request_count,
         get_request_count_fn=_get_ai_provider_request_count,
-        strip_ai_fallback_marker_fn=_strip_ai_fallback_marker,
     )
 
 
@@ -6418,6 +6409,7 @@ def handle_ai_stream_response(
             user_name=user_name,
             user_id=user_id,
             timezone_offset=timezone_offset,
+            response_meta=response_meta,
         )
         message_id = _send_message_for_stream(
             chat_id, final_text, reply_to_message_id

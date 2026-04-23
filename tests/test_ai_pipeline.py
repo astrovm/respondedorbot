@@ -889,14 +889,16 @@ def test_build_message_links_context_keeps_full_youtube_transcript():
     assert context.count(transcript) == 1
 
 
-def test_handle_ai_response_strips_internal_ai_fallback_marker(monkeypatch):
+def test_handle_ai_response_reads_fallback_from_meta(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     meta = {}
 
-    def fake_handler(_messages):
-        return "[[AI_FALLBACK]]no boludo"
+    def fake_handler(_messages, response_meta=None):
+        if response_meta is not None:
+            response_meta["ai_fallback"] = True
+        return "no boludo"
 
     result = handle_ai_response("123", fake_handler, [], response_meta=meta)
 
