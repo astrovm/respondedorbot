@@ -3983,6 +3983,89 @@ class SummaryCommandResult:
     is_fallback: bool
 
 
+def _build_summary_messages(
+    source: IncrementalSummarySource,
+    prompt_text: str,
+) -> List[Dict[str, Any]]:
+    try:
+        bot_personality = load_bot_config().get("system_prompt", "")
+    except Exception:
+        bot_personality = ""
+
+    api_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": bot_personality}
+    ]
+    for msg in source.delta_messages:
+        content = msg.get("content") or msg.get("text", "")
+        if content:
+            api_messages.append({
+                "role": msg.get("role", "user"),
+                "content": content,
+            })
+    api_messages.append({"role": "user", "content": prompt_text})
+    return api_messages
+
+
+def _build_summary_provider() -> OpenRouterProvider:
+    return OpenRouterProvider(
+        get_client=_get_openrouter_client,
+        admin_report=admin_report,
+        increment_request_count=_increment_ai_provider_request_count,
+        build_web_search_tool=_build_openrouter_web_search_tool,
+        build_usage_result=_build_groq_usage_result,
+        extract_usage_map=_extract_groq_usage_map,
+        primary_model=SUMMARY_MODEL,
+        max_tool_rounds=0,
+    )
+
+
+def _wrap_provider_stream(
+    provider_name: str, token_iter: Iterator[str]
+) -> Iterator[Tuple[str, str]]:
+    yield provider_name, ""
+    for token in token_iter:
+        yield provider_name, token
+
+
+def stream_summary_command(
+    chat_id: str,
+    redis_client: redis.Redis,
+    prompt_text: str,
+) -> Tuple[Iterator[Tuple[str, str]], Optional[str]]:
+    existing_summary = _state_get_chat_summary(redis_client, chat_id)
+    compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
+    history = get_chat_history(chat_id, redis_client)
+
+    if not history:
+        def _empty():
+            yield "none", "no hay mensajes para resumir"
+        return _empty(), None
+
+    source = _build_incremental_summary_source(
+        history, existing_summary, compacted_until
+    )
+    if source.is_zero_delta and source.prior_summary:
+        def _yield_cached():
+            yield "cache", source.prior_summary
+        return _yield_cached(), source.next_marker
+
+    api_messages = _build_summary_messages(source, prompt_text)
+    provider = _build_summary_provider()
+    if not provider.is_available():
+        def _unavailable():
+            yield "none", "no pude generar el resumen"
+        return _unavailable(), source.next_marker
+
+    system_message = api_messages[0]
+    messages = api_messages[1:]
+    return (
+        _wrap_provider_stream(provider.name, provider.stream(
+            system_message, messages, enable_web_search=False
+        )),
+        source.next_marker,
+    )
+
+
 def handle_summary_command(
     chat_id: str,
     redis_client: redis.Redis,
@@ -4029,18 +4112,7 @@ def handle_summary_command(
         canonical_summary = source.prior_summary
         _summary_logger.info("summary_cmd: reusing existing summary, len=%d", len(canonical_summary))
     elif not source.is_zero_delta:
-        api_messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": bot_personality}
-        ]
-        for msg in source.delta_messages:
-            content = msg.get("content") or msg.get("text", "")
-            if content:
-                api_messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": content,
-                })
-        api_messages.append({"role": "user", "content": prompt_text})
-
+        api_messages = _build_summary_messages(source, prompt_text)
         _summary_logger.info(
             "summary_cmd: generating summary messages=%d",
             len(api_messages),
@@ -6305,6 +6377,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
         handle_summary_command=handle_summary_command,
+        stream_summary_command=stream_summary_command,
     )
     return build_message_handler_deps(
         chat=MessageChatDeps(
