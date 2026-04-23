@@ -1462,7 +1462,7 @@ def _handle_non_ai_command(
     if uses_ai:
         return None, None, False, None
 
-    if command in ("/resumen", "/summary"):
+    if command in ("/resumen", "/summary", "/tldr"):
         custom_instruction = None
         parts = sanitized_message_text.strip().split(None, 1)
         if parts and parts[0].isdigit() and len(parts) > 1:
