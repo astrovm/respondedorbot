@@ -68,7 +68,7 @@ python run_polling.py
 | `/ask` | `/pregunta`, `/che`, `/gordo` | AI chat (streaming) |
 | `/resumen` | `/summary` | Stream conversation summary |
 | `/transcribe` | `/describe` | Transcribe audio / describe image |
-| `/prices` | `/price`, `/precios`, `/precio`, `/presio(s)`, `/bresio(s)`, `/brecio(s)` | Crypto prices |
+| `/prices` | `/price`, `/precios`, `/precio`, `/presio(s)`, `/bresio(s)`, `/brecio(s)`, `/crypto`, `/criptos` | Crypto prices |
 | `/dolar` | `/dollar`, `/usd` | Dollar rates (CriptoYa) |
 | `/petroleo` | `/oil` | Oil prices |
 | `/acciones` | `/stocks` | Stock prices |
