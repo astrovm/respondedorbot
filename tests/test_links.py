@@ -10,6 +10,24 @@ def test_is_social_frontend():
     assert not is_social_frontend("example.com")
 
 
+def test_link_commands_extract_html_metadata_prefers_open_graph():
+    from api.link_commands import extract_html_metadata, truncate_link_metadata_text
+
+    html = """
+    <html><head>
+      <title>Fallback title</title>
+      <meta property="og:title" content="OG title &amp; more">
+      <meta name="description" content="Long   description\nwith whitespace">
+    </head></html>
+    """
+
+    assert extract_html_metadata(html) == (
+        "OG title & more",
+        "Long description with whitespace",
+    )
+    assert truncate_link_metadata_text("a" * 285, limit=10) == "aaaaaaa..."
+
+
 @patch("api.utils.links.request_with_ssl_fallback")
 def test_replace_links(mock_get):
     mock_response = MagicMock()

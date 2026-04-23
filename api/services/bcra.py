@@ -8,6 +8,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, UTC
 from decimal import Decimal
+from importlib import import_module
 from typing import (
     Any,
     Callable,
@@ -31,7 +32,6 @@ from api.logging_config import get_logger
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.utils import (
-    fmt_num,
     local_cache_get,
     now_utc_iso,
     parse_date_string,
@@ -42,6 +42,10 @@ from api.utils import (
 )
 
 logger = get_logger(__name__)
+
+format_bcra_variables_display = cast(
+    Callable[..., str], import_module("api.bcra_formatters").format_bcra_variables
+)
 
 CachedRequestFn = Callable[..., Optional[Dict[str, Any]]]
 RedisFactoryFn = Callable[..., redis.Redis]
@@ -1015,9 +1019,7 @@ def calculate_tcrm_100(
     redis_set_json_fn: Optional[Callable[[redis.Redis, str, Any], Any]] = None,
     redis_setex_json_fn: Optional[Callable[[redis.Redis, str, int, Any], Any]] = None,
     bcra_get_value_for_date_fn: Optional[Callable[[str, str], Optional[float]]] = None,
-    cache_mayorista_missing_fn: Optional[
-        Callable[[str, Optional[redis.Redis]], None]
-    ] = None,
+    cache_mayorista_missing_fn: Optional[Callable[..., None]] = None,
     itcrm_getter_fn: Optional[Callable[[], Optional[Tuple[float, str]]]] = None,
 ) -> Optional[float]:
     """Calculate nominal exchange rate that sets ITCRM to 100."""
@@ -1143,9 +1145,7 @@ def get_cached_tcrm_100(
     calculate_tcrm_fn: Optional[Callable[..., Optional[float]]] = None,
     get_latest_itcrm_fn: Optional[Callable[[], Optional[Tuple[float, str]]]] = None,
     bcra_get_value_for_date_fn: Optional[Callable[[str, str], Optional[float]]] = None,
-    cache_mayorista_missing_fn: Optional[
-        Callable[[str, Optional[redis.Redis]], None]
-    ] = None,
+    cache_mayorista_missing_fn: Optional[Callable[..., None]] = None,
     get_cache_history_fn: Optional[
         Callable[[int, str, redis.Redis], Optional[Dict[str, Any]]]
     ] = None,
@@ -1434,6 +1434,9 @@ def get_country_risk_summary() -> Optional[Dict[str, Any]]:
             return None
 
     value = response_payload.get("weightedSpreadBps")
+    if value is None:
+        logger.warning("Invalid country risk value: %s", value)
+        return None
     try:
         value_bps = float(value)
     except Exception as exc:
@@ -1493,150 +1496,21 @@ def format_bcra_variables(
     get_itcrm = itcrm_getter or get_latest_itcrm_value_and_date
     get_country_risk = country_risk_getter or get_country_risk_summary
 
-    def format_value(value_str: str, is_percentage: bool = False) -> str:
-        try:
-            clean_value = (
-                value_str.replace(".", "").replace(",", ".")
-                if not is_percentage
-                else value_str.replace(",", ".")
-            )
-            num = float(clean_value)
-            if is_percentage:
-                return f"{num:.1f}%" if num >= 10 else f"{num:.2f}%"
-            if num >= 1_000_000:
-                return f"{num / 1000:,.0f}".replace(",", ".")
-            if num >= 1000:
-                return f"{num:,.0f}".replace(",", ".")
-            return f"{num:.2f}".replace(".", ",")
-        except Exception:
-            return f"{value_str}%" if is_percentage else value_str
-
-    specs = [
-        (
-            r"base\s*monetaria",
-            lambda v: f"🏦 Base monetaria: ${format_value(v)} mill. pesos",
-        ),
-        (
-            r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
-            lambda v: f"📈 Inflación mensual: {format_value(v, True)}",
-        ),
-        (
-            r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
-            lambda v: f"📊 Inflación interanual: {format_value(v, True)}",
-        ),
-        (
-            r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
-            lambda v: f"🔮 Inflación esperada: {format_value(v, True)}",
-        ),
-        (r"tamar", lambda v: f"📈 TAMAR: {format_value(v, True)}"),
-        (r"badlar", lambda v: f"📊 BADLAR: {format_value(v, True)}"),
-        (
-            r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
-            lambda v: f"💵 Dólar minorista: ${v}",
-        ),
-        (r"tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
-        (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"💰 UVA: ${v}"),
-        (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"📊 CER: {v}"),
-        (
-            r"reservas.*internacionales",
-            lambda v: f"🏛️ Reservas: USD {format_value(v)} millones",
-        ),
-    ]
-
-    meta_info: Dict[str, Any] = {}
-    if isinstance(variables, dict):
-        candidate_meta = variables.get("_meta")
-        if isinstance(candidate_meta, dict):
-            meta_info = candidate_meta
-
-    lines = ["📊 Variables principales BCRA\n"]
-    latest_dt: Optional[datetime] = None
-    for pattern, formatter in specs:
-        compiled = re.compile(pattern)
-        for key, data in variables.items():
-            if str(key).startswith("_"):
-                continue
-            if not isinstance(data, Mapping):
-                continue
-            if compiled.search(_normalize_text(key)):
-                value = data.get("value", "")
-                date_label = data.get("date", "")
-                line = formatter(value)
-                if date_label and date_label != value:
-                    line += f" ({str(date_label).replace('/2025', '/25')})"
-                lines.append(line)
-                parsed_dt = parse_date_string(str(date_label))
-                if parsed_dt and (latest_dt is None or parsed_dt > latest_dt):
-                    latest_dt = parsed_dt
-                break
-
     try:
         country_risk = get_country_risk()
     except Exception:
         country_risk = None
 
-    if country_risk:
-        value_bps = country_risk.get("value_bps")
-        if isinstance(value_bps, (int, float)):
-            value_decimals = 1 if abs(value_bps) < 100 else 0
-            value_text = fmt_num(float(value_bps), value_decimals).replace(".", ",")
-            risk_line = f"🇦🇷 Riesgo país: {value_text} bps"
-
-            details: List[str] = []
-            label = country_risk.get("valuation_label")
-            if isinstance(label, str) and label:
-                details.append(label)
-
-            delta_value = country_risk.get("delta_one_day")
-            if isinstance(delta_value, (int, float)):
-                abs_delta = abs(delta_value)
-                if abs_delta >= 0.05:
-                    delta_decimals = 1 if abs_delta < 100 else 0
-                    delta_text = fmt_num(abs_delta, delta_decimals).replace(".", ",")
-                    sign = "+" if delta_value > 0 else "-"
-                    details.append(f"{sign}{delta_text} bps vs ayer")
-
-            if details:
-                risk_line += " (" + " | ".join(details) + ")"
-
-            lines.append(risk_line)
-
     band_limits = get_bands()
-    if band_limits:
-        lower = band_limits.get("lower")
-        upper = band_limits.get("upper")
-        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)):
-            date_label = band_limits.get("date")
-            lower_text = fmt_num(float(lower), 2)
-            upper_text = fmt_num(float(upper), 2)
-            line = f"📏 Bandas cambiarias: piso ${lower_text} / techo ${upper_text}"
-            if isinstance(date_label, str) and date_label:
-                line += f" ({date_label})"
-            lines.append(line)
-
+    itcrm_details = None
     try:
-        details = get_itcrm()
-        if details:
-            itcrm_value, date_str = details
-            lines.append(
-                f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}"
-                + (f" ({date_str})" if date_str else "")
-            )
+        itcrm_details = get_itcrm()
     except Exception:
         pass
 
-    if meta_info.get("stale"):
-        stale_msg = (
-            "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
-        )
-        if stale_msg not in lines:
-            lines.append(stale_msg)
-
-    if latest_dt:
-        age_days = (datetime.now(BA_TZ).date() - latest_dt.date()).days
-        if age_days >= 3:
-            lines.append(
-                f"⚠️ Datos del BCRA con {age_days} días de atraso, chequeá más tarde."
-            )
-
-    return "\n".join(lines)
+    return format_bcra_variables_display(
+        variables,
+        band_limits=band_limits,
+        itcrm_details=itcrm_details,
+        country_risk=country_risk,
+    )
