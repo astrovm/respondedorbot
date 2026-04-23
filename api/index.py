@@ -128,6 +128,7 @@ from api.ai_pipeline import (
     handle_ai_response as _ai_handle_response,
 )
 from api.streaming import (
+    consume_stream_to_telegram,
     set_streamed_response_metadata,
     stream_to_telegram,
 )
@@ -3931,15 +3932,19 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
     return None, 0
 
 
-def _compact_conversation(
-    messages: List[Dict[str, Any]],
-    prior_summary: Optional[str] = None,
-) -> Tuple[str, int]:
+def _load_bot_personality() -> str:
     try:
-        bot_personality = load_bot_config().get("system_prompt", "")
+        return load_bot_config().get("system_prompt", "")
     except Exception:
-        bot_personality = ""
+        return ""
 
+
+def _build_chat_messages(
+    bot_personality: str,
+    messages: List[Dict[str, Any]],
+    prompt_text: str,
+    prior_summary: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     api_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": bot_personality}
     ]
@@ -3952,14 +3957,24 @@ def _compact_conversation(
                 "role": msg.get("role", "user"),
                 "content": content,
             })
-    api_messages.append({
-        "role": "user",
-        "content": (
+    api_messages.append({"role": "user", "content": prompt_text})
+    return api_messages
+
+
+def _compact_conversation(
+    messages: List[Dict[str, Any]],
+    prior_summary: Optional[str] = None,
+) -> Tuple[str, int]:
+    api_messages = _build_chat_messages(
+        _load_bot_personality(),
+        messages,
+        (
             "actualizá el resumen previo con los mensajes nuevos. "
             "usá formato denso: temas, hechos clave, decisiones y pendientes. "
             "omití saludos y chat casual. mantené el idioma original."
         ),
-    })
+        prior_summary=prior_summary,
+    )
 
     result, cost = _call_summary_model(api_messages)
     if result:
@@ -3987,23 +4002,11 @@ def _build_summary_messages(
     source: IncrementalSummarySource,
     prompt_text: str,
 ) -> List[Dict[str, Any]]:
-    try:
-        bot_personality = load_bot_config().get("system_prompt", "")
-    except Exception:
-        bot_personality = ""
-
-    api_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": bot_personality}
-    ]
-    for msg in source.delta_messages:
-        content = msg.get("content") or msg.get("text", "")
-        if content:
-            api_messages.append({
-                "role": msg.get("role", "user"),
-                "content": content,
-            })
-    api_messages.append({"role": "user", "content": prompt_text})
-    return api_messages
+    return _build_chat_messages(
+        _load_bot_personality(),
+        source.delta_messages,
+        prompt_text,
+    )
 
 
 def _build_summary_provider() -> OpenRouterProvider:
@@ -4100,11 +4103,6 @@ def handle_summary_command(
         source.is_zero_delta,
         "yes" if source.prior_summary else "no",
     )
-
-    try:
-        bot_personality = load_bot_config().get("system_prompt", "")
-    except Exception:
-        bot_personality = ""
 
     canonical_summary: Optional[str] = None
     summary_cost = 0
@@ -6398,6 +6396,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             send_msg=send_msg,
             send_animation=send_animation,
             delete_msg=delete_msg,
+            edit_message=_edit_message_for_stream,
             admin_report=admin_report,
         ),
         state=MessageStateDeps(
@@ -6558,7 +6557,7 @@ def handle_ai_stream_response(
     )
 
     try:
-        final_text, message_id = stream_to_telegram(
+        final_text, message_id = consume_stream_to_telegram(
             chat_id,
             token_iterator,
             _send_message_for_stream,
@@ -6576,15 +6575,16 @@ def handle_ai_stream_response(
         message_id = _send_message_for_stream(
             chat_id, final_text, reply_to_message_id
         )
+        set_streamed_response_metadata(
+            str(message_id) if message_id is not None else None, final_text
+        )
 
-    streamed_message_id = str(message_id) if message_id is not None else None
-    set_streamed_response_metadata(streamed_message_id, final_text)
     if response_meta is not None:
         response_meta["billing_segments"] = list(
             cast(List[Dict[str, Any]], response_meta.get("billing_segments") or [])
         )
         response_meta["streamed_text"] = final_text
-        response_meta["streamed_message_id"] = streamed_message_id
+        response_meta["streamed_message_id"] = message_id
     return final_text
 
 
