@@ -1472,11 +1472,9 @@ def _handle_non_ai_command(
 
         base_prompt = (
             "actualizá el resumen anterior con los mensajes nuevos. "
-            "incluí todos los temas tratados, quién dijo qué, las conclusiones, "
-            "las decisiones pendientes y cualquier dato relevante. "
-            "no seas conciso: sé exhaustivo y detallado. "
-            "IMPORTANTE: NO uses títulos, bullets, numeración de secciones, ni markdown estructurado. "
-            "contá la historia de forma directa y continua, como si la estuvieras narrando en una charla."
+            "máximo 10 bullets cortos y concretos. "
+            "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
+            "evitá relleno, repetición, contexto innecesario y frases largas."
         )
         if custom_instruction:
             prompt_text = f"{custom_instruction}. {base_prompt}"

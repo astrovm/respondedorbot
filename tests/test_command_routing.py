@@ -715,6 +715,7 @@ def test_initialize_commands():
     assert commands["/brecios"][0] == get_prices
     assert commands["/help"][0] == get_help
     assert commands["/usd"][0] == _get_dollar_rates
+    assert commands["/tldr"][0] == commands["/resumen"][0]
 
 
 def test_price_alias_command_dispatches_to_get_prices():
@@ -1038,6 +1039,7 @@ def test_get_help_basic():
     assert "/usd" in result
     assert "/prices" in result
     assert "/config" in result
+    assert "/tldr" in result
 
 
 def test_get_instance_name_basic():

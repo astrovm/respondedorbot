@@ -77,3 +77,15 @@ def test_update_bot_commands_logs_error_and_returns_false():
 
     assert ok is False
     logger.assert_called_once_with("Error updating bot commands: boom")
+
+
+def test_build_commands_list_includes_tldr_alias_when_documented():
+    from api.command_registry import COMMAND_GROUPS
+    from api.telegram_bot_commands import build_commands_list
+
+    commands = build_commands_list(COMMAND_GROUPS)
+    names = {item["command"] for item in commands}
+
+    assert "resumen" in names
+    assert "summary" in names
+    assert "tldr" in names

@@ -58,7 +58,8 @@ COMMAND_DESCRIPTIONS: Dict[str, str] = {
     "tareas": "listado de tareas programadas",
     "tasks": "listado de tareas programadas",
     "resumen": "resumí la conversación [enfoque opcional]",
-    "summary": "resumí la conversación [optional focus]",
+    "summary": "resumí la conversación [enfoque opcional]",
+    "tldr": "resumí la conversación [enfoque opcional]",
 }
 
 
