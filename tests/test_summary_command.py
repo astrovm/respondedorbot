@@ -21,7 +21,7 @@ EXHAUSTIVE_SUMMARY_PROMPT = (
 def test_handle_summary_command_returns_early_when_no_history(monkeypatch):
     from api.index import handle_summary_command
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: "old")
+    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: "old")
     monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m1")
     monkeypatch.setattr("api.index.get_chat_history", lambda *_: [])
 
@@ -38,7 +38,7 @@ def test_handle_summary_command_returns_early_when_no_history(monkeypatch):
 def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monkeypatch):
     from api.index import IncrementalSummarySource, handle_summary_command
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: "resumen previo")
+    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: "resumen previo")
     monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m2")
     monkeypatch.setattr(
         "api.index.get_chat_history",
@@ -75,7 +75,7 @@ def test_handle_summary_command_uses_existing_summary_when_no_new_messages(monke
 def test_handle_summary_command_generates_summary_with_minimax(monkeypatch):
     from api.index import IncrementalSummarySource, handle_summary_command
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: "resumen previo")
+    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: "resumen previo")
     monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m1")
     monkeypatch.setattr(
         "api.index.get_chat_history",
@@ -123,7 +123,7 @@ def test_handle_summary_command_uses_custom_prompt_with_personality(monkeypatch)
 
     custom_focus = "enfocate solo en riesgos y proximos pasos"
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: None)
+    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: None)
     monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: None)
     monkeypatch.setattr(
         "api.index.get_chat_history",
