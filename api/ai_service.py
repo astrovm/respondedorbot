@@ -6,10 +6,14 @@ media context handling, fallback detection, and billing settlement.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.ai_pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE, credit_units_from_usd_micros
+
+
+_summary_logger = logging.getLogger(__name__)
 
 
 def _make_summary_billing_segment(cost_usd_micros: int) -> Dict[str, Any]:
@@ -224,6 +228,7 @@ class AIService:
         try:
             final_text = stream_consumer(token_iterator)
         except Exception:
+            _summary_logger.exception("summary_stream: failed for chat_id=%s", request.chat_id)
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="summary_stream_failed"
             )
