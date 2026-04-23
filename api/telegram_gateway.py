@@ -8,6 +8,19 @@ from urllib.parse import urlparse
 from api.agent_tools import normalize_http_url
 
 
+_MAX_TELEGRAM_TEXT_LENGTH = 4096
+
+
+def _truncate_telegram_text(text: str) -> str:
+    if len(text) <= _MAX_TELEGRAM_TEXT_LENGTH:
+        return text
+    truncated = text[: _MAX_TELEGRAM_TEXT_LENGTH - 3]
+    last_newline = truncated.rfind("\n")
+    if last_newline > _MAX_TELEGRAM_TEXT_LENGTH * 0.8:
+        truncated = truncated[:last_newline]
+    return truncated + "..."
+
+
 def _message_has_domain_link(message: str, domain: str) -> bool:
     if not message:
         return False
@@ -52,7 +65,7 @@ class TelegramGateway:
         buttons: Optional[List[str]] = None,
         reply_markup: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
-        payload: Dict[str, Any] = {"chat_id": chat_id, "text": msg}
+        payload: Dict[str, Any] = {"chat_id": chat_id, "text": _truncate_telegram_text(msg)}
         if self._message_has_domain_link(msg, "polymarket.com"):
             payload["disable_web_page_preview"] = True
         if msg_id:
