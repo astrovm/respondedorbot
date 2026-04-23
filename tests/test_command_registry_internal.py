@@ -42,6 +42,7 @@ def test_build_command_registry_reuses_alias_metadata():
     assert registry["/prices"] == registry["/price"]
     assert registry["/prices"] == registry["/precios"]
     assert registry["/transcribe"] == registry["/describe"]
+    assert registry["/resumen"] == registry["/tldr"]
     assert "/purgeailog" not in registry
     assert "/updatecommands" not in registry
 

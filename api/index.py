@@ -2419,7 +2419,7 @@ esto es lo que sé hacer, boludo:
 
 - /tareas, /tasks: listado de tareas programadas con botones para borrar (el gordo agenda recordatorios y tareas recurrentes cuando le pedis)
 
-- /resumen, /summary: resumí la conversación (opcional: /resumen focus en crypto)
+- /resumen, /summary, /tldr: resumí la conversación (opcional: /resumen focus en crypto)
 
 - /acciones, /stocks: precios de acciones [aapl tsla googl]
 """
@@ -3983,7 +3983,7 @@ class SummaryCommandResult:
 
 
 def _build_summary_messages(
-    source: IncrementalSummarySource,
+    source: "IncrementalSummarySource",
     prompt_text: str,
 ) -> List[Dict[str, Any]]:
     return _build_chat_messages(
