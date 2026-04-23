@@ -2114,6 +2114,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "send_msg": MagicMock(return_value=999),
         "send_animation": MagicMock(return_value=999),
         "delete_msg": MagicMock(),
+        "edit_message": MagicMock(),
         "admin_report": MagicMock(),
         "get_bot_message_metadata": MagicMock(return_value=None),
         "save_bot_message_metadata": MagicMock(),
@@ -2245,6 +2246,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             send_msg=flat_defaults["send_msg"],
             send_animation=flat_defaults["send_animation"],
             delete_msg=flat_defaults["delete_msg"],
+            edit_message=flat_defaults["edit_message"],
             admin_report=flat_defaults["admin_report"],
         ),
         state=MessageStateDeps(
@@ -2381,6 +2383,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             send_msg=MagicMock(),
             send_animation=MagicMock(),
             delete_msg=MagicMock(),
+            edit_message=MagicMock(),
             admin_report=MagicMock(),
         ),
         state=MessageStateDeps(
