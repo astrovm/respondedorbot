@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date, UTC
@@ -3983,7 +3985,7 @@ class SummaryCommandResult:
 
 
 def _build_summary_messages(
-    source: "IncrementalSummarySource",
+    source: IncrementalSummarySource,
     prompt_text: str,
 ) -> List[Dict[str, Any]]:
     return _build_chat_messages(

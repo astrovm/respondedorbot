@@ -19,7 +19,7 @@ def _load_dotenv() -> None:
 
     try:
         dotenv = importlib.import_module("dotenv")
-        load_dotenv = getattr(dotenv, "load_dotenv")
+        load_dotenv = dotenv.load_dotenv
         load_dotenv(env_path, override=False)
         return
     except ImportError:
