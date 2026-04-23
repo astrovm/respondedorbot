@@ -150,7 +150,11 @@ def stream_to_telegram(
         if token:
             streamer.feed(token)
 
-    return streamer.finalize(), streamer.message_id or ""
+    final_text = streamer.finalize()
+    message_id = streamer.message_id or ""
+    if not message_id:
+        raise RuntimeError("Failed to send message to Telegram")
+    return final_text, message_id
 
 
 def consume_stream_to_telegram(
