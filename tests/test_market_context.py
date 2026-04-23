@@ -49,6 +49,83 @@ def test_get_rulo():
     assert "Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT" in result
 
 
+def test_build_rulo_message_preserves_arbitrage_output():
+    from api.rulo_commands import build_rulo_message
+
+    dolar_data = {
+        "oficial": {"price": 1440},
+        "blue": {"ask": 1450, "bid": 1430},
+        "mep": {"al30": {"ci": {"price": 1459.73}}},
+    }
+    usd_usdt_data = {
+        "buenbit": {"ask": 1.031, "totalAsk": 1.031},
+        "xapo": {"ask": 1.002, "totalAsk": 1.004},
+    }
+    usdt_ars_data = {
+        "buenbit": {"bid": 1458.44, "totalBid": 1458.44},
+        "ripio": {"bid": 1448.75, "totalBid": 1448.75},
+    }
+
+    result = build_rulo_message(dolar_data, usd_usdt_data, usdt_ars_data)
+
+    assert result.startswith("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
+    assert "- MEP (AL30 CI)" in result
+    assert "  • Ganancia: +19.730 ARS" in result
+    assert "- Blue" in result
+    assert "  • Ganancia: -10.000 ARS" in result
+    assert "- USDT" in result
+    assert "Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT" in result
+
+
+def test_sort_dollar_rates_uses_hourly_history_and_tcrm():
+    from api.dollar_commands import sort_dollar_rates
+
+    dollar_rates = {
+        "data": {
+            "mayorista": {"price": 1400, "variation": 1.0},
+            "oficial": {"price": 1420, "variation": 2.0},
+            "tarjeta": {"price": 1988, "variation": 3.0},
+            "mep": {"al30": {"ci": {"price": 1450, "variation": 4.0}}},
+            "ccl": {"al30": {"ci": {"price": 1460, "variation": 5.0}}},
+            "blue": {"ask": 1430, "variation": 6.0},
+            "cripto": {
+                "ccb": {"ask": 1470, "variation": 7.0},
+                "usdc": {"ask": 1480, "variation": 8.0},
+                "usdt": {"ask": 1490, "variation": 9.0},
+            },
+        },
+        "history": {
+            "data": {
+                "mayorista": {"price": 1300},
+                "oficial": {"price": 1400},
+                "tarjeta": {"price": 1900},
+                "mep": {"al30": {"ci": {"price": 1400}}},
+                "ccl": {"al30": {"ci": {"price": 1400}}},
+                "blue": {"ask": 1400},
+                "cripto": {
+                    "ccb": {"ask": 1400},
+                    "usdc": {"ask": 1400},
+                    "usdt": {"ask": 1400},
+                },
+            }
+        },
+    }
+
+    result = sort_dollar_rates(dollar_rates, 1410, -0.5, hours_ago=6)
+
+    assert [entry["name"] for entry in result[:3]] == [
+        "Mayorista",
+        "TCRM 100",
+        "Oficial",
+    ]
+    assert result[0] == {
+        "name": "Mayorista",
+        "price": 1400,
+        "history": pytest.approx(7.6923076923),
+    }
+    assert result[1] == {"name": "TCRM 100", "price": 1410, "history": -0.5}
+
+
 def test_get_weather():
     from api.index import get_weather
 
@@ -306,6 +383,67 @@ def test_get_prices_existing_paths_unchanged():
 
         assert in_result is not None
         assert "EUR" in in_result
+
+
+def test_get_prices_stablecoins_expands_known_symbols():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "USDT",
+                    "name": "Tether",
+                    "quote": {"USD": {"price": 1.0, "percent_change_24h": 0.01}},
+                },
+                {
+                    "symbol": "USDC",
+                    "name": "USD Coin",
+                    "quote": {"USD": {"price": 0.999, "percent_change_24h": -0.01}},
+                },
+            ]
+        }
+
+        result = get_prices("stables")
+
+    assert result is not None
+    assert "USDT" in result
+    assert "USDC" in result
+
+
+def test_get_prices_rejects_unsupported_timeframe_without_api_call():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        result = get_prices("btc 2h")
+
+    assert result == "timeframe '2h' no soportado, uso: 1h, 24h, 7d, 30d"
+    mock_get_prices.assert_not_called()
+
+
+def test_get_prices_ignores_non_numeric_limit_tokens():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "quote": {"USD": {"price": 50000.0, "percent_change_24h": 1.0}},
+                },
+                {
+                    "symbol": "ETH",
+                    "name": "Ethereum",
+                    "quote": {"USD": {"price": 2500.0, "percent_change_24h": 2.0}},
+                },
+            ]
+        }
+
+        result = get_prices("2,btc")
+
+    assert result is not None
+    assert "BTC" in result
 
 
 def test_get_weather_description():
@@ -923,6 +1061,47 @@ def test_format_market_info():
     assert "BTC" in result
     assert "50.000" in result or "50000" in result
     assert "1.000" in result or "1000" in result
+
+
+def test_market_commands_format_market_info_compact_summary():
+    from api.market_commands import format_market_info
+
+    market_data = {
+        "crypto": [
+            {
+                "symbol": "BTC",
+                "quote": {
+                    "USD": {
+                        "price": 50000,
+                        "changes": {"24h": 2.5},
+                        "dominance": 52.25,
+                    }
+                },
+            }
+        ],
+        "dollar": {
+            "oficial": {"price": 1000},
+            "blue": {"ask": 1200, "bid": 1180},
+            "mep": {"al30": {"ci": {"price": 1150}}},
+            "tarjeta": {"price": 1600},
+            "cripto": {"usdt": {"ask": 1230, "bid": 1220}},
+        },
+    }
+
+    result = format_market_info(market_data)
+
+    assert result == "\n".join(
+        [
+            "PRECIOS DE CRIPTOS:",
+            "- BTC: 50000 usd (+2.5 24h), dom 52.2%",
+            "DOLARES:",
+            "- oficial: 1000",
+            "- blue: 1200 (bid 1180)",
+            "- mep al30 ci: 1150",
+            "- tarjeta: 1600",
+            "- usdt: 1230 (bid 1220)",
+        ]
+    )
 
 
 def test_format_market_info_empty_dict():
