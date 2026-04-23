@@ -12,6 +12,7 @@ from api.ai_pricing import (
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
 from api.message_state import save_chat_compacted_until, save_user_chat_summary
+from api.utils.text import sanitize_summary_text
 from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import (
     consume_stream_to_telegram,
@@ -1474,7 +1475,9 @@ def _handle_non_ai_command(
             "actualizá el resumen anterior con los mensajes nuevos. "
             "máximo 10 items cortos y concretos, uno por línea. "
             "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
-            "evitá relleno, repetición, contexto innecesario y frases largas."
+            "evitá relleno, repetición, contexto innecesario y frases largas. "
+            "NUNCA uses markdown: no negritas, no headers, no tablas. "
+            "usá solo guiones (-) al inicio de cada item."
         )
         if custom_instruction:
             prompt_text = f"{custom_instruction}. {base_prompt}"
@@ -1504,6 +1507,8 @@ def _handle_non_ai_command(
             ),
             stream_consumer=_consume_summary_stream,
         )
+
+        final_text = sanitize_summary_text(final_text)
 
         if not is_fallback and pending_marker is not None:
             save_user_chat_summary(redis_client, chat_id, final_text)
