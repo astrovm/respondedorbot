@@ -166,7 +166,7 @@ from api.message_handler import (
 )
 from api.ai_service import build_ai_service
 from api.routing_policy import RoutingPolicy
-from api.telegram_gateway import TelegramGateway
+from api.telegram_gateway import TelegramGateway, _truncate_telegram_text
 from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
@@ -6084,7 +6084,7 @@ def edit_message(
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text,
+        "text": _truncate_telegram_text(text),
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
