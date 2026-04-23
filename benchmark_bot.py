@@ -117,9 +117,9 @@ class GordoBenchmark:
                     else:
                         return f"ERROR: Rate limit persistente después de {max_retries} intentos"
                 else:
-                    return f"ERROR: HTTP {e.response.status_code} - {str(e)}"
+                    return f"ERROR: HTTP {e.response.status_code} - {e!s}"
             except Exception as e:
-                return f"ERROR: {str(e)}"
+                return f"ERROR: {e!s}"
 
         return "ERROR: Número máximo de reintentos alcanzado"
 
@@ -129,9 +129,9 @@ class GordoBenchmark:
         scenarios = self.get_test_scenarios()
 
         trigger_words = ", ".join(self.get_trigger_words())
-        print(f"🎯 Iniciando benchmark manual del bot")
+        print("🎯 Iniciando benchmark manual del bot")
         print(f"📋 {len(scenarios)} casos para evaluar con {len(self.models)} modelos")
-        print(f"🔍 Para cada caso, verás todas las respuestas y elegirás la mejor")
+        print("🔍 Para cada caso, verás todas las respuestas y elegirás la mejor")
         print(f"📝 Trigger words: {trigger_words}\n")
 
         for i, scenario in enumerate(scenarios, 1):
@@ -164,7 +164,7 @@ class GordoBenchmark:
             while True:
                 try:
                     print(
-                        f"\n🎯 ¿Cuál respuesta captura mejor la personalidad del bot?"
+                        "\n🎯 ¿Cuál respuesta captura mejor la personalidad del bot?"
                     )
                     print(
                         f"Opciones: 1-{len(self.models)} (número del modelo) o 's' para saltar"
@@ -192,14 +192,14 @@ class GordoBenchmark:
                     print("\n\n⏸️  Benchmark interrumpido por el usuario")
                     return manual_scores
 
-            print(f"\n📈 Puntajes actuales:")
+            print("\n📈 Puntajes actuales:")
             for model, score in manual_scores.items():
                 print(f"  {model}: {score} casos ganados")
 
             if i < len(scenarios):
-                input(f"\n⏸️  Presiona Enter para continuar al siguiente caso...")
+                input("\n⏸️  Presiona Enter para continuar al siguiente caso...")
 
-        print(f"\n🎉 ¡Benchmark manual completado!")
+        print("\n🎉 ¡Benchmark manual completado!")
         return manual_scores
 
     def generate_manual_report(self, manual_scores: Dict[str, int]) -> str:
@@ -230,15 +230,15 @@ class GordoBenchmark:
                     f"🥈 **Segundo lugar**: {runner_up[0]} ({runner_up[1]} casos)"
                 )
 
-        report.append(f"\n## ⚙️ Configuración del Bot")
+        report.append("\n## ⚙️ Configuración del Bot")
         trigger_words = ", ".join(self.get_trigger_words())
         system_prompt_length = len(self.get_system_prompt())
         report.append(f"- Trigger words: {trigger_words}")
         report.append(f"- System prompt: {system_prompt_length} caracteres")
 
-        report.append(f"\n## 📋 Metodología")
-        report.append(f"- Evaluación manual caso por caso")
-        report.append(f"- Criterio: Mejor captura de personalidad del bot configurado")
+        report.append("\n## 📋 Metodología")
+        report.append("- Evaluación manual caso por caso")
+        report.append("- Criterio: Mejor captura de personalidad del bot configurado")
         report.append(f"- {len(self.get_test_scenarios())} escenarios de prueba")
         report.append(f"- {len(self.models)} modelos evaluados")
 
@@ -267,7 +267,7 @@ def main():
     with open(report_filename, "w", encoding="utf-8") as f:
         f.write(report)
 
-    print(f"\n✅ Benchmark completado!")
+    print("\n✅ Benchmark completado!")
     print(f"📋 Reporte generado en: {report_filename}")
     print("\n" + "=" * 50)
     print(report)

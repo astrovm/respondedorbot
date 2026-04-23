@@ -17,14 +17,14 @@ def _load_dotenv() -> None:
 
     try:
         dotenv = importlib.import_module("dotenv")
-        load_dotenv = getattr(dotenv, "load_dotenv")
+        load_dotenv = dotenv.load_dotenv
 
         load_dotenv(env_path, override=False)
         return
     except ImportError:
         pass
 
-    with open(env_path, "r", encoding="utf-8") as file_obj:
+    with open(env_path, encoding="utf-8") as file_obj:
         for raw_line in file_obj:
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
