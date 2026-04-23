@@ -16,8 +16,6 @@ from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import (
     consume_stream_to_telegram,
     extract_stream_metadata,
-    set_streamed_response_metadata,
-    stream_to_telegram,
 )
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
