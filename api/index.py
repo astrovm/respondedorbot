@@ -2367,7 +2367,7 @@ esto es lo que sé hacer, boludo:
 
 - /ask, /pregunta, /che, /gordo: te contesto cualquier gilada
 
-- /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios: top 10 cryptos en usd
+- /prices, /precio, /precios, /presio, /presios, /bresio, /bresios, /brecio, /brecios, /crypto, /criptos: top 10 cryptos en usd
 - /prices in btc: top 10 en btc
 - /prices 20: top 20 en usd
 - /prices 100 in eur: top 100 en eur
