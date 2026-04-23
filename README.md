@@ -42,8 +42,8 @@ python run_polling.py
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache (requires RediSearch) |
 | `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
-| `GROQ_API_KEY` | Paid Groq API key for vision/transcription |
-| `GROQ_FREE_API_KEY` | Optional free-tier Groq key for vision/transcribe |
+| `GROQ_API_KEY` | Paid Groq API key for transcription |
+| `GROQ_FREE_API_KEY` | Optional free-tier Groq key for transcription |
 | `OPENROUTER_API_KEY` | OpenRouter API key for chat/vision |
 | `CF_AIG_TOKEN` | Cloudflare AI Gateway token forwarded to OpenRouter requests |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` |
