@@ -37,6 +37,8 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
             "/bresios",
             "/brecio",
             "/brecios",
+            "/crypto",
+            "/criptos",
         ),
         "get_prices",
         False,
