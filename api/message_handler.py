@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
 
-from api.ai_billing import AIMessageBilling
-from api.ai_pricing import (
-    MODEL_PRICING_USD_MICROS,
-    estimate_transcribe_reserve_credits,
+from .admin_commands import (
+    handle_admin_creditlog_command,
+    handle_admin_printcredits_command,
 )
+from api.ai_billing import AIMessageBilling
+from api.ai_pricing import estimate_transcribe_reserve_credits
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
+from .billing_commands import (
+    handle_balance_command,
+    handle_transfer_command,
+)
 from api.message_state import save_chat_compacted_until, save_user_chat_summary
+from .message_links import handle_link_replacement
 from api.utils.text import sanitize_summary_text
-from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import (
     consume_stream_to_telegram,
     extract_stream_metadata,
@@ -864,65 +869,15 @@ def _handle_link_replacement(
     message_id: str,
     redis_client: Any,
 ) -> bool:
-    link_mode = str(chat_config.get("link_mode", "reply"))
-    if link_mode == "off" or not message_text or message_text.startswith("/"):
-        return False
-
-    fixed_text, changed, original_links = deps.replace_links(message_text)
-    if not changed:
-        return False
-
-    user_info = message.get("from", {})
-    username = user_info.get("username")
-    if username:
-        shared_by = f"@{username}"
-    else:
-        name_parts = [
-            part
-            for part in (user_info.get("first_name"), user_info.get("last_name"))
-            if part
-        ]
-        shared_by = " ".join(name_parts)
-
-    if shared_by:
-        fixed_text += f"\n\ncompartido por {shared_by}"
-
-    link_context = deps.build_message_links_context({"text": fixed_text})
-    stored_bot_message = fixed_text
-    if link_context:
-        stored_bot_message = f"{stored_bot_message}\n\n{link_context}"
-
-    reply_id = message.get("reply_to_message", {}).get("message_id")
-    reply_id = str(reply_id) if reply_id is not None else None
-
-    if link_mode == "delete":
-        deps.delete_msg(chat_id, message_id)
-        if reply_id:
-            sent_message_id = deps.send_msg(
-                chat_id, fixed_text, reply_id, original_links
-            )
-        else:
-            sent_message_id = deps.send_msg(chat_id, fixed_text, buttons=original_links)
-        if sent_message_id is not None:
-            deps.save_message_to_redis(
-                chat_id,
-                f"bot_{sent_message_id}",
-                stored_bot_message,
-                redis_client,
-            )
-        return True
-
-    sent_message_id = deps.send_msg(
-        chat_id, fixed_text, reply_id or message_id, original_links
+    return handle_link_replacement(
+        deps,
+        chat_config=chat_config,
+        message=message,
+        message_text=message_text,
+        chat_id=chat_id,
+        message_id=message_id,
+        redis_client=redis_client,
     )
-    if sent_message_id is not None:
-        deps.save_message_to_redis(
-            chat_id,
-            f"bot_{sent_message_id}",
-            stored_bot_message,
-            redis_client,
-        )
-    return True
 
 
 def _load_reply_metadata(
@@ -1041,38 +996,14 @@ def _handle_balance_command(
     user_id: Optional[int],
     numeric_chat_id: Optional[int],
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/balance":
-        return None, None, False, None
-
-    billing_required_response = _require_billing_for_command(deps, command=command)
-    if billing_required_response is not None:
-        return billing_required_response
-
-    if user_id is None or numeric_chat_id is None:
-        return (
-            "no te pude leer bien el usuario para ver los saldos",
-            None,
-            False,
-            command,
-        )
-
-    try:
-        deps.maybe_grant_onboarding_credits(
-            deps.credits_db_service, deps.admin_report, user_id
-        )
-        response_msg = deps.balance_formatter.format(
-            chat_type=chat_type,
-            user_id=user_id,
-            chat_id=numeric_chat_id,
-        )
-    except Exception as error:
-        deps.admin_report(
-            "Error loading balance",
-            error,
-            {"chat_id": chat_id, "user_id": user_id},
-        )
-        response_msg = "se trabó leyendo tu saldo, probá de nuevo"
-    return response_msg, None, False, command
+    return handle_balance_command(
+        deps,
+        command=command,
+        chat_type=chat_type,
+        chat_id=chat_id,
+        user_id=user_id,
+        numeric_chat_id=numeric_chat_id,
+    )
 
 
 def _handle_admin_printcredits_command(
@@ -1083,240 +1014,14 @@ def _handle_admin_printcredits_command(
     chat_id: str,
     user_id: Optional[int],
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/printcredits":
-        return None, None, False, None
-
-    admin_chat_id = _get_admin_chat_id()
-    if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
-
-    billing_required_response = _require_billing_for_command(deps, command=command)
-    if billing_required_response is not None:
-        return billing_required_response
-
-    amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-    amount = parse_credit_units(amount_token)
-    if amount is None:
-        return "mandalo bien: /printcredits <monto>", None, False, command
-
-    if amount <= 0:
-        return (
-            "el monto tiene que ser mayor a 0, no me rompas las bolas",
-            None,
-            False,
-            command,
-        )
-
-    if user_id is None:
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
-
-    try:
-        mint_result = deps.credits_db_service.mint_user_credits(
-            user_id=user_id,
-            amount=amount,
-            actor_user_id=user_id,
-        )
-    except Exception as error:
-        deps.admin_report(
-            "Error minting credits with /printcredits",
-            error,
-            {"chat_id": chat_id, "user_id": user_id, "amount": amount},
-        )
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
-
-    return (
-        (
-            f"listo, te imprimí {format_credit_units(amount)} créditos\n"
-            f"te quedaron {format_credit_units(mint_result.get('user_balance', 0))}"
-        ),
-        None,
-        False,
-        command,
+    return handle_admin_printcredits_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
     )
 
-
-def _build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    def _summarize_models(items: Sequence[Mapping[str, Any]]) -> str:
-        totals: Dict[str, int] = {}
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            name = str(item.get("model") or "?")
-            totals[name] = totals.get(name, 0) + int(item.get("usd_micros") or 0)
-        if not totals:
-            return "sin modelos"
-        ordered = sorted(totals.items(), key=lambda entry: (-entry[1], entry[0]))
-        visible = ordered[:5]
-        summary = ", ".join(f"{name}={usd}" for name, usd in visible)
-        hidden_count = len(ordered) - len(visible)
-        if hidden_count > 0:
-            summary += f", +{hidden_count} más"
-        return summary
-
-    def _summarize_tools(items: Sequence[Mapping[str, Any]]) -> str:
-        totals: Dict[str, Dict[str, int]] = {}
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            name = str(item.get("tool") or "?")
-            current = totals.setdefault(name, {"usd_micros": 0, "count": 0})
-            current["usd_micros"] += int(item.get("usd_micros") or 0)
-            current["count"] += int(item.get("count") or 0)
-        if not totals:
-            return "sin tools"
-        ordered = sorted(
-            totals.items(),
-            key=lambda entry: (-entry[1]["usd_micros"], -entry[1]["count"], entry[0]),
-        )
-        visible = ordered[:5]
-        summary = ", ".join(
-            f"{name}={values['usd_micros']} ({values['count']}x)"
-            for name, values in visible
-        )
-        hidden_count = len(ordered) - len(visible)
-        if hidden_count > 0:
-            summary += f", +{hidden_count} más"
-        return summary
-
-    def _summarize_segments(items: Sequence[Mapping[str, Any]]) -> str:
-        totals: Dict[str, int] = {}
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            if str(item.get("source") or "").strip().lower() == "cache":
-                continue
-            kind = str(item.get("kind") or "unknown")
-            totals[kind] = totals.get(kind, 0) + 1
-        if not totals:
-            return "sin segmentos"
-        ordered = sorted(totals.items(), key=lambda entry: entry[0])
-        return ", ".join(f"{kind}={count}" for kind, count in ordered)
-
-    def _summarize_cache_hits(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
-        totals: Dict[str, int] = {}
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            if str(item.get("source") or "").strip().lower() != "cache":
-                continue
-            kind = str(item.get("kind") or "unknown")
-            totals[kind] = totals.get(kind, 0) + 1
-        if not totals:
-            return None
-        ordered = sorted(totals.items(), key=lambda entry: entry[0])
-        return ", ".join(f"{kind}={count}" for kind, count in ordered)
-
-    def _summarize_cache(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
-        total_cached_tokens = 0
-        total_cached_savings_usd_micros = 0
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            cached_tokens = int(item.get("input_cached_tokens") or 0)
-            non_cached_tokens = int(item.get("input_non_cached_tokens") or 0)
-            input_tokens = int(item.get("input_tokens") or 0)
-            if cached_tokens <= 0:
-                continue
-            model_name = str(item.get("model") or "")
-            pricing = MODEL_PRICING_USD_MICROS.get(model_name) or {}
-            input_per_million = int(pricing.get("input_per_million") or 0)
-            cached_input_per_million = int(
-                pricing.get("cached_input_per_million") or input_per_million
-            )
-            total_cached_tokens += cached_tokens
-            if input_per_million > cached_input_per_million:
-                total_cached_savings_usd_micros += (
-                    cached_tokens * (input_per_million - cached_input_per_million)
-                ) // 1_000_000
-            elif input_tokens > 0 and non_cached_tokens == 0:
-                continue
-        if total_cached_tokens <= 0:
-            return None
-        return f"cacheados={total_cached_tokens} ahorro_cache={total_cached_savings_usd_micros}"
-
-    lines: List[str] = ["últimas liquidaciones IA:"]
-    for entry in entries:
-        raw_metadata = entry.get("metadata")
-        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-        model_breakdown = metadata.get("model_breakdown") or []
-        tool_breakdown = metadata.get("tool_breakdown") or []
-        billing_segments = metadata.get("billing_segments") or []
-        command = str(
-            metadata.get("command") or metadata.get("usage_tag") or "sin comando"
-        )
-        created_at = str(entry.get("created_at") or "")
-        created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
-        reserved_total = int(
-            metadata.get("reserved_credit_units_total")
-            or metadata.get("reserved_credit_units")
-            or metadata.get("reserved_credits_total")
-            or metadata.get("reserved_credits")
-            or 0
-        )
-        settled_credits = int(
-            metadata.get("settled_credit_units") or metadata.get("settled_credits") or 0
-        )
-        refunded_credits = int(
-            metadata.get("refunded_credit_units")
-            or metadata.get("refunded_credits")
-            or 0
-        )
-        extra_charged_credits = int(
-            metadata.get("extra_charged_credit_units")
-            or metadata.get("extra_charged_credits")
-            or 0
-        )
-        debt_applied_credits = int(
-            metadata.get("debt_applied_credit_units")
-            or metadata.get("debt_applied_credits")
-            or 0
-        )
-        raw_usd_micros = int(metadata.get("raw_usd_micros") or 0)
-        chat_value = metadata.get("chat_id", entry.get("chat_id"))
-        user_value = metadata.get("user_id", entry.get("user_id"))
-        if bool(metadata.get("billing_zero_usage_fallback")):
-            status_label = "estado=groq_zero_usage"
-        elif bool(metadata.get("missing_usage_billing")):
-            status_label = "estado=missing_usage"
-        else:
-            status_label = "estado=ok"
-        model_summary = _summarize_models(model_breakdown)
-        tool_summary = _summarize_tools(tool_breakdown)
-        segment_summary = _summarize_segments(billing_segments)
-        cache_hit_summary = _summarize_cache_hits(billing_segments)
-        cache_summary = _summarize_cache(model_breakdown)
-        detail_lines = [
-            f"{created_label} | cmd={command} | {status_label}",
-            (
-                f"chat={chat_value} user={user_value} "
-                f"reservado={format_credit_units(reserved_total)} "
-                f"cobrado={format_credit_units(settled_credits)} "
-                f"refund={format_credit_units(refunded_credits)} "
-                f"extra={format_credit_units(extra_charged_credits)} "
-                f"deuda={format_credit_units(debt_applied_credits)}"
-            ),
-            f"usd_micros={raw_usd_micros}",
-            f"requests: {segment_summary}",
-        ]
-        if cache_hit_summary:
-            detail_lines.append(f"cache_hits: {cache_hit_summary}")
-        if cache_summary:
-            detail_lines.append(cache_summary)
-        detail_lines.extend(
-            [
-                f"modelos: {model_summary}",
-                f"tools: {tool_summary}",
-            ]
-        )
-        lines.append("\n".join(detail_lines))
-    return lines
-
-
-def _truncate_creditlog_message(text: str, max_length: int = 3500) -> str:
-    if len(text) <= max_length:
-        return text
-    suffix = "\n\n[truncado]"
-    return text[: max_length - len(suffix)].rstrip() + suffix
 
 
 def _handle_admin_creditlog_command(
@@ -1327,44 +1032,12 @@ def _handle_admin_creditlog_command(
     chat_id: str,
     user_id: Optional[int],
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/creditlog":
-        return None, None, False, None
-
-    admin_chat_id = _get_admin_chat_id()
-    if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
-
-    billing_required_response = _require_billing_for_command(deps, command=command)
-    if billing_required_response is not None:
-        return billing_required_response
-
-    raw_limit = str(sanitized_message_text or "").strip()
-    limit = 10
-    if raw_limit:
-        try:
-            limit = int(raw_limit.split(" ", 1)[0].strip())
-        except (TypeError, ValueError):
-            return "mandalo bien: /creditlog [limite]", None, False, command
-    limit = max(1, min(limit, 25))
-
-    try:
-        entries = deps.credits_db_service.list_recent_ai_settlement_results(limit=limit)
-    except Exception as error:
-        deps.admin_report(
-            "Error loading /creditlog",
-            error,
-            {"chat_id": chat_id, "user_id": user_id, "limit": limit},
-        )
-        return "se trabó leyendo el creditlog, probá de nuevo", None, False, command
-
-    if not entries:
-        return "no hay liquidaciones ia recientes", None, False, command
-
-    return (
-        _truncate_creditlog_message("\n\n".join(_build_creditlog_lines(entries))),
-        None,
-        False,
-        command,
+    return handle_admin_creditlog_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
     )
 
 
@@ -1378,68 +1051,15 @@ def _handle_transfer_command(
     user_id: Optional[int],
     numeric_chat_id: Optional[int],
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/transfer":
-        return None, None, False, None
-
-    billing_required_response = _require_billing_for_command(deps, command=command)
-    if billing_required_response is not None:
-        return billing_required_response
-
-    if not deps.is_group_chat_type(chat_type):
-        return "esto es para grupos, capo: /transfer <monto>", None, False, command
-
-    if user_id is None or numeric_chat_id is None:
-        return (
-            "no te pude sacar bien el usuario o el grupo para transferir",
-            None,
-            False,
-            command,
-        )
-
-    amount_token = sanitized_message_text.split(" ", 1)[0].strip()
-    amount = parse_credit_units(amount_token)
-    if amount is None:
-        return "mandalo bien: /transfer <monto>", None, False, command
-
-    if amount <= 0:
-        return (
-            "el monto tiene que ser mayor a 0, no me rompas las bolas",
-            None,
-            False,
-            command,
-        )
-
-    try:
-        transfer_result = deps.credits_db_service.transfer_user_to_chat(
-            user_id=user_id,
-            chat_id=numeric_chat_id,
-            amount=amount,
-        )
-    except Exception as error:
-        deps.admin_report(
-            "Error transferring credits",
-            error,
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "amount": amount,
-            },
-        )
-        return "se trabó la transferencia, probá de nuevo", None, False, command
-
-    if transfer_result.get("ok"):
-        response_msg = (
-            f"listo, le pasé {format_credit_units(amount)} créditos al grupo\n"
-            f"- lo tuyo: {format_credit_units(transfer_result.get('user_balance', 0))}\n"
-            f"- lo del grupo: {format_credit_units(transfer_result.get('chat_balance', 0))}"
-        )
-        return response_msg, None, False, command
-
-    response_msg = (
-        "no te alcanza lo tuyo para pasar esa guita al grupo\n"
-        f"te quedan: {format_credit_units(transfer_result.get('user_balance', 0))}"
+    return handle_transfer_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        user_id=user_id,
+        numeric_chat_id=numeric_chat_id,
     )
-    return response_msg, None, False, command
 
 
 def _handle_non_ai_command(
