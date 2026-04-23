@@ -63,16 +63,6 @@ def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch
     assert _get_groq_accounts_for_scope() == ["free", "paid"]
 
 
-def test_get_openrouter_vision_model_maps_supported_models():
-    from api.index import _get_openrouter_vision_model
-
-    assert (
-        _get_openrouter_vision_model("groq/meta-llama/llama-4-scout-17b-16e-instruct")
-        == "meta-llama/llama-4-scout"
-    )
-    assert _get_openrouter_vision_model("groq/whisper-large-v3") is None
-
-
 def test_openrouter_config_helpers(monkeypatch):
     from api.index import (
         _get_openrouter_api_key,
@@ -1061,21 +1051,21 @@ def test_provider_runtime_returns_none_when_primary_model_fails():
     assert result is None
 
 
-def test_describe_image_openrouter_result_returns_none_when_provider_raises(
+def test_describe_image_result_returns_none_when_provider_raises(
     monkeypatch,
 ):
-    from api.index import _describe_image_openrouter_result
+    from api.index import _describe_image_result
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
     )
 
     failing_client = MagicMock()
     failing_client.chat.completions.create.side_effect = Exception("boom")
 
     with patch("api.index.OpenAI", return_value=failing_client):
-        result = _describe_image_openrouter_result(b"image-bytes")
+        result = _describe_image_result(b"image-bytes")
 
     assert result is None
 

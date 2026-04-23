@@ -563,7 +563,7 @@ def test_handle_transcribe_with_message_photo_success():
         patch("api.index.get_cached_description") as mock_cached,
         patch("api.index.download_telegram_file") as mock_download,
         patch("api.index.resize_image_if_needed") as mock_resize,
-        patch("api.index._describe_image_groq_result") as mock_describe,
+        patch("api.index._describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"image data"
@@ -599,7 +599,7 @@ def test_handle_transcribe_with_message_sticker_success():
         patch("api.index.get_cached_description") as mock_cached,
         patch("api.index.download_telegram_file") as mock_download,
         patch("api.index.resize_image_if_needed") as mock_resize,
-        patch("api.index._describe_image_groq_result") as mock_describe,
+        patch("api.index._describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"sticker data"
@@ -1361,107 +1361,46 @@ def test_resize_image_if_needed_processing_error():
 
 
 def test_describe_image_groq_success():
-    """Test describe_image_groq with successful API response"""
+    """Test describe_image_groq with successful OpenRouter response"""
     from api.index import describe_image_groq
 
-    with (
-        patch("api.index.environ.get") as mock_env,
-        patch("api.index.OpenAI") as mock_openai,
-    ):
-        mock_env.side_effect = lambda key, default=None: {
-            "GROQ_FREE_API_KEY": "test_api_key",
-        }.get(key, default)
+    choice = MagicMock()
+    choice.message.content = "A beautiful landscape with mountains"
 
-        fake_response = MagicMock()
-        fake_response.output_text = "A beautiful landscape with mountains"
+    response = MagicMock()
+    response.choices = [choice]
 
-        fake_client = MagicMock()
-        fake_client.responses.create.return_value = fake_response
-        mock_openai.return_value = fake_client
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
 
+    with patch("api.index._get_openrouter_client", return_value=client):
         result = describe_image_groq(b"image_data")
 
-        assert result == "A beautiful landscape with mountains"
-        fake_client.responses.create.assert_called_once()
+    assert result == "A beautiful landscape with mountains"
+    client.chat.completions.create.assert_called_once()
 
 
 def test_describe_image_groq_api_error():
-    """Test describe_image_groq with API error"""
+    """Test describe_image_groq with OpenRouter API error"""
     from api.index import describe_image_groq
 
-    with (
-        patch("api.index.environ.get") as mock_env,
-        patch("api.index.OpenAI") as mock_openai,
-    ):
-        mock_env.side_effect = lambda key, default=None: {
-            "GROQ_FREE_API_KEY": "test_api_key",
-        }.get(key, default)
+    client = MagicMock()
+    client.chat.completions.create.side_effect = Exception("API error")
 
-        fake_client = MagicMock()
-        fake_client.responses.create.side_effect = Exception("API error")
-        mock_openai.return_value = fake_client
-
+    with patch("api.index._get_openrouter_client", return_value=client):
         result = describe_image_groq(b"image_data")
 
-        assert result is None
+    assert result is None
 
 
-def test_describe_image_groq_skips_call_when_provider_in_cooldown():
-    from api.index import describe_image_groq
-    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
-
-    clear_all_cooldowns()
-    mark_provider_cooldown("groq:free:vision", 300)
-    mark_provider_cooldown("groq:paid:vision", 300)
-
-    with (
-        patch("api.index.environ.get") as mock_env,
-        patch("api.index._get_groq_client", return_value=None),
-    ):
-        mock_env.side_effect = lambda key, default=None: {
-            "GROQ_FREE_API_KEY": "test_api_key",
-        }.get(key, default)
-
-        result = describe_image_groq(b"image_data")
-
-        assert result is None
-
-    clear_all_cooldowns()
-
-
-def test_describe_image_groq_falls_back_to_openrouter_after_free_429(monkeypatch):
+def test_describe_image_groq_no_client():
+    """Test describe_image_groq when OpenRouter client is unavailable"""
     from api.index import describe_image_groq
 
-    monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
-
-    free_client = MagicMock()
-    free_client.responses.create.side_effect = Exception(
-        "Error code: 429 - rate limit reached"
-    )
-
-    openrouter_choice = MagicMock()
-    openrouter_choice.message.content = "A openrouter fallback image description"
-    openrouter_choice.finish_reason = "stop"
-
-    openrouter_response = MagicMock()
-    openrouter_response.choices = [openrouter_choice]
-
-    openrouter_client = MagicMock()
-    openrouter_client.chat.completions.create.return_value = openrouter_response
-
-    with patch(
-        "api.index.OpenAI", side_effect=[free_client, openrouter_client]
-    ) as mock_openai:
+    with patch("api.index._get_openrouter_client", return_value=None):
         result = describe_image_groq(b"image_data")
 
-    assert result == "A openrouter fallback image description"
-    assert mock_openai.call_count == 2
-    assert mock_openai.call_args_list[0].kwargs["api_key"] == "free_api_key"
-    assert mock_openai.call_args_list[1].kwargs["api_key"] == "openrouter_key"
+    assert result is None
 
 
 def test_transcribe_audio_groq_success():

@@ -252,14 +252,11 @@ SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
 COMPACTION_TRUNCATE_LINES = 20
-GROQ_VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_MODEL = "google/gemini-3.1-flash-lite-preview"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 AI_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 OPENROUTER_WEB_SEARCH_MAX_RESULTS = 10
 OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
-OPENROUTER_VISION_MODEL_MAP = {
-    GROQ_VISION_MODEL: "meta-llama/llama-4-scout",
-}
 
 
 # Polymarket constants
@@ -574,10 +571,6 @@ def _get_groq_api_key(account: str) -> Optional[str]:
 
 def _get_configured_groq_accounts() -> List[str]:
     return [account for account in GROQ_ACCOUNT_ORDER if _get_groq_api_key(account)]
-
-
-def _get_openrouter_vision_model(model: str) -> Optional[str]:
-    return OPENROUTER_VISION_MODEL_MAP.get(model)
 
 
 def _get_openrouter_api_key() -> Optional[str]:
@@ -3005,11 +2998,11 @@ def ask_ai(
         )
 
         if image_data:
-            print("Processing image with Groq vision model...")
+            print("Processing image with vision model...")
 
             user_text = "Describe what you see in this image in detail."
 
-            image_result = _describe_image_groq_result(
+            image_result = _describe_image_result(
                 image_data, user_text, image_file_id
             )
             image_description = image_result.text if image_result else None
@@ -5304,14 +5297,14 @@ def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
         return None
 
 
-def _describe_image_groq_result(
+def _describe_image_result(
     image_data: bytes,
     user_text: str = "¿Qué ves en esta imagen?",
     file_id: Optional[str] = None,
     *,
     use_cache: bool = True,
 ) -> Optional[AIUsageResult]:
-    """Describe image using Groq vision models."""
+    """Describe image using OpenRouter vision model."""
 
     if file_id and use_cache:
         cached = get_cached_description(file_id)
@@ -5319,103 +5312,22 @@ def _describe_image_groq_result(
             return AIUsageResult(
                 kind="vision",
                 text=str(cached),
-                model=GROQ_VISION_MODEL,
+                model=VISION_MODEL,
                 cached=True,
                 metadata={"file_id": file_id, "cache_hit": True},
             )
-
-    image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/jpeg;base64,{image_base64}"
-    estimated_token_count = (
-        estimate_message_tokens(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": user_text},
-                        {"type": "input_image", "image_url": image_url},
-                    ],
-                }
-            ]
-        )
-        + VISION_OUTPUT_TOKEN_LIMIT
-    )
-
-    def _attempt(account: str) -> Optional[AIUsageResult]:
-        groq_client = _get_groq_client(account)
-        if groq_client is None:
-            return None
-        print(f"Describing image with Groq vision model using account={account}...")
-        input_payload = cast(
-            ResponseInputParam,
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": user_text},
-                        {"type": "input_image", "image_url": image_url},
-                    ],
-                }
-            ],
-        )
-
-        response = groq_client.responses.create(
-            model=GROQ_VISION_MODEL,
-            input=input_payload,
-            max_output_tokens=VISION_OUTPUT_TOKEN_LIMIT,
-        )
-        description = _extract_response_text(response)
-        if description:
-            print(f"Image description successful: {description[:100]}...")
-            return _build_groq_usage_result(
-                kind="vision",
-                text=description,
-                model=GROQ_VISION_MODEL,
-                response=response,
-                metadata={
-                    "file_id": file_id,
-                    "cache_hit": False,
-                    "groq_account": account,
-                },
-            )
-        return None
-
-    result = _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="vision",
-        label="Groq Vision",
-        token_count=estimated_token_count,
-    )
-
-    if result is None:
-        result = _describe_image_openrouter_result(image_data, user_text, file_id)
-
-    if result and result.text and file_id:
-        cache_description(file_id, result.text)
-
-    return result
-
-
-def _describe_image_openrouter_result(
-    image_data: bytes,
-    user_text: str = "¿Qué ves en esta imagen?",
-    file_id: Optional[str] = None,
-) -> Optional[AIUsageResult]:
-    model = _get_openrouter_vision_model(GROQ_VISION_MODEL)
-    if not model:
-        return None
 
     client = _get_openrouter_client()
     if client is None:
         return None
 
-    print("Trying OpenRouter vision as fallback...")
+    print(f"Describing image with {VISION_MODEL}...")
     _increment_ai_provider_request_count()
     image_base64 = encode_image_to_base64(image_data)
     image_url = f"data:image/jpeg;base64,{image_base64}"
     try:
         response = client.chat.completions.create(
-            model=model,
+            model=VISION_MODEL,
             messages=cast(
                 Any,
                 [
@@ -5430,18 +5342,30 @@ def _describe_image_openrouter_result(
             ),
             max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
         )
-    except Exception:
+    except Exception as error:
+        admin_report(
+            f"Vision error model={VISION_MODEL}",
+            error,
+            {"model": VISION_MODEL},
+        )
         return None
+
     if response and hasattr(response, "choices") and response.choices:
         content = getattr(response.choices[0].message, "content", None)
         if content:
-            return _build_groq_usage_result(
+            description = str(content)
+            print(f"Image description successful: {description[:100]}...")
+            result = _build_groq_usage_result(
                 kind="vision",
-                text=str(content),
-                model=model,
+                text=description,
+                model=VISION_MODEL,
                 response=response,
                 metadata={"file_id": file_id, "provider": "openrouter"},
             )
+            if file_id:
+                cache_description(file_id, description)
+            return result
+
     return None
 
 
@@ -5452,7 +5376,7 @@ def describe_image_groq(
     *,
     use_cache: bool = True,
 ) -> Optional[str]:
-    result = _describe_image_groq_result(
+    result = _describe_image_result(
         image_data,
         user_text,
         file_id,
@@ -5715,7 +5639,7 @@ def describe_media_by_id(
 
     def _processor(media: bytes) -> Optional[AIUsageResult]:
         resized = resize_image_if_needed(media)
-        return _describe_image_groq_result(resized, prompt, file_id)
+        return _describe_image_result(resized, prompt, file_id)
 
     return _process_media_with_cache(
         file_id=file_id,
