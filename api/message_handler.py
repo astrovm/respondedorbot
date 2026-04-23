@@ -1481,12 +1481,16 @@ def _handle_non_ai_command(
         else:
             prompt_text = base_prompt
 
+        raw_message_id = message.get("message_id")
+        reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
+
         def _consume_summary_stream(iterator):
             final_text, message_id = stream_to_telegram(
                 chat_id,
                 iterator,
                 deps.io.send_message,
                 deps.io.edit_message,
+                reply_to_message_id=reply_to_message_id,
             )
             set_streamed_response_metadata(message_id, final_text)
             return final_text
