@@ -11,9 +11,9 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
 
     with patch("api.index.ask_ai_stream", return_value=token_iterator) as ask_stream:
         with patch(
-            "api.index.stream_to_telegram",
+            "api.index.consume_stream_to_telegram",
             return_value=("hola", "777"),
-        ) as stream_to_telegram:
+        ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
                 [{"role": "user", "content": "hola"}],
                 response_meta=response_meta,
@@ -32,7 +32,7 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
         user_id=55,
         timezone_offset=-3,
     )
-    stream_to_telegram.assert_called_once()
+    consume_stream_to_telegram.assert_called_once()
     assert response_meta["streamed_text"] == "hola"
     assert response_meta["streamed_message_id"] == "777"
 
@@ -128,9 +128,9 @@ def test_handle_ai_stream_response_passes_reply_to_message_id(monkeypatch):
 
     with patch("api.index.ask_ai_stream", return_value=token_iterator):
         with patch(
-            "api.index.stream_to_telegram",
+            "api.index.consume_stream_to_telegram",
             return_value=("hola", "777"),
-        ) as stream_to_telegram:
+        ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
                 [{"role": "user", "content": "hola"}],
                 response_meta=response_meta,
@@ -142,7 +142,7 @@ def test_handle_ai_stream_response_passes_reply_to_message_id(monkeypatch):
             )
 
     assert result == "hola"
-    assert stream_to_telegram.call_args.kwargs["reply_to_message_id"] == "99"
+    assert consume_stream_to_telegram.call_args.kwargs["reply_to_message_id"] == "99"
 
 
 def test_run_ai_flow_uses_user_message_id_not_reply_to_message_id():
@@ -333,9 +333,9 @@ def test_handle_ai_stream_response_end_to_end_no_tool_leak():
 
     with patch("api.index.ask_ai_stream", return_value=token_iterator):
         with patch(
-            "api.index.stream_to_telegram",
+            "api.index.consume_stream_to_telegram",
             return_value=("tool result: hola", "777"),
-        ) as stream_to_telegram:
+        ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
                 [{"role": "user", "content": "hola"}],
                 response_meta=response_meta,
@@ -348,7 +348,7 @@ def test_handle_ai_stream_response_end_to_end_no_tool_leak():
     assert result == "tool result: hola"
     assert_no_raw_tool_syntax(result)
     assert response_meta["streamed_text"] == result
-    stream_to_telegram.assert_called_once()
+    consume_stream_to_telegram.assert_called_once()
 
 
 def test_stream_with_providers_forwards_extra_tools_and_tool_context():

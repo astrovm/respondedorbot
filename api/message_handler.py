@@ -14,6 +14,7 @@ from api.chat_context import format_user_identity
 from api.message_state import save_chat_summary, save_chat_compacted_until
 from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import (
+    consume_stream_to_telegram,
     extract_stream_metadata,
     set_streamed_response_metadata,
     stream_to_telegram,
@@ -58,6 +59,7 @@ class MessageIODeps:
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
+    edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 
@@ -136,6 +138,7 @@ class MessageHandlerDeps:
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
+    edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
     get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
     save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
@@ -218,6 +221,7 @@ def build_message_handler_deps(
         send_msg=io.send_msg,
         send_animation=io.send_animation,
         delete_msg=io.delete_msg,
+        edit_message=io.edit_message,
         admin_report=io.admin_report,
         get_bot_message_metadata=state.get_bot_message_metadata,
         save_bot_message_metadata=state.save_bot_message_metadata,
@@ -1485,14 +1489,13 @@ def _handle_non_ai_command(
         reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
 
         def _consume_summary_stream(iterator):
-            final_text, message_id = stream_to_telegram(
+            final_text, _message_id = consume_stream_to_telegram(
                 chat_id,
                 iterator,
-                deps.io.send_message,
-                deps.io.edit_message,
+                deps.send_msg,
+                deps.edit_message,
                 reply_to_message_id=reply_to_message_id,
             )
-            set_streamed_response_metadata(message_id, final_text)
             return final_text
 
         final_text, pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(

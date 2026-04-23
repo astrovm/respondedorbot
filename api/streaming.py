@@ -150,3 +150,21 @@ def stream_to_telegram(
             streamer.feed(token)
 
     return streamer.finalize(), streamer.message_id or ""
+
+
+def consume_stream_to_telegram(
+    chat_id: str,
+    token_iterator: Iterator[Tuple[str, str]],
+    send_message_fn: SendMessageFn,
+    edit_message_fn: EditMessageFn,
+    reply_to_message_id: Optional[str] = None,
+) -> Tuple[str, str]:
+    final_text, message_id = stream_to_telegram(
+        chat_id,
+        token_iterator,
+        send_message_fn,
+        edit_message_fn,
+        reply_to_message_id=reply_to_message_id,
+    )
+    set_streamed_response_metadata(message_id, final_text)
+    return final_text, message_id
