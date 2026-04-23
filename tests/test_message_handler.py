@@ -237,6 +237,62 @@ def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
     assert "mandalo bien: /transfer <monto>" in mock_send_msg.call_args[0][1]
 
 
+def test_billing_commands_balance_and_transfer_preserve_responses():
+    billing_commands = __import__("api.billing_commands", fromlist=["billing_commands"])
+    handle_balance_command = billing_commands.handle_balance_command
+    handle_transfer_command = billing_commands.handle_transfer_command
+
+    deps = MagicMock()
+    deps.credits_db_service.is_configured.return_value = True
+    deps.balance_formatter.format.return_value = "saldo listo"
+    deps.is_group_chat_type.return_value = True
+    deps.credits_db_service.transfer_user_to_chat.return_value = {
+        "ok": False,
+        "user_balance": 7,
+    }
+
+    balance = handle_balance_command(
+        deps,
+        command="/balance",
+        chat_type="private",
+        chat_id="101",
+        user_id=55,
+        numeric_chat_id=101,
+    )
+    transfer = handle_transfer_command(
+        deps,
+        command="/transfer",
+        sanitized_message_text="1.5",
+        chat_id="202",
+        chat_type="group",
+        user_id=55,
+        numeric_chat_id=202,
+    )
+
+    assert balance == ("saldo listo", None, False, "/balance")
+    deps.maybe_grant_onboarding_credits.assert_called_once_with(
+        deps.credits_db_service,
+        deps.admin_report,
+        55,
+    )
+    deps.balance_formatter.format.assert_called_once_with(
+        chat_type="private",
+        user_id=55,
+        chat_id=101,
+    )
+    assert transfer == (
+        "no te alcanza lo tuyo para pasar esa guita al grupo\nte quedan: 0.7",
+        None,
+        False,
+        "/transfer",
+    )
+    deps.credits_db_service.transfer_user_to_chat.assert_called_once_with(
+        user_id=55,
+        chat_id=202,
+        amount=15,
+    )
+
+
 def test_handle_msg_streamed_response_saves_final_text_to_redis():
     from api.message_handler import handle_msg
 
@@ -499,6 +555,66 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback(monkeypatch):
     assert result == "ok"
     sent_text = mock_send_msg.call_args[0][1]
     assert "estado=groq_zero_usage" in sent_text
+
+
+def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch):
+    admin_commands = __import__("api.admin_commands", fromlist=["admin_commands"])
+    handle_admin_creditlog_command = admin_commands.handle_admin_creditlog_command
+    handle_admin_printcredits_command = admin_commands.handle_admin_printcredits_command
+
+    monkeypatch.setenv("ADMIN_CHAT_ID", "99")
+    deps = MagicMock()
+    deps.credits_db_service.is_configured.return_value = True
+    deps.credits_db_service.mint_user_credits.return_value = {"user_balance": 1200}
+    deps.credits_db_service.list_recent_ai_settlement_results.return_value = [
+        {
+            "created_at": "2026-03-11T17:35:10+00:00",
+            "chat_id": 202,
+            "user_id": 99,
+            "metadata": {
+                "command": "/ask",
+                "reserved_credit_units_total": 20,
+                "settled_credit_units": 10,
+                "refunded_credit_units": 10,
+                "model_breakdown": [{"model": "m1", "usd_micros": 5}],
+                "tool_breakdown": [{"tool": "web", "usd_micros": 7, "count": 2}],
+                "billing_segments": [{"kind": "chat"}, {"kind": "vision"}],
+            },
+        }
+    ]
+
+    printed = handle_admin_printcredits_command(
+        deps,
+        command="/printcredits",
+        sanitized_message_text="100.0",
+        chat_id="202",
+        user_id=99,
+    )
+    logged = handle_admin_creditlog_command(
+        deps,
+        command="/creditlog",
+        sanitized_message_text="1",
+        chat_id="202",
+        user_id=99,
+    )
+
+    assert printed == (
+        "listo, te imprimí 100.0 créditos\nte quedaron 120.0",
+        None,
+        False,
+        "/printcredits",
+    )
+    deps.credits_db_service.mint_user_credits.assert_called_once_with(
+        user_id=99,
+        amount=1000,
+        actor_user_id=99,
+    )
+    assert logged[1:] == (None, False, "/creditlog")
+    assert "últimas liquidaciones IA" in logged[0]
+    assert "cmd=/ask" in logged[0]
+    assert "requests: chat=1, vision=1" in logged[0]
+    assert "modelos: m1=5" in logged[0]
+    assert "tools: web=7 (2x)" in logged[0]
 
 
 def test_handle_msg_successful_payment_credits_user():
@@ -1694,6 +1810,50 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
     mock_charge.assert_called_once()
     mock_send_msg.assert_called_once()
     assert mock_send_msg.call_args[0][1] == "respuesta ok"
+
+
+def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context():
+    message_links = __import__("api.message_links", fromlist=["message_links"])
+    handle_link_replacement = message_links.handle_link_replacement
+
+    deps = MagicMock()
+    deps.replace_links.return_value = (
+        "mirá https://fixupx.com/user/status/1",
+        True,
+        ["https://x.com/user/status/1"],
+    )
+    deps.build_message_links_context.return_value = "links: x original"
+    deps.send_msg.return_value = 777
+    redis_client = MagicMock()
+    message = {
+        "from": {"first_name": "Ana", "last_name": "Pérez"},
+        "reply_to_message": {"message_id": 42},
+    }
+
+    handled = handle_link_replacement(
+        deps,
+        chat_config={"link_mode": "delete"},
+        message=message,
+        message_text="mirá https://x.com/user/status/1",
+        chat_id="555",
+        message_id="100",
+        redis_client=redis_client,
+    )
+
+    assert handled is True
+    deps.delete_msg.assert_called_once_with("555", "100")
+    deps.send_msg.assert_called_once_with(
+        "555",
+        "mirá https://fixupx.com/user/status/1\n\ncompartido por Ana Pérez",
+        "42",
+        ["https://x.com/user/status/1"],
+    )
+    deps.save_message_to_redis.assert_called_once_with(
+        "555",
+        "bot_777",
+        "mirá https://fixupx.com/user/status/1\n\ncompartido por Ana Pérez\n\nlinks: x original",
+        redis_client,
+    )
 
 
 def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(

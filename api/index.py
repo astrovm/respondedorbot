@@ -4,7 +4,6 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date, UTC
 from email.utils import parsedate_to_datetime
-from html.parser import HTMLParser
 from html import unescape
 from math import log
 from openai import OpenAI
@@ -64,8 +63,6 @@ else:
 from api.utils import (
     fmt_num,
     fmt_signed_pct,
-    local_cache_get,
-    update_local_cache,
 )
 from api.services.redis_helpers import (
     redis_get_json,
@@ -103,7 +100,6 @@ from api.ai_pricing import (
     AIUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
-    credit_units_from_usd_micros,
     estimate_chat_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
@@ -175,6 +171,9 @@ from api.price_commands import (
     parse_conversion_only,
     price_query_parameter,
 )
+from .dollar_commands import sort_dollar_rates
+from .rulo_commands import build_rulo_message
+from .market_commands import format_market_info
 from api.routing_policy import RoutingPolicy
 from api.telegram_gateway import TelegramGateway, _truncate_telegram_text
 from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
@@ -191,7 +190,6 @@ from api.message_state import (
     get_user_chat_summary as _state_get_user_chat_summary,
     save_chat_compacted_until as _state_save_chat_compacted_until,
     save_chat_summary as _state_save_chat_summary,
-    save_user_chat_summary as _state_save_user_chat_summary,
     save_bot_message_metadata as _state_save_bot_message_metadata,
     save_message_to_redis as _state_save_message_to_redis,
     search_chat_history as _state_search_chat_history,
@@ -214,6 +212,7 @@ from api.utils.youtube_transcript import (
     extract_youtube_video_id,
     get_youtube_transcript_context,
 )
+from . import link_commands
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -226,6 +225,8 @@ LINK_METADATA_MAX_BYTES = 64_000
 MAX_LINKS_IN_MESSAGE = 3
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
+
+_logger = get_logger(__name__)
 
 # Timeframe support for /prices (maps to CMC native fields)
 _CMC_CHANGE_FIELD: Dict[str, str] = {
@@ -397,7 +398,8 @@ def _optional_redis_client(**kwargs: Any) -> Optional[redis.Redis]:
 
     try:
         return config_redis(**kwargs)
-    except Exception:
+    except Exception as error:
+        _logger.warning("optional Redis client unavailable: %s", error)
         return None
 
 
@@ -765,7 +767,7 @@ def _parse_retry_window_seconds(value: Optional[str]) -> Optional[int]:
 
     try:
         parsed_dt = parsedate_to_datetime(raw_value)
-    except Exception:
+    except (IndexError, KeyError, RequestException, TypeError, ValueError):
         return None
     if parsed_dt.tzinfo is None:
         parsed_dt = parsed_dt.replace(tzinfo=UTC)
@@ -972,19 +974,16 @@ def gen_random(name: str) -> str:
 
 
 def select_random(msg_text: str) -> str:
-    try:
-        values = [v.strip() for v in msg_text.split(",")]
-        if len(values) >= 2:
-            return random.choice(values)
-    except ValueError:
-        pass
+    values = [v.strip() for v in msg_text.split(",")]
+    if len(values) >= 2:
+        return random.choice(values)
 
     try:
         start, end = [int(v.strip()) for v in msg_text.split("-")]
         if start < end:
             return str(random.randint(start, end))
     except ValueError:
-        pass
+        return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
     return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
 
@@ -1030,8 +1029,8 @@ def refresh_price_caches() -> None:
     get_api_or_cache_prices("USD", hourly_cache=True)
     try:
         get_oil_price()
-    except Exception:
-        pass
+    except Exception as error:
+        _logger.warning("refresh_price_caches: oil cache refresh failed: %s", error)
 
 
 def _fetch_polymarket_event(
@@ -1223,7 +1222,10 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
         if not price_info:
             return None
         return float(price_info.get("price"))
-    except Exception:
+    except (KeyError, TypeError, ValueError):
+        return None
+    except Exception as error:
+        _logger.exception("get_btc_price failed for convert_to=%s: %s", convert_to, error)
         return None
 
 
@@ -1418,144 +1420,6 @@ def get_prices(msg_text: str) -> Optional[str]:
     return msg
 
 
-def sort_dollar_rates(
-    dollar_rates,
-    tcrm_100: Optional[float] = None,
-    tcrm_history: Optional[float] = None,
-    hours_ago: int = 24,
-):
-    dollars = dollar_rates["data"]
-
-    # For 24h use CriptoYa's own variation (accurate, always present).
-    # For other timeframes use Redis hourly snapshots when available.
-    hist_dollars: Optional[Dict[str, Any]] = None
-    if hours_ago != 24:
-        history_entry = dollar_rates.get("history")
-        if isinstance(history_entry, dict) and "data" in history_entry:
-            hist_dollars = history_entry["data"]
-
-    def _var(
-        current_price: float, criptoya_variation, *hist_path: str
-    ) -> Optional[float]:
-        if hours_ago == 24:
-            return criptoya_variation
-        if hist_dollars is None:
-            return None
-        try:
-            obj: Any = hist_dollars
-            for key in hist_path:
-                obj = obj[key]
-            return _pct_change(current_price, float(obj))
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    sorted_dollar_rates = [
-        {
-            "name": "Mayorista",
-            "price": dollars["mayorista"]["price"],
-            "history": _var(
-                dollars["mayorista"]["price"],
-                dollars["mayorista"]["variation"],
-                "mayorista",
-                "price",
-            ),
-        },
-        {
-            "name": "Oficial",
-            "price": dollars["oficial"]["price"],
-            "history": _var(
-                dollars["oficial"]["price"],
-                dollars["oficial"]["variation"],
-                "oficial",
-                "price",
-            ),
-        },
-        {
-            "name": "Tarjeta",
-            "price": dollars["tarjeta"]["price"],
-            "history": _var(
-                dollars["tarjeta"]["price"],
-                dollars["tarjeta"]["variation"],
-                "tarjeta",
-                "price",
-            ),
-        },
-        {
-            "name": "MEP",
-            "price": dollars["mep"]["al30"]["ci"]["price"],
-            "history": _var(
-                dollars["mep"]["al30"]["ci"]["price"],
-                dollars["mep"]["al30"]["ci"]["variation"],
-                "mep",
-                "al30",
-                "ci",
-                "price",
-            ),
-        },
-        {
-            "name": "CCL",
-            "price": dollars["ccl"]["al30"]["ci"]["price"],
-            "history": _var(
-                dollars["ccl"]["al30"]["ci"]["price"],
-                dollars["ccl"]["al30"]["ci"]["variation"],
-                "ccl",
-                "al30",
-                "ci",
-                "price",
-            ),
-        },
-        {
-            "name": "Blue",
-            "price": dollars["blue"]["ask"],
-            "history": _var(
-                dollars["blue"]["ask"], dollars["blue"]["variation"], "blue", "ask"
-            ),
-        },
-        {
-            "name": "Bitcoin",
-            "price": dollars["cripto"]["ccb"]["ask"],
-            "history": _var(
-                dollars["cripto"]["ccb"]["ask"],
-                dollars["cripto"]["ccb"]["variation"],
-                "cripto",
-                "ccb",
-                "ask",
-            ),
-        },
-        {
-            "name": "USDC",
-            "price": dollars["cripto"]["usdc"]["ask"],
-            "history": _var(
-                dollars["cripto"]["usdc"]["ask"],
-                dollars["cripto"]["usdc"]["variation"],
-                "cripto",
-                "usdc",
-                "ask",
-            ),
-        },
-        {
-            "name": "USDT",
-            "price": dollars["cripto"]["usdt"]["ask"],
-            "history": _var(
-                dollars["cripto"]["usdt"]["ask"],
-                dollars["cripto"]["usdt"]["variation"],
-                "cripto",
-                "usdt",
-                "ask",
-            ),
-        },
-    ]
-
-    if tcrm_100 is not None:
-        sorted_dollar_rates.append(
-            {"name": "TCRM 100", "price": tcrm_100, "history": tcrm_history}
-        )
-
-    sorted_dollar_rates.sort(key=lambda x: x["price"])
-
-    return sorted_dollar_rates
-
-
 def format_dollar_rates(
     dollar_rates: List[Dict],
     hours_ago: int,
@@ -1682,55 +1546,6 @@ Total: {fmt_num(compra_ars + ganancia_ars, 2)} ARS / {fmt_num(compra_usdt + gana
         return "uso: /devo <fee_porcentaje>[, <monto_compra>]"
 
 
-def _safe_float(value: Any) -> Optional[float]:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str) and value.strip():
-            return float(value)
-    except (TypeError, ValueError):
-        return None
-    return None
-
-
-def _pct_change(current: float, historical: float) -> Optional[float]:
-    """Compute percentage change from historical to current. Returns None on bad input."""
-    try:
-        h = float(historical)
-        if h != 0:
-            return ((float(current) - h) / h) * 100
-    except (TypeError, ValueError, ZeroDivisionError):
-        pass
-    return None
-
-
-def _format_local_currency(value: float, decimals: int = 2) -> str:
-    formatted = f"{value:,.{decimals}f}"
-    formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
-    if decimals:
-        formatted = formatted.rstrip("0").rstrip(",")
-    return formatted
-
-
-def _format_local_signed(value: float, decimals: int = 2) -> str:
-    sign = "+" if value >= 0 else "-"
-    return f"{sign}{_format_local_currency(abs(value), decimals)}"
-
-
-def _format_spread_line(
-    label: str, sell_price: float, oficial_price: float, details: Sequence[str]
-) -> str:
-    diff = sell_price - oficial_price
-    pct = (diff / oficial_price) * 100 if oficial_price else 0.0
-    lines = [
-        f"- {label}",
-        f"  • Precio venta: {_format_local_currency(sell_price)} ARS/USD",
-        f"  • Diferencia vs oficial: {_format_local_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
-    ]
-    lines.extend(f"  • {detail}" for detail in details)
-    return "\n".join(lines)
-
-
 def get_rulo() -> str:
     cache_expiration_time = TTL_DOLLAR
     usd_amount = 1000.0
@@ -1745,53 +1560,6 @@ def get_rulo() -> str:
     if not dollars or "data" not in dollars:
         return "error consiguiendo cotizaciones del dólar"
 
-    data = dollars["data"]
-    oficial_price = _safe_float(data.get("oficial", {}).get("price"))
-
-    if not oficial_price or oficial_price <= 0:
-        return "No pude conseguir el oficial para armar el rulo"
-
-    oficial_cost_ars = oficial_price * usd_amount
-
-    base_usd = _format_local_currency(usd_amount, 0)
-    base_ars = _format_local_currency(oficial_cost_ars)
-
-    lines: List[str] = [
-        f"Rulos desde Oficial (precio oficial: {_format_local_currency(oficial_price)} ARS/USD)",
-        f"Inversión base: {base_usd} USD → {base_ars} ARS",
-        "",
-    ]
-
-    # Oficial -> MEP
-    mep_best_price = _safe_float(data["mep"]["al30"]["ci"]["price"])
-    mep_label = "MEP (AL30 CI)"
-
-    if mep_best_price:
-        mep_final_ars = mep_best_price * usd_amount
-        mep_profit_ars = mep_final_ars - oficial_cost_ars
-        mep_extra = [
-            f"Resultado: {base_usd} USD → {_format_local_currency(mep_final_ars)} ARS",
-            f"Ganancia: {_format_local_signed(mep_profit_ars)} ARS",
-        ]
-        lines.append(
-            _format_spread_line(mep_label, mep_best_price, oficial_price, mep_extra)
-        )
-
-    # Oficial -> Blue
-    blue_data = data.get("blue", {})
-    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(
-        blue_data.get("price")
-    )
-    if blue_price:
-        blue_final_ars = blue_price * usd_amount
-        blue_profit_ars = blue_final_ars - oficial_cost_ars
-        blue_extra = [
-            f"Resultado: {base_usd} USD → {_format_local_currency(blue_final_ars)} ARS",
-            f"Ganancia: {_format_local_signed(blue_profit_ars)} ARS",
-        ]
-        lines.append(_format_spread_line("Blue", blue_price, oficial_price, blue_extra))
-
-    # Oficial -> USDT -> ARS
     usd_usdt = cached_requests(
         f"https://criptoya.com/api/USDT/USD/{amount_param}",
         None,
@@ -1806,63 +1574,12 @@ def get_rulo() -> str:
         cache_expiration_time,
         True,
     )
-
-    best_usd_to_usdt: Optional[Tuple[str, float]] = None
-    excluded_usd_to_usdt_exchanges = {"banexcoin", "xapo", "x4t"}
-    excluded_usdt_to_ars_exchanges = {"okexp2p"}
-
-    if usd_usdt and "data" in usd_usdt:
-        for exchange, quote in usd_usdt["data"].items():
-            if not isinstance(quote, Mapping):
-                continue
-            if exchange.lower() in excluded_usd_to_usdt_exchanges:
-                continue
-            ask = _safe_float(quote.get("totalAsk")) or _safe_float(quote.get("ask"))
-            if not ask or ask <= 0:
-                continue
-            if best_usd_to_usdt is None or ask < best_usd_to_usdt[1]:
-                best_usd_to_usdt = (exchange, ask)
-
-    best_usdt_to_ars: Optional[Tuple[str, float]] = None
-    if usdt_ars and "data" in usdt_ars:
-        for exchange, quote in usdt_ars["data"].items():
-            if not isinstance(quote, Mapping):
-                continue
-            if exchange.lower() in excluded_usdt_to_ars_exchanges:
-                continue
-            bid = _safe_float(quote.get("totalBid")) or _safe_float(quote.get("bid"))
-            if not bid or bid <= 0:
-                continue
-            if best_usdt_to_ars is None or bid > best_usdt_to_ars[1]:
-                best_usdt_to_ars = (exchange, bid)
-
-    if best_usd_to_usdt and best_usdt_to_ars:
-        usd_to_usdt_rate = best_usd_to_usdt[1]
-        usdt_to_ars_rate = best_usdt_to_ars[1]
-        usdt_obtained = usd_amount / usd_to_usdt_rate
-        ars_obtained = usdt_obtained * usdt_to_ars_rate
-        final_price = ars_obtained / usd_amount
-        usdt_profit_ars = ars_obtained - oficial_cost_ars
-        path_detail = (
-            f"Tramos: USD→USDT {best_usd_to_usdt[0].upper()}, "
-            f"USDT→ARS {best_usdt_to_ars[0].upper()}"
-        )
-        usdt_extra = [
-            path_detail,
-            (
-                f"Resultado: {base_usd} USD → {_format_local_currency(usdt_obtained, 2)} USDT → "
-                f"{_format_local_currency(ars_obtained)} ARS"
-            ),
-            f"Ganancia: {_format_local_signed(usdt_profit_ars)} ARS",
-        ]
-        lines.append(
-            _format_spread_line("USDT", final_price, oficial_price, usdt_extra)
-        )
-
-    if len(lines) <= 2:
-        return "No encontré ningún rulo potable"
-
-    return "\n".join(lines)
+    return build_rulo_message(
+        dollars["data"],
+        usd_usdt.get("data") if usd_usdt and "data" in usd_usdt else None,
+        usdt_ars.get("data") if usdt_ars and "data" in usdt_ars else None,
+        usd_amount=usd_amount,
+    )
 
 
 def satoshi() -> str:
@@ -1888,7 +1605,10 @@ $1 USD = {sats_per_dollar:,} sats
 $1 ARS = {sats_per_peso:.3f} sats"""
 
         return msg
-    except Exception:
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "no pude conseguir el precio de btc boludo"
+    except Exception as error:
+        _logger.exception("satoshi failed: %s", error)
         return "no pude conseguir el precio de btc boludo"
 
 
@@ -2061,7 +1781,7 @@ def handle_transcribe_with_message_result(
         return "ese mensaje no tiene audio, video, imagen ni sticker para laburar", []
 
     except Exception as e:
-        print(f"Error in handle_transcribe: {e}")
+        _logger.exception("handle_transcribe failed: %s", e)
         return "se trabó el /transcribe, probá más tarde", []
 
 
@@ -2399,7 +2119,7 @@ def _fetch_top_stocks_by_market_cap() -> List[str]:
                 seen_companies.add(company)
                 result.append(symbol)
         return result
-    except Exception:
+    except RequestException:
         return []
 
 
@@ -2698,10 +2418,6 @@ def admin_report(
 
     if admin_chat_id:
         send_msg(admin_chat_id, formatted_message)
-
-
-def _chat_admin_cache_key(chat_id: str, user_id: Union[str, int]) -> str:
-    return f"chat_admin:{chat_id}:{user_id}"
 
 
 def is_chat_admin(
@@ -3046,80 +2762,10 @@ def stream_with_providers(
     )
 
 
-class _HtmlMetadataExtractor(HTMLParser):
-    """Extract preview metadata from HTML documents."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._title_parts: List[str] = []
-        self._in_title = False
-        self.title: Optional[str] = None
-        self.description: Optional[str] = None
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        tag_lower = tag.lower()
-        attrs_map = {str(key).lower(): value for key, value in attrs}
-        if tag_lower == "title":
-            self._in_title = True
-            return
-        if tag_lower != "meta":
-            return
-
-        property_name = str(attrs_map.get("property") or "").strip().lower()
-        meta_name = str(attrs_map.get("name") or "").strip().lower()
-        content = str(attrs_map.get("content") or "").strip()
-        if not content:
-            return
-
-        normalized_content = re.sub(r"\s+", " ", unescape(content)).strip()
-        if not normalized_content:
-            return
-
-        if property_name in {"og:title", "twitter:title"} and not self.title:
-            self.title = normalized_content
-        elif (
-            property_name in {"og:description", "twitter:description"}
-            and not self.description
-        ):
-            self.description = normalized_content
-        elif meta_name == "description" and not self.description:
-            self.description = normalized_content
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "title":
-            self._in_title = False
-
-    def handle_data(self, data: str) -> None:
-        if not self._in_title:
-            return
-        text = re.sub(r"\s+", " ", unescape(data)).strip()
-        if text:
-            self._title_parts.append(text)
-
-    def finalize(self) -> Tuple[Optional[str], Optional[str]]:
-        title = self.title or re.sub(r"\s+", " ", " ".join(self._title_parts)).strip()
-        return title or None, self.description or None
-
-
-def _extract_html_metadata(html_text: str) -> Tuple[Optional[str], Optional[str]]:
-    parser = _HtmlMetadataExtractor()
-    try:
-        parser.feed(html_text)
-        parser.close()
-    except Exception:
-        pass
-    return parser.finalize()
-
-
 def _truncate_link_metadata_text(
     text: Optional[str], limit: int = 280
 ) -> Optional[str]:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not normalized:
-        return None
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 3].rstrip() + "..."
+    return link_commands.truncate_link_metadata_text(text, limit)
 
 
 def _utf16_slice(text: str, offset: int, length: int) -> str:
@@ -3143,25 +2789,11 @@ def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
 
 
 def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
-    normalized = normalize_http_url(raw_url)
-    if not normalized:
-        return
-
-    cache_payload = {
-        "url": str(metadata.get("url") or normalized).strip() or normalized,
-        "status": metadata.get("status"),
-        "content_type": str(metadata.get("content_type") or ""),
-        "title": _truncate_link_metadata_text(metadata.get("title"), limit=160),
-        "description": _truncate_link_metadata_text(
-            metadata.get("description"), limit=280
-        ),
-    }
-    cache_store = _link_metadata_local_cache.setdefault(normalized, {})
-    update_local_cache(
-        cache_store,
-        cache_payload,
-        TTL_LINK_METADATA,
-        0,
+    link_commands.cache_link_metadata(
+        raw_url,
+        metadata,
+        local_cache=_link_metadata_local_cache,
+        ttl=TTL_LINK_METADATA,
     )
 
 
@@ -3227,118 +2859,17 @@ def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
 
 def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
     """Fetch preview metadata for a URL and cache the result."""
-
-    normalized = normalize_http_url(raw_url)
-    if not normalized:
-        return {"url": str(raw_url or "").strip(), "error": "url inválida"}
-
-    local_cached, is_fresh, _ = local_cache_get(
-        _link_metadata_local_cache.setdefault(normalized, {}),
-        allow_stale=False,
+    return link_commands.fetch_link_metadata(
+        raw_url,
+        local_cache=_link_metadata_local_cache,
+        ttl=TTL_LINK_METADATA,
+        max_bytes=LINK_METADATA_MAX_BYTES,
+        optional_redis_client=_optional_redis_client,
+        hash_cache_key=_hash_cache_key,
+        request_fn=request_with_ssl_fallback,
+        redis_get_json_fn=redis_get_json,
+        redis_setex_json_fn=redis_setex_json,
     )
-    if is_fresh and isinstance(local_cached, dict):
-        return local_cached
-
-    redis_client = _optional_redis_client()
-    cache_key = _hash_cache_key("link_metadata", {"url": normalized})
-    if redis_client is not None:
-        try:
-            cached = redis_get_json(redis_client, cache_key)
-            if isinstance(cached, dict):
-                _cache_link_metadata(normalized, cached)
-                return cached
-        except Exception:
-            redis_client = None
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
-    }
-
-    response = None
-    try:
-        response = request_with_ssl_fallback(
-            normalized,
-            headers=headers,
-            timeout=8,
-            allow_redirects=True,
-            stream=True,
-        )
-        response.raise_for_status()
-    except RequestException as error:
-        return {
-            "url": normalized,
-            "error": error.__class__.__name__,
-        }
-
-    final_url = normalized
-    content_type = ""
-    status_code = getattr(response, "status_code", None)
-    encoding: Optional[str] = None
-    apparent_encoding: Optional[str] = None
-    content_bytes = b""
-    try:
-        maybe_url = normalize_http_url(str(getattr(response, "url", "") or ""))
-        if maybe_url:
-            final_url = maybe_url
-        content_type = str(response.headers.get("Content-Type", "")).lower()
-        encoding = response.encoding
-        apparent_encoding = getattr(response, "apparent_encoding", None)
-        chunks: List[bytes] = []
-        total = 0
-        for chunk in response.iter_content(chunk_size=4096):
-            if not chunk:
-                continue
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= LINK_METADATA_MAX_BYTES:
-                break
-        content_bytes = b"".join(chunks)
-    finally:
-        try:
-            response.close()
-        except Exception:
-            pass
-
-    result: Dict[str, Any] = {
-        "url": final_url,
-        "status": status_code,
-        "content_type": content_type or "",
-        "title": None,
-        "description": None,
-    }
-
-    if content_bytes:
-        sample_lower = content_bytes[:400].lower()
-        if (
-            "html" in content_type
-            or b"<html" in sample_lower
-            or b"<!doctype" in sample_lower
-        ):
-            try:
-                text_body = content_bytes.decode(
-                    encoding or apparent_encoding or "utf-8", errors="replace"
-                )
-            except Exception:
-                text_body = content_bytes.decode("utf-8", errors="replace")
-            title, description = _extract_html_metadata(text_body)
-            result["title"] = _truncate_link_metadata_text(title, limit=160)
-            result["description"] = _truncate_link_metadata_text(description, limit=280)
-
-    if redis_client is not None:
-        try:
-            redis_setex_json(redis_client, cache_key, TTL_LINK_METADATA, result)
-        except Exception:
-            pass
-
-    _cache_link_metadata(normalized, result)
-
-    return result
 
 
 def build_message_links_context(message: Mapping[str, Any]) -> str:
@@ -3384,7 +2915,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
 
     try:
         limit = int(limit)
-    except Exception:
+    except (TypeError, ValueError):
         limit = HACKER_NEWS_MAX_ITEMS
 
     if limit < 1:
@@ -3432,7 +2963,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
             if points_match:
                 try:
                     points_val = int(points_match.group(1))
-                except Exception:
+                except ValueError:
                     points_val = None
 
             comments_val: Optional[int] = None
@@ -3440,7 +2971,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
             if comments_match:
                 try:
                     comments_val = int(comments_match.group(1))
-                except Exception:
+                except ValueError:
                     comments_val = None
 
             comments_url_match = re.search(
@@ -3468,12 +2999,18 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
                 redis_setex_json(
                     redis_client, HACKER_NEWS_CACHE_KEY, TTL_HACKER_NEWS, items
                 )
-            except Exception:
-                pass
+            except Exception as cache_error:
+                _logger.warning(
+                    "get_hacker_news_context: failed to cache RSS items: %s",
+                    cache_error,
+                )
 
         return items[:limit] if items else (cached_items or [])[:limit]
-    except Exception as parse_error:
+    except ET.ParseError as parse_error:
         print(f"Error parsing Hacker News RSS: {parse_error}")
+        return (cached_items or [])[:limit]
+    except Exception as parse_error:
+        _logger.exception("get_hacker_news_context failed: %s", parse_error)
         return (cached_items or [])[:limit]
 
 
@@ -4307,118 +3844,6 @@ def format_hacker_news_info(
     return "\n".join(lines) if lines else "- sin datos por ahora"
 
 
-def format_market_info(market: Dict) -> str:
-    """Format market data for context with compact summaries."""
-
-    info: List[str] = []
-
-    crypto_rows = market.get("crypto")
-    if isinstance(crypto_rows, Sequence) and not isinstance(
-        crypto_rows, (str, bytes, bytearray)
-    ):
-        crypto_lines: List[str] = []
-        for crypto in list(crypto_rows)[:3]:
-            if not isinstance(crypto, Mapping):
-                continue
-            symbol = (
-                str(crypto.get("symbol") or crypto.get("name") or "").strip().upper()
-            )
-            usd_quote = (
-                ensure_mapping((ensure_mapping(crypto.get("quote")) or {}).get("USD"))
-                or {}
-            )
-            price = _safe_float(
-                usd_quote.get("price") if usd_quote else crypto.get("price")
-            )
-            change_24h = _safe_float(
-                (ensure_mapping(usd_quote.get("changes")) or {}).get("24h")
-                if usd_quote
-                else crypto.get("change_24h")
-            )
-            dominance = _safe_float(usd_quote.get("dominance")) if usd_quote else None
-            if not symbol or price is None:
-                continue
-            line = f"- {symbol}: {fmt_num(price, 2)} usd"
-            if change_24h is not None:
-                line += f" ({fmt_signed_pct(change_24h, 2)} 24h)"
-            if dominance is not None:
-                line += f", dom {fmt_num(dominance, 1)}%"
-            crypto_lines.append(line)
-        if crypto_lines:
-            info.append("PRECIOS DE CRIPTOS:")
-            info.extend(crypto_lines)
-
-    dollar_value = market.get("dollar")
-    dollar_data = ensure_mapping(dollar_value)
-    if (
-        not dollar_data
-        and isinstance(dollar_value, Sequence)
-        and not isinstance(dollar_value, (str, bytes, bytearray))
-    ):
-        sequence_lines: List[str] = []
-        for item in dollar_value:
-            if not isinstance(item, Mapping):
-                continue
-            label = str(item.get("name") or item.get("label") or "").strip().lower()
-            price = _safe_float(item.get("price"))
-            if label and price is not None:
-                sequence_lines.append(f"- {label}: {fmt_num(price, 2)}")
-        if sequence_lines:
-            info.append("DOLARES:")
-            info.extend(sequence_lines)
-    elif dollar_data:
-        dollar_lines: List[str] = []
-
-        oficial_price = _safe_float(
-            (ensure_mapping(dollar_data.get("oficial")) or {}).get("price")
-        )
-        if oficial_price is not None:
-            dollar_lines.append(f"- oficial: {fmt_num(oficial_price, 2)}")
-
-        blue_data = ensure_mapping(dollar_data.get("blue")) or {}
-        blue_ask = _safe_float(blue_data.get("ask") or blue_data.get("price"))
-        blue_bid = _safe_float(blue_data.get("bid"))
-        if blue_ask is not None:
-            blue_line = f"- blue: {fmt_num(blue_ask, 2)}"
-            if blue_bid is not None:
-                blue_line += f" (bid {fmt_num(blue_bid, 2)})"
-            dollar_lines.append(blue_line)
-
-        mep_ci = ensure_mapping(
-            (ensure_mapping(dollar_data.get("mep")) or {}).get("al30")
-        )
-        mep_ci = ensure_mapping((mep_ci or {}).get("ci")) or {}
-        mep_price = _safe_float(mep_ci.get("price"))
-        if mep_price is not None:
-            dollar_lines.append(f"- mep al30 ci: {fmt_num(mep_price, 2)}")
-
-        tarjeta_price = _safe_float(
-            (ensure_mapping(dollar_data.get("tarjeta")) or {}).get("price")
-        )
-        if tarjeta_price is not None:
-            dollar_lines.append(f"- tarjeta: {fmt_num(tarjeta_price, 2)}")
-
-        usdt_data = (
-            ensure_mapping(
-                (ensure_mapping(dollar_data.get("cripto")) or {}).get("usdt")
-            )
-            or {}
-        )
-        usdt_ask = _safe_float(usdt_data.get("ask"))
-        usdt_bid = _safe_float(usdt_data.get("bid"))
-        if usdt_ask is not None:
-            usdt_line = f"- usdt: {fmt_num(usdt_ask, 2)}"
-            if usdt_bid is not None:
-                usdt_line += f" (bid {fmt_num(usdt_bid, 2)})"
-            dollar_lines.append(usdt_line)
-
-        if dollar_lines:
-            info.append("DOLARES:")
-            info.extend(dollar_lines)
-
-    return "\n".join(info)
-
-
 def format_weather_info(weather: Dict) -> str:
     """Format weather data for context"""
     visibility_km = weather.get("visibility")
@@ -4985,61 +4410,6 @@ def _execute_groq_request_with_fallback(
         if is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
             continue
         break
-
-    return None
-
-
-def _extract_response_text(response: Any) -> Optional[str]:
-    if response is None:
-        return None
-
-    output_text = getattr(response, "output_text", None)
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    if isinstance(response, dict):
-        output_text = response.get("output_text")
-        if isinstance(output_text, str) and output_text.strip():
-            return output_text.strip()
-        output = response.get("output")
-    else:
-        output = getattr(response, "output", None)
-
-    if isinstance(output, list):
-        parts: List[str] = []
-        for item in output:
-            content = None
-            if isinstance(item, dict):
-                content = item.get("content")
-            else:
-                content = getattr(item, "content", None)
-
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        block_type = block.get("type")
-                        if block_type in {"output_text", "text"}:
-                            chunk = block.get("text") or block.get("output_text")
-                            if chunk:
-                                parts.append(str(chunk))
-                    else:
-                        chunk = getattr(block, "text", None) or getattr(
-                            block, "output_text", None
-                        )
-                        if chunk:
-                            parts.append(str(chunk))
-            else:
-                if isinstance(item, dict):
-                    chunk = item.get("text") or item.get("output_text")
-                else:
-                    chunk = getattr(item, "text", None) or getattr(
-                        item, "output_text", None
-                    )
-                if chunk:
-                    parts.append(str(chunk))
-
-        if parts:
-            return " ".join(part.strip() for part in parts if part.strip()).strip()
 
     return None
 
@@ -5890,8 +5260,13 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
         new_text, new_keyboard = _build_tasks_message(tasks)
         try:
             edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
-        except Exception:
-            pass
+        except Exception as error:
+            _logger.exception(
+                "handle_task_callback: failed to edit task message chat_id=%s message_id=%s: %s",
+                chat_id,
+                message_id,
+                error,
+            )
 
 
 def edit_message(
@@ -6001,7 +5376,10 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
                     timezone_offset=offset,
                 )
             except ValueError:
-                pass
+                _log_config_event(
+                    "Invalid timezone callback value",
+                    {"chat_id": chat_id_str, "value": value},
+                )
     elif action == "creditless":
         try:
             current_limit = int(
@@ -6034,7 +5412,10 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
                 creditless_user_hourly_limit=limit,
             )
         except ValueError:
-            pass
+            _log_config_event(
+                "Invalid creditless callback value",
+                {"chat_id": chat_id_str, "value": value},
+            )
 
     text = build_config_text(config, chat_type)
     keyboard = build_config_keyboard(config, chat_type)
@@ -6233,15 +5614,21 @@ def _send_message_for_stream(
 ) -> Optional[int]:
     try:
         return send_msg(chat_id, text, reply_to_message_id or "")
-    except Exception:
+    except Exception as error:
+        _logger.exception("stream: failed to send message chat_id=%s: %s", chat_id, error)
         return None
 
 
 def _edit_message_for_stream(chat_id: str, text: str, message_id: str) -> None:
     try:
         edit_message(chat_id, int(message_id), text)
-    except Exception:
-        pass
+    except Exception as error:
+        _logger.exception(
+            "stream: failed to edit message chat_id=%s message_id=%s: %s",
+            chat_id,
+            message_id,
+            error,
+        )
 
 
 def handle_ai_stream_response(
