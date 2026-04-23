@@ -37,6 +37,7 @@ class AIService:
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
     handle_summary_command: Callable[[str, Any, str], Any]
+    stream_summary_command: Callable[[str, Any, str], Any]
 
     def run_conversation(
         self,
@@ -277,6 +278,54 @@ class AIService:
             pending_marker=result.pending_marker,
         )
 
+    def run_summary_command_stream(
+        self,
+        request: SummaryCommandRequest,
+        stream_consumer: Callable[[Any], str],
+    ) -> Tuple[str, Optional[str], bool]:
+        if not self.credits_db_service.is_configured():
+            return self.handle_rate_limit(request.chat_id, request.message), None, True
+
+        if (
+            not self.check_provider_available(scope="chat")
+            and not self.has_openrouter_fallback()
+        ):
+            return self.handle_rate_limit(request.chat_id, request.message), None, True
+
+        token_iterator, pending_marker = self.stream_summary_command(
+            request.chat_id,
+            request.redis_client,
+            request.prompt_text,
+        )
+
+        main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
+            [{"role": "user", "content": "summary"}],
+            extra_input_tokens=0,
+        )
+        base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
+            "ai_response_base",
+            main_reserve_credits,
+            metadata={"estimated_prompt_messages": 1, **reserve_meta},
+        )
+        if base_charge_error:
+            return base_charge_error, None, True
+
+        try:
+            final_text = stream_consumer(token_iterator)
+        except Exception:
+            request.billing_helper.refund_reserved_ai_credits(
+                base_charge_meta, reason="summary_stream_failed"
+            )
+            return "no pude generar el resumen", None, True
+
+        request.billing_helper.settle_reserved_ai_credits_batch(
+            [base_charge_meta],
+            [],
+            reason="summary_command_stream_success",
+        )
+
+        return final_text, pending_marker, False
+
 
 @dataclass(frozen=True)
 class AIConversationRequest:
@@ -327,6 +376,7 @@ def build_ai_service(
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     estimate_image_context_reserve_credits: Callable[[bytes, str], int],
     handle_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: None,
+    stream_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: (iter([]), None),
 ) -> AIService:
     return AIService(
         credits_db_service=credits_db_service,
@@ -340,4 +390,5 @@ def build_ai_service(
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
         handle_summary_command=handle_summary_command,
+        stream_summary_command=stream_summary_command,
     )

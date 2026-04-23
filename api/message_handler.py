@@ -13,7 +13,11 @@ from api.ai_service import AIConversationRequest, AIService, SummaryCommandReque
 from api.chat_context import format_user_identity
 from api.message_state import save_chat_summary, save_chat_compacted_until
 from api.credit_units import format_credit_units, parse_credit_units
-from api.streaming import extract_stream_metadata
+from api.streaming import (
+    extract_stream_metadata,
+    set_streamed_response_metadata,
+    stream_to_telegram,
+)
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
@@ -1477,20 +1481,34 @@ def _handle_non_ai_command(
         else:
             prompt_text = base_prompt
 
-        response = deps.ai_service.run_summary_command(
+        def _consume_summary_stream(iterator):
+            final_text, message_id = stream_to_telegram(
+                chat_id,
+                iterator,
+                deps.io.send_message,
+                deps.io.edit_message,
+            )
+            set_streamed_response_metadata(message_id, final_text)
+            return final_text
+
+        final_text, pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(
             SummaryCommandRequest(
                 chat_id=chat_id,
                 message=message,
                 billing_helper=billing_helper,
                 prompt_text=prompt_text,
                 redis_client=redis_client,
-            )
+            ),
+            stream_consumer=_consume_summary_stream,
         )
-        if not response.is_fallback and response.pending_summary is not None:
-            save_chat_summary(redis_client, chat_id, response.pending_summary)
-            if response.pending_marker is not None:
-                save_chat_compacted_until(redis_client, chat_id, response.pending_marker)
-        return response.text, None, False, command
+
+        if not is_fallback and pending_marker is not None:
+            save_chat_summary(redis_client, chat_id, final_text)
+            save_chat_compacted_until(redis_client, chat_id, pending_marker)
+
+        if is_fallback:
+            return final_text, None, False, command
+        return None, None, True, command
 
     if command == "/transcribe":
         reserve_credits = 0

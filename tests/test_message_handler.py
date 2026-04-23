@@ -2524,15 +2524,14 @@ def test_resolve_message_intent_uses_reply_text_for_command_without_params():
     assert intent.should_respond is True
 
 
-def test_handle_non_ai_command_summary_uses_billed_summary_runner():
+def test_handle_non_ai_command_summary_uses_streaming():
     from api.message_handler import _handle_non_ai_command
 
     deps = MagicMock()
-    deps.ai_service.run_summary_command.return_value = MagicMock(
-        text="resumen listo",
-        is_fallback=False,
-        pending_summary="canonical summary",
-        pending_marker="m10",
+    deps.ai_service.run_summary_command_stream.return_value = (
+        "resumen listo",
+        "m10",
+        False,
     )
     commands = {"/resumen": (MagicMock(), False, True)}
 
@@ -2550,11 +2549,39 @@ def test_handle_non_ai_command_summary_uses_billed_summary_runner():
         timezone_offset=-3,
     )
 
-    assert response == ("resumen listo", None, False, "/resumen")
-    deps.ai_service.run_summary_command.assert_called_once()
-    call_args = deps.ai_service.run_summary_command.call_args
+    assert response == (None, None, True, "/resumen")
+    deps.ai_service.run_summary_command_stream.assert_called_once()
+    call_args = deps.ai_service.run_summary_command_stream.call_args
     assert call_args[0][0].chat_id == "123"
     assert "focus en crypto" in call_args[0][0].prompt_text
+
+
+def test_handle_non_ai_command_summary_fallback_returns_text():
+    from api.message_handler import _handle_non_ai_command
+
+    deps = MagicMock()
+    deps.ai_service.run_summary_command_stream.return_value = (
+        "no pude generar el resumen",
+        None,
+        True,
+    )
+    commands = {"/resumen": (MagicMock(), False, True)}
+
+    response = _handle_non_ai_command(
+        deps,
+        command="/resumen",
+        commands=commands,
+        sanitized_message_text="focus en crypto",
+        message={"message_id": "10"},
+        chat_id="123",
+        redis_client=MagicMock(),
+        billing_helper=MagicMock(),
+        user_id=7,
+        user_identity="Ana (ana)",
+        timezone_offset=-3,
+    )
+
+    assert response == ("no pude generar el resumen", None, False, "/resumen")
 
 
 def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
