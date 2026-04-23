@@ -201,6 +201,7 @@ from api.utils.links import (
     replace_links as _links_replace_links,
     fetch_tweet_text as _links_fetch_tweet_text,
 )
+from api.utils.text import sanitize_summary_text
 from api.utils.youtube_transcript import (
     extract_youtube_video_id,
     get_youtube_transcript_context,
@@ -3963,14 +3964,15 @@ def _compact_conversation(
         (
             "actualizá el resumen previo con los mensajes nuevos. "
             "usá formato denso: temas, hechos clave, decisiones y pendientes. "
-            "omití saludos y chat casual. mantené el idioma original."
+            "omití saludos y chat casual. mantené el idioma original. "
+            "NUNCA uses markdown: no negritas, no headers, no tablas."
         ),
         prior_summary=prior_summary,
     )
 
     result, cost = _call_summary_model(api_messages)
     if result:
-        return f"[contexto anterior: {result}]", cost
+        return f"[contexto anterior: {sanitize_summary_text(result)}]", cost
     fallback_lines = []
     for msg in messages:
         content = msg.get("content") or msg.get("text", "")
@@ -4039,8 +4041,9 @@ def stream_summary_command(
         source.is_zero_delta, bool(source.prior_summary)
     )
     if source.is_zero_delta and source.prior_summary:
+        sanitized = sanitize_summary_text(source.prior_summary)
         def _yield_cached():
-            yield "cache", source.prior_summary
+            yield "cache", sanitized
         return _yield_cached(), source.next_marker
 
     api_messages = _build_summary_messages(source, prompt_text)
