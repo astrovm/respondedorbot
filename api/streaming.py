@@ -100,13 +100,14 @@ class TelegramMessageStreamer:
     def finalize(self, final_text: Optional[str] = None) -> str:
         self._done = True
         text = final_text if final_text is not None else self._buffer
-        if not self._message_id and not self._send_attempted:
-            self._send_attempted = True
+        if not self._message_id:
+            if not self._send_attempted:
+                self._send_attempted = True
             message_id = self._send_message(
                 self._chat_id, text, self._reply_to_message_id
             )
             self._message_id = str(message_id) if message_id is not None else None
-        elif self._message_id and text != self._sent_text:
+        elif text != self._sent_text:
             try:
                 self._edit_message(self._chat_id, text, self._message_id)
             except Exception as e:
