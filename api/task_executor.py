@@ -14,7 +14,6 @@ from api.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_FALLBACK_MARKER = "[[AI_FALLBACK]]"
 _MAX_FALLBACK_RETRIES = 1
 _MAX_EMPTY_RETRIES = 1
 
@@ -28,12 +27,6 @@ _TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
         "- no la pongas toda en una sola frase: estructurala para que sea fácil de leer",
     ]
 )
-
-
-def _strip_response_marker(response: str) -> str:
-    if response.startswith(_FALLBACK_MARKER):
-        return response[len(_FALLBACK_MARKER) :].lstrip()
-    return response
 
 
 def _clean_task_response(response: str) -> str:
@@ -151,7 +144,7 @@ class TaskExecutor:
                     billing.refund_reserved_ai_credits(charge_meta, reason="task_empty")
                     return should_delete
 
-                is_fallback = response.startswith(_FALLBACK_MARKER)
+                is_fallback = response_meta.get("ai_fallback", False)
                 if is_fallback and fallback_retries < _MAX_FALLBACK_RETRIES:
                     fallback_retries += 1
                     logger.warning(
@@ -163,7 +156,6 @@ class TaskExecutor:
                     )
                     continue
 
-                response = _strip_response_marker(response)
                 response = _clean_task_response(response)
                 self._send_msg(chat_id, f"{display}, tarea programada: {response}")
                 logger.info("task %s completed successfully", task_id)
