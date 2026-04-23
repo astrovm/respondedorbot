@@ -52,16 +52,12 @@ python run_polling.py
 
 ### Provider contract
 
-**Chat**: OpenRouter (`qwen/qwen3.6-plus`)
-
-**Vision**:
-- OpenRouter (`google/gemini-3.1-flash-lite-preview`)
-
-**Transcription**:
-- Groq free → Groq paid → OpenRouter (`google/gemini-3.1-flash-lite-preview`)
-
-**Summary**:
-- OpenRouter (`minimax/minimax-m2.7`) exclusively
+| Use | Provider | Model |
+|---|---|---|
+| **Chat** | OpenRouter | `qwen/qwen3.6-plus` |
+| **Vision** | OpenRouter | `google/gemini-3.1-flash-lite-preview` |
+| **Transcription** | Groq → OpenRouter fallback | `whisper-large-v3` → `google/gemini-3.1-flash-lite-preview` |
+| **Summary** | OpenRouter | `minimax/minimax-m2.7` |
 
 **Streaming**: token streaming only when no tools/web-search are active. Tool-enabled requests return complete responses.
 
