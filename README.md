@@ -13,7 +13,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
 - **BCRA economic data**: `/bcra`, `/variables`
-- **Media**: audio transcription (Whisper via Groq) and image description (OpenRouter)
+- **Media**: audio transcription (Whisper via Groq, with OpenRouter fallback) and image description (OpenRouter)
 - **Scheduled tasks**: `/tareas`, `/tasks` — create, list, and delete one-shot or recurring reminders via AI or inline buttons
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context; social links auto-replaced (fxTwitter, fixupx, etc.)
