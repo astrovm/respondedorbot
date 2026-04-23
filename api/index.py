@@ -180,8 +180,10 @@ from api.message_state import (
     get_chat_compacted_until as _state_get_chat_compacted_until,
     get_chat_history as _state_get_chat_history,
     get_chat_summary as _state_get_chat_summary,
+    get_user_chat_summary as _state_get_user_chat_summary,
     save_chat_compacted_until as _state_save_chat_compacted_until,
     save_chat_summary as _state_save_chat_summary,
+    save_user_chat_summary as _state_save_user_chat_summary,
     save_bot_message_metadata as _state_save_bot_message_metadata,
     save_message_to_redis as _state_save_message_to_redis,
     search_chat_history as _state_search_chat_history,
@@ -4020,7 +4022,7 @@ def stream_summary_command(
     redis_client: redis.Redis,
     prompt_text: str,
 ) -> Tuple[Iterator[Tuple[str, str]], Optional[str]]:
-    existing_summary = _state_get_chat_summary(redis_client, chat_id)
+    existing_summary = _state_get_user_chat_summary(redis_client, chat_id)
     compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 
@@ -4062,10 +4064,10 @@ def handle_summary_command(
     _summary_logger.info(
         "summary_cmd: chat_id=%s existing_summary=%s compacted_until=%s",
         chat_id,
-        "yes" if _state_get_chat_summary(redis_client, chat_id) else "no",
+        "yes" if _state_get_user_chat_summary(redis_client, chat_id) else "no",
         _state_get_chat_compacted_until(redis_client, chat_id) or "none",
     )
-    existing_summary = _state_get_chat_summary(redis_client, chat_id)
+    existing_summary = _state_get_user_chat_summary(redis_client, chat_id)
     compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 

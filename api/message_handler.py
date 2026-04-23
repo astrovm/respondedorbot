@@ -11,7 +11,7 @@ from api.ai_pricing import (
 )
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
-from api.message_state import save_chat_summary, save_chat_compacted_until
+from api.message_state import save_chat_summary, save_chat_compacted_until, save_user_chat_summary
 from api.credit_units import format_credit_units, parse_credit_units
 from api.streaming import (
     consume_stream_to_telegram,
@@ -1506,7 +1506,7 @@ def _handle_non_ai_command(
         )
 
         if not is_fallback and pending_marker is not None:
-            save_chat_summary(redis_client, chat_id, final_text)
+            save_user_chat_summary(redis_client, chat_id, final_text)
             save_chat_compacted_until(redis_client, chat_id, pending_marker)
 
         if is_fallback:

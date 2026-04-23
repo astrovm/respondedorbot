@@ -59,6 +59,10 @@ def _summary_key(chat_id: str) -> str:
     return f"chat_summary:{chat_id}"
 
 
+def _user_summary_key(chat_id: str) -> str:
+    return f"chat_user_summary:{chat_id}"
+
+
 def _compacted_until_key(chat_id: str) -> str:
     return f"chat_compacted_until:{chat_id}"
 
@@ -138,6 +142,14 @@ def get_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
 
 def save_chat_summary(redis_client: redis.Redis, chat_id: str, summary: str) -> None:
     redis_client.setex(_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
+
+
+def get_user_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    return _decode_redis_text(redis_client.get(_user_summary_key(chat_id)))
+
+
+def save_user_chat_summary(redis_client: redis.Redis, chat_id: str, summary: str) -> None:
+    redis_client.setex(_user_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
 
 
 def get_chat_compacted_until(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
@@ -527,8 +539,10 @@ __all__ = [
     "get_chat_compacted_until",
     "get_chat_history",
     "get_chat_summary",
+    "get_user_chat_summary",
     "save_chat_compacted_until",
     "save_chat_summary",
+    "save_user_chat_summary",
     "save_bot_message_metadata",
     "save_message_to_redis",
     "search_chat_history",
