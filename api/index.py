@@ -3976,16 +3976,6 @@ def _compact_conversation(
     return f"[contexto anterior truncado: {truncated}]", 0
 
 
-@dataclass
-class SummaryCommandResult:
-    response_text: str
-    pending_summary: Optional[str]
-    pending_marker: Optional[str]
-    summary_cost: int
-    billing_segments: List[Dict[str, Any]]
-    is_fallback: bool
-
-
 def _build_summary_messages(
     source: IncrementalSummarySource,
     prompt_text: str,
@@ -4050,83 +4040,9 @@ def stream_summary_command(
     messages = api_messages[1:]
     return (
         _wrap_provider_stream(provider.name, provider.stream(
-            system_message, messages, enable_web_search=False
+            system_message, messages, enable_web_search=False, max_tokens=SUMMARY_MAX_TOKENS
         )),
         source.next_marker,
-    )
-
-
-def handle_summary_command(
-    chat_id: str,
-    redis_client: redis.Redis,
-    prompt_text: str,
-) -> SummaryCommandResult:
-    _summary_logger.info(
-        "summary_cmd: chat_id=%s existing_summary=%s compacted_until=%s",
-        chat_id,
-        "yes" if _state_get_user_chat_summary(redis_client, chat_id) else "no",
-        _state_get_chat_compacted_until(redis_client, chat_id) or "none",
-    )
-    existing_summary = _state_get_user_chat_summary(redis_client, chat_id)
-    compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
-    history = get_chat_history(chat_id, redis_client)
-
-    if not history:
-        _summary_logger.info("summary_cmd: no history for chat_id=%s", chat_id)
-        return SummaryCommandResult(
-            response_text="no hay mensajes para resumir",
-            pending_summary=None,
-            pending_marker=None,
-            summary_cost=0,
-            billing_segments=[],
-            is_fallback=False,
-        )
-
-    source = _build_incremental_summary_source(history, existing_summary, compacted_until)
-    _summary_logger.info(
-        "summary_cmd: history=%d delta=%d zero_delta=%s has_prior=%s",
-        len(history),
-        len(source.delta_messages),
-        source.is_zero_delta,
-        "yes" if source.prior_summary else "no",
-    )
-
-    canonical_summary: Optional[str] = None
-    summary_cost = 0
-    if source.is_zero_delta and source.prior_summary:
-        canonical_summary = source.prior_summary
-        _summary_logger.info("summary_cmd: reusing existing summary, len=%d", len(canonical_summary))
-    elif not source.is_zero_delta:
-        api_messages = _build_summary_messages(source, prompt_text)
-        _summary_logger.info(
-            "summary_cmd: generating summary messages=%d",
-            len(api_messages),
-        )
-        canonical_summary, summary_cost = _call_summary_model(api_messages)
-
-    if not canonical_summary:
-        _summary_logger.error("summary_cmd: no canonical_summary generated")
-        return SummaryCommandResult(
-            response_text="no pude generar el resumen",
-            pending_summary=None,
-            pending_marker=source.next_marker,
-            summary_cost=summary_cost,
-            billing_segments=[],
-            is_fallback=True,
-        )
-
-    _summary_logger.info(
-        "summary_cmd: summary ready, len=%d cost=%d",
-        len(canonical_summary),
-        summary_cost,
-    )
-    return SummaryCommandResult(
-        response_text=canonical_summary,
-        pending_summary=canonical_summary,
-        pending_marker=source.next_marker,
-        summary_cost=summary_cost,
-        billing_segments=[],
-        is_fallback=False,
     )
 
 
@@ -6292,7 +6208,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         handle_ai_response=handle_ai_response,
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
-        handle_summary_command=handle_summary_command,
         stream_summary_command=stream_summary_command,
     )
     return build_message_handler_deps(

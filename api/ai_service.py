@@ -36,7 +36,6 @@ class AIService:
     handle_ai_response: Callable[..., str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
-    handle_summary_command: Callable[[str, Any, str], Any]
     stream_summary_command: Callable[[str, Any, str], Any]
 
     def run_conversation(
@@ -190,94 +189,6 @@ class AIService:
 
         return response_msg, True
 
-    def run_summary_command(
-        self,
-        request: SummaryCommandRequest,
-    ) -> SummaryCommandResponse:
-        if not self.credits_db_service.is_configured():
-            rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
-            return SummaryCommandResponse(
-                text=rate_limit_msg,
-                is_fallback=False,
-                pending_summary=None,
-                pending_marker=None,
-            )
-
-        if (
-            not self.check_provider_available(scope="chat")
-            and not self.has_openrouter_fallback()
-        ):
-            rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
-            return SummaryCommandResponse(
-                text=rate_limit_msg,
-                is_fallback=False,
-                pending_summary=None,
-                pending_marker=None,
-            )
-
-        result = self.handle_summary_command(
-            request.chat_id,
-            request.redis_client,
-            request.prompt_text,
-        )
-
-        if result.pending_summary is None:
-            return SummaryCommandResponse(
-                text=result.response_text or "no pude generar el resumen",
-                is_fallback=True,
-                pending_summary=None,
-                pending_marker=None,
-            )
-
-        main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
-            [{"role": "user", "content": result.response_text}],
-            extra_input_tokens=0,
-        )
-        base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
-            "ai_response_base",
-            main_reserve_credits,
-            metadata={
-                "estimated_prompt_messages": 1,
-                "summary_cost": result.summary_cost,
-                **reserve_meta,
-            },
-        )
-        if base_charge_error:
-            return SummaryCommandResponse(
-                text=base_charge_error,
-                is_fallback=False,
-                pending_summary=None,
-                pending_marker=None,
-            )
-
-        billing_segments = list(result.billing_segments or [])
-        if result.summary_cost > 0:
-            billing_segments.insert(0, _make_summary_billing_segment(result.summary_cost))
-
-        if result.is_fallback:
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="summary_qwen_fallback"
-            )
-            return SummaryCommandResponse(
-                text=result.response_text or "no pude generar el resumen",
-                is_fallback=True,
-                pending_summary=None,
-                pending_marker=None,
-            )
-
-        request.billing_helper.settle_reserved_ai_credits_batch(
-            [base_charge_meta],
-            billing_segments,
-            reason="summary_command_success",
-        )
-
-        return SummaryCommandResponse(
-            text=result.response_text,
-            is_fallback=False,
-            pending_summary=result.pending_summary,
-            pending_marker=result.pending_marker,
-        )
-
     def run_summary_command_stream(
         self,
         request: SummaryCommandRequest,
@@ -375,7 +286,6 @@ def build_ai_service(
     handle_ai_response: Callable[..., str],
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     estimate_image_context_reserve_credits: Callable[[bytes, str], int],
-    handle_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: None,
     stream_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: (iter([]), None),
 ) -> AIService:
     return AIService(
@@ -389,6 +299,5 @@ def build_ai_service(
         handle_ai_response=handle_ai_response,
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
-        handle_summary_command=handle_summary_command,
         stream_summary_command=stream_summary_command,
     )
