@@ -6,7 +6,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 
 ## Features
 
-- **AI chat**: configurable personality with web search, powered by Qwen via OpenRouter with Groq fallback
+- **AI chat**: configurable personality with web search, powered by Qwen via OpenRouter
 - **Streaming responses**: AI replies stream token-by-token to Telegram (when no tools are active)
 - **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
 - **Incremental summaries**: `/resumen` streams conversation summaries using Minimax, with automatic context compaction
@@ -52,9 +52,7 @@ python run_polling.py
 
 ### Provider contract
 
-**Chat provider chain** (tries in order):
-1. OpenRouter (`qwen/qwen3.6-plus`) — primary
-2. Groq (`llama-3.3-70b-versatile`) — fallback with cooldown backoff
+**Chat**: OpenRouter (`qwen/qwen3.6-plus`)
 
 **Vision**:
 - Groq free → Groq paid → OpenRouter (`meta-llama/llama-4-scout`)
@@ -105,8 +103,6 @@ python run_polling.py
 
 - `ProviderChain` — tries providers in order until one succeeds
 - `OpenRouterProvider` — streaming + completion, primary chat model
-- `GroqChatProvider` — completion only, cooldown-aware fallback
-
 ### Streaming (`api/streaming.py`)
 
 `TelegramMessageStreamer` edits Telegram messages every 400ms or 15+ new chars. Token streaming from `OpenRouterProvider.stream()` when no tools active. Falls back to complete response for tool-enabled requests.
@@ -152,7 +148,7 @@ Every system prompt includes:
 ## Project layout
 
 - `api/` - application code
-  - `api/providers/` - AI provider abstraction (OpenRouter, Groq, ProviderChain)
+  - `api/providers/` - AI provider abstraction (OpenRouter, ProviderChain)
   - `api/streaming.py` - Telegram token streaming
   - `api/ai_service.py` - AI conversation orchestration and billing
   - `api/ai_pipeline.py` - response cleanup pipeline
