@@ -4009,7 +4009,6 @@ def _build_summary_provider() -> OpenRouterProvider:
 def _wrap_provider_stream(
     provider_name: str, token_iter: Iterator[str]
 ) -> Iterator[Tuple[str, str]]:
-    yield provider_name, ""
     for token in token_iter:
         yield provider_name, token
 
