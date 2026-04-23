@@ -58,7 +58,7 @@ python run_polling.py
 - OpenRouter (`google/gemini-3.1-flash-lite-preview`)
 
 **Transcription**:
-- Groq free → Groq paid (no OpenRouter fallback)
+- Groq free → Groq paid → OpenRouter (`google/gemini-3.1-flash-lite-preview`)
 
 **Summary**:
 - OpenRouter (`minimax/minimax-m2.7`) exclusively
