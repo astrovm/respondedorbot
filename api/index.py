@@ -4003,8 +4003,12 @@ def _build_summary_provider() -> OpenRouterProvider:
 def _wrap_provider_stream(
     provider_name: str, token_iter: Iterator[str]
 ) -> Iterator[Tuple[str, str]]:
-    for token in token_iter:
-        yield provider_name, token
+    try:
+        for token in token_iter:
+            yield provider_name, token
+    except Exception:
+        _summary_logger.exception("summary_stream: provider=%s failed", provider_name)
+        raise
 
 
 def stream_summary_command(
@@ -4017,12 +4021,18 @@ def stream_summary_command(
     history = get_chat_history(chat_id, redis_client)
 
     if not history:
+        _summary_logger.info("summary_stream: no history for chat_id=%s", chat_id)
         def _empty():
             yield "none", "no hay mensajes para resumir"
         return _empty(), None
 
     source = _build_incremental_summary_source(
         history, existing_summary, compacted_until
+    )
+    _summary_logger.info(
+        "summary_stream: chat_id=%s history=%d delta=%d zero_delta=%s has_prior=%s",
+        chat_id, len(history), len(source.delta_messages),
+        source.is_zero_delta, bool(source.prior_summary)
     )
     if source.is_zero_delta and source.prior_summary:
         def _yield_cached():
@@ -4031,6 +4041,10 @@ def stream_summary_command(
 
     api_messages = _build_summary_messages(source, prompt_text)
     provider = _build_summary_provider()
+    _summary_logger.info(
+        "summary_stream: chat_id=%s provider_available=%s messages=%d",
+        chat_id, provider.is_available(), len(api_messages)
+    )
     if not provider.is_available():
         def _unavailable():
             yield "none", "no pude generar el resumen"
