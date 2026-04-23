@@ -50,16 +50,16 @@ def _read_bootstrap_file(name: str) -> Optional[str]:
 
 def _build_system_prompt_from_workspace() -> Optional[str]:
     soul = _read_bootstrap_file("SOUL.md")
-    agents = _read_bootstrap_file("AGENTS.md")
+    rules = _read_bootstrap_file("RULES.md")
 
-    if not soul and not agents:
+    if not soul and not rules:
         return None
 
     parts = []
     if soul:
         parts.append(soul)
-    if agents:
-        parts.append(agents)
+    if rules:
+        parts.append(rules)
     return "\n\n".join(parts)
 
 
@@ -77,7 +77,7 @@ def load_bot_config() -> Dict[str, Any]:
         if not workspace_prompt:
             raise RuntimeError(
                 "workspace/ directory missing. "
-                "Create workspace/SOUL.md and workspace/AGENTS.md, or set BOT_SYSTEM_PROMPT env var."
+                "Create workspace/SOUL.md and workspace/RULES.md, or set BOT_SYSTEM_PROMPT env var."
             )
         system_prompt = workspace_prompt
 
