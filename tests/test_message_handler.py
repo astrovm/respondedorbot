@@ -2200,15 +2200,6 @@ def _build_test_ai_service(flat_defaults):
         estimate_image_context_reserve_credits=flat_defaults[
             "estimate_image_context_reserve_credits"
         ],
-        handle_summary_command=flat_defaults.get("handle_summary_command")
-        or MagicMock(return_value=MagicMock(
-            response_text="resumen listo",
-            pending_summary=None,
-            pending_marker=None,
-            summary_cost=0,
-            billing_segments=[],
-            is_fallback=False,
-        )),
     )
 
 

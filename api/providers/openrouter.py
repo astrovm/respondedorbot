@@ -82,6 +82,7 @@ class OpenRouterProvider(StreamingAIProvider):
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
     ) -> Iterator[str]:
         client = self._get_client()
         if client is None:
@@ -95,7 +96,7 @@ class OpenRouterProvider(StreamingAIProvider):
                 request_kwargs: Dict[str, Any] = {
                     "model": self._primary_model,
                     "messages": [system_message] + list(messages),
-                    "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+                    "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
                     "stream": True,
                 }
 
