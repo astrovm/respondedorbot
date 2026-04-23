@@ -78,9 +78,15 @@ class TestTaskExecutor:
         assert "INSTRUCCIONES:" in sent_prompt
 
     def test_refunds_reserved_credits_on_fallback(self):
+        def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
+            if response_meta is not None:
+                response_meta["ai_fallback"] = True
+            return "respuesta"
+
         executor, billing, ask_ai, send_msg = _build_executor(
-            ask_ai_return_value="[[AI_FALLBACK]]respuesta"
+            ask_ai_return_value="respuesta"
         )
+        ask_ai.side_effect = _fallback_ask_ai
 
         task = {
             "id": "abc123",

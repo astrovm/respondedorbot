@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.logging_config import get_logger
 from api.task_executor import (
-    _strip_response_marker as _task_executor_strip_response_marker,
     build_task_executor,
     TaskExecutor,
 )
@@ -283,10 +282,6 @@ def shutdown_scheduler() -> None:
     if _scheduler_instance is not None:
         _scheduler_instance.shutdown(wait=False)
         _scheduler_instance = None
-
-
-def _strip_response_marker(response: str) -> str:
-    return _task_executor_strip_response_marker(response)
 
 
 def _get_redis() -> Any:

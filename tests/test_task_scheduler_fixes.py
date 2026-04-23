@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 from api.tools.task_scheduler import (
     TASK_REDIS_PREFIX,
-    _strip_response_marker,
     get_scheduler_runtime_status,
     get_scheduler,
     list_tasks,
@@ -89,38 +88,12 @@ def _build_executor_for_tests(
 
 
 # ---------------------------------------------------------------------------
-# _strip_response_marker
-# ---------------------------------------------------------------------------
-
-
-class TestStripResponseMarker:
-    def test_strips_marker(self):
-        assert _strip_response_marker("[[AI_FALLBACK]]no boludo") == "no boludo"
-
-    def test_strips_marker_with_leading_whitespace(self):
-        assert _strip_response_marker("[[AI_FALLBACK]]  hola") == "hola"
-
-    def test_no_marker(self):
-        assert _strip_response_marker("respuesta normal") == "respuesta normal"
-
-    def test_empty_string(self):
-        assert _strip_response_marker("") == ""
-
-    def test_marker_only(self):
-        assert _strip_response_marker("[[AI_FALLBACK]]") == ""
-
-    def test_marker_in_middle_not_stripped(self):
-        text = "algo [[AI_FALLBACK]] algo"
-        assert _strip_response_marker(text) == text
-
-
-# ---------------------------------------------------------------------------
 # _fire_task -- core behavior
 # ---------------------------------------------------------------------------
 
 
 class TestFireTaskStripsMarker:
-    """Verify _fire_task strips [[AI_FALLBACK]] from the sent message."""
+    """Verify _fire_task handles fallback responses correctly."""
 
     @patch("api.tools.task_scheduler.get_scheduler")
     def test_one_shot_strips_fallback_marker(self, mock_sched):
@@ -137,7 +110,12 @@ class TestFireTaskStripsMarker:
         )
         set_redis_client(redis_client)
 
-        mock_ask_ai = MagicMock(return_value="[[AI_FALLBACK]]no boludo")
+        def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
+            if response_meta is not None:
+                response_meta["ai_fallback"] = True
+            return "no boludo"
+
+        mock_ask_ai = MagicMock(side_effect=_fallback_ask_ai)
         mock_send = MagicMock()
         credits = _credits_ok_mock()
         executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
@@ -148,11 +126,10 @@ class TestFireTaskStripsMarker:
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
-        assert "[[AI_FALLBACK]]" not in sent_text
         assert "no boludo" in sent_text
 
     @patch("api.tools.task_scheduler.get_scheduler")
-    def test_recurring_strips_fallback_marker(self, mock_sched):
+    def test_recurring_fallback_response(self, mock_sched):
         from api.tools.task_scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
@@ -166,7 +143,12 @@ class TestFireTaskStripsMarker:
         )
         set_redis_client(redis_client)
 
-        mock_ask_ai = MagicMock(return_value="[[AI_FALLBACK]]fallback response")
+        def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
+            if response_meta is not None:
+                response_meta["ai_fallback"] = True
+            return "fallback response"
+
+        mock_ask_ai = MagicMock(side_effect=_fallback_ask_ai)
         mock_send = MagicMock()
         credits = _credits_ok_mock()
         executor = _build_executor_for_tests(credits, mock_ask_ai, mock_send)
@@ -177,7 +159,6 @@ class TestFireTaskStripsMarker:
 
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][1]
-        assert "[[AI_FALLBACK]]" not in sent_text
         assert "fallback response" in sent_text
 
     @patch("api.tools.task_scheduler.get_scheduler")
@@ -321,9 +302,14 @@ class TestFireTaskCleanup:
         )
         set_redis_client(redis_client)
 
+        def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
+            if response_meta is not None:
+                response_meta["ai_fallback"] = True
+            return "dale"
+
         executor = _build_executor_for_tests(
             credits,
-            MagicMock(return_value="[[AI_FALLBACK]]dale"),
+            MagicMock(side_effect=_fallback_ask_ai),
             MagicMock(),
             billing_factory=billing_factory,
         )
