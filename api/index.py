@@ -109,7 +109,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
-from api.providers import OpenRouterProvider, GroqChatProvider, ProviderChain
+from api.providers import OpenRouterProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
 import api.tools.calculate
@@ -3095,16 +3095,7 @@ def _build_provider_chain() -> ProviderChain:
         max_tool_rounds=_MAX_TOOL_ROUNDS,
         tool_runtime=_TOOL_RUNTIME,
     )
-    groq = GroqChatProvider(
-        get_client=lambda: _get_groq_client("paid"),
-        admin_report=admin_report,
-        increment_request_count=_increment_ai_provider_request_count,
-        build_usage_result=_build_groq_usage_result,
-        extract_usage_map=_extract_groq_usage_map,
-        primary_model="llama-3.3-70b-versatile",
-        max_tool_rounds=_MAX_TOOL_ROUNDS,
-    )
-    return ProviderChain([openrouter, groq])
+    return ProviderChain([openrouter])
 
 
 _provider_chain: Optional[ProviderChain] = None
