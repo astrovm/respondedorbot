@@ -5629,7 +5629,7 @@ def transcribe_file_by_id(
 def describe_media_by_id(
     file_id: str, prompt: str
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
-    """Fetch description for an image/sticker by Telegram file_id using Groq vision.
+    """Fetch description for an image/sticker by Telegram file_id using OpenRouter vision.
 
     Returns (description, error):
     - On success: (description, None)
