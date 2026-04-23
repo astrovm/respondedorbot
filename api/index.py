@@ -167,6 +167,14 @@ from api.message_handler import (
     handle_msg as _handle_msg_impl,
 )
 from api.ai_service import build_ai_service
+from api.price_commands import (
+    SUPPORTED_PRICE_SYMBOLS,
+    expand_price_tokens,
+    find_coin_by_symbol_or_name,
+    parse_amount_conversion,
+    parse_conversion_only,
+    price_query_parameter,
+)
 from api.routing_policy import RoutingPolicy
 from api.telegram_gateway import TelegramGateway, _truncate_telegram_text
 from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
@@ -1232,92 +1240,34 @@ def get_prices(msg_text: str) -> Optional[str]:
     prices_number = 0
     convert_to = "USD"
     convert_to_parameter = "USD"
-    supported_symbols = {
-        "ARS",
-        "AUD",
-        "BRL",
-        "BTC",
-        "BUSD",
-        "CAD",
-        "CHF",
-        "CLP",
-        "CNY",
-        "COP",
-        "CZK",
-        "DAI",
-        "DKK",
-        "ETH",
-        "EUR",
-        "GBP",
-        "HKD",
-        "ILS",
-        "INR",
-        "ISK",
-        "JPY",
-        "KRW",
-        "MXN",
-        "NZD",
-        "PEN",
-        "SATS",
-        "SEK",
-        "SGD",
-        "TWD",
-        "USD",
-        "USDC",
-        "USDT",
-        "UYU",
-        "XAU",
-        "XMR",
-    }
-
-    conversion_prepositions = ("in", "to", "a", "en")
-    conversion_token_pattern = "|".join(conversion_prepositions)
-
-    conversion_match = re.match(
-        rf"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+([a-zA-Z0-9]+)\s+(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
-        msg_text,
-        re.IGNORECASE,
-    )
 
     # symmetric behavior: amount + source_asset + in + target_currency
-    if conversion_match:
-        amount_text, source_symbol, target_symbol = conversion_match.groups()
-        amount = float(amount_text.replace(",", "."))
-        source_symbol = source_symbol.upper()
-        convert_to = target_symbol.upper()
+    conversion_request = parse_amount_conversion(msg_text)
+    if conversion_request:
+        amount = conversion_request.amount
+        source_symbol = conversion_request.source_symbol
+        convert_to = conversion_request.target_symbol
 
-        if convert_to not in supported_symbols:
+        if convert_to not in SUPPORTED_PRICE_SYMBOLS:
             return f"no laburo con {convert_to} gordo"
 
-        convert_to_parameter = "BTC" if convert_to == "SATS" else convert_to
+        convert_to_parameter = conversion_request.target_parameter
         prices = get_api_or_cache_prices(convert_to_parameter)
 
         if not prices or "data" not in prices:
             return "no pude traer precios de crypto boludo"
 
-        requested_asset = None
-        normalized_source = source_symbol.replace(" ", "")
-        for coin in prices["data"]:
-            symbol = coin["symbol"].upper().replace(" ", "")
-            name = coin["name"].upper().replace(" ", "")
-            if symbol == normalized_source or name == normalized_source:
-                requested_asset = coin
-                break
+        requested_asset = find_coin_by_symbol_or_name(prices["data"], source_symbol)
 
         if not requested_asset:
-            source_parameter = "BTC" if source_symbol == "SATS" else source_symbol
+            source_parameter = price_query_parameter(source_symbol)
             reverse_prices = get_api_or_cache_prices(source_parameter)
             if not reverse_prices or "data" not in reverse_prices:
                 return "no pude traer precios de crypto boludo"
 
-            requested_target_asset = None
-            normalized_target = convert_to.replace(" ", "")
-            for coin in reverse_prices["data"]:
-                symbol = coin["symbol"].upper().replace(" ", "")
-                name = coin["name"].upper().replace(" ", "")
-                if symbol == normalized_target or name == normalized_target:
-                    requested_target_asset = coin
-                    break
+            requested_target_asset = find_coin_by_symbol_or_name(
+                reverse_prices["data"], convert_to
+            )
 
             if not requested_target_asset:
                 return "no laburo con esos ponzis boludo"
@@ -1345,37 +1295,9 @@ def get_prices(msg_text: str) -> Optional[str]:
             f"{fmt_num(converted_value, 8)} {convert_to}"
         )
 
-    conversion_only_match = re.match(
-        rf"^\s*(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
-        msg_text,
-        re.IGNORECASE,
-    )
-    if conversion_only_match:
-        convert_to = conversion_only_match.group(1).upper()
-        msg_text = ""
-        if convert_to == "SATS":
-            convert_to_parameter = "BTC"
-        elif convert_to in supported_symbols:
-            convert_to_parameter = convert_to
-        else:
-            return f"no laburo con {convert_to} gordo"
-    else:
-        split_parts = re.split(
-            rf"\s+(?:{conversion_token_pattern})\s+",
-            msg_text,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )
-        if len(split_parts) == 2:
-            msg_text, convert_to = split_parts[0], split_parts[1].upper().strip()
-            msg_text = msg_text.strip()
-            if convert_to in supported_symbols:
-                if convert_to == "SATS":
-                    convert_to_parameter = "BTC"
-                else:
-                    convert_to_parameter = convert_to
-            else:
-                return f"no laburo con {convert_to} gordo"
+    msg_text, convert_to, convert_to_parameter = parse_conversion_only(msg_text)
+    if convert_to not in SUPPORTED_PRICE_SYMBOLS:
+        return f"no laburo con {convert_to} gordo"
 
     prices = get_api_or_cache_prices(convert_to_parameter)
 
@@ -1388,43 +1310,11 @@ def get_prices(msg_text: str) -> Optional[str]:
                 if parsed > prices_number:
                     prices_number = parsed
             except ValueError:
-                # ignore items which aren't integers
-                pass
+                continue
 
     if msg_text.upper().isupper():
         new_prices = []
-        coins = msg_text.upper().replace(" ", "").split(",")
-        if "STABLES" in coins or "STABLECOINS" in coins:
-            coins.extend(
-                [
-                    "BUSD",
-                    "DAI",
-                    "DOC",
-                    "EURT",
-                    "FDUSD",
-                    "FRAX",
-                    "GHO",
-                    "GUSD",
-                    "LUSD",
-                    "MAI",
-                    "MIM",
-                    "MIMATIC",
-                    "NUARS",
-                    "PAXG",
-                    "PYUSD",
-                    "RAI",
-                    "SUSD",
-                    "TUSD",
-                    "USDC",
-                    "USDD",
-                    "USDM",
-                    "USDP",
-                    "USDT",
-                    "UXD",
-                    "XAUT",
-                    "XSGD",
-                ]
-            )
+        coins = expand_price_tokens(msg_text.split(","))
 
         if not prices or "data" not in prices:
             return "no pude traer precios de crypto boludo"
@@ -6161,42 +6051,6 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             _answer_callback_query(callback_id)
 
 
-def save_bot_message_metadata(
-    redis_client: redis.Redis,
-    chat_id: str,
-    message_id: Union[str, int],
-    metadata: Mapping[str, Any],
-    ttl: int = BOT_MESSAGE_META_TTL,
-) -> None:
-    _state_save_bot_message_metadata(
-        redis_client,
-        chat_id,
-        message_id,
-        metadata,
-        admin_reporter=admin_report,
-        ttl=ttl,
-    )
-
-
-def get_bot_message_metadata(
-    redis_client: redis.Redis, chat_id: str, message_id: Union[str, int]
-) -> Optional[Dict[str, Any]]:
-    return _state_get_bot_message_metadata(
-        redis_client,
-        chat_id,
-        message_id,
-        admin_reporter=admin_report,
-        decode_redis_value=decode_redis_value,
-    )
-
-
-def build_reply_context_text(message: Mapping[str, Any]) -> Optional[str]:
-    return _state_build_reply_context_text(
-        message,
-        extract_message_text_fn=extract_message_text,
-    )
-
-
 def format_user_message(
     message: Dict,
     message_text: str,
@@ -6242,11 +6096,30 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             admin_report=admin_report,
         ),
         state=MessageStateDeps(
-            get_bot_message_metadata=get_bot_message_metadata,
-            save_bot_message_metadata=save_bot_message_metadata,
-            build_reply_context_text=build_reply_context_text,
+            get_bot_message_metadata=lambda redis_client, chat_id, message_id: (
+                _state_get_bot_message_metadata(
+                    redis_client,
+                    chat_id,
+                    message_id,
+                    admin_reporter=admin_report,
+                    decode_redis_value=decode_redis_value,
+                )
+            ),
+            save_bot_message_metadata=lambda redis_client, chat_id, message_id, metadata: (
+                _state_save_bot_message_metadata(
+                    redis_client,
+                    chat_id,
+                    message_id,
+                    metadata,
+                    admin_reporter=admin_report,
+                )
+            ),
+            build_reply_context_text=lambda message: _state_build_reply_context_text(
+                message,
+                extract_message_text_fn=extract_message_text,
+            ),
             build_message_links_context=build_message_links_context,
-            format_user_message=format_user_message,
+            format_user_message=_state_format_user_message,
             save_message_to_redis=save_message_to_redis,
         ),
         ai=MessageAIDeps(

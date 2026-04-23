@@ -308,6 +308,67 @@ def test_get_prices_existing_paths_unchanged():
         assert "EUR" in in_result
 
 
+def test_get_prices_stablecoins_expands_known_symbols():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "USDT",
+                    "name": "Tether",
+                    "quote": {"USD": {"price": 1.0, "percent_change_24h": 0.01}},
+                },
+                {
+                    "symbol": "USDC",
+                    "name": "USD Coin",
+                    "quote": {"USD": {"price": 0.999, "percent_change_24h": -0.01}},
+                },
+            ]
+        }
+
+        result = get_prices("stables")
+
+    assert result is not None
+    assert "USDT" in result
+    assert "USDC" in result
+
+
+def test_get_prices_rejects_unsupported_timeframe_without_api_call():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        result = get_prices("btc 2h")
+
+    assert result == "timeframe '2h' no soportado, uso: 1h, 24h, 7d, 30d"
+    mock_get_prices.assert_not_called()
+
+
+def test_get_prices_ignores_non_numeric_limit_tokens():
+    from api.index import get_prices
+
+    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+        mock_get_prices.return_value = {
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "quote": {"USD": {"price": 50000.0, "percent_change_24h": 1.0}},
+                },
+                {
+                    "symbol": "ETH",
+                    "name": "Ethereum",
+                    "quote": {"USD": {"price": 2500.0, "percent_change_24h": 2.0}},
+                },
+            ]
+        }
+
+        result = get_prices("2,btc")
+
+    assert result is not None
+    assert "BTC" in result
+
+
 def test_get_weather_description():
     from api.index import get_weather_description
 
