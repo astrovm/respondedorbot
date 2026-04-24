@@ -107,6 +107,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
+from api.constants import PROMPT_NO_MARKDOWN
 from api.providers import OpenRouterProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
@@ -800,8 +801,8 @@ def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
         if cached_value:
             return str(cached_value)
         return None
-    except Exception as e:
-        print(f"Error getting cached {prefix}: {e}")
+    except Exception:
+        _logger.exception("Error getting cached %s", prefix)
         return None
 
 
@@ -811,8 +812,8 @@ def _cache_media(prefix: str, file_id: str, text: str, ttl: int) -> None:
     try:
         redis_client = config_redis()
         redis_client.setex(cache_key, ttl, text)
-    except Exception as e:
-        print(f"Error caching {prefix}: {e}")
+    except Exception:
+        _logger.exception("Error caching %s", prefix)
 
 
 def get_cached_transcription(file_id: str) -> Optional[str]:
@@ -1620,8 +1621,8 @@ def handle_bcra_variables() -> str:
             return "No pude obtener las variables del BCRA en este momento, probá más tarde"
         return format_bcra_variables(variables)
 
-    except Exception as e:
-        print(f"Error handling BCRA variables: {e}")
+    except Exception:
+        _logger.exception("Error handling BCRA variables")
         return "error al obtener las variables del BCRA"
 
 
@@ -2292,8 +2293,8 @@ def _fetch_giphy_pool(category: str) -> List[str]:
                 url = gif.get("images", {}).get("original", {}).get("url")
                 if url:
                     urls.append(url)
-        except Exception as e:
-            print(f"Error fetching Giphy pool for {category}: {e}")
+        except Exception:
+            _logger.exception("Error fetching Giphy pool for %s", category)
 
     return urls
 
@@ -2310,8 +2311,8 @@ def _get_giphy_pool(category: str) -> List[str]:
             cached = redis_get_json(redis_client, pool_key)
             if cached is not None:
                 return cached
-        except Exception as e:
-            print(f"Error reading Giphy pool from cache: {e}")
+        except Exception:
+            _logger.exception("Error reading Giphy pool from cache")
 
     urls = _fetch_giphy_pool(category)
 
@@ -2319,16 +2320,16 @@ def _get_giphy_pool(category: str) -> List[str]:
         try:
             redis_client.setex(pool_key, TTL_GIPHY_POOL, json.dumps(urls))
             redis_client.setex(stale_key, GIPHY_STALE_TTL, json.dumps(urls))
-        except Exception as e:
-            print(f"Error caching Giphy pool: {e}")
+        except Exception:
+            _logger.exception("Error caching Giphy pool")
     elif not urls and redis_client:
         try:
             stale = redis_get_json(redis_client, stale_key)
             if stale is not None:
-                print(f"Giphy API failed, using stale pool for {category}")
+                _logger.warning("Giphy API failed, using stale pool for %s", category)
                 return stale
-        except Exception as e:
-            print(f"Error reading stale Giphy pool: {e}")
+        except Exception:
+            _logger.exception("Error reading stale Giphy pool")
 
     return urls
 
@@ -2494,8 +2495,8 @@ def get_weather() -> dict:
                 "visibility": hourly["visibility"][current_index],
             }
         return {}
-    except Exception as e:
-        print(f"Error getting weather: {e!s}")
+    except Exception:
+        _logger.exception("Error getting weather")
         return {}
 
 def _sanitize_bot_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2924,8 +2925,8 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
     try:
         response = request_with_ssl_fallback(HACKER_NEWS_RSS_URL, timeout=5)
         response.raise_for_status()
-    except RequestException as request_error:
-        print(f"Error fetching Hacker News RSS: {request_error}")
+    except RequestException:
+        _logger.exception("Error fetching Hacker News RSS")
         return (cached_items or [])[:limit]
 
     response_text = response.text
@@ -2994,11 +2995,11 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
                 )
 
         return items[:limit] if items else (cached_items or [])[:limit]
-    except ET.ParseError as parse_error:
-        print(f"Error parsing Hacker News RSS: {parse_error}")
+    except ET.ParseError:
+        _logger.exception("Error parsing Hacker News RSS")
         return (cached_items or [])[:limit]
-    except Exception as parse_error:
-        _logger.exception("get_hacker_news_context failed: %s", parse_error)
+    except Exception:
+        _logger.exception("get_hacker_news_context failed")
         return (cached_items or [])[:limit]
 
 
@@ -3011,16 +3012,16 @@ def get_market_context() -> Dict:
         api_data = get_api_or_cache_prices("USD", limit=5)
         if api_data and "data" in api_data:
             market_data["crypto"] = clean_crypto_data(api_data["data"])
-    except Exception as e:
-        print(f"Error fetching crypto data: {e}")
+    except Exception:
+        _logger.exception("Error fetching crypto data")
 
     try:
         # Get dollar rates (reuse 5-minute cache)
         dollar_response = _fetch_criptoya_dollar_data(hourly_cache=False)
         if dollar_response and "data" in dollar_response:
             market_data["dollar"] = dollar_response["data"]
-    except Exception as e:
-        print(f"Error fetching dollar data: {e}")
+    except Exception:
+        _logger.exception("Error fetching dollar data")
 
     return market_data
 
@@ -3032,8 +3033,8 @@ def get_weather_context() -> Optional[Dict]:
         if weather:
             weather["description"] = get_weather_description(weather["weather_code"])
         return weather
-    except Exception as e:
-        print(f"Error fetching weather data: {e}")
+    except Exception:
+        _logger.exception("Error fetching weather data")
         return None
 
 
@@ -3380,7 +3381,7 @@ def _compact_conversation(
             "actualizá el resumen previo con los mensajes nuevos. "
             "usá formato denso: temas, hechos clave, decisiones y pendientes. "
             "omití saludos y chat casual. mantené el idioma original. "
-            "NUNCA uses markdown: no negritas, no headers, no tablas."
+            f"{PROMPT_NO_MARKDOWN}"
         ),
         prior_summary=prior_summary,
     )
@@ -4442,8 +4443,8 @@ def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
             if len(audio_bytes) == 0:
                 return None
             return audio_bytes
-    except Exception as e:
-        print(f"Error extracting audio from video: {e}")
+    except Exception:
+        _logger.exception("Error extracting audio from video")
         return None
 
 
@@ -4486,7 +4487,7 @@ def _describe_image_result(
                         "content": (
                             "respondé siempre en minúsculas, "
                             "sin emojis, sin markdown, en lenguaje coloquial argentino. "
-                            "NUNCA uses markdown: no negritas, no headers, no tablas."
+                            f"{PROMPT_NO_MARKDOWN}"
                         ),
                     },
                     {
@@ -5278,7 +5279,8 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     is_config_callback = str(callback_data).startswith("cfg:")
     if is_config_callback and is_group_chat_type(chat_type):
         if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
-            denial_message = "solo los admins pueden tocar esta config, maestro"
+            from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE
+            denial_message = ADMIN_CONFIG_DENIAL_MESSAGE
             _guard_callback(callback_id, True)
             send_msg(chat_id_str, denial_message, str(message_id))
             _report_unauthorized_config_attempt(
