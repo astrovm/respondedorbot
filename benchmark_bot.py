@@ -33,9 +33,16 @@ class GordoBenchmark:
         self.bot_config = self.load_bot_config()
 
         self.models = [
-            "z-ai/glm-5.1",
             "qwen/qwen3.6-plus",
+            "minimax/minimax-m2.7",
+            "deepseek/deepseek-v4-flash",
         ]
+
+        self.model_pricing = {
+            "qwen/qwen3.6-plus": {"input": 0.325, "output": 1.95, "context": "1M"},
+            "minimax/minimax-m2.7": {"input": 0.30, "output": 1.20, "context": "196K"},
+            "deepseek/deepseek-v4-flash": {"input": 0.40, "output": 1.20, "context": "2M"},
+        }
 
     def load_bot_config(self) -> Dict[str, Any]:
         """Cargar configuración del bot desde variables de entorno"""
@@ -132,7 +139,16 @@ class GordoBenchmark:
         print("🎯 Iniciando benchmark manual del bot")
         print(f"📋 {len(scenarios)} casos para evaluar con {len(self.models)} modelos")
         print("🔍 Para cada caso, verás todas las respuestas y elegirás la mejor")
-        print(f"📝 Trigger words: {trigger_words}\n")
+        print(f"📝 Trigger words: {trigger_words}")
+        print("\n💰 Pricing comparison (per 1M tokens):")
+        for model in self.models:
+            pricing = self.model_pricing.get(model, {})
+            print(
+                f"  {model}: ${pricing.get('input', '?')}/M input, "
+                f"${pricing.get('output', '?')}/M output, "
+                f"{pricing.get('context', '?')} context"
+            )
+        print()
 
         for i, scenario in enumerate(scenarios, 1):
             print(f"{'=' * 60}")
@@ -235,6 +251,16 @@ class GordoBenchmark:
         system_prompt_length = len(self.get_system_prompt())
         report.append(f"- Trigger words: {trigger_words}")
         report.append(f"- System prompt: {system_prompt_length} caracteres")
+
+        report.append("\n## 💰 Pricing Comparison (per 1M tokens)")
+        for model in self.models:
+            pricing = self.model_pricing.get(model, {})
+            report.append(
+                f"- **{model}**: "
+                f"${pricing.get('input', '?')}/M input | "
+                f"${pricing.get('output', '?')}/M output | "
+                f"{pricing.get('context', '?')} context"
+            )
 
         report.append("\n## 📋 Metodología")
         report.append("- Evaluación manual caso por caso")
