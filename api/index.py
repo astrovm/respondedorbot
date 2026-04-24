@@ -4980,6 +4980,20 @@ def _answer_callback_query(
     )
 
 
+def _guard_callback(
+    callback_id: Optional[str],
+    condition: bool,
+    *,
+    text: Optional[str] = None,
+    show_alert: bool = False,
+) -> bool:
+    if condition:
+        if callback_id:
+            _answer_callback_query(callback_id, text=text, show_alert=show_alert)
+        return True
+    return False
+
+
 def _billing_unavailable_alert_text() -> str:
     return "el cobro de ia está hecho pelota, avisale al admin"
 
@@ -5001,45 +5015,31 @@ def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
     chat_id = chat.get("id")
     chat_type = str(chat.get("type", ""))
 
-    if chat_id is None:
-        if callback_id:
-            _answer_callback_query(callback_id)
+    if _guard_callback(callback_id, chat_id is None):
         return
-
-    if not _billing_is_available():
-        if callback_id:
-            _answer_callback_query(
-                callback_id,
-                text=_billing_unavailable_alert_text(),
-                show_alert=True,
-            )
+    if _guard_callback(
+        callback_id, not _billing_is_available(),
+        text=_billing_unavailable_alert_text(), show_alert=True,
+    ):
         return
-
-    if chat_type != "private":
-        if callback_id:
-            _answer_callback_query(
-                callback_id,
-                text="cargá por privado, maestro",
-                show_alert=True,
-            )
+    if _guard_callback(
+        callback_id, chat_type != "private",
+        text="cargá por privado, maestro", show_alert=True,
+    ):
         return
 
     parts = callback_data.split(":", 1)
     pack = get_ai_billing_pack(parts[1] if len(parts) == 2 else "")
-    if not pack:
-        if callback_id:
-            _answer_callback_query(
-                callback_id,
-                text="ese pack es fruta, elegí otro",
-                show_alert=True,
-            )
+    if _guard_callback(
+        callback_id, not pack,
+        text="ese pack es fruta, elegí otro", show_alert=True,
+    ):
         return
 
     try:
         user_id = int(user.get("id"))
     except (TypeError, ValueError):
-        if callback_id:
-            _answer_callback_query(callback_id)
+        _guard_callback(callback_id, True)
         return
 
     sent_ok = _send_stars_invoice(chat_id=str(chat_id), user_id=user_id, pack=pack)
@@ -5222,26 +5222,23 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
     message_id = message.get("message_id")
     user = callback_query.get("from") or {}
 
-    if not callback_data or chat_id is None:
-        if callback_id:
-            _answer_callback_query(callback_id)
+    if _guard_callback(callback_id, not callback_data or chat_id is None):
         return
 
     parts = str(callback_data).split(":", 2)
-    if len(parts) != 3 or parts[0] != "task":
-        if callback_id:
-            _answer_callback_query(callback_id)
+    if _guard_callback(
+        callback_id, len(parts) != 3 or parts[0] != "task",
+    ):
         return
 
     _, _, task_id = parts
 
     tasks = _task_list_tasks(str(chat_id))
     target_task = next((t for t in tasks if str(t.get("id")) == str(task_id)), None)
-    if not target_task:
-        if callback_id:
-            _answer_callback_query(
-                callback_id, text="esa tarea no existe", show_alert=True
-            )
+    if _guard_callback(
+        callback_id, not target_task,
+        text="esa tarea no existe", show_alert=True,
+    ):
         return
 
     request_user_id = user.get("id")
@@ -5258,13 +5255,11 @@ def handle_task_callback(callback_query: Dict[str, Any]) -> None:
     else:
         is_admin = True
 
-    if not is_owner and not is_admin:
-        if callback_id:
-            _answer_callback_query(
-                callback_id,
-                text="solo el creador o un admin pueden borrar esta tarea",
-                show_alert=True,
-            )
+    if _guard_callback(
+        callback_id, not is_owner and not is_admin,
+        text="solo el creador o un admin pueden borrar esta tarea",
+        show_alert=True,
+    ):
         return
 
     _task_cancel_task(task_id)
@@ -5314,9 +5309,9 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     chat_id = chat.get("id")
     message_id = message.get("message_id")
 
-    if not callback_data or chat_id is None or message_id is None:
-        if callback_id:
-            _answer_callback_query(callback_id)
+    if _guard_callback(
+        callback_id, not callback_data or chat_id is None or message_id is None,
+    ):
         return
 
     if str(callback_data).startswith("topup:"):
@@ -5335,8 +5330,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     if is_config_callback and is_group_chat_type(chat_type):
         if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
             denial_message = "solo los admins pueden tocar esta config, maestro"
-            if callback_id:
-                _answer_callback_query(callback_id)
+            _guard_callback(callback_id, True)
             send_msg(chat_id_str, denial_message, str(message_id))
             _report_unauthorized_config_attempt(
                 chat_id_str,
@@ -5352,8 +5346,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
     try:
         _, action, value = callback_data.split(":", 2)
     except ValueError:
-        if callback_id:
-            _answer_callback_query(callback_id)
+        _guard_callback(callback_id, True)
         return
 
     if action == "link" and value in {"reply", "delete", "off"}:
@@ -5380,23 +5373,20 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             ignore_link_fix_followups=not current,
         )
     elif action == "timezone":
-        if value == "current":
-            if callback_id:
-                _answer_callback_query(callback_id)
+        if _guard_callback(callback_id, value == "current"):
             return
-        else:
-            try:
-                offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
-                config = set_chat_config(
-                    redis_client,
-                    chat_id_str,
-                    timezone_offset=offset,
-                )
-            except ValueError:
-                _log_config_event(
-                    "Invalid timezone callback value",
-                    {"chat_id": chat_id_str, "value": value},
-                )
+        try:
+            offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
+            config = set_chat_config(
+                redis_client,
+                chat_id_str,
+                timezone_offset=offset,
+            )
+        except ValueError:
+            _log_config_event(
+                "Invalid timezone callback value",
+                {"chat_id": chat_id_str, "value": value},
+            )
     elif action == "creditless":
         try:
             current_limit = int(
@@ -5411,9 +5401,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
                 limit = (
                     current_limit if current_limit < 0 else max(0, current_limit - 1)
                 )
-            elif value == "current":
-                if callback_id:
-                    _answer_callback_query(callback_id)
+            elif _guard_callback(callback_id, value == "current"):
                 return
             elif value == "increase":
                 limit = current_limit if current_limit < 0 else current_limit + 1
