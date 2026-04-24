@@ -5649,6 +5649,8 @@ def handle_ai_stream_response(
             timezone_offset=timezone_offset,
             response_meta=response_meta,
         )
+        if not final_text.strip():
+            final_text = gen_random(user_name or "")
         message_id = _send_message_for_stream(
             chat_id, final_text, reply_to_message_id
         )
