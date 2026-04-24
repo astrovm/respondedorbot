@@ -1157,7 +1157,7 @@ def test_can_embed_url_primes_link_metadata_cache():
 
 def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
     """When handler_func is handle_ai_stream_response, image_data must be forwarded."""
-    from api.index import handle_ai_response, handle_ai_stream_response
+    import api.index
 
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
@@ -1188,9 +1188,9 @@ def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
         "api.index.handle_ai_stream_response", mock_stream_response
     )
 
-    result = handle_ai_response(
+    result = api.index.handle_ai_response(
         "123",
-        handle_ai_stream_response,
+        api.index.handle_ai_stream_response,
         [{"role": "user", "content": "hello"}],
         image_data=b"fake_image_bytes",
         image_file_id="photo123",
