@@ -100,10 +100,6 @@ class GordoBenchmark:
             "max_tokens": 512,
         }
 
-        data["extra_body"] = {
-            "reasoning": {"effort": "low"}
-        }
-
         if use_tools:
             data["tools"] = [
                 {
