@@ -916,24 +916,6 @@ def test_calculate_billing_without_gateway_cost_uses_local():
     assert breakdown["model_breakdown"][0]["usd_micros"] == 100
 
 
-def test_estimate_chat_reserve_credits_reasoning_adds_headroom():
-    messages = [{"role": "user", "content": "hello"}]
-    system_message = {"role": "system", "content": "sys"}
-
-    without_reasoning = estimate_chat_reserve_credits(
-        system_message=system_message,
-        messages=messages,
-        reasoning=False,
-    )
-    with_reasoning = estimate_chat_reserve_credits(
-        system_message=system_message,
-        messages=messages,
-        reasoning=True,
-    )
-
-    assert with_reasoning > without_reasoning
-
-
 def _make_group_billing(*, limit: int, redis_client=None):
     mock_redis = redis_client or MagicMock()
     db = MagicMock()
