@@ -28,6 +28,49 @@ CommandTuple = Tuple[Callable[..., str], bool, bool]
 _BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
 
 
+def _reserve_media_credits(
+    deps: Any,
+    billing_helper: AIMessageBilling,
+    scope: str,
+    reserve_credits: int,
+    *,
+    reason: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[AIMessageBilling], Optional[str]]:
+    if (
+        not deps.check_provider_available(scope=scope)
+        and not deps.has_openrouter_fallback()
+    ):
+        return None, "rate_limited"
+    media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
+        reason, reserve_credits, metadata=metadata
+    )
+    if media_charge_error:
+        return None, media_charge_error
+    return media_charge_meta, None
+
+
+def _settle_media_result(
+    billing_helper: AIMessageBilling,
+    media_charge_meta: Optional[AIMessageBilling],
+    billing_segments: List[Dict[str, Any]],
+    success: bool,
+    *,
+    settle_reason: str,
+    refund_reason: str,
+) -> None:
+    if media_charge_meta and not success:
+        billing_helper.refund_reserved_ai_credits(
+            media_charge_meta, reason=refund_reason
+        )
+    else:
+        billing_helper.settle_reserved_ai_credits_batch(
+            [media_charge_meta] if media_charge_meta else [],
+            billing_segments,
+            reason=settle_reason,
+        )
+
+
 @dataclass(frozen=True)
 class MessageChatDeps:
     config_redis: Callable[[], Any]
@@ -746,12 +789,13 @@ def _process_message_media(
                 audio_duration_seconds=0.0,
             )
         audio_duration_seconds = resolved_audio_duration
-        if (
-            not deps.check_provider_available(
-                scope="transcribe",
-            )
-            and not deps.has_openrouter_fallback()
-        ):
+        reserved_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
+        media_charge_meta, reserve_error = _reserve_media_credits(
+            deps, billing_helper, "transcribe", reserved_credits,
+            reason="auto_audio_media",
+            metadata={"audio_seconds": audio_duration_seconds},
+        )
+        if reserve_error == "rate_limited":
             rate_limited_chat_id = str(
                 cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
             )
@@ -762,35 +806,28 @@ def _process_message_media(
                 audio_duration_seconds=audio_duration_seconds,
                 early_response=deps.handle_rate_limit(rate_limited_chat_id, message),
             )
-        reserved_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
-        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
-            "auto_audio_media",
-            reserved_credits,
-            metadata={"audio_seconds": audio_duration_seconds},
-        )
-        if media_charge_error:
+        if reserve_error:
             return PreparedMessage(
                 message_text=message_text,
                 photo_file_id=photo_file_id,
                 audio_file_id=audio_file_id,
                 audio_duration_seconds=audio_duration_seconds,
-                early_response=media_charge_error,
+                early_response=reserve_error,
             )
 
         transcription, err, billing_segment = deps._transcribe_audio_file(
             audio_file_id, use_cache=False
         )
+        _settle_media_result(
+            billing_helper, media_charge_meta,
+            [billing_segment] if billing_segment else [],
+            bool(transcription),
+            settle_reason="auto_audio_media_success",
+            refund_reason="auto_audio_transcribe_failed",
+        )
         if transcription:
-            billing_helper.settle_reserved_ai_credits_batch(
-                [media_charge_meta] if media_charge_meta else [],
-                [billing_segment] if billing_segment else [],
-                reason="auto_audio_media_success",
-            )
             message_text = transcription
         else:
-            billing_helper.refund_reserved_ai_credits(
-                media_charge_meta, reason="auto_audio_transcribe_failed"
-            )
             message_text = (
                 deps._transcription_error_message(
                     err,
@@ -1210,16 +1247,13 @@ def _handle_non_ai_command(
         transcribe_succeeded = bool(
             billing_segments
         ) or billing_helper.is_transcribe_success_response(response_msg)
-        if media_charge_meta and not transcribe_succeeded:
-            billing_helper.refund_reserved_ai_credits(
-                media_charge_meta, reason="transcribe_command_unsuccessful"
-            )
-        else:
-            billing_helper.settle_reserved_ai_credits_batch(
-                [media_charge_meta] if media_charge_meta else [],
-                cast(List[Mapping[str, Any]], billing_segments),
-                reason="transcribe_command_success",
-            )
+        _settle_media_result(
+            billing_helper, media_charge_meta,
+            cast(List[Mapping[str, Any]], billing_segments),
+            transcribe_succeeded,
+            settle_reason="transcribe_command_success",
+            refund_reason="transcribe_command_unsuccessful",
+        )
         return response_msg, None, False, command
 
     if command in ("/gm", "/gn"):
