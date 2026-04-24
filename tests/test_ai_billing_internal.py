@@ -64,7 +64,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1_000,
                     "input_cached_tokens": 900,
@@ -80,7 +80,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
     assert breakdown["charged_credits_display"] == "0.3"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "qwen/qwen3.6-plus",
+            "model": "deepseek/deepseek-v4-flash",
             "usd_micros": 1_300,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
@@ -95,12 +95,12 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
@@ -123,20 +123,20 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
 
     assert breakdown["raw_usd_micros"] > 0
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
-        "qwen/qwen3.6-plus",
-        "qwen/qwen3.6-plus",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "meta-llama/llama-4-scout",
         "whisper-large-v3",
     ]
 
 
-def test_calculate_billing_for_segments_bumps_pricing_version_for_qwen_search_billing():
+def test_calculate_billing_for_segments_bumps_pricing_version_for_deepseek_search_billing():
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
                 "metadata": {"web_search_requests": 1},
             }
@@ -151,7 +151,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "prompt_tokens": 2_000,
                     "completion_tokens": 100,
@@ -166,7 +166,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
     assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
-            "model": "qwen/qwen3.6-plus",
+            "model": "deepseek/deepseek-v4-flash",
             "usd_micros": 845,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
@@ -182,7 +182,7 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
             {
                 "kind": "chat",
                 "source": "cache",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 10_000,
                     "output_tokens": 500,
@@ -204,7 +204,7 @@ def test_calculate_billing_for_segments_bills_web_search_requests():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
                 "metadata": {"web_search_requests": 2},
             }
@@ -223,7 +223,7 @@ def test_calculate_billing_for_segments_refunds_cache_only_usage_to_zero():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "source": "cache",
                 "usage": {
                     "input_tokens": 10_000,
@@ -276,7 +276,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -306,7 +306,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -392,7 +392,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -435,7 +435,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -480,7 +480,7 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -594,7 +594,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -623,7 +623,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -657,7 +657,7 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "prompt_tokens": 1_000,
                     "prompt_tokens_details": {"cached_tokens": 900},
@@ -700,7 +700,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -772,7 +772,7 @@ def test_settle_reserved_ai_credits_refunds_partial_chat_usage():
     segments = [
         {
             "kind": "chat",
-            "model": "qwen/qwen3.6-plus",
+            "model": "deepseek/deepseek-v4-flash",
             "usage": {
                 "input_tokens": 1_000,
                 "output_tokens": 100,
@@ -855,14 +855,14 @@ def test_settle_reserved_ai_credits_without_billing_segments_keeps_reserved_char
 
 
 def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
-    # Local pricing for 100 input + 50 output qwen tokens:
-    # (100 * 325_000 + 50 * 1_950_000) // 1_000_000 = 130 usd_micros
+    # Local pricing for 100 input + 50 output deepseek tokens:
+    # (100 * 400_000 + 50 * 1_200_000) // 1_000_000 = 100 usd_micros
     # Gateway cost of $0.005 USD = 5_000 usd_micros -> should win
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
@@ -877,14 +877,14 @@ def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
 
 
 def test_calculate_billing_keeps_local_cost_when_higher_than_gateway():
-    # Local pricing for 4000 input + 2000 output qwen tokens:
-    # (4000 * 325_000 + 2000 * 1_950_000) // 1_000_000 = 5_200 usd_micros
+    # Local pricing for 4000 input + 2000 output deepseek tokens:
+    # (4000 * 400_000 + 2000 * 1_200_000) // 1_000_000 = 4_000 usd_micros
     # Gateway cost of $0.001 USD = 1_000 usd_micros -> local wins
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "prompt_tokens": 4_000,
                     "completion_tokens": 2_000,
@@ -894,8 +894,8 @@ def test_calculate_billing_keeps_local_cost_when_higher_than_gateway():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 5_200
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 5_200
+    assert breakdown["raw_usd_micros"] == 4_000
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 4_000
 
 
 def test_calculate_billing_without_gateway_cost_uses_local():
@@ -903,7 +903,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         [
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
