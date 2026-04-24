@@ -445,7 +445,7 @@ def test_handle_transcribe_with_message_voice_cached():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "te saqué esto del audio: cached voice transcription"
+        assert result == "🎵 te saqué esto del audio: cached voice transcription"
         mock_cached.assert_called_once_with("voice123")
 
 
@@ -477,7 +477,7 @@ def test_handle_transcribe_with_message_voice_download_success():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "te saqué esto del audio: new transcription"
+        assert result == "🎵 te saqué esto del audio: new transcription"
         mock_download.assert_called_once_with("voice123")
         mock_measure.assert_called_once_with(b"audio data")
         mock_transcribe.assert_called_once_with(
@@ -534,7 +534,7 @@ def test_handle_transcribe_with_message_audio_success():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "te saqué esto del audio: audio transcription"
+        assert result == "🎵 te saqué esto del audio: audio transcription"
         mock_measure.assert_called_once_with(b"audio data")
 
 
@@ -552,7 +552,7 @@ def test_handle_transcribe_with_message_photo_cached():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "en la imagen veo: cached image description"
+        assert result == "🖼️ en la imagen veo: cached image description"
         mock_cached.assert_called_once_with("photo123")
 
 
@@ -582,7 +582,7 @@ def test_handle_transcribe_with_message_photo_success():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "en la imagen veo: image description"
+        assert result == "🖼️ en la imagen veo: image description"
         mock_download.assert_called_once_with("photo123")
         mock_resize.assert_called_once_with(b"image data")
         mock_describe.assert_called_once_with(
@@ -618,7 +618,7 @@ def test_handle_transcribe_with_message_sticker_success():
         }
 
         result = handle_transcribe_with_message(message)
-        assert result == "en el sticker veo: sticker description"
+        assert result == "🎨 en el sticker veo: sticker description"
 
 
 def test_handle_transcribe_with_message_no_media():
