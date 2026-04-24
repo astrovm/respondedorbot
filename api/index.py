@@ -5602,6 +5602,8 @@ def handle_ai_response(
                 user_name=user_name or None,
                 timezone_offset=timezone_offset,
                 reply_to_message_id=reply_to_message_id,
+                image_data=image_data,
+                image_file_id=image_file_id,
             )
 
         effective_handler = _stream_handler
