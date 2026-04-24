@@ -1153,3 +1153,129 @@ def test_can_embed_url_primes_link_metadata_cache():
     assert result["title"] == "Agustin Cortes (@agucortes)"
     assert result["description"] == "Texto del post"
     mock_fetch_request.assert_not_called()
+
+
+def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
+    """When handler_func is handle_ai_stream_response, image_data must be forwarded."""
+    from api.index import handle_ai_response, handle_ai_stream_response
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
+
+    received_image_data = []
+
+    def mock_stream_response(
+        messages,
+        *,
+        response_meta=None,
+        chat_id=None,
+        user_id=None,
+        user_name=None,
+        timezone_offset=-3,
+        reply_to_message_id=None,
+        image_data=None,
+        image_file_id=None,
+    ):
+        received_image_data.append(
+            {
+                "image_data": image_data,
+                "image_file_id": image_file_id,
+            }
+        )
+        return "streamed response"
+
+    monkeypatch.setattr(
+        "api.index.handle_ai_stream_response", mock_stream_response
+    )
+
+    result = handle_ai_response(
+        "123",
+        handle_ai_stream_response,
+        [{"role": "user", "content": "hello"}],
+        image_data=b"fake_image_bytes",
+        image_file_id="photo123",
+    )
+
+    assert result == "streamed response"
+    assert len(received_image_data) == 1
+    assert received_image_data[0]["image_data"] == b"fake_image_bytes"
+    assert received_image_data[0]["image_file_id"] == "photo123"
+
+
+def test_handle_ai_stream_response_injects_image_context(monkeypatch):
+    """handle_ai_stream_response must call _inject_image_context when image_data is present."""
+    from api.index import handle_ai_stream_response
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+
+    injected_calls = []
+
+    def mock_inject_image_context(messages, image_data, image_file_id, response_meta):
+        injected_calls.append(
+            {
+                "messages": messages,
+                "image_data": image_data,
+                "image_file_id": image_file_id,
+                "response_meta": response_meta,
+            }
+        )
+
+    monkeypatch.setattr("api.index._inject_image_context", mock_inject_image_context)
+
+    def mock_ask_ai_stream(*args, **kwargs):
+        return iter([("openrouter", "test")])
+
+    monkeypatch.setattr("api.index.ask_ai_stream", mock_ask_ai_stream)
+
+    monkeypatch.setattr(
+        "api.index.consume_stream_to_telegram",
+        lambda *args, **kwargs: ("final text", "msg_id"),
+    )
+
+    messages = [{"role": "user", "content": "que onda con esta foto"}]
+    meta = {}
+
+    result = handle_ai_stream_response(
+        messages,
+        response_meta=meta,
+        chat_id="456",
+        image_data=b"image_bytes",
+        image_file_id="file456",
+    )
+
+    assert len(injected_calls) == 1
+    assert injected_calls[0]["image_data"] == b"image_bytes"
+    assert injected_calls[0]["image_file_id"] == "file456"
+    assert injected_calls[0]["messages"] is messages
+
+
+def test_handle_ai_stream_response_skips_image_injection_when_no_image_data(monkeypatch):
+    """handle_ai_stream_response must not call _inject_image_context when image_data is None."""
+    from api.index import handle_ai_stream_response
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+
+    injected_calls = []
+
+    def mock_inject_image_context(messages, image_data, image_file_id, response_meta):
+        injected_calls.append(True)
+
+    monkeypatch.setattr("api.index._inject_image_context", mock_inject_image_context)
+
+    def mock_ask_ai_stream(*args, **kwargs):
+        return iter([("openrouter", "test")])
+
+    monkeypatch.setattr("api.index.ask_ai_stream", mock_ask_ai_stream)
+
+    monkeypatch.setattr(
+        "api.index.consume_stream_to_telegram",
+        lambda *args, **kwargs: ("final text", "msg_id"),
+    )
+
+    result = handle_ai_stream_response(
+        [{"role": "user", "content": "hello"}],
+        response_meta={},
+        chat_id="456",
+    )
+
+    assert len(injected_calls) == 0
