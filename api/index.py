@@ -2585,6 +2585,38 @@ def _build_ai_request(
     return system_message, messages, extra_tools, tool_context
 
 
+def _inject_image_context(
+    messages: List[Dict[str, Any]],
+    image_data: bytes,
+    image_file_id: Optional[str],
+    response_meta: Optional[Dict[str, Any]],
+) -> None:
+    print("Processing image with vision model...")
+
+    user_text = (
+        "describí lo que ves en esta imagen en una sola frase corta, "
+        "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+    )
+
+    image_result = _describe_image_result(image_data, user_text, image_file_id)
+    image_description = image_result.text if image_result else None
+
+    if image_description:
+        _append_billing_segment(response_meta, image_result)
+        image_context = f"[Imagen: {image_description}]"
+
+        if messages:
+            last_message = messages[-1]
+            if isinstance(last_message.get("content"), str):
+                last_message["content"] = (
+                    last_message["content"] + f"\n\n{image_context}"
+                )
+
+        print("Image described, continuing with normal AI flow...")
+    else:
+        print("Failed to describe image, continuing without description...")
+
+
 def ask_ai(
     messages: List[Dict[str, Any]],
     image_data: Optional[bytes] = None,
@@ -2608,30 +2640,7 @@ def ask_ai(
             enable_web_search=enable_web_search,
         )
 
-        if image_data:
-            print("Processing image with vision model...")
-
-            user_text = "Describe what you see in this image in detail."
-
-            image_result = _describe_image_result(
-                image_data, user_text, image_file_id
-            )
-            image_description = image_result.text if image_result else None
-
-            if image_description:
-                _append_billing_segment(response_meta, image_result)
-                image_context = f"[Imagen: {image_description}]"
-
-                if messages:
-                    last_message = messages[-1]
-                    if isinstance(last_message.get("content"), str):
-                        last_message["content"] = (
-                            last_message["content"] + f"\n\n{image_context}"
-                        )
-
-                print("Image described, continuing with normal AI flow...")
-            else:
-                print("Failed to describe image, continuing without description...")
+        _inject_image_context(messages, image_data, image_file_id, response_meta)
 
         response = complete_with_providers(
             system_message,
@@ -5648,10 +5657,15 @@ def handle_ai_stream_response(
     user_name: Optional[str] = None,
     timezone_offset: int = -3,
     reply_to_message_id: Optional[str] = None,
+    image_data: Optional[bytes] = None,
+    image_file_id: Optional[str] = None,
     **_: Any,
 ) -> str:
     if not chat_id:
         return "me quedé reculando y no te pude responder, probá de nuevo"
+
+    if image_data:
+        _inject_image_context(messages, image_data, image_file_id, response_meta)
 
     token = environ.get("TELEGRAM_TOKEN")
     if token:
