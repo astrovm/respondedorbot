@@ -10,6 +10,7 @@ from .admin_commands import (
 )
 from api.ai_billing import AIMessageBilling
 from api.ai_pricing import estimate_transcribe_reserve_credits
+from api.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
 from .billing_commands import (
@@ -25,7 +26,6 @@ from api.streaming import (
 )
 
 CommandTuple = Tuple[Callable[..., str], bool, bool]
-_BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
 
 
 def _reserve_media_credits(
@@ -555,7 +555,7 @@ def _resolve_message_intent(
 def _billing_unavailable_command_response(
     command: str,
 ) -> Tuple[str, None, bool, str]:
-    return _BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
 
 
 def _get_admin_chat_id() -> str:

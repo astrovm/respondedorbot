@@ -16,6 +16,7 @@ from typing import (
     cast,
 )
 
+from api.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.chat_context import (
     is_group_chat_type,
 )
@@ -199,9 +200,7 @@ class AIMessageBilling:
     redis_client: Any = None
     creditless_user_hourly_limit: int = 0
     onboarding_checked: bool = False
-    billing_not_configured_message: str = (
-        "el cobro de ia no está andando, avisale al admin"
-    )
+    billing_not_configured_message: str = BILLING_UNAVAILABLE_MESSAGE
     billing_missing_scope_message: str = (
         "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
     )

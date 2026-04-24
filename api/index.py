@@ -4738,8 +4738,8 @@ def _process_media_with_cache(
                 result.audio_seconds = measure_audio_duration_seconds(media_bytes)
             return result.text, None, result.billing_segment()
         return None, failure_code, None
-    except Exception as error:
-        print(f"Error processing media {file_id}: {error}")
+    except Exception:
+        _logger.exception("Error processing media %s", file_id)
         return None, failure_code, None
 
 
@@ -4753,35 +4753,30 @@ def transcribe_file_by_id(
     - If download failed: (None, "download")
     - If transcription failed: (None, "transcribe")
     """
-    try:
-        if use_cache:
-            cached_value = get_cached_transcription(file_id)
-            if cached_value:
-                return str(cached_value), None, None
 
-        media_bytes = download_telegram_file(file_id)
-        if not media_bytes:
-            return None, "download", None
-
+    def _processor(media_bytes: bytes) -> Optional[AIUsageResult]:
         duration_seconds = measure_audio_duration_seconds(media_bytes)
         if duration_seconds is None:
             extracted = extract_audio_from_video(media_bytes)
             if extracted:
-                print("Extracted audio from video for transcription")
+                _logger.info("Extracted audio from video for transcription")
                 media_bytes = extracted
                 duration_seconds = measure_audio_duration_seconds(media_bytes)
             if duration_seconds is None:
-                return None, "duration", None
+                return None
 
         result = _transcribe_audio_result(media_bytes, file_id, use_cache=use_cache)
-        if result:
-            if not result.audio_seconds:
-                result.audio_seconds = duration_seconds
-            return result.text, None, result.billing_segment()
-        return None, "transcribe", None
-    except Exception as error:
-        print(f"Error processing media {file_id}: {error}")
-        return None, "transcribe", None
+        if result and not result.audio_seconds:
+            result.audio_seconds = duration_seconds
+        return result
+
+    return _process_media_with_cache(
+        file_id=file_id,
+        use_cache=use_cache,
+        cache_lookup=get_cached_transcription,
+        processor=_processor,
+        failure_code="transcribe",
+    )
 
 
 def describe_media_by_id(
@@ -4952,7 +4947,8 @@ def _billing_unavailable_alert_text() -> str:
 
 
 def _billing_unavailable_message_text() -> str:
-    return "el cobro de ia no está andando, avisale al admin"
+    from api.constants import BILLING_UNAVAILABLE_MESSAGE
+    return BILLING_UNAVAILABLE_MESSAGE
 
 
 def _billing_is_available() -> bool:

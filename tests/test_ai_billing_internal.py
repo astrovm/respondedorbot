@@ -1,11 +1,11 @@
 from unittest.mock import MagicMock
 
 from api.ai_billing import (
-    AIMessageBilling,
     build_insufficient_credits_message,
     get_ai_billing_packs,
     parse_topup_payload,
 )
+from tests.support import make_ai_message_billing
 from api.credit_units import whole_credits_to_units
 from api.ai_pricing import (
     calculate_billing_for_segments,
@@ -45,18 +45,13 @@ def test_build_insufficient_credits_message_mentions_group_balances():
 
 
 def test_ai_message_billing_transcribe_success_response_prefixes():
-    billing = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing = make_ai_message_billing(
         command="/transcribe",
         chat_id="1",
         chat_type="private",
         user_id=1,
         numeric_chat_id=1,
-        message={"from": {"first_name": "Ana"}},
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
     )
 
     assert billing.is_transcribe_success_response("🎵 te saqué esto del audio: hola")
@@ -257,19 +252,14 @@ def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
     assert large > small
 
 
-def _build_billing_helper() -> AIMessageBilling:
-    return AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+def _build_billing_helper():
+    return make_ai_message_billing(
         command="/ask",
         chat_id="1",
         chat_type="private",
         user_id=1,
         numeric_chat_id=1,
-        message={"from": {"first_name": "Ana"}},
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
     )
 
 
@@ -344,18 +334,13 @@ def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():
         "usage_tag": "ai_response_base",
         "metadata": {"cached": True},
     }
-    billing = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing = make_ai_message_billing(
         command="/ask",
         chat_id="1",
         chat_type="private",
         user_id=1,
         numeric_chat_id=1,
-        message={"from": {"first_name": "Ana"}},
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
         load_persisted_reservation_fn=lambda usage_tag: (
             persisted_reservation if usage_tag == "ai_response_base" else None
         ),
@@ -372,17 +357,14 @@ def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():
 
 
 def test_build_insufficient_credits_reply_uses_username_when_first_name_is_missing():
-    billing = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda name: f"random:{name}",
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing = make_ai_message_billing(
         command="/ask",
         chat_id="1",
         chat_type="private",
         user_id=1,
         numeric_chat_id=1,
+        gen_random_fn=lambda name: f"random:{name}",
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
         message={"from": {"username": "ana_user"}},
     )
 
@@ -952,23 +934,19 @@ def test_estimate_chat_reserve_credits_reasoning_adds_headroom():
     assert with_reasoning > without_reasoning
 
 
-def _make_group_billing(*, limit: int, redis_client=None) -> AIMessageBilling:
+def _make_group_billing(*, limit: int, redis_client=None):
     mock_redis = redis_client or MagicMock()
     db = MagicMock()
     db.is_configured.return_value = True
     db.charge_ai_credits.return_value = {"ok": True, "source": "chat"}
-    billing = AIMessageBilling(
-        credits_db_service=db,
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=build_insufficient_credits_message,
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing = make_ai_message_billing(
         command="/ask",
         chat_id="-100",
         chat_type="group",
         user_id=42,
         numeric_chat_id=100,
-        message={"from": {"first_name": "Ana"}},
+        credits_db_service=db,
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
         redis_client=mock_redis,
         creditless_user_hourly_limit=limit,
     )
