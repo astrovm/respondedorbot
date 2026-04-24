@@ -1677,7 +1677,7 @@ def _describe_replied_media(
 
     description, error_code, billing_segment = describe_media_by_id(file_id, prompt)
     if description:
-        return f"{success_prefix}{description}", billing_segment
+        return f"{success_prefix}{sanitize_summary_text(description)}", billing_segment
 
     if error_code == "download":
         return download_error, None
@@ -1707,7 +1707,7 @@ def handle_transcribe_with_message_result(
             )
             if text:
                 return (
-                    f"🎵 te saqué esto del audio: {text}",
+                    f"te saqué esto del audio: {text}",
                     [billing_segment] if billing_segment else [],
                 )
             error_message = _transcription_error_message(error_code)
@@ -1752,8 +1752,8 @@ def handle_transcribe_with_message_result(
                         and media
                         else None
                     ),
-                    prompt="Describe what you see in this image in detail.",
-                    success_prefix="🖼️ en la imagen veo: ",
+                    prompt="describí lo que ves en esta imagen en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
+                    success_prefix="en la imagen veo: ",
                     download_error="no pude bajar la imagen, mandala de nuevo",
                     describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
                 )
@@ -1768,8 +1768,8 @@ def handle_transcribe_with_message_result(
                     extract_file_id=lambda media: (
                         media.get("file_id") if isinstance(media, Mapping) else None
                     ),
-                    prompt="Describe what you see in this sticker in detail.",
-                    success_prefix="🎨 en el sticker veo: ",
+                    prompt="describí lo que ves en este sticker en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
+                    success_prefix="en el sticker veo: ",
                     download_error="no pude bajar el sticker, mandalo de nuevo",
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
@@ -4520,12 +4520,20 @@ def _describe_image_result(
                 Any,
                 [
                     {
+                        "role": "system",
+                        "content": (
+                            "respondé siempre en una sola frase corta, en minúsculas, "
+                            "sin emojis, sin markdown, en lenguaje coloquial argentino. "
+                            "NUNCA uses markdown: no negritas, no headers, no tablas."
+                        ),
+                    },
+                    {
                         "role": "user",
                         "content": [
                             {"type": "text", "text": user_text},
                             {"type": "image_url", "image_url": {"url": image_url}},
                         ],
-                    }
+                    },
                 ],
             ),
             max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
