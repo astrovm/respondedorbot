@@ -1707,7 +1707,7 @@ def handle_transcribe_with_message_result(
             )
             if text:
                 return (
-                    f"te saqué esto del audio: {text}",
+                    f"🎵 te saqué esto del audio: {text}",
                     [billing_segment] if billing_segment else [],
                 )
             error_message = _transcription_error_message(error_code)
@@ -1753,7 +1753,7 @@ def handle_transcribe_with_message_result(
                         else None
                     ),
                     prompt="describí lo que ves en esta imagen en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
-                    success_prefix="en la imagen veo: ",
+                    success_prefix="🖼️ en la imagen veo: ",
                     download_error="no pude bajar la imagen, mandala de nuevo",
                     describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
                 )
@@ -1769,7 +1769,7 @@ def handle_transcribe_with_message_result(
                         media.get("file_id") if isinstance(media, Mapping) else None
                     ),
                     prompt="describí lo que ves en este sticker en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
-                    success_prefix="en el sticker veo: ",
+                    success_prefix="🎨 en el sticker veo: ",
                     download_error="no pude bajar el sticker, mandalo de nuevo",
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
                 )
