@@ -125,8 +125,8 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
         "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-flash",
-        "groq/meta-llama/llama-4-scout-17b-16e-instruct",
-        "meta-llama/llama-4-scout",
+        "google/gemini-3.1-flash-lite-preview",
+        "google/gemini-3.1-flash-lite-preview",
         "whisper-large-v3",
     ]
 
