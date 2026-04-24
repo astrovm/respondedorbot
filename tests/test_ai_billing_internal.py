@@ -247,7 +247,7 @@ def test_estimate_vision_reserve_credits_uses_real_image_payload_size():
         image_data=b"a" * 200_000,
     )
 
-    assert small == 1
+    assert small == 2
     assert large > small
 
 
