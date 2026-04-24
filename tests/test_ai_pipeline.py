@@ -1282,3 +1282,47 @@ def test_handle_ai_stream_response_skips_image_injection_when_no_image_data(monk
     )
 
     assert len(injected_calls) == 0
+
+
+def test_handle_ai_stream_response_uses_gen_random_when_non_stream_fallback_is_empty(monkeypatch):
+    from api.index import handle_ai_stream_response
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setattr("api.index.ask_ai_stream", lambda *_, **__: iter([]))
+    monkeypatch.setattr(
+        "api.index.consume_stream_to_telegram",
+        MagicMock(side_effect=RuntimeError("Failed to send message to Telegram")),
+    )
+    monkeypatch.setattr("api.index.ask_ai", lambda *_, **__: "")
+    monkeypatch.setattr("api.index.gen_random", lambda name: f"random:{name}")
+
+    sent_messages = []
+
+    def fake_send_message(chat_id, text, reply_to_message_id=None):
+        sent_messages.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return 42
+
+    monkeypatch.setattr("api.index._send_message_for_stream", fake_send_message)
+
+    result = handle_ai_stream_response(
+        [{"role": "user", "content": "hello"}],
+        response_meta={},
+        chat_id="456",
+        user_name="astro",
+        reply_to_message_id="123",
+    )
+
+    assert result == "random:astro"
+    assert sent_messages == [
+        {
+            "chat_id": "456",
+            "text": "random:astro",
+            "reply_to_message_id": "123",
+        }
+    ]
