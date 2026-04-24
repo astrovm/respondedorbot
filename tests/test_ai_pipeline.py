@@ -744,6 +744,35 @@ def test_ask_ai_with_image():
         assert len(result) > 0
 
 
+def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
+    from api.index import ask_ai
+
+    monkeypatch.setattr("api.index.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr(
+        "api.index.build_system_message",
+        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
+    )
+
+    inject_calls = []
+
+    def fake_inject_image_context(messages, image_data, image_file_id, response_meta):
+        inject_calls.append((messages, image_data, image_file_id, response_meta))
+
+    monkeypatch.setattr("api.index._inject_image_context", fake_inject_image_context)
+    monkeypatch.setattr(
+        "api.index.complete_with_providers",
+        lambda *_args, **_kwargs: "ok",
+    )
+
+    result = ask_ai([{"role": "user", "content": "hola"}], image_data=None)
+
+    assert result == "ok"
+    assert inject_calls == []
+
+
 def test_ask_ai_does_not_force_search_for_news_queries():
     from api.index import ask_ai
 

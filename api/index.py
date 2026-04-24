@@ -2567,10 +2567,13 @@ def _build_ai_request(
 
 def _inject_image_context(
     messages: List[Dict[str, Any]],
-    image_data: bytes,
+    image_data: Optional[bytes],
     image_file_id: Optional[str],
     response_meta: Optional[Dict[str, Any]],
 ) -> None:
+    if image_data is None:
+        return
+
     print("Processing image with vision model...")
 
     user_text = (
@@ -2620,7 +2623,8 @@ def ask_ai(
             enable_web_search=enable_web_search,
         )
 
-        _inject_image_context(messages, image_data, image_file_id, response_meta)
+        if image_data is not None:
+            _inject_image_context(messages, image_data, image_file_id, response_meta)
 
         response = complete_with_providers(
             system_message,
