@@ -186,6 +186,9 @@ def handle_ai_response(
                 kwargs["response_meta"] = response_meta
             if reply_to_message_id is not None:
                 kwargs["reply_to_message_id"] = reply_to_message_id
+            if image_data is not None:
+                kwargs["image_data"] = image_data
+                kwargs["image_file_id"] = image_file_id
             if kwargs:
                 try:
                     response = handler_func(messages, **kwargs)
