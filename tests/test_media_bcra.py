@@ -691,9 +691,9 @@ def test_format_bcra_variables_with_data():
         mock_itcrm.return_value = (123.45, "01/02/25")
         mock_bands.return_value = None
         result = format_bcra_variables(variables)
-    assert "📊 Variables principales BCRA" in result
+    assert "variables principales bcra" in result
     assert "15/01/25" in result  # Date should be formatted
-    assert "TCRM" in result  # Should include current TCRM line
+    assert "tcrm" in result  # Should include current TCRM line
     assert "01/02/25" in result  # Should include TCRM date from sheet
 
 
@@ -722,7 +722,7 @@ def test_format_bcra_variables_includes_currency_bands():
 
     expected_lower = fmt_num(950.12, 2)
     expected_upper = fmt_num(1460.34, 2)
-    assert "📏 Bandas cambiarias" in result
+    assert "bandas cambiarias" in result
     assert f"piso ${expected_lower}" in result
     assert f"techo ${expected_upper}" in result
     assert "15/09/25" in result
