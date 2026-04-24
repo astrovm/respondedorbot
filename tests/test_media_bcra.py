@@ -587,7 +587,7 @@ def test_handle_transcribe_with_message_photo_success():
         mock_resize.assert_called_once_with(b"image data")
         mock_describe.assert_called_once_with(
             b"resized image data",
-            "describí lo que ves en esta imagen en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
+            "describí lo que ves en esta imagen en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
             "photo123",
         )
 

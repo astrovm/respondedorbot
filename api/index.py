@@ -1752,7 +1752,7 @@ def handle_transcribe_with_message_result(
                         and media
                         else None
                     ),
-                    prompt="describí lo que ves en esta imagen en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
+                    prompt="describí lo que ves en esta imagen en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
                     success_prefix="🖼️ en la imagen veo: ",
                     download_error="no pude bajar la imagen, mandala de nuevo",
                     describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
@@ -1768,7 +1768,7 @@ def handle_transcribe_with_message_result(
                     extract_file_id=lambda media: (
                         media.get("file_id") if isinstance(media, Mapping) else None
                     ),
-                    prompt="describí lo que ves en este sticker en una sola frase corta, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
+                    prompt="describí lo que ves en este sticker en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
                     success_prefix="🎨 en el sticker veo: ",
                     download_error="no pude bajar el sticker, mandalo de nuevo",
                     describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
@@ -2593,10 +2593,10 @@ def _inject_image_context(
 ) -> None:
     print("Processing image with vision model...")
 
-    user_text = (
-        "describí lo que ves en esta imagen en una sola frase corta, "
-        "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
-    )
+        user_text = (
+            "describí lo que ves en esta imagen en detalle, "
+            "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+        )
 
     image_result = _describe_image_result(image_data, user_text, image_file_id)
     image_description = image_result.text if image_result else None
@@ -4531,7 +4531,7 @@ def _describe_image_result(
                     {
                         "role": "system",
                         "content": (
-                            "respondé siempre en una sola frase corta, en minúsculas, "
+                            "respondé siempre en minúsculas, "
                             "sin emojis, sin markdown, en lenguaje coloquial argentino. "
                             "NUNCA uses markdown: no negritas, no headers, no tablas."
                         ),
