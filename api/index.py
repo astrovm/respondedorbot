@@ -2593,10 +2593,10 @@ def _inject_image_context(
 ) -> None:
     print("Processing image with vision model...")
 
-        user_text = (
-            "describí lo que ves en esta imagen en detalle, "
-            "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
-        )
+    user_text = (
+        "describí lo que ves en esta imagen en detalle, "
+        "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+    )
 
     image_result = _describe_image_result(image_data, user_text, image_file_id)
     image_description = image_result.text if image_result else None
