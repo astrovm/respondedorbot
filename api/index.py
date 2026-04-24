@@ -2245,28 +2245,7 @@ def send_animation(
     caption: str = "",
 ) -> Optional[int]:
     """Send an animation (GIF) to a Telegram chat"""
-    payload: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "animation": animation_url,
-    }
-    if msg_id:
-        payload["reply_to_message_id"] = msg_id
-    if caption:
-        payload["caption"] = caption
-
-    payload_response, error = _telegram_request(
-        "sendAnimation", method="POST", json_payload=payload
-    )
-    if error or not payload_response:
-        return None
-
-    result = payload_response.get("result")
-    if isinstance(result, dict):
-        message_id = result.get("message_id")
-        if isinstance(message_id, int):
-            return message_id
-
-    return None
+    return telegram_gateway.send_animation(chat_id, animation_url, msg_id, caption)
 
 
 # Giphy API constants
@@ -4291,33 +4270,7 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
 
 def download_telegram_file(file_id: str) -> Optional[bytes]:
     """Download file from Telegram"""
-    try:
-        token = environ.get("TELEGRAM_TOKEN")
-
-        # Get file path from Telegram
-        file_info_url = f"https://api.telegram.org/bot{token}/getFile"
-        file_response = requests.get(
-            file_info_url, params={"file_id": file_id}, timeout=10
-        )
-        file_response.raise_for_status()
-
-        file_data = file_response.json()
-        if not file_data.get("ok"):
-            print(f"Error getting file info: {file_data}")
-            return None
-
-        file_path = file_data["result"]["file_path"]
-
-        # Download actual file
-        file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-        download_response = requests.get(file_url, timeout=30)
-        download_response.raise_for_status()
-
-        return download_response.content
-
-    except Exception as e:
-        print(f"Error downloading Telegram file: {e}")
-        return None
+    return telegram_gateway.download_file(file_id)
 
 
 def _get_groq_client(
