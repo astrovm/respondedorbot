@@ -291,7 +291,7 @@ def main():
 
     benchmark = GordoBenchmark(api_key)
 
-    print("🎯 Benchmark del Bot - Evaluación Manual")
+    print("🎯 Benchmark del bot - Evaluación manual")
     print("Evaluando capacidad de replicar personalidad configurada del bot")
     print("👤 Evaluación humana caso por caso\n")
 
