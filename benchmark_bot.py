@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark del Gordo - Evaluación de Personalidad del Bot
+Benchmark del Gordo - Evaluación de personalidad del bot
 Evalúa qué tan bien diferentes LLMs replican el estilo y personalidad del gordo
 """
 
