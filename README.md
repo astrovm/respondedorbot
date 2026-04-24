@@ -114,6 +114,7 @@ python run_polling.py
 
 - `COMPACTION_THRESHOLD = 20` — compact when delta > 20 messages
 - `COMPACTION_KEEP = 25` — retain last 25 messages
+- `COMPACTION_THRESHOLD = 40` — compact when 40+ new messages
 - Incremental summaries from delta messages + prior summary
 - RediSearch index (`idx:chat_messages`) for full-text search and RAG retrieval
 

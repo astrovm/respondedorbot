@@ -264,9 +264,9 @@ BA_TZ = timezone(timedelta(hours=-3))
 PRIMARY_CHAT_MODEL = "deepseek/deepseek-v4-flash"
 SUMMARY_MODEL = "deepseek/deepseek-v4-flash"
 SUMMARY_MAX_TOKENS = 2048
-COMPACTION_THRESHOLD = 20
+COMPACTION_THRESHOLD = 40
 COMPACTION_KEEP = 25
-COMPACTION_TRUNCATE_LINES = 20
+COMPACTION_TRUNCATE_LINES = 25
 VISION_MODEL = "google/gemini-3.1-flash-lite-preview"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 
@@ -3562,6 +3562,8 @@ def compact_chat_memory(
         return existing_summary, source.delta_messages, compacted_until, 0
 
     dropped = source.delta_messages[: -compaction_keep]
+    if not dropped:
+        return existing_summary, source.delta_messages, compacted_until, 0
     summary, summary_cost = compact_fn(dropped, source.prior_summary)
     if not summary:
         return existing_summary, source.delta_messages[-compaction_keep:], compacted_until, 0
