@@ -267,6 +267,7 @@ SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 40
 COMPACTION_KEEP = 25
 COMPACTION_TRUNCATE_LINES = 25
+COMPACTION_MAX_SUMMARY_MESSAGES = 100
 VISION_MODEL = "google/gemini-3.1-flash-lite-preview"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 
@@ -3305,7 +3306,7 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
         _summary_logger.warning("summary: no openrouter client available")
         return None, 0
 
-    prompt_tokens = len(str(messages).split())
+    prompt_tokens = estimate_message_tokens(messages)
     _summary_logger.info(
         "summary: calling model=%s max_tokens=%d prompt_tokens_est=%d",
         SUMMARY_MODEL,
@@ -3386,6 +3387,8 @@ def _compact_conversation(
     messages: List[Dict[str, Any]],
     prior_summary: Optional[str] = None,
 ) -> Tuple[str, int]:
+    if len(messages) > COMPACTION_MAX_SUMMARY_MESSAGES:
+        messages = messages[-COMPACTION_MAX_SUMMARY_MESSAGES:]
     api_messages = _build_chat_messages(
         _load_bot_personality(),
         messages,
