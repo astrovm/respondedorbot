@@ -105,12 +105,12 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
             },
             {
                 "kind": "vision",
-                "model": "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
@@ -443,7 +443,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
             },
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -586,7 +586,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
         [
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -708,7 +708,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
             },
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
