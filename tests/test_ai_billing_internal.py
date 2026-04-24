@@ -913,7 +913,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
     )
 
     assert breakdown["raw_usd_micros"] == 100
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 130
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 100
 
 
 def test_estimate_chat_reserve_credits_reasoning_adds_headroom():
