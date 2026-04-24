@@ -85,8 +85,7 @@ class GordoBenchmark:
             },
         ]
 
-    def call_model(self, model: str, prompt: str, max_retries: int = 3) -> str:
-        """Llama a un modelo específico via Groq con reintentos automáticos"""
+    def call_model(self, model: str, prompt: str, max_retries: int = 3, use_tools: bool = False) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -100,6 +99,18 @@ class GordoBenchmark:
             ],
             "max_tokens": 512,
         }
+
+        if use_tools:
+            data["tools"] = [
+                {
+                    "type": "openrouter:web_search",
+                    "parameters": {
+                        "engine": "firecrawl",
+                        "max_results": 5,
+                        "max_total_results": 15,
+                    },
+                }
+            ]
 
         for attempt in range(max_retries):
             try:
@@ -156,9 +167,14 @@ class GordoBenchmark:
             responses = {}
             print("🤖 Obteniendo respuestas de todos los modelos...")
 
+            use_tools = scenario.get("category") == "news_search"
+            if use_tools:
+                print("  🔧 Herramientas activadas (web search)")
             for model in self.models:
                 print(f"  Consultando {model}...")
-                response = self.call_model(model, scenario["prompt"])
+                response = self.call_model(
+                    model, scenario["prompt"], use_tools=use_tools
+                )
                 responses[model] = response
                 time.sleep(1)
 
