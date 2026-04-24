@@ -3240,7 +3240,6 @@ def estimate_ai_base_reserve_credits(
         messages=messages,
         max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         extra_input_tokens=extra_input_tokens,
-        reasoning=True,
         model=PRIMARY_CHAT_MODEL,
     )
 

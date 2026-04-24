@@ -65,10 +65,6 @@ class ProviderRuntime:
                     "messages": [system_message] + current_messages,
                     "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
                 }
-                reasoning_effort = "low" if enable_web_search else "none"
-                request_kwargs["extra_body"] = {
-                    "reasoning": {"effort": reasoning_effort}
-                }
 
                 tools_list: List[Dict[str, Any]] = []
                 if enable_web_search:

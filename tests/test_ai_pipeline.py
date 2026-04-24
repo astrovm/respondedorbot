@@ -487,34 +487,8 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 7
+    assert reserve == 2
     assert metadata == {}
-
-
-def test_estimate_ai_base_reserve_credits_includes_reasoning_headroom(monkeypatch):
-    from api.ai_pricing import estimate_chat_reserve_credits
-    from api.index import estimate_ai_base_reserve_credits
-
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
-    monkeypatch.setattr(
-        "api.index.build_system_message",
-        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
-    )
-
-    reserve_without_reasoning = estimate_chat_reserve_credits(
-        system_message={"role": "system", "content": "sys"},
-        messages=[{"role": "user", "content": "hola"}],
-        reasoning=False,
-    )
-    reserve, metadata = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "hola"}],
-    )
-
-    assert metadata == {}
-    assert reserve > reserve_without_reasoning
 
 
 def test_ask_ai_fetches_url_unconditionally(monkeypatch):
