@@ -53,7 +53,7 @@ def _format_country_risk(country_risk: Optional[Dict[str, Any]]) -> Optional[str
 
     value_decimals = 1 if abs(value_bps) < 100 else 0
     value_text = fmt_num(float(value_bps), value_decimals).replace(".", ",")
-    risk_line = f"🇦🇷 Riesgo país: {value_text} bps"
+    risk_line = f"riesgo país: {value_text} bps"
 
     details: List[str] = []
     label = country_risk.get("valuation_label")
@@ -86,7 +86,7 @@ def _format_currency_bands(band_limits: Optional[Dict[str, Any]]) -> Optional[st
     date_label = band_limits.get("date")
     lower_text = fmt_num(float(lower), 2)
     upper_text = fmt_num(float(upper), 2)
-    line = f"📏 Bandas cambiarias: piso ${lower_text} / techo ${upper_text}"
+    line = f"bandas cambiarias: piso ${lower_text} / techo ${upper_text}"
     if isinstance(date_label, str) and date_label:
         line += f" ({date_label})"
     return line
@@ -97,7 +97,7 @@ def _format_itcrm(details: Optional[Tuple[float, str]]) -> Optional[str]:
         return None
 
     itcrm_value, date_str = details
-    return f"📐 TCRM: {fmt_num(float(itcrm_value), 2)}" + (
+    return f"tcrm: {fmt_num(float(itcrm_value), 2)}" + (
         f" ({date_str})" if date_str else ""
     )
 
@@ -118,32 +118,32 @@ def format_bcra_variables(
     specs = [
         (
             r"base\s*monetaria",
-            lambda v: f"🏦 Base monetaria: ${format_bcra_value(v)} mill. pesos",
+            lambda v: f"base monetaria: ${format_bcra_value(v)} mill. pesos",
         ),
         (
             r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
-            lambda v: f"📈 Inflación mensual: {format_bcra_value(v, True)}",
+            lambda v: f"inflación mensual: {format_bcra_value(v, True)}",
         ),
         (
             r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
-            lambda v: f"📊 Inflación interanual: {format_bcra_value(v, True)}",
+            lambda v: f"inflación interanual: {format_bcra_value(v, True)}",
         ),
         (
             r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
-            lambda v: f"🔮 Inflación esperada: {format_bcra_value(v, True)}",
+            lambda v: f"inflación esperada: {format_bcra_value(v, True)}",
         ),
-        (r"tamar", lambda v: f"📈 TAMAR: {format_bcra_value(v, True)}"),
-        (r"badlar", lambda v: f"📊 BADLAR: {format_bcra_value(v, True)}"),
+        (r"tamar", lambda v: f"TAMAR: {format_bcra_value(v, True)}"),
+        (r"badlar", lambda v: f"BADLAR: {format_bcra_value(v, True)}"),
         (
             r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
-            lambda v: f"💵 Dólar minorista: ${v}",
+            lambda v: f"dólar minorista: ${v}",
         ),
-        (r"tipo.*cambio.*mayorista", lambda v: f"💱 Dólar mayorista: ${v}"),
-        (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"💰 UVA: ${v}"),
-        (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"📊 CER: {v}"),
+        (r"tipo.*cambio.*mayorista", lambda v: f"dólar mayorista: ${v}"),
+        (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"UVA: ${v}"),
+        (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"CER: {v}"),
         (
             r"reservas.*internacionales",
-            lambda v: f"🏛️ Reservas: USD {format_bcra_value(v)} millones",
+            lambda v: f"reservas: USD {format_bcra_value(v)} millones",
         ),
     ]
 
@@ -153,7 +153,7 @@ def format_bcra_variables(
         if isinstance(candidate_meta, dict):
             meta_info = candidate_meta
 
-    lines = ["📊 Variables principales BCRA\n"]
+    lines = ["variables principales bcra\n"]
     latest_dt: Optional[datetime] = None
     for pattern, formatter in specs:
         compiled = re.compile(pattern)
@@ -188,7 +188,7 @@ def format_bcra_variables(
 
     if meta_info.get("stale"):
         stale_msg = (
-            "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
+            "no hay actualización nueva del bcra, te muestro lo último que tengo"
         )
         if stale_msg not in lines:
             lines.append(stale_msg)
@@ -198,7 +198,7 @@ def format_bcra_variables(
         age_days = (effective_today - latest_dt.date()).days
         if age_days >= 3:
             lines.append(
-                f"⚠️ Datos del BCRA con {age_days} días de atraso, chequeá más tarde."
+                f"datos del bcra con {age_days} días de atraso, chequeá más tarde"
             )
 
     return "\n".join(lines)
