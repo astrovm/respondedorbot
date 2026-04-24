@@ -10,7 +10,7 @@ from .admin_commands import (
 )
 from api.ai_billing import AIMessageBilling
 from api.ai_pricing import estimate_transcribe_reserve_credits
-from api.constants import BILLING_UNAVAILABLE_MESSAGE
+from api.constants import BILLING_UNAVAILABLE_MESSAGE, PROMPT_NO_MARKDOWN
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.chat_context import format_user_identity
 from .billing_commands import (
@@ -985,8 +985,8 @@ def _handle_config_command(
         message.get("from", {}).get("id"),
         redis_client=redis_client,
     ):
-        denial_message = "solo los admins pueden tocar esta config, maestro"
-        deps.send_msg(chat_id, denial_message, str(message.get("message_id")))
+        from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE
+        deps.send_msg(chat_id, ADMIN_CONFIG_DENIAL_MESSAGE, str(message.get("message_id")))
         deps.report_unauthorized_config_attempt(
             chat_id,
             message.get("from", {}),
@@ -1133,7 +1133,7 @@ def _handle_non_ai_command(
             "máximo 10 items cortos y concretos, uno por línea. "
             "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
             "evitá relleno, repetición, contexto innecesario y frases largas. "
-            "NUNCA uses markdown: no negritas, no headers, no tablas. "
+            f"{PROMPT_NO_MARKDOWN} "
             "usá solo guiones (-) al inicio de cada item."
         )
         if custom_instruction:
