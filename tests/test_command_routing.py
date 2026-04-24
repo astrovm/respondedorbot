@@ -47,7 +47,7 @@ def test_optional_redis_client_success():
     from api.index import _optional_redis_client
 
     with patch("api.index.config_redis") as mock_config:
-        sentinel = MagicMock()
+        sentinel = make_mock_config_redis()
         mock_config.return_value = sentinel
 
         result = _optional_redis_client(db=2)
