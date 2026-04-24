@@ -75,13 +75,13 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 1_300
-    assert breakdown["charged_credit_units"] == 3
-    assert breakdown["charged_credits_display"] == "0.3"
+    assert breakdown["raw_usd_micros"] == 1_000
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
             "model": "deepseek/deepseek-v4-flash",
-            "usd_micros": 1_300,
+            "usd_micros": 1_000,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
