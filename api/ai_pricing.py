@@ -23,39 +23,22 @@ WEB_SEARCH_USD_MICROS_PER_REQUEST = 1_660
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
-    # Groq pricing
-    "meta-llama/llama-4-scout-17b-16e-instruct": {
-        "input_per_million": 110_000,
-        "output_per_million": 340_000,
-    },
-    # OpenRouter pricing
-    "meta-llama/llama-4-scout": {
-        "input_per_million": 80_000,
-        "output_per_million": 300_000,
-    },
     "whisper-large-v3": {
         "audio_per_hour": 111_000,
     },
-    # Gemini 3.1 Flash-Lite via OpenRouter (~$0.0045/min for audio = ~$0.27/hr)
     "google/gemini-3.1-flash-lite-preview": {
         "input_per_million": 250_000,
         "output_per_million": 1_500_000,
     },
-    "qwen/qwen3.6-plus": {
-        "input_per_million": 325_000,
-        "output_per_million": 1_950_000,
-    },
-    "minimax/minimax-m2.7": {
-        "input_per_million": 300_000,
+    "deepseek/deepseek-v4-flash": {
+        "input_per_million": 400_000,
         "output_per_million": 1_200_000,
     },
 }
 
 
 MODEL_BILLING_ALIASES = {
-    "groq/meta-llama/llama-4-scout-17b-16e-instruct": "meta-llama/llama-4-scout-17b-16e-instruct",
     "groq/whisper-large-v3": "whisper-large-v3",
-    "qwen/qwen3.6-plus-04-02": "qwen/qwen3.6-plus",
     "gemini-3.1-flash-lite-preview": "google/gemini-3.1-flash-lite-preview",
 }
 
@@ -158,8 +141,9 @@ def estimate_chat_reserve_credits(
     max_output_tokens: int = CHAT_OUTPUT_TOKEN_LIMIT,
     extra_input_tokens: int = 0,
     reasoning: bool = True,
+    model: str = "deepseek/deepseek-v4-flash",
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS["qwen/qwen3.6-plus"]
+    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash"])
     input_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
         input_tokens += estimate_message_tokens([system_message])
