@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import re
+from os import environ
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
+
+import requests
 
 from api.agent_tools import normalize_http_url
 
@@ -101,3 +104,63 @@ class TelegramGateway:
             log_errors=False,
             expect_json=False,
         )
+
+    def send_animation(
+        self,
+        chat_id: str,
+        animation_url: str,
+        msg_id: str = "",
+        caption: str = "",
+    ) -> Optional[int]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "animation": animation_url,
+        }
+        if msg_id:
+            payload["reply_to_message_id"] = msg_id
+        if caption:
+            payload["caption"] = caption
+
+        payload_response, error = self._telegram_request(
+            "sendAnimation", method="POST", json_payload=payload
+        )
+        if error or not payload_response:
+            return None
+
+        result = payload_response.get("result")
+        if isinstance(result, dict):
+            message_id = result.get("message_id")
+            if isinstance(message_id, int):
+                return message_id
+
+        return None
+
+    def download_file(self, file_id: str) -> Optional[bytes]:
+        token = environ.get("TELEGRAM_TOKEN")
+        if not token:
+            return None
+
+        payload_response, error = self._telegram_request(
+            "getFile",
+            method="GET",
+            params={"file_id": file_id},
+            log_errors=False,
+        )
+        if error or not payload_response:
+            return None
+
+        result = payload_response.get("result")
+        if not isinstance(result, dict):
+            return None
+
+        file_path = result.get("file_path")
+        if not isinstance(file_path, str):
+            return None
+
+        file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        try:
+            download_response = requests.get(file_url, timeout=30)
+            download_response.raise_for_status()
+            return download_response.content
+        except requests.RequestException:
+            return None
