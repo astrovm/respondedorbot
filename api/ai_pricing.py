@@ -255,7 +255,7 @@ def _calculate_model_token_cost(
     except (TypeError, ValueError):
         pass
     return {
-        "model": normalized_model,
+        "model": model,
         "usd_micros": int(usd_micros),
         **tokens,
     }

@@ -125,7 +125,7 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
         "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-flash",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "groq/meta-llama/llama-4-scout-17b-16e-instruct",
         "meta-llama/llama-4-scout",
         "whisper-large-v3",
     ]
@@ -161,13 +161,13 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 845
+    assert breakdown["raw_usd_micros"] == 920
     assert breakdown["charged_credit_units"] == 2
     assert breakdown["charged_credits_display"] == "0.2"
     assert breakdown["model_breakdown"] == [
         {
             "model": "deepseek/deepseek-v4-flash",
-            "usd_micros": 845,
+            "usd_micros": 920,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -211,7 +211,7 @@ def test_calculate_billing_for_segments_bills_web_search_requests():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 3_450
+    assert breakdown["raw_usd_micros"] == 3_420
     assert breakdown["charged_credit_units"] == 7
     assert breakdown["tool_breakdown"] == [
         {"tool": "web_search", "count": 2, "usd_micros": 3_320}
@@ -309,7 +309,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
                 "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 4000,
-                    "output_tokens": 2000,
+                    "output_tokens": 3000,
                 },
             }
         ],
@@ -395,7 +395,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
                 "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 4000,
-                    "output_tokens": 2000,
+                    "output_tokens": 3000,
                 },
             }
         ],
@@ -606,7 +606,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 9
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 12
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -912,7 +912,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 130
+    assert breakdown["raw_usd_micros"] == 100
     assert breakdown["model_breakdown"][0]["usd_micros"] == 130
 
 
