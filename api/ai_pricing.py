@@ -162,8 +162,9 @@ def estimate_vision_reserve_credits(
     prompt_text: str,
     image_data: Optional[bytes] = None,
     max_output_tokens: int = VISION_OUTPUT_TOKEN_LIMIT,
+    model: str = "google/gemini-3.1-flash-lite-preview",
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS["meta-llama/llama-4-scout-17b-16e-instruct"]
+    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["google/gemini-3.1-flash-lite-preview"])
     image_url = ""
     if image_data:
         image_base64 = base64.b64encode(image_data).decode("utf-8")
