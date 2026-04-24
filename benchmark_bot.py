@@ -87,6 +87,10 @@ class GordoBenchmark:
                 "category": "direct_response",
                 "prompt": "me podes explicar la teoria de la relatividad?",
             },
+            {
+                "category": "news_search",
+                "prompt": "dame las noticias de argentina de hoy",
+            },
         ]
 
     def call_model(self, model: str, prompt: str, max_retries: int = 3) -> str:
