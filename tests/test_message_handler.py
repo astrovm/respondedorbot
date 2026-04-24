@@ -449,14 +449,14 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
                     "raw_usd_micros": 390,
                     "model_breakdown": [
                         {
-                            "model": "qwen/qwen3.6-plus",
+                            "model": "deepseek/deepseek-v4-flash",
                             "usd_micros": 325,
                             "input_tokens": 1000,
                             "input_cached_tokens": 800,
                             "input_non_cached_tokens": 200,
                         },
                         {
-                            "model": "qwen/qwen3.6-plus",
+                            "model": "deepseek/deepseek-v4-flash",
                             "usd_micros": 65,
                             "input_tokens": 200,
                             "input_cached_tokens": 100,
@@ -499,7 +499,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
     assert "requests: chat=3" in sent_text
     assert "cache_hits: chat=1" in sent_text
     assert "cacheados=900 ahorro_cache=0" in sent_text
-    assert "qwen/qwen3.6-plus=390" in sent_text
+    assert "deepseek/deepseek-v4-flash=390" in sent_text
     assert "web_search=8000 (2x)" in sent_text
     assert "python=500 (1x)" in sent_text
 
@@ -1522,7 +1522,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypat
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1635,7 +1635,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1644,7 +1644,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1705,7 +1705,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             },
         ],
@@ -1876,7 +1876,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1885,7 +1885,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1984,7 +1984,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -1993,7 +1993,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -2002,7 +2002,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
             },
             {
                 "kind": "chat",
-                "model": "qwen/qwen3.6-plus",
+                "model": "deepseek/deepseek-v4-flash",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,

@@ -261,8 +261,8 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 
 BA_TZ = timezone(timedelta(hours=-3))
-PRIMARY_CHAT_MODEL = "qwen/qwen3.6-plus"
-SUMMARY_MODEL = "minimax/minimax-m2.7"
+PRIMARY_CHAT_MODEL = "deepseek/deepseek-v4-flash"
+SUMMARY_MODEL = "deepseek/deepseek-v4-flash"
 SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 20
 COMPACTION_KEEP = 15
@@ -3229,6 +3229,7 @@ def estimate_ai_base_reserve_credits(
         max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
         extra_input_tokens=extra_input_tokens,
         reasoning=True,
+        model=PRIMARY_CHAT_MODEL,
     )
 
     return reserve, {}

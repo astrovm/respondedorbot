@@ -374,7 +374,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     result = AIUsageResult(
         kind="chat",
         text="respuesta",
-        model="qwen/qwen3.6-plus",
+        model="deepseek/deepseek-v4-flash",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"groq_account": "primary"},
     )
@@ -441,7 +441,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
         return AIUsageResult(
             kind="chat",
             text="respuesta chat",
-            model="qwen/qwen3.6-plus",
+            model="deepseek/deepseek-v4-flash",
             metadata={"groq_account": account},
         )
 
@@ -487,7 +487,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
         [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
     )
 
-    assert reserve == 10
+    assert reserve == 7
     assert metadata == {}
 
 
@@ -972,7 +972,7 @@ def test_complete_with_providers_openrouter_success():
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="qwen/qwen3.6-plus",
+        model="deepseek/deepseek-v4-flash",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )
@@ -1021,7 +1021,7 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="qwen/qwen3.6-plus",
+        model="deepseek/deepseek-v4-flash",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )
