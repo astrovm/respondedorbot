@@ -2,7 +2,6 @@ from tests.support import *
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
-    from api.ai_billing import AIMessageBilling
     from api.ai_service import AIConversationRequest, build_ai_service
     from api.message_handler import PreparedMessage
 
@@ -20,18 +19,11 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
 
-    billing_helper = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=lambda **_: "insufficient",
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing_helper = make_ai_message_billing(
         command="/ask",
         chat_id="557",
-        chat_type="private",
         user_id=101,
         numeric_chat_id=557,
-        message={"from": {"first_name": "Ana"}},
     )
 
     response_msg, handled = ai_service.run_conversation(
@@ -60,7 +52,6 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcribe():
-    from api.ai_billing import AIMessageBilling
     from api.ai_service import AIConversationRequest, build_ai_service
     from api.message_handler import PreparedMessage
 
@@ -78,18 +69,11 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
 
-    billing_helper = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=lambda **_: "insufficient",
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing_helper = make_ai_message_billing(
         command="/transcribe",
         chat_id="558",
-        chat_type="private",
         user_id=102,
         numeric_chat_id=558,
-        message={"from": {"first_name": "Ana"}},
     )
 
     response_msg, handled = ai_service.run_conversation(
@@ -118,7 +102,6 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
 
 
 def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
-    from api.ai_billing import AIMessageBilling
     from api.ai_service import AIConversationRequest, build_ai_service
     from api.message_handler import PreparedMessage
 
@@ -136,18 +119,11 @@ def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
 
-    billing_helper = AIMessageBilling(
-        credits_db_service=MagicMock(),
-        admin_reporter=MagicMock(),
-        gen_random_fn=lambda _: "random",
-        build_insufficient_credits_message_fn=lambda **_: "insufficient",
-        maybe_grant_onboarding_credits_fn=lambda _user_id: None,
+    billing_helper = make_ai_message_billing(
         command="/ask",
         chat_id="559",
-        chat_type="private",
         user_id=103,
         numeric_chat_id=559,
-        message={"from": {"first_name": "Ana"}},
     )
 
     ai_service.run_conversation(

@@ -38,6 +38,7 @@ from api.message_state import (
     save_bot_message_metadata as _save_bot_message_metadata,
     truncate_text as _truncate_text,
 )
+from api.ai_billing import AIMessageBilling  # noqa: F401
 from api.services import bcra as bcra_service  # noqa: F401
 
 convert_to_command = index.convert_to_command
@@ -189,6 +190,37 @@ RAW_TOOL_LEAKS = (
 def assert_no_raw_tool_syntax(text: str) -> None:
     for leak in RAW_TOOL_LEAKS:
         assert leak not in text
+
+
+def make_mock_config_redis():
+    mock_redis = MagicMock()
+    return mock_redis
+
+
+def make_ai_message_billing(
+    *,
+    command: str = "/ask",
+    chat_id: str = "557",
+    chat_type: str = "private",
+    user_id: int = 101,
+    numeric_chat_id: int = 557,
+    **overrides: Any,
+) -> AIMessageBilling:
+    kwargs = {
+        "credits_db_service": MagicMock(),
+        "admin_reporter": MagicMock(),
+        "gen_random_fn": lambda _: "random",
+        "build_insufficient_credits_message_fn": lambda **_: "insufficient",
+        "maybe_grant_onboarding_credits_fn": lambda _user_id: None,
+        "command": command,
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "user_id": user_id,
+        "numeric_chat_id": numeric_chat_id,
+        "message": {"from": {"first_name": "Ana"}},
+    }
+    kwargs.update(overrides)
+    return AIMessageBilling(**kwargs)
 
 
 __all__ = [name for name in globals() if not name.startswith("_")] + [

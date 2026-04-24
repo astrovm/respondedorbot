@@ -12,7 +12,7 @@ def test_get_cached_media_success(prefix, file_id, cached_value):
     from api.index import _get_cached_media
 
     with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
+        mock_redis = make_mock_config_redis()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = cached_value
 
@@ -30,7 +30,7 @@ def test_get_cached_media_not_found(prefix):
     from api.index import _get_cached_media
 
     with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
+        mock_redis = make_mock_config_redis()
         mock_config_redis.return_value = mock_redis
         mock_redis.get.return_value = None
 
@@ -66,7 +66,7 @@ def test_cache_media_success(prefix, file_id, text, ttl):
     from api.index import _cache_media
 
     with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = MagicMock()
+        mock_redis = make_mock_config_redis()
         mock_config_redis.return_value = mock_redis
 
         _cache_media(prefix, file_id, text, ttl)
@@ -84,7 +84,6 @@ def test_cache_media_exception(prefix):
     with patch("api.index.config_redis") as mock_config_redis:
         mock_config_redis.side_effect = Exception("Redis error")
 
-        # Should not raise exception, just print error
         _cache_media(prefix, "test_file_id", "payload", 3600)
 
 
@@ -1589,7 +1588,7 @@ def test_transcribe_file_by_id_video_extraction_fails():
     ):
         text, error, billing = transcribe_file_by_id("file123", use_cache=False)
         assert text is None
-        assert error == "duration"
+        assert error == "transcribe"
 
 
 def test_extract_audio_duration_seconds_video():

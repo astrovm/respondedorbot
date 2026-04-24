@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Protocol, Tuple
 
+from api.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.credit_units import format_credit_units, parse_credit_units
 
-_BILLING_UNAVAILABLE_MESSAGE = "el cobro de ia no está andando, avisale al admin"
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
 
 
@@ -20,7 +20,7 @@ class BillingCommandDeps(Protocol):
 def _require_billing(deps: BillingCommandDeps, command: str) -> Optional[CommandResponse]:
     if bool(deps.credits_db_service.is_configured()):
         return None
-    return _BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
 
 
 def handle_balance_command(
