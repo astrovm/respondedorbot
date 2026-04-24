@@ -2189,7 +2189,15 @@ def _telegram_request(
             return {}, None
     except requests.RequestException as error:
         if log_errors:
-            print(f"Telegram request to {endpoint} failed: {error}")
+            detail = str(error)
+            response_body = ""
+            if hasattr(error, "response") and error.response is not None:
+                try:
+                    body = error.response.text
+                    response_body = f" response={body[:500]!r}"
+                except Exception:
+                    pass
+            print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
         return None, str(error)
 
     try:

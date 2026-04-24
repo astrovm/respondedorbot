@@ -79,7 +79,7 @@ class ProviderRuntime:
                     request_kwargs["tools"] = tools_list
 
                 response = None
-                for attempt in range(3):
+                for attempt in range(5):
                     try:
                         response = client.chat.completions.create(**request_kwargs)
                         break
@@ -87,11 +87,22 @@ class ProviderRuntime:
                         is_json_error = isinstance(error, json.JSONDecodeError) or (
                             "JSONDecodeError" in type(error).__name__
                         )
-                        if is_json_error and attempt < 2:
+                        if is_json_error and attempt < 4:
                             wait = 2**attempt
+                            raw_body = ""
+                            if isinstance(error, json.JSONDecodeError) and error.doc:
+                                doc = str(error.doc)
+                                raw_body = f" body_len={len(doc)}"
+                                if len(doc) > 200:
+                                    raw_body += (
+                                        f" body_preview={doc[:100]!r}...{doc[-100:]!r}"
+                                    )
+                                else:
+                                    raw_body += f" body={doc!r}"
                             print(
                                 f"OpenRouter JSONDecodeError, retrying in {wait}s "
-                                f"(attempt {attempt + 1}/3) model={self._deps.primary_model}"
+                                f"(attempt {attempt + 1}/5) model={self._deps.primary_model}"
+                                f"{raw_body}"
                             )
                             time.sleep(wait)
                             continue
