@@ -9,7 +9,6 @@ from tests.support import make_ai_message_billing
 from api.credit_units import whole_credits_to_units
 from api.ai_pricing import (
     calculate_billing_for_segments,
-    estimate_chat_reserve_credits,
     estimate_vision_reserve_credits,
 )
 
