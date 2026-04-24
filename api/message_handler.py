@@ -1266,67 +1266,46 @@ def _handle_known_command(
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
 
-    response = _handle_config_command(
-        deps,
-        command=command,
-        chat_id=chat_id,
-        chat_type=chat_type,
-        message=message,
-        redis_client=redis_client,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
+    def _dispatch(cmd_handlers):
+        for handler in cmd_handlers:
+            resp = handler()
+            if resp[0] is not None or resp[3] is not None:
+                return resp
+        return None
 
-    response = _handle_topup_command(
-        deps,
-        command=command,
-        chat_type=chat_type,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_balance_command(
-        deps,
-        command=command,
-        chat_type=chat_type,
-        chat_id=chat_id,
-        user_id=user_id,
-        numeric_chat_id=numeric_chat_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_transfer_command(
-        deps,
-        command=command,
-        sanitized_message_text=sanitized_message_text,
-        chat_id=chat_id,
-        chat_type=chat_type,
-        user_id=user_id,
-        numeric_chat_id=numeric_chat_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_admin_printcredits_command(
-        deps,
-        command=command,
-        sanitized_message_text=sanitized_message_text,
-        chat_id=chat_id,
-        user_id=user_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
-
-    response = _handle_admin_creditlog_command(
-        deps,
-        command=command,
-        sanitized_message_text=sanitized_message_text,
-        chat_id=chat_id,
-        user_id=user_id,
-    )
-    if response[0] is not None or response[3] is not None:
-        return response
+    dispatch_result = _dispatch([
+        lambda: _handle_config_command(
+            deps, command=command, chat_id=chat_id,
+            chat_type=chat_type, message=message,
+            redis_client=redis_client,
+        ),
+        lambda: _handle_topup_command(
+            deps, command=command, chat_type=chat_type,
+        ),
+        lambda: _handle_balance_command(
+            deps, command=command, chat_type=chat_type,
+            chat_id=chat_id, user_id=user_id,
+            numeric_chat_id=numeric_chat_id,
+        ),
+        lambda: _handle_transfer_command(
+            deps, command=command,
+            sanitized_message_text=sanitized_message_text,
+            chat_id=chat_id, chat_type=chat_type,
+            user_id=user_id, numeric_chat_id=numeric_chat_id,
+        ),
+        lambda: _handle_admin_printcredits_command(
+            deps, command=command,
+            sanitized_message_text=sanitized_message_text,
+            chat_id=chat_id, user_id=user_id,
+        ),
+        lambda: _handle_admin_creditlog_command(
+            deps, command=command,
+            sanitized_message_text=sanitized_message_text,
+            chat_id=chat_id, user_id=user_id,
+        ),
+    ])
+    if dispatch_result is not None:
+        return dispatch_result
 
     if command in commands:
         _handler_func, uses_ai, _ = commands[command]
