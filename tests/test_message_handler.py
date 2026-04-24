@@ -1630,7 +1630,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
         billing_segments=[
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             },
             {
@@ -1700,7 +1700,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
         billing_segments=[
             {
                 "kind": "vision",
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-3.1-flash-lite-preview",
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             },
             {
@@ -2066,7 +2066,7 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
                 [
                     {
                         "kind": "vision",
-                        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                        "model": "google/gemini-3.1-flash-lite-preview",
                         "usage": {"input_tokens": 1, "output_tokens": 1},
                     }
                 ],
