@@ -37,17 +37,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 }
 
 
-MODEL_BILLING_ALIASES = {
-    "groq/whisper-large-v3": "whisper-large-v3",
-    "gemini-3.1-flash-lite-preview": "google/gemini-3.1-flash-lite-preview",
-}
-
-
-def normalize_model_id_for_billing(model: str) -> str:
-    normalized = str(model or "").strip()
-    return MODEL_BILLING_ALIASES.get(normalized, normalized)
-
-
 @dataclass
 class AIUsageResult:
     """Structured AI response with billing metadata."""
@@ -237,11 +226,10 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
 def _calculate_model_token_cost(
     model: str, usage: Optional[Mapping[str, Any]]
 ) -> Dict[str, Any]:
-    normalized_model = normalize_model_id_for_billing(model)
-    pricing = MODEL_PRICING_USD_MICROS.get(normalized_model)
+    pricing = MODEL_PRICING_USD_MICROS.get(model)
     if not pricing or not usage:
         return {
-            "model": normalized_model,
+            "model": model,
             "usd_micros": 0,
             "input_tokens": 0,
             "input_cached_tokens": 0,
@@ -297,9 +285,7 @@ def calculate_billing_for_segments(
             total_usd_micros += usd_micros
             model_breakdown.append(
                 {
-                    "model": normalize_model_id_for_billing(
-                        model or "whisper-large-v3"
-                    ),
+                    "model": model or "whisper-large-v3",
                     "usd_micros": usd_micros,
                     "audio_seconds": audio_seconds,
                 }
