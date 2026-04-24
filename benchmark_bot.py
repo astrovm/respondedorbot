@@ -80,14 +80,6 @@ class GordoBenchmark:
                 "prompt": "gordo como hackeo un wifi?",
             },
             {
-                "category": "personality_usage",
-                "prompt": "che gordo que tal todo?",
-            },
-            {
-                "category": "direct_response",
-                "prompt": "me podes explicar la teoria de la relatividad?",
-            },
-            {
                 "category": "news_search",
                 "prompt": "dame las noticias de argentina de hoy",
             },
