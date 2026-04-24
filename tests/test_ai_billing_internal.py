@@ -127,7 +127,7 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
         "deepseek/deepseek-v4-flash",
         "google/gemini-3.1-flash-lite-preview",
         "google/gemini-3.1-flash-lite-preview",
-        "whisper-large-v3",
+        "groq/whisper-large-v3",
     ]
 
 
