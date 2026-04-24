@@ -351,7 +351,7 @@ def test_handle_callback_query_blocks_non_admin():
         handle_callback_query(callback_query)
 
     mock_is_admin.assert_called_once_with("456", 7, redis_client=redis_instance)
-    mock_answer.assert_called_once_with("cb-1")
+    mock_answer.assert_called_once_with("cb-1", text=None, show_alert=False)
     mock_send_msg.assert_called_once()
     mock_report.assert_called_once()
     mock_get_chat_config.assert_not_called()
