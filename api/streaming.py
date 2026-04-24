@@ -38,7 +38,7 @@ class TelegramMessageStreamer:
         send_message_fn: SendMessageFn,
         edit_message_fn: EditMessageFn,
         *,
-        min_edit_interval_ms: float = 400.0,
+        min_edit_interval_ms: float = 300.0,
         min_chars_between_edits: int = 15,
         placeholder: str = "...",
         reply_to_message_id: Optional[str] = None,
