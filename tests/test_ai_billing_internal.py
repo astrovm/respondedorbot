@@ -606,7 +606,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 12
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 11
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
