@@ -405,7 +405,7 @@ def test_xcancel_link_replacement(mock_get):
     )
 
 
-def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
+def test_can_embed_url_logs_missing_meta(monkeypatch, caplog):
     from api.index import can_embed_url
 
     mock_response = MagicMock()
@@ -418,8 +418,8 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, capsys):
 
     result = can_embed_url("http://example.com")
     assert result is False
-    captured = capsys.readouterr().out
-    assert "missing required metadata" in captured
+    captured = caplog.text
+    assert "embed: missing metadata" in captured
     assert "og:title/twitter:title or og:description/twitter:description" in captured
     assert (
         "og:image/twitter:image or og:video/twitter:player or twitter:card" in captured
