@@ -43,7 +43,9 @@ __all__ = [
     "url_is_embedable",
     "replace_links",
     "extract_tweet_urls",
+    "resolve_tweet_url",
     "fetch_tweet_via_oembed",
+    "fetch_tweet_content",
     "fetch_tweet_text",
 ]
 
@@ -54,13 +56,23 @@ _TWITTER_HOSTS: Set[str] = {
     "xcancel.com",
 }
 
+_TWITTER_FRONTEND_HOSTS: Set[str] = _TWITTER_HOSTS | {
+    "fixupx.com",
+    "fxtwitter.com",
+}
+
+
+def _normalized_host(parsed: ParseResult) -> str:
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
 
 def _is_twitter_user_profile(parsed: ParseResult) -> bool:
     """Return ``True`` when *parsed* points to a Twitter/X user profile."""
 
-    host = parsed.netloc.lower().split(":", 1)[0]
-    if host.startswith("www."):
-        host = host[4:]
+    host = _normalized_host(parsed)
     if host not in _TWITTER_HOSTS:
         return False
 
@@ -229,9 +241,8 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     description = meta_tags.get("og:description") or meta_tags.get(
         "twitter:description"
     )
-    host = parsed.netloc.lower().split(":", 1)[0]
-    if host.startswith("www."):
-        host = host[4:]
+    canonical_url = meta_tags.get("og:url")
+    host = _normalized_host(parsed)
     is_eeinstagram_host = host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
 
     has_title = "og:title" in meta_tags or "twitter:title" in meta_tags
@@ -264,6 +275,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             "content_type": content_type,
             "title": title,
             "description": description,
+            "canonical_url": canonical_url,
         }
 
     missing_fields: List[str] = []
@@ -286,6 +298,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         "content_type": content_type,
         "title": title,
         "description": description,
+        "canonical_url": canonical_url,
     }
 
 
@@ -305,9 +318,7 @@ def can_embed_url(
 def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
     """Return embed eligibility from the eeinstagram HEAD response when available."""
 
-    host = parsed.netloc.lower().split(":", 1)[0]
-    if host.startswith("www."):
-        host = host[4:]
+    host = _normalized_host(parsed)
     if not (host == "eeinstagram.com" or host.endswith(".eeinstagram.com")):
         return None
 
@@ -437,6 +448,10 @@ TWITTER_STATUS_REGEX = re.compile(
     r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com|fixupx\.com|fxtwitter\.com|xcancel\.com)/(\w+)/status/(\d+)"
 )
 
+TWITTER_STATUS_ID_REGEX = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com|fixupx\.com|fxtwitter\.com|xcancel\.com)/status/(\d+)"
+)
+
 
 def extract_tweet_urls(text: str) -> List[Tuple[str, str, str]]:
     """Extract tweet URLs from text and return list of (username, status_id, original_url)."""
@@ -446,6 +461,32 @@ def extract_tweet_urls(text: str) -> List[Tuple[str, str, str]]:
         full_url = f"https://x.com/{username}/status/{status_id}"
         results.append((username, status_id, full_url))
     return results
+
+
+def resolve_tweet_url(url: str) -> Optional[str]:
+    """Return a canonical x.com status URL for supported Twitter/X frontends."""
+
+    parsed = urlparse(url)
+    if _normalized_host(parsed) not in _TWITTER_FRONTEND_HOSTS:
+        return None
+
+    direct_match = TWITTER_STATUS_REGEX.search(url.lower())
+    if direct_match:
+        username, status_id = direct_match.groups()
+        return f"https://x.com/{username}/status/{status_id}"
+
+    id_only_match = TWITTER_STATUS_ID_REGEX.search(url.lower())
+    if not id_only_match:
+        return None
+
+    metadata = inspect_embed_url(url)
+    canonical_url = str(metadata.get("canonical_url") or metadata.get("url") or "")
+    canonical_match = TWITTER_STATUS_REGEX.search(canonical_url.lower())
+    if canonical_match:
+        username, status_id = canonical_match.groups()
+        return f"https://x.com/{username}/status/{status_id}"
+
+    return None
 
 
 def _resolve_tco_redirect(url: str) -> Optional[str]:
@@ -497,6 +538,35 @@ def fetch_tweet_via_oembed(url: str) -> Optional[Dict[str, Any]]:
     except RequestException:
         pass
     return None
+
+
+def fetch_tweet_content(url: str) -> Optional[Dict[str, str]]:
+    """Fetch readable tweet content for a Twitter/X/front-end URL."""
+
+    canonical_url = resolve_tweet_url(url)
+    if not canonical_url:
+        return None
+
+    oembed_data = fetch_tweet_via_oembed(canonical_url)
+    if not oembed_data:
+        return {
+            "url": canonical_url,
+            "error": "no se pudo leer el tweet",
+        }
+
+    html = str(oembed_data.get("html") or "")
+    tweet_text = _extract_text_from_oembed_html(html)
+    author_name = str(oembed_data.get("author_name") or "").strip()
+    author_url = str(oembed_data.get("author_url") or "").strip()
+    date = _extract_date_from_oembed_html(html)
+
+    return {
+        "url": canonical_url,
+        "author": author_name,
+        "author_url": author_url,
+        "date": date,
+        "text": tweet_text,
+    }
 
 
 def fetch_tweet_text(text: str) -> Tuple[str, List[Dict[str, str]]]:

@@ -100,6 +100,87 @@ class TestWebFetchTool:
         result = execute_tool("web_fetch", {"url": "https://example.com"}, {})
         assert "error" in result.output.lower()
 
+    @patch("api.utils.links.fetch_tweet_via_oembed")
+    def test_web_fetch_reads_tweet_with_oembed(self, mock_oembed):
+        mock_oembed.return_value = {
+            "author_name": "OSINTdefender",
+            "html": (
+                "<blockquote><p>Reports of shots fired were unfounded.</p>"
+                "<a href='https://x.com/sentdefender/status/2048202539770802483'>"
+                "Apr 26, 2026</a></blockquote>"
+            ),
+        }
+
+        result = execute_tool(
+            "web_fetch",
+            {"url": "https://x.com/sentdefender/status/2048202539770802483"},
+            {},
+        )
+
+        assert "OSINTdefender" in result.output
+        assert "Reports of shots fired" in result.output
+        assert result.metadata["url"] == "https://x.com/sentdefender/status/2048202539770802483"
+
+    @patch("api.utils.links.request_with_ssl_fallback")
+    @patch("api.utils.links.fetch_tweet_via_oembed")
+    def test_web_fetch_resolves_id_only_fixupx_from_metadata(
+        self, mock_oembed, mock_request
+    ):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_response.url = "https://fixupx.com/status/2048202539770802483"
+        mock_response.text = (
+            "<meta property='og:url' content='https://x.com/sentdefender/status/2048202539770802483'>"
+            "<meta property='og:title' content='OSINTdefender (@sentdefender)'>"
+            "<meta property='og:description' content='Following reports'>"
+            "<meta property='og:image' content='https://example.com/image.jpg'>"
+        )
+        mock_request.return_value = mock_response
+        mock_oembed.return_value = {
+            "author_name": "OSINTdefender",
+            "html": "<blockquote><p>All clear.</p></blockquote>",
+        }
+
+        result = execute_tool(
+            "web_fetch",
+            {"url": "https://fixupx.com/status/2048202539770802483"},
+            {},
+        )
+
+        assert "All clear" in result.output
+        assert result.metadata["url"] == "https://x.com/sentdefender/status/2048202539770802483"
+
+    @patch("api.agent_tools.fetch_url_content")
+    def test_web_fetch_rejects_x_error_page(self, mock_fetch):
+        mock_fetch.return_value = {
+            "url": "https://x.com/status/1",
+            "content": "Something went wrong Try again privacy related extensions",
+        }
+
+        result = execute_tool("web_fetch", {"url": "https://example.com/x-error"}, {})
+
+        assert "pagina de error" in result.output
+
+    @patch("api.utils.links.inspect_embed_url")
+    @patch("api.agent_tools.fetch_url_content")
+    def test_web_fetch_does_not_treat_embedded_twitter_url_as_tweet(
+        self, mock_fetch, mock_inspect
+    ):
+        mock_fetch.return_value = {
+            "url": "https://example.com/read/fixupx.com/status/123",
+            "content": "regular page",
+        }
+
+        result = execute_tool(
+            "web_fetch",
+            {"url": "https://example.com/read/fixupx.com/status/123"},
+            {},
+        )
+
+        assert "regular page" in result.output
+        mock_inspect.assert_not_called()
+
 
 class TestTaskSetTool:
     @patch("api.tools.task_set.schedule_task")
