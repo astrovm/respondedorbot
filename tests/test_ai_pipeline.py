@@ -382,7 +382,7 @@ def test_log_groq_request_result_logs_local_billing_details():
         metadata={"groq_account": "primary"},
     )
 
-    with patch("builtins.print") as mock_print:
+    with patch("api.index._logger.info") as mock_log:
         _log_groq_request_result(
             label="OpenRouter Chat",
             scope="chat",
@@ -392,8 +392,8 @@ def test_log_groq_request_result_logs_local_billing_details():
             result=result,
         )
 
-    assert mock_print.call_count == 1
-    log_entry = json.loads(mock_print.call_args.args[0])
+    assert mock_log.call_count == 1
+    log_entry = json.loads(mock_log.call_args.args[1])
     assert log_entry["scope"] == "groq_request"
     assert log_entry["status"] == "success"
     assert log_entry["request_scope"] == "chat"
@@ -406,7 +406,7 @@ def test_log_groq_request_result_logs_local_billing_details():
 def test_log_groq_request_result_logs_empty_requests():
     from api.index import _log_groq_request_result
 
-    with patch("builtins.print") as mock_print:
+    with patch("api.index._logger.info") as mock_log:
         _log_groq_request_result(
             label="OpenRouter Chat",
             scope="chat",
@@ -416,8 +416,8 @@ def test_log_groq_request_result_logs_empty_requests():
             result=None,
         )
 
-    assert mock_print.call_count == 1
-    log_entry = json.loads(mock_print.call_args.args[0])
+    assert mock_log.call_count == 1
+    log_entry = json.loads(mock_log.call_args.args[1])
     assert log_entry == {
         "scope": "groq_request",
         "label": "OpenRouter Chat",

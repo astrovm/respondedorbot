@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
+from api.logging_config import format_log_context, get_logger
 from api.tools.registry import TOOL_REGISTRY, execute_tool, parse_tool_call_arguments
+
+
+logger = get_logger(__name__)
+
+
+def _default_log(message: str) -> None:
+    logger.info(message)
 
 
 class ToolRuntime:
@@ -15,7 +23,7 @@ class ToolRuntime:
             [Any], Dict[str, Any]
         ] = parse_tool_call_arguments,
         tool_registry: Mapping[str, Any] = TOOL_REGISTRY,
-        print_fn: Callable[[str], None] = print,
+        print_fn: Callable[[str], None] = _default_log,
     ) -> None:
         self._execute_tool_fn = execute_tool_fn
         self._parse_tool_call_arguments_fn = parse_tool_call_arguments_fn
@@ -44,16 +52,24 @@ class ToolRuntime:
                 continue
             tool_name = str(getattr(fn, "name", "") or "")
             if not self.has_tool(tool_name):
-                self._print_fn(f"Tool call skipped (not registered): {tool_name}")
+                self._print_fn(
+                    "tool call skipped: not registered "
+                    f"tool_name={tool_name}{format_log_context(tool_context)}"
+                )
                 continue
 
             tc_id = str(getattr(tool_call, "id", "") or "")
             raw_args = getattr(fn, "arguments", "{}")
             tool_params = self._parse_tool_call_arguments_fn(raw_args)
 
-            self._print_fn(f"Tool call: {tool_name}({tool_params})")
+            self._print_fn(
+                f"tool call: {tool_name} params={tool_params}{format_log_context(tool_context)}"
+            )
             result = self._execute_tool_fn(tool_name, tool_params, dict(tool_context))
-            self._print_fn(f"Tool result: {result.output[:200]}")
+            self._print_fn(
+                f"tool result: {tool_name} output={result.output[:200]!r}"
+                f"{format_log_context(tool_context)}"
+            )
 
             assistant_msg["tool_calls"].append(
                 {
