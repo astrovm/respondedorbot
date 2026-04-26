@@ -204,6 +204,7 @@ from api.services import credits_db as credits_db_service
 from api.utils.http import request_with_ssl_fallback
 from api.utils.links import (
     can_embed_url as _links_can_embed_url,
+    fetch_tweet_content as _links_fetch_tweet_content,
     is_social_frontend as _links_is_social_frontend,
     replace_links as _links_replace_links,
     fetch_tweet_text as _links_fetch_tweet_text,
@@ -2887,6 +2888,25 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     transcript_parts: List[str] = []
 
     for index, url in enumerate(urls, 1):
+        tweet = _links_fetch_tweet_content(url)
+        if tweet:
+            final_url = str(tweet.get("url") or url).strip() or url
+            lines.append(f"{index}. {final_url}")
+            tweet_error = tweet.get("error")
+            if tweet_error:
+                lines.append(f"error: {tweet_error}")
+                continue
+            author = _truncate_link_metadata_text(tweet.get("author"), limit=160)
+            date = _truncate_link_metadata_text(tweet.get("date"), limit=80)
+            text = _truncate_link_metadata_text(tweet.get("text"), limit=500)
+            if author:
+                lines.append(f"autor: {author}")
+            if date:
+                lines.append(f"fecha: {date}")
+            if text:
+                lines.append(f"tweet: {text}")
+            continue
+
         metadata = fetch_link_metadata(url)
         final_url = str(metadata.get("url") or url).strip() or url
         lines.append(f"{index}. {final_url}")
