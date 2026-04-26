@@ -9,7 +9,11 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 from requests.exceptions import RequestException
 
+from api.logging_config import get_logger
 from api.utils.http import request_with_ssl_fallback
+
+
+logger = get_logger(__name__)
 
 EMBED_REQUEST_TIMEOUT = 10
 TELEGRAM_PREVIEW_USER_AGENT = "TelegramBot (like TwitterBot)"
@@ -167,7 +171,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             headers=headers,
         )
     except RequestException as exc:
-        print(f"[EMBED] {url} request failed: {exc}")
+        logger.warning("embed: request failed url=%s error=%s", url, exc)
         return {
             "embeddable": False,
             "url": url,
@@ -179,7 +183,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         }
 
     if response.status_code >= 400:
-        print(f"[EMBED] {url} returned status {response.status_code}")
+        logger.info("embed: returned status url=%s status=%s", url, response.status_code)
         return {
             "embeddable": False,
             "url": str(getattr(response, "url", "") or url),
@@ -192,7 +196,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     content_type = response.headers.get("Content-Type", "").lower()
     normalized_url = str(getattr(response, "url", "") or url).strip() or url
     if content_type.startswith(("image/", "video/", "audio/")):
-        print(f"[EMBED] {url} served direct media type {content_type}")
+        logger.info("embed: direct media url=%s content_type=%s", url, content_type)
         return {
             "embeddable": True,
             "url": normalized_url,
@@ -202,7 +206,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             "description": None,
         }
     if "text/html" not in content_type:
-        print(f"[EMBED] {url} content-type {content_type} not embeddable")
+        logger.info("embed: not embeddable url=%s content_type=%s", url, content_type)
         return {
             "embeddable": False,
             "url": normalized_url,
@@ -267,7 +271,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         is_eeinstagram_host and has_eeinstagram_media
     ):
         detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags.items())
-        print(f"[EMBED] {url} has embed metadata: {detail}")
+        logger.info("embed: metadata found url=%s metadata=%s", url, detail)
         return {
             "embeddable": True,
             "url": normalized_url,
@@ -290,7 +294,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     if not has_eeinstagram_media and is_eeinstagram_host:
         missing_fields.append("og:image or og:video")
     missing_detail = ", ".join(missing_fields)
-    print(f"[EMBED] {url} missing required metadata: {missing_detail}")
+    logger.info("embed: missing metadata url=%s missing=%s", url, missing_detail)
     return {
         "embeddable": False,
         "url": normalized_url,
@@ -336,23 +340,28 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
             headers=headers,
         )
     except RequestException as exc:
-        print(f"[EMBED] {url} HEAD request failed: {exc}")
+        logger.warning("embed: HEAD request failed url=%s error=%s", url, exc)
         return False
 
     status_code = response.status_code
     if status_code == 405:
-        print(f"[EMBED] {url} HEAD not allowed, falling back to GET metadata check")
+        logger.info("embed: HEAD not allowed, falling back to GET url=%s", url)
         return None
     if status_code >= 400:
-        print(f"[EMBED] {url} HEAD returned status {status_code}")
+        logger.info("embed: HEAD returned status url=%s status=%s", url, status_code)
         return False
 
     if 300 <= status_code < 400:
         location = response.headers.get("Location", "")
         if not location:
-            print(f"[EMBED] {url} HEAD redirect missing location")
+            logger.info("embed: HEAD redirect missing location url=%s", url)
             return False
-        print(f"[EMBED] {url} HEAD redirect {status_code} to {location[:120]}")
+        logger.info(
+            "embed: HEAD redirect url=%s status=%s location=%s",
+            url,
+            status_code,
+            location[:120],
+        )
         return True
 
     return None
@@ -408,19 +417,23 @@ def replace_links(
                 changed = True
                 cleaned_original = parsed_original._replace(query="", fragment="")
                 original_links.append(urlunparse(cleaned_original))
-                print(f"[LINK] replacing {original} with {replaced_full}")
+                logger.info("link: replacing original=%s replacement=%s", original, replaced_full)
                 return replaced_full
 
             if fallback_replaced_full and checker(fallback_replaced_full):
                 changed = True
                 cleaned_original = parsed_original._replace(query="", fragment="")
                 original_links.append(urlunparse(cleaned_original))
-                print(
-                    f"[LINK] replacing {original} with fallback {fallback_replaced_full}"
+                logger.info(
+                    "link: replacing with fallback original=%s replacement=%s",
+                    original,
+                    fallback_replaced_full,
                 )
                 return fallback_replaced_full
 
-            print(f"[LINK] cannot embed {replaced_full}, keeping {original}")
+            logger.info(
+                "link: cannot embed replacement=%s keeping=%s", replaced_full, original
+            )
             return original
 
         return _sub

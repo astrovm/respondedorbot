@@ -197,6 +197,7 @@ from api.message_state import (
     truncate_text as _state_truncate_text,
 )
 from api.logging_config import get_logger
+from api.logging_config import format_log_context
 from api.random_replies import build_random_reply
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
@@ -2882,7 +2883,29 @@ def build_message_links_context(message: Mapping[str, Any]) -> str:
     if not urls:
         return ""
 
-    print(f"build_message_links_context: extracted {len(urls)} url(s) urls={urls}")
+    _logger.info(
+        "links context: extracted urls count=%d urls=%s%s",
+        len(urls),
+        urls,
+        format_log_context(
+            {
+                "source": "build_message_links_context",
+                "chat_id": message.get("chat", {}).get("id")
+                if isinstance(message.get("chat"), Mapping)
+                else message.get("chat_id"),
+                "chat_title": message.get("chat", {}).get("title")
+                if isinstance(message.get("chat"), Mapping)
+                else None,
+                "message_id": message.get("message_id"),
+                "user_id": message.get("from", {}).get("id")
+                if isinstance(message.get("from"), Mapping)
+                else None,
+                "user_name": message.get("from", {}).get("username")
+                if isinstance(message.get("from"), Mapping)
+                else None,
+            }
+        ),
+    )
 
     lines = ["LINKS DEL MENSAJE:"]
     transcript_parts: List[str] = []
@@ -3206,7 +3229,7 @@ def _log_groq_request_result(
             }
         )
 
-    print(json.dumps(log_entry, ensure_ascii=False, default=str))
+    _logger.info("groq request: %s", json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
 def _extract_groq_usage_map(response: Any) -> Optional[Dict[str, Any]]:
@@ -4895,7 +4918,7 @@ def _log_config_event(message: str, extra: Optional[Mapping[str, Any]] = None) -
     if extra:
         for key, value in extra.items():
             log_entry[key] = value
-    print(json.dumps(log_entry, ensure_ascii=False, default=str))
+    _logger.info("config event: %s", json.dumps(log_entry, ensure_ascii=False, default=str))
 
 
 def build_routing_policy() -> RoutingPolicy:
@@ -5699,15 +5722,15 @@ def update_telegram_bot_commands() -> bool:
     """
     token = environ.get("TELEGRAM_TOKEN")
     if not token:
-        print("TELEGRAM_TOKEN not set, cannot update bot commands")
+        _logger.warning("telegram commands: TELEGRAM_TOKEN not set, cannot update")
         return False
     try:
         return _update_bot_commands(
             token=token,
             request_fn=_telegram_request,
             command_groups=COMMAND_GROUPS,
-            logger=print,
+            logger=_logger.info,
         )
     except Exception as e:
-        print(f"Exception updating bot commands: {e}")
+        _logger.warning("telegram commands: exception updating: %s", e)
         return False
