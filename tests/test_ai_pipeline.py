@@ -351,13 +351,16 @@ def test_build_ai_messages_includes_links_context():
         "text": "mirá fixupx.com/status/2032173338240467235",
     }
 
-    with patch(
-        "api.index.fetch_link_metadata",
-        return_value={
-            "url": "https://fixupx.com/status/2032173338240467235",
-            "title": "tweet",
-            "description": "contenido",
-        },
+    with (
+        patch("api.index._links_fetch_tweet_content", return_value=None),
+        patch(
+            "api.index.fetch_link_metadata",
+            return_value={
+                "url": "https://fixupx.com/status/2032173338240467235",
+                "title": "tweet",
+                "description": "contenido",
+            },
+        ),
     ):
         messages = build_ai_messages(message, [], message["text"])
 
@@ -1156,6 +1159,32 @@ def test_can_embed_url_primes_link_metadata_cache():
     assert result["title"] == "Agustin Cortes (@agucortes)"
     assert result["description"] == "Texto del post"
     mock_fetch_request.assert_not_called()
+
+
+def test_build_message_links_context_uses_tweet_content_before_generic_metadata():
+    from api.index import build_message_links_context
+
+    with (
+        patch(
+            "api.index._links_fetch_tweet_content",
+            return_value={
+                "url": "https://x.com/sentdefender/status/2048202539770802483",
+                "author": "OSINTdefender",
+                "date": "Apr 26, 2026",
+                "text": "Reports of shots fired were unfounded.",
+            },
+        ) as mock_tweet,
+        patch("api.index.fetch_link_metadata") as mock_metadata,
+    ):
+        context = build_message_links_context(
+            {"text": "https://fixupx.com/status/2048202539770802483"}
+        )
+
+    assert "https://x.com/sentdefender/status/2048202539770802483" in context
+    assert "autor: OSINTdefender" in context
+    assert "tweet: Reports of shots fired were unfounded." in context
+    mock_tweet.assert_called_once_with("https://fixupx.com/status/2048202539770802483")
+    mock_metadata.assert_not_called()
 
 
 def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
