@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.ai_pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT, ensure_mapping
+from api.logging_config import format_log_context, get_logger
 from api.tool_runtime import ToolRuntime
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,7 +39,14 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AIUsageResult]:
-        print(f"Trying OpenRouter chat with model={self._deps.primary_model}...")
+        context = dict(tool_context or {})
+        context["model"] = self._deps.primary_model
+        logger.info(
+            "openrouter: calling chat enable_web_search=%s extra_tools=%d%s",
+            enable_web_search,
+            len(extra_tools or []),
+            format_log_context(context),
+        )
         return self._run_tool_rounds(
             current_messages=list(messages),
             system_message=system_message,
@@ -95,17 +106,32 @@ class ProviderRuntime:
                                     )
                                 else:
                                     raw_body += f" body={doc!r}"
-                            print(
-                                f"OpenRouter JSONDecodeError, retrying in {wait}s "
-                                f"(attempt {attempt + 1}/5) model={self._deps.primary_model}"
-                                f"{raw_body}"
+                            retry_context = dict(tool_context or {})
+                            retry_context.update(
+                                {
+                                    "model": self._deps.primary_model,
+                                    "tool_round": round_idx + 1,
+                                }
+                            )
+                            logger.warning(
+                                "openrouter: JSONDecodeError retrying in %ss attempt=%d/5%s%s",
+                                wait,
+                                attempt + 1,
+                                format_log_context(retry_context),
+                                raw_body,
                             )
                             time.sleep(wait)
                             continue
                         raise
             except Exception as error:
-                print(
-                    f"OpenRouter chat error model={self._deps.primary_model}: {error}"
+                error_context = dict(tool_context or {})
+                error_context.update(
+                    {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+                )
+                logger.error(
+                    "openrouter: chat error %s error=%s",
+                    format_log_context(error_context),
+                    error,
                 )
                 self._deps.admin_report(
                     f"OpenRouter chat error model={self._deps.primary_model}",
@@ -150,7 +176,18 @@ class ProviderRuntime:
                         continue
                     tool_name = getattr(fn, "name", "")
                     if not self._tool_runtime.has_tool(tool_name):
-                        print(f"Tool call skipped (not registered): {tool_name}")
+                        skipped_context = dict(tool_context or {})
+                        skipped_context.update(
+                            {
+                                "model": self._deps.primary_model,
+                                "tool_round": round_idx + 1,
+                            }
+                        )
+                        logger.warning(
+                            "tool call skipped: not registered tool_name=%s%s",
+                            tool_name,
+                            format_log_context(skipped_context),
+                        )
                         continue
                     known_calls.append(tool_call)
 
@@ -226,8 +263,14 @@ class ProviderRuntime:
                     },
                 )
 
-            print(
-                f"provider_runtime: unexpected finish_reason={finish_reason!r} model={self._deps.primary_model}"
+            unexpected_context = dict(tool_context or {})
+            unexpected_context.update(
+                {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+            )
+            logger.warning(
+                "provider_runtime: unexpected finish_reason=%r%s",
+                finish_reason,
+                format_log_context(unexpected_context),
             )
             self._deps.admin_report(
                 f"OpenRouter unexpected finish_reason={finish_reason!r}",
