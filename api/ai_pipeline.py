@@ -4,11 +4,25 @@ from __future__ import annotations
 
 import random
 import re
+import inspect
+import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+_logger = logging.getLogger(__name__)
+
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
 IDENTITY_USER_PATTERN = re.compile(r"\(@?(\w+)\)")
+MARKDOWN_CODE_FENCE_PATTERN = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+MARKDOWN_BOLD_PATTERN = re.compile(r"(?<!\w)(\*\*|__)(\S(?:.*?\S)?)\1(?!\w)")
+MARKDOWN_ITALIC_PATTERN = re.compile(r"(?<![\w:/])(\*|_)([^\s*_](?:.*?[^\s*_])?)\1(?!\w)")
+MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"`([^`]+)`")
+MARKDOWN_HEADER_PATTERN = re.compile(r"^\s{0,3}#{2,6}\s+", re.MULTILINE)
+MARKDOWN_HRULE_PATTERN = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,})\s*$", re.MULTILINE)
+MARKDOWN_BLOCKQUOTE_PATTERN = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)
+MARKDOWN_BULLET_PATTERN = re.compile(r"^\s{0,3}[-*]\s+", re.MULTILINE)
 LOG_PREVIEW_LIMIT = 160
 
 INSTRUCCIONES_BASE = [
@@ -76,6 +90,26 @@ def clean_duplicate_response(response: str) -> str:
             cleaned_sentences.append(stripped)
 
     return ". ".join(cleaned_sentences).replace("..", ".")
+
+
+def strip_markdown_formatting(text: str) -> str:
+    """Remove common markdown markers while preserving their readable content."""
+
+    if not text:
+        return ""
+
+    cleaned = MARKDOWN_CODE_FENCE_PATTERN.sub(r"\1", text)
+    cleaned = MARKDOWN_IMAGE_PATTERN.sub(r"\1", cleaned)
+    cleaned = MARKDOWN_LINK_PATTERN.sub(r"\1", cleaned)
+    cleaned = MARKDOWN_INLINE_CODE_PATTERN.sub(r"\1", cleaned)
+    cleaned = MARKDOWN_HEADER_PATTERN.sub("", cleaned)
+    cleaned = MARKDOWN_HRULE_PATTERN.sub("", cleaned)
+    cleaned = MARKDOWN_BLOCKQUOTE_PATTERN.sub("", cleaned)
+    cleaned = MARKDOWN_BULLET_PATTERN.sub("", cleaned)
+    cleaned = MARKDOWN_BOLD_PATTERN.sub(r"\2", cleaned)
+    cleaned = MARKDOWN_ITALIC_PATTERN.sub(r"\2", cleaned)
+
+    return "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
 
 
 def strip_leading_context(
@@ -191,8 +225,12 @@ def handle_ai_response(
                 kwargs["image_file_id"] = image_file_id
             if kwargs:
                 try:
-                    response = handler_func(messages, **kwargs)
-                except TypeError:
+                    sig = inspect.signature(handler_func)
+                    accepted_kwargs = {
+                        key: value for key, value in kwargs.items() if key in sig.parameters
+                    }
+                    response = handler_func(messages, **accepted_kwargs)
+                except (TypeError, ValueError):
                     response = handler_func(messages)
             else:
                 response = handler_func(messages)
@@ -212,23 +250,22 @@ def handle_ai_response(
         context_stripped_response, user_identity
     )
     cleaned_response = clean_duplicate_response(prefix_stripped_response)
+    cleaned_response = strip_markdown_formatting(cleaned_response)
 
     if not cleaned_response.strip():
         was_fallback = bool(response_meta.get("ai_fallback")) if response_meta else False
-        print(
-            "handle_ai_response: cleaned response empty after normalization "
-            f"handler={handler_name or '<unknown>'} ai_fallback={was_fallback} "
-            f"raw_len={len(response_text)} "
-            f"persona_len={len(persona_stripped_response)} "
-            f"context_len={len(context_stripped_response)} "
-            f"prefix_len={len(prefix_stripped_response)}"
+        _logger.warning(
+            "cleaned response empty handler=%s ai_fallback=%s raw_len=%d",
+            handler_name or "<unknown>",
+            was_fallback,
+            len(response_text),
         )
-        print(
-            "handle_ai_response: previews "
-            f"raw='{_preview_for_log(response_text)}' "
-            f"persona='{_preview_for_log(persona_stripped_response)}' "
-            f"context='{_preview_for_log(context_stripped_response)}' "
-            f"prefix='{_preview_for_log(prefix_stripped_response)}'"
+        _logger.debug(
+            "empty response previews raw='%s' persona='%s' context='%s' prefix='%s'",
+            _preview_for_log(response_text),
+            _preview_for_log(persona_stripped_response),
+            _preview_for_log(context_stripped_response),
+            _preview_for_log(prefix_stripped_response),
         )
         return "me quedé reculando y no te pude responder, probá de nuevo"
 
@@ -240,4 +277,5 @@ __all__ = [
     "clean_duplicate_response",
     "handle_ai_response",
     "remove_gordo_prefix",
+    "strip_markdown_formatting",
 ]

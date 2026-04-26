@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from tests.support import *
+from api.ai_pipeline import strip_markdown_formatting
 from api.providers.base import ProviderResult
 
 
@@ -52,6 +53,69 @@ def _build_chat_response(*, text, finish_reason="stop", annotations=None, usage=
         ],
         usage=usage or {"prompt_tokens": 0, "completion_tokens": 0},
     )
+
+
+def test_strip_markdown_formatting_removes_bold_markers():
+    assert strip_markdown_formatting("**hello**") == "hello"
+    assert strip_markdown_formatting("__hello__") == "hello"
+
+
+def test_strip_markdown_formatting_removes_italic_markers():
+    assert strip_markdown_formatting("*hello*") == "hello"
+    assert strip_markdown_formatting("_hello_") == "hello"
+
+
+def test_strip_markdown_formatting_removes_header_markers():
+    assert strip_markdown_formatting("## Title") == "Title"
+    assert strip_markdown_formatting("### Title") == "Title"
+
+
+def test_strip_markdown_formatting_removes_inline_code_markers():
+    assert strip_markdown_formatting("mirá `code`") == "mirá code"
+
+
+def test_strip_markdown_formatting_removes_code_fences_but_preserves_content():
+    text = "antes\n```\nlinea 1\nlinea 2\n```\ndespues"
+    assert strip_markdown_formatting(text) == "antes\nlinea 1\nlinea 2\ndespues"
+
+
+def test_strip_markdown_formatting_keeps_link_text_only():
+    assert strip_markdown_formatting("mirá [este link](https://example.com)") == "mirá este link"
+
+
+def test_strip_markdown_formatting_keeps_image_alt_text_only():
+    assert strip_markdown_formatting("mirá ![un gato](https://example.com/cat.png)") == "mirá un gato"
+
+
+def test_strip_markdown_formatting_removes_horizontal_rules():
+    assert strip_markdown_formatting("antes\n---\ndespues\n***") == "antes\ndespues"
+
+
+def test_strip_markdown_formatting_removes_blockquote_prefix():
+    assert strip_markdown_formatting("> citado\nnormal") == "citado\nnormal"
+
+
+def test_strip_markdown_formatting_removes_list_bullets():
+    assert strip_markdown_formatting("- item uno\n* item dos") == "item uno\nitem dos"
+
+
+def test_strip_markdown_formatting_preserves_underscores_in_urls():
+    text = "mirá https://example.com/my_page y user_name"
+    assert strip_markdown_formatting(text) == text
+
+
+def test_strip_markdown_formatting_cleans_mixed_markdown():
+    text = "**bold** and *italic*\n## header"
+    assert strip_markdown_formatting(text) == "bold and italic\nheader"
+
+
+def test_strip_markdown_formatting_leaves_non_markdown_text_alone():
+    text = "hacé 2 * 3 y dejá snake_case intacto"
+    assert strip_markdown_formatting(text) == text
+
+
+def test_strip_markdown_formatting_returns_empty_string_for_empty_input():
+    assert strip_markdown_formatting("") == ""
 
 
 def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch):
@@ -820,6 +884,52 @@ def test_fetch_link_metadata_success():
     assert result["description"] == "Hola mundo desde la web."
 
 
+def test_get_hacker_news_context_uses_fallback_url():
+    from api.index import get_hacker_news_context
+
+    sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <item>
+          <title>Fallback Story</title>
+          <link>https://example.com/fallback</link>
+          <description><![CDATA[
+            <p>Comments URL: <a href="https://news.ycombinator.com/item?id=99">https://news.ycombinator.com/item?id=99</a></p>
+            <p>Points: 42</p>
+            <p># Comments: 7</p>
+          ]]></description>
+        </item>
+      </channel>
+    </rss>"""
+
+    class DummyResponse:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    with patch(
+        "api.index.request_with_ssl_fallback",
+        side_effect=[
+            requests.RequestException("primary timeout"),
+            DummyResponse(sample_xml),
+        ],
+    ) as mock_get, patch("api.index.config_redis", side_effect=RuntimeError("no redis")):
+        items = get_hacker_news_context(limit=1)
+
+    assert items == [
+        {
+            "title": "Fallback Story",
+            "url": "https://example.com/fallback",
+            "points": 42,
+            "comments": 7,
+            "comments_url": "https://news.ycombinator.com/item?id=99",
+        }
+    ]
+    assert mock_get.call_count == 2
+
+
 def test_fetch_link_metadata_invalid_url():
     assert fetch_link_metadata("nota sin protocolo") == {
         "url": "nota sin protocolo",
@@ -912,24 +1022,21 @@ def test_handle_ai_response_reads_fallback_from_meta(monkeypatch):
     assert meta["ai_fallback"] is True
 
 
-def test_handle_ai_response_returns_fallback_on_empty(monkeypatch):
+def test_handle_ai_response_returns_fallback_on_empty(monkeypatch, caplog):
     """Empty responses should return a fallback message"""
+    import logging
+
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handler(_messages):
         return ""
 
-    with patch("builtins.print") as mock_print:
+    with caplog.at_level(logging.WARNING, logger="api.ai_pipeline"):
         result = handle_ai_response("123", fake_handler, [])
 
     assert result == "me quedé reculando y no te pude responder, probá de nuevo"
-    assert mock_print.call_count == 2
-    assert (
-        "cleaned response empty after normalization"
-        in mock_print.call_args_list[0].args[0]
-    )
-    assert "previews raw=''" in mock_print.call_args_list[1].args[0]
+    assert any("cleaned response empty" in r.message for r in caplog.records)
 
 
 def test_handle_ai_response_strips_context_echo(monkeypatch):

@@ -575,6 +575,7 @@ def is_provider_backoff_active(provider: str) -> bool:
 
 
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
+HACKER_NEWS_RSS_FALLBACK_URL = "https://news.ycombinator.com/rss"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
 HACKER_NEWS_MAX_ITEMS = 5
 
@@ -929,7 +930,7 @@ def cached_requests(
             try:
                 return make_request()
             except Exception as e:
-                print(f"[CACHE] Error requesting {api_url}: {e!s}")
+                _logger.warning("cache request error url=%s error=%s", api_url, e)
                 return None
         else:
             cached_data = cast(Dict[str, Any], redis_response)
@@ -942,7 +943,7 @@ def cached_requests(
                 try:
                     return make_request()
                 except Exception as e:
-                    print(f"[CACHE] Error updating cache for {api_url}: {e!s}")
+                    _logger.warning("cache update error url=%s error=%s", api_url, e)
                     return cached_data
             else:
                 return cached_data
@@ -2585,7 +2586,7 @@ def _inject_image_context(
     if image_data is None:
         return
 
-    print("Processing image with vision model...")
+    _logger.info("vision model processing image")
 
     user_text = (
         "describí lo que ves en esta imagen en detalle, "
@@ -2606,7 +2607,7 @@ def _inject_image_context(
                     last_message["content"] + f"\n\n{image_context}"
                 )
 
-        print("Image described, continuing with normal AI flow...")
+        _logger.info("vision model described image, continuing ai flow")
     else:
         print("Failed to describe image, continuing without description...")
 
@@ -2647,8 +2648,10 @@ def ask_ai(
         )
         response = str(response or "")
         if response:
-            print(
-                f"ask_ai: response len={len(response)} preview='{response[:160].replace(chr(10), ' ')}'"
+            _logger.info(
+                "ask_ai response len=%d preview='%s'",
+                len(response),
+                response[:160].replace(chr(10), " "),
             )
             return response
 
@@ -2740,10 +2743,7 @@ def complete_with_providers(
     if provider_result.result:
         if response_meta is not None:
             _append_billing_segment(response_meta, provider_result.result)
-        print(
-            f"complete_with_providers: got response from {provider_result.provider_name}"
-            f" fallback={provider_result.fallback_used}"
-        )
+        _logger.info("provider response provider=%s", provider_result.provider_name)
         return provider_result.result.text
     return None
 
@@ -2979,11 +2979,18 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
                 return cached_items[:limit]
 
     try:
-        response = request_with_ssl_fallback(HACKER_NEWS_RSS_URL, timeout=5)
+        response = request_with_ssl_fallback(HACKER_NEWS_RSS_URL, timeout=10)
         response.raise_for_status()
     except RequestException:
-        _logger.exception("Error fetching Hacker News RSS")
-        return (cached_items or [])[:limit]
+        _logger.warning("HN RSS primary failed, trying fallback")
+        try:
+            response = request_with_ssl_fallback(
+                HACKER_NEWS_RSS_FALLBACK_URL, timeout=10
+            )
+            response.raise_for_status()
+        except RequestException:
+            _logger.exception("Error fetching Hacker News RSS (both URLs)")
+            return (cached_items or [])[:limit]
 
     response_text = response.text
 
@@ -4286,17 +4293,17 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
     # Check for sticker in the main message
     elif message.get("sticker"):
         photo_file_id = message["sticker"]["file_id"]
-        print(f"Found sticker: {photo_file_id}")
+        _logger.debug("media detected type=sticker file_id=%s", photo_file_id)
 
     # If no photo/sticker in main message, check in replied message
     elif message.get("reply_to_message"):
         replied_msg = message["reply_to_message"]
         if replied_msg.get("photo"):
             photo_file_id = replied_msg["photo"][-1]["file_id"]
-            print(f"Found photo in quoted message: {photo_file_id}")
+            _logger.debug("media detected type=photo_quoted file_id=%s", photo_file_id)
         elif replied_msg.get("sticker"):
             photo_file_id = replied_msg["sticker"]["file_id"]
-            print(f"Found sticker in quoted message: {photo_file_id}")
+            _logger.debug("media detected type=sticker_quoted file_id=%s", photo_file_id)
 
     # Extract audio/voice/video
     audio_file_id = None
@@ -4306,25 +4313,25 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
         audio_file_id = message["audio"]["file_id"]
     elif message.get("video"):
         audio_file_id = message["video"]["file_id"]
-        print(f"Found video: {audio_file_id}")
+        _logger.debug("media detected type=video file_id=%s", audio_file_id)
     elif message.get("video_note"):
         audio_file_id = message["video_note"]["file_id"]
-        print(f"Found video_note: {audio_file_id}")
+        _logger.debug("media detected type=video_note file_id=%s", audio_file_id)
     # Also check for audio/video in replied message
     elif message.get("reply_to_message"):
         replied_msg = message["reply_to_message"]
         if replied_msg.get("voice"):
             audio_file_id = replied_msg["voice"]["file_id"]
-            print(f"Found voice in quoted message: {audio_file_id}")
+            _logger.debug("media detected type=voice_quoted file_id=%s", audio_file_id)
         elif replied_msg.get("audio"):
             audio_file_id = replied_msg["audio"]["file_id"]
-            print(f"Found audio in quoted message: {audio_file_id}")
+            _logger.debug("media detected type=audio_quoted file_id=%s", audio_file_id)
         elif replied_msg.get("video"):
             audio_file_id = replied_msg["video"]["file_id"]
-            print(f"Found video in quoted message: {audio_file_id}")
+            _logger.debug("media detected type=video_quoted file_id=%s", audio_file_id)
         elif replied_msg.get("video_note"):
             audio_file_id = replied_msg["video_note"]["file_id"]
-            print(f"Found video_note in quoted message: {audio_file_id}")
+            _logger.debug("media detected type=video_note_quoted file_id=%s", audio_file_id)
 
     return text, photo_file_id, audio_file_id
 
@@ -4573,7 +4580,7 @@ def _describe_image_result(
         content = getattr(response.choices[0].message, "content", None)
         if content:
             description = str(content)
-            print(f"Image description successful: {description[:100]}...")
+            _logger.info("image description success preview='%s'", description[:100])
             result = _build_groq_usage_result(
                 kind="vision",
                 text=description,
