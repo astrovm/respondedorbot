@@ -160,7 +160,7 @@ class TaskExecutor:
                     continue
 
                 response = _clean_task_response(response)
-                self._send_msg(chat_id, f"{display}, tarea programada: {response}")
+                self._send_msg(chat_id, f"{display}, tarea «{text}»:\n{response}")
                 logger.info("task %s completed successfully", task_id)
 
                 if is_fallback:
