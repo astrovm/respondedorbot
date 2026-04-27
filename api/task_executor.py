@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
 from api.ai_pipeline import (
     clean_duplicate_response,
     remove_gordo_prefix,
+    strip_markdown_formatting,
 )
 from api.logging_config import get_logger
 
@@ -32,6 +34,7 @@ _TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
 def _clean_task_response(response: str) -> str:
     response = remove_gordo_prefix(response)
     response = clean_duplicate_response(response)
+    response = strip_markdown_formatting(response)
     return response.strip()
 
 
@@ -172,10 +175,21 @@ class TaskExecutor:
                 return should_delete
 
             except Exception as e:
-                logger.error("task %s ask_ai failed: %s", task_id, e, exc_info=True)
-                billing.refund_reserved_ai_credits(charge_meta, reason="task_error")
-                self._admin_report(
-                    f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
+                is_json_error = isinstance(e, json.JSONDecodeError) or (
+                    "JSONDecodeError" in type(e).__name__
+                )
+                if is_json_error:
+                    logger.warning(
+                        "task %s ask_ai JSONDecodeError (upstream transient), skipping",
+                        task_id,
+                    )
+                else:
+                    logger.error("task %s ask_ai failed: %s", task_id, e, exc_info=True)
+                    self._admin_report(
+                        f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
+                    )
+                billing.refund_reserved_ai_credits(
+                    charge_meta, reason="task_json_error" if is_json_error else "task_error"
                 )
                 return should_delete
 

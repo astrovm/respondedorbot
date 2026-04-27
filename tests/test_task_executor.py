@@ -145,3 +145,64 @@ class TestTaskExecutor:
             {"reservation": "ok"}, reason="task_error"
         )
         billing.settle_reserved_ai_credits.assert_not_called()
+
+    def test_does_not_admin_report_on_json_decode_error(self):
+        import json
+
+        ask_ai = MagicMock(side_effect=json.JSONDecodeError("test", "doc", 0))
+        send_msg = MagicMock()
+        admin_report = MagicMock()
+        billing = MagicMock()
+        billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        billing_factory = MagicMock(return_value=billing)
+        estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
+
+        executor = TaskExecutor(
+            ask_ai=ask_ai,
+            send_msg=send_msg,
+            admin_report=admin_report,
+            credits_db_service=MagicMock(),
+            gen_random_fn=MagicMock(),
+            build_insufficient_credits_message_fn=MagicMock(),
+            estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
+            billing_factory=billing_factory,
+        )
+
+        task = {
+            "id": "abc123",
+            "chat_id": "123",
+            "text": "recordame algo",
+            "user_name": "astro",
+            "user_id": 77,
+            "interval_seconds": None,
+            "trigger_config": None,
+        }
+
+        should_delete = executor.execute(task)
+
+        assert should_delete is True
+        admin_report.assert_not_called()
+        send_msg.assert_not_called()
+        billing.refund_reserved_ai_credits.assert_called_once_with(
+            {"reservation": "ok"}, reason="task_json_error"
+        )
+
+    def test_strips_markdown_from_task_response(self):
+        executor, billing, ask_ai, send_msg = _build_executor(
+            ask_ai_return_value="**hola**\n## titulo"
+        )
+
+        task = {
+            "id": "abc123",
+            "chat_id": "123",
+            "text": "recordame algo",
+            "user_name": "astro",
+            "user_id": 77,
+            "interval_seconds": None,
+            "trigger_config": None,
+        }
+
+        should_delete = executor.execute(task)
+
+        assert should_delete is True
+        send_msg.assert_called_once_with("123", "astro, tarea programada: hola\ntitulo")
