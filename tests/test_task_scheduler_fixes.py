@@ -213,7 +213,7 @@ class TestFireTaskStripsMarker:
         _flush_task_pool()
 
         sent_text = mock_send.call_args[0][1]
-        assert "tarea programada:" in sent_text
+        assert "tarea «recordame algo»:" in sent_text
 
 
 # ---------------------------------------------------------------------------
