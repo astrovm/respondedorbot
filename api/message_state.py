@@ -66,6 +66,21 @@ def _compacted_until_key(chat_id: str) -> str:
     return f"chat_compacted_until:{chat_id}"
 
 
+def _sort_by_message_id(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort messages by Telegram message_id (sequential per chat)."""
+
+    def _sort_key(msg: Dict[str, Any]) -> float:
+        raw_id = str(msg.get("id") or msg.get("message_id", ""))
+        if raw_id.startswith("bot_"):
+            return float(raw_id[4:]) + 0.5
+        try:
+            return float(raw_id)
+        except (ValueError, TypeError):
+            return float(msg.get("timestamp", 0))
+
+    return sorted(messages, key=_sort_key)
+
+
 def _decode_redis_text(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -189,7 +204,7 @@ def fetch_chat_messages_for_compaction(
             row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
             row["timestamp"] = int(row.get("timestamp") or 0)
             rows.append(row)
-        return rows
+        return _sort_by_message_id(rows)
     except Exception as error:
         if admin_reporter is not None:
             admin_reporter(
@@ -327,7 +342,7 @@ def get_chat_history(
                     {"chat_id": chat_id, "entry": entry},
                 )
 
-        return sorted(messages, key=lambda m: m.get("timestamp", 0))
+        return _sort_by_message_id(messages)
     except Exception as error:
         admin_reporter(
             f"Error retrieving chat history: {error}",
