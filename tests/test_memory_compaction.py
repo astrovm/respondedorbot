@@ -155,6 +155,29 @@ def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     assert "*" not in query
 
 
+def test_fetch_chat_messages_for_compaction_fetches_newest_window_then_sorts():
+    from api.message_state import fetch_chat_messages_for_compaction
+
+    redis_client = MagicMock()
+    redis_client.execute_command.return_value = [
+        3,
+        "chatmsg:123:103",
+        ["message_id", "103", "id", "103", "text", "newest", "timestamp", "3"],
+        "chatmsg:123:102",
+        ["message_id", "102", "id", "102", "text", "middle", "timestamp", "2"],
+        "chatmsg:123:101",
+        ["message_id", "101", "id", "101", "text", "oldest", "timestamp", "1"],
+    ]
+
+    rows = fetch_chat_messages_for_compaction(redis_client, "123", limit=3)
+
+    command_args = redis_client.execute_command.call_args.args
+    sortby_idx = command_args.index("SORTBY")
+    assert command_args[sortby_idx : sortby_idx + 3] == ("SORTBY", "timestamp", "DESC")
+    assert [row["message_id"] for row in rows] == ["101", "102", "103"]
+    assert [row["id"] for row in rows] == ["101", "102", "103"]
+
+
 def test_build_incremental_summary_source_with_text_field():
     from api.index import _build_incremental_summary_source
 

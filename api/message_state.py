@@ -192,7 +192,7 @@ def fetch_chat_messages_for_compaction(
             "2",
             "SORTBY",
             "timestamp",
-            "ASC",
+            "DESC",
             "LIMIT",
             "0",
             str(limit),
@@ -202,6 +202,7 @@ def fetch_chat_messages_for_compaction(
         rows: List[Dict[str, Any]] = []
         for idx in range(1, len(raw), 2):
             row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
+            row["id"] = str(row.get("id") or row.get("message_id") or "")
             row["timestamp"] = int(row.get("timestamp") or 0)
             rows.append(row)
         return _sort_by_message_id(rows)
