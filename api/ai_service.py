@@ -168,10 +168,7 @@ class AIService:
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
         if summary_cost > 0:
             billing_segments.insert(0, _make_summary_billing_segment(summary_cost))
-        if (
-            response_msg == "me quedé reculando y no te pude responder, probá de nuevo"
-            or bool(ai_response_meta.get("ai_fallback"))
-        ):
+        if bool(ai_response_meta.get("ai_fallback")):
             if media_charge_meta:
                 request.billing_helper.refund_reserved_ai_credits(
                     media_charge_meta, reason="ai_response_fallback"

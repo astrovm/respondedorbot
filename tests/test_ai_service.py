@@ -196,4 +196,50 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
     assert any(segment.get("kind") == "summary" for segment in billing_segments)
 
 
+def test_run_conversation_uses_fallback_metadata_not_response_text():
+    from api.ai_service import AIConversationRequest, build_ai_service
+    from api.message_handler import PreparedMessage
+
+    fallback_text = "me quedé reculando y no te pude responder, probá de nuevo"
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(return_value="no"),
+        handle_ai_response=MagicMock(return_value=fallback_text),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+
+    billing_helper = MagicMock()
+    billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
+
+    response_msg, handled = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="561",
+            message={"chat": {"id": 561, "type": "private"}},
+            user_id=None,
+            prepared_message=PreparedMessage(
+                message_text="hola",
+                photo_file_id=None,
+                audio_file_id=None,
+                resized_image_data=None,
+            ),
+            billing_helper=billing_helper,
+            prompt_text="hola",
+            reply_context_text=None,
+            user_identity="105",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert handled is True
+    assert response_msg == fallback_text
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once()
+
 

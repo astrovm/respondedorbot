@@ -254,6 +254,8 @@ def handle_ai_response(
 
     if not cleaned_response.strip():
         was_fallback = bool(response_meta.get("ai_fallback")) if response_meta else False
+        if response_meta is not None:
+            response_meta["ai_fallback"] = True
         _logger.warning(
             "cleaned response empty handler=%s ai_fallback=%s raw_len=%d",
             handler_name or "<unknown>",
