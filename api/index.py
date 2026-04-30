@@ -188,6 +188,7 @@ from api.message_state import (
     get_chat_compacted_until as _state_get_chat_compacted_until,
     get_chat_history as _state_get_chat_history,
     get_chat_summary as _state_get_chat_summary,
+    get_user_chat_compacted_until as _state_get_user_chat_compacted_until,
     get_user_chat_summary as _state_get_user_chat_summary,
     save_chat_compacted_until as _state_save_chat_compacted_until,
     save_chat_summary as _state_save_chat_summary,
@@ -3504,7 +3505,7 @@ def stream_summary_command(
     prompt_text: str,
 ) -> Tuple[Iterator[Tuple[str, str]], Optional[str]]:
     existing_summary = _state_get_user_chat_summary(redis_client, chat_id)
-    compacted_until = _state_get_chat_compacted_until(redis_client, chat_id)
+    compacted_until = _state_get_user_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 
     if not history:
@@ -3658,7 +3659,7 @@ def prepare_chat_memory(
     base_history = searchable_history if len(searchable_history) > len(chat_history) else chat_history
     compacted_until = (
         _state_get_chat_compacted_until(redis_client, chat_id)
-        if redis_client is not None and chat_id
+        if redis_client is not None and chat_id and summary_text
         else None
     )
     summary_text, visible_history, _, summary_cost = compact_chat_memory(
