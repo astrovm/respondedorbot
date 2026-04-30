@@ -64,28 +64,30 @@ def test_get_chat_history():
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
 
-        # Test with valid history
+        # Test with valid history - timestamps determine chronological order
+        user_ts = int(datetime.now(timezone.utc).timestamp())
+        bot_ts = user_ts + 1
         mock_instance.lrange.return_value = [
             json.dumps(
                 {
                     "id": "123",
                     "text": "test message",
-                    "timestamp": int(datetime.now(timezone.utc).timestamp()),
+                    "timestamp": user_ts,
                 }
             ),
             json.dumps(
                 {
                     "id": "bot_124",
                     "text": "bot response",
-                    "timestamp": int(datetime.now(timezone.utc).timestamp()),
+                    "timestamp": bot_ts,
                 }
             ),
         ]
 
         history = list(get_chat_history("123", mock_instance, 2))
         assert len(history) == 2
-        assert history[0]["role"] == "assistant"
-        assert history[1]["role"] == "user"
+        assert history[0]["role"] == "user"
+        assert history[1]["role"] == "assistant"
 
 
 def test_build_reply_context_text():

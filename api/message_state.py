@@ -327,7 +327,7 @@ def get_chat_history(
                     {"chat_id": chat_id, "entry": entry},
                 )
 
-        return list(reversed(messages))
+        return sorted(messages, key=lambda m: m.get("timestamp", 0))
     except Exception as error:
         admin_reporter(
             f"Error retrieving chat history: {error}",
