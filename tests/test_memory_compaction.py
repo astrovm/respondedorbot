@@ -142,6 +142,65 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     assert summary_cost == 1
 
 
+def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch):
+    from api.index import prepare_chat_memory
+
+    chat_history = [
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
+        for i in range(1, 101)
+    ]
+    captured = {}
+
+    def fake_compact_chat_memory(
+        _redis_client,
+        _chat_id,
+        messages,
+        existing_summary,
+        compacted_until,
+        **_kwargs,
+    ):
+        captured["existing_summary"] = existing_summary
+        captured["compacted_until"] = compacted_until
+        return existing_summary, messages, compacted_until, 0
+
+    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: None)
+    monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m80")
+    monkeypatch.setattr(
+        "api.index._state_fetch_chat_messages_for_compaction",
+        lambda *_args, **_kwargs: chat_history,
+    )
+    monkeypatch.setattr("api.index._state_search_chat_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("api.index.compact_chat_memory", fake_compact_chat_memory)
+
+    prepare_chat_memory(MagicMock(), "123", chat_history, "que paso")
+
+    assert captured["existing_summary"] is None
+    assert captured["compacted_until"] is None
+
+
+def test_stream_summary_command_uses_user_compaction_marker(monkeypatch):
+    from api.index import stream_summary_command
+
+    redis_client = MagicMock()
+    history = [
+        {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1},
+        {"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2},
+    ]
+
+    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: "cached summary")
+    monkeypatch.setattr("api.index._state_get_user_chat_compacted_until", lambda *_: "m2")
+    monkeypatch.setattr(
+        "api.index._state_get_chat_compacted_until",
+        lambda *_: (_ for _ in ()).throw(AssertionError("used internal compaction marker")),
+    )
+    monkeypatch.setattr("api.index.get_chat_history", lambda *_: history)
+
+    iterator, pending_marker = stream_summary_command("123", redis_client, "resumen")
+
+    assert list(iterator) == [("cache", "cached summary")]
+    assert pending_marker is None
+
+
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     from api.message_state import fetch_chat_messages_for_compaction
 
