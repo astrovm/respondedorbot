@@ -1032,10 +1032,13 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch, caplog):
     def fake_handler(_messages):
         return ""
 
+    response_meta = {}
+
     with caplog.at_level(logging.WARNING, logger="api.ai_pipeline"):
-        result = handle_ai_response("123", fake_handler, [])
+        result = handle_ai_response("123", fake_handler, [], response_meta=response_meta)
 
     assert result == "me quedé reculando y no te pude responder, probá de nuevo"
+    assert response_meta["ai_fallback"] is True
     assert any("cleaned response empty" in r.message for r in caplog.records)
 
 
