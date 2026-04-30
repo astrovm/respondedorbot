@@ -17,7 +17,7 @@ from .billing_commands import (
     handle_balance_command,
     handle_transfer_command,
 )
-from api.message_state import save_chat_compacted_until, save_user_chat_summary
+from api.message_state import save_user_chat_compacted_until, save_user_chat_summary
 from .message_links import handle_link_replacement
 from api.utils.text import sanitize_summary_text
 from api.streaming import (
@@ -1169,7 +1169,7 @@ def _handle_non_ai_command(
 
         if not is_fallback and pending_marker is not None:
             save_user_chat_summary(redis_client, chat_id, final_text)
-            save_chat_compacted_until(redis_client, chat_id, pending_marker)
+            save_user_chat_compacted_until(redis_client, chat_id, pending_marker)
 
         if is_fallback:
             return final_text, None, False, command
