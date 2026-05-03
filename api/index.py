@@ -280,12 +280,7 @@ OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 
 # Polymarket constants
 POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-POLYMARKET_ARGENTINA_ELECTION_SLUG = (
-    "which-party-wins-most-seats-in-argentina-deputies-election"
-)
-POLYMARKET_ARGENTINA_SEATS_AFTER_SLUG = (
-    "which-party-holds-the-most-seats-after-argentina-deputies-election"
-)
+POLYMARKET_ARGENTINA_ELECTION_SLUG = "argentina-presidential-election-winner"
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
@@ -1166,51 +1161,37 @@ def _format_polymarket_event_section(
 
 
 def get_polymarket_argentina_election() -> str:
-    """Return Polymarket probabilities for Argentina's 2025 deputies election."""
+    """Return Polymarket probabilities for Argentina's presidential election."""
 
-    sections: List[str] = []
+    slug = POLYMARKET_ARGENTINA_ELECTION_SLUG
+    header = "Polymarket - ¿Quién gana las elecciones presidenciales 2027 en Argentina?"
+    url = "https://polymarket.com/event/argentina-presidential-election-winner"
 
-    for slug, header, url in [
-        (
-            POLYMARKET_ARGENTINA_ELECTION_SLUG,
-            "Polymarket - ¿Quién gana más bancas en Diputados 2025?",
-            "https://polymarket.com/event/which-party-wins-most-seats-in-argentina-deputies-election",
-        ),
-        (
-            POLYMARKET_ARGENTINA_SEATS_AFTER_SLUG,
-            "Polymarket - ¿Quién queda con más bancas después de Diputados 2025?",
-            "https://polymarket.com/event/which-party-holds-the-most-seats-after-argentina-deputies-election",
-        ),
-    ]:
-        fetched_event = _fetch_polymarket_event(slug)
-        if not fetched_event:
-            continue
+    fetched_event = _fetch_polymarket_event(slug)
+    if not fetched_event:
+        return "No pude traer las probabilidades desde Polymarket"
 
-        event, response_timestamp = fetched_event
-        formatted = _format_polymarket_event_section(event, header, ("LLA", "UP"))
-        if not formatted:
-            continue
+    event, response_timestamp = fetched_event
+    formatted = _format_polymarket_event_section(event, header, ())
+    if not formatted:
+        return "No pude traer las probabilidades desde Polymarket"
 
-        lines, latest_stream_timestamp = formatted
+    lines, latest_stream_timestamp = formatted
 
-        timestamp = latest_stream_timestamp or response_timestamp
-        if isinstance(timestamp, int):
-            updated_at_utc = datetime.fromtimestamp(timestamp, UTC)
-            updated_at_ba = updated_at_utc.astimezone(BA_TZ)
-            lines.extend(
-                [
-                    "",
-                    f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
-                ]
-            )
+    timestamp = latest_stream_timestamp or response_timestamp
+    if isinstance(timestamp, int):
+        updated_at_utc = datetime.fromtimestamp(timestamp, UTC)
+        updated_at_ba = updated_at_utc.astimezone(BA_TZ)
+        lines.extend(
+            [
+                "",
+                f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
+            ]
+        )
 
-        lines.append(url)
-        sections.append("\n".join(lines))
+    lines.append(url)
 
-    if sections:
-        return "\n\n".join(sections)
-
-    return "No pude traer las probabilidades desde Polymarket"
+    return "\n".join(lines)
 
 
 def get_btc_price(convert_to: str = "USD") -> Optional[float]:
@@ -2005,7 +1986,7 @@ esto es lo que sé hacer, boludo:
 
 - /bcra, /variables: te tiro las variables económicas del bcra
 
-- /eleccion: odds actuales de Polymarket para Diputados 2025
+- /eleccion: odds actuales de Polymarket para las elecciones presidenciales 2027
 
 - /devo 0.5, 100: te calculo el arbitraje entre tarjeta y crypto
 

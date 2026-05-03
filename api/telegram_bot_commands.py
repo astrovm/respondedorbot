@@ -32,7 +32,7 @@ COMMAND_DESCRIPTIONS: Dict[str, str] = {
     "oil": "te paso el precio del Brent y del WTI",
     "acciones": "precios de acciones [aapl tsla googl]",
     "stocks": "precios de acciones [aapl tsla googl]",
-    "eleccion": "odds actuales de Polymarket para Diputados 2025",
+    "eleccion": "odds actuales de Polymarket para las elecciones presidenciales 2027",
     "rulo": "te armo los rulos desde el oficial",
     "devo": "te calculo el arbitraje entre tarjeta y crypto",
     "powerlaw": "te tiro el precio justo de btc según power law",
