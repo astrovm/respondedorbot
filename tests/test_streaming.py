@@ -78,7 +78,7 @@ def test_openrouter_stream_uses_complete_path_when_tools_present():
         )
     )
 
-    assert chunks == ["hola final"]
+    assert chunks == ["hola", " fin", "al"]
     provider._runtime.complete.assert_called_once()
     client.chat.completions.create.assert_not_called()
 
@@ -93,14 +93,10 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
 
     def create(**kwargs):
         create_calls.append(kwargs)
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    finish_reason="stop",
-                    message=SimpleNamespace(content="web answer", annotations=[]),
-                )
-            ]
-        )
+        return iter([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="web"))]),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=" answer"))]),
+        ])
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     provider = OpenRouterProvider(
@@ -127,7 +123,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
         )
     )
 
-    assert chunks == ["web answer"]
+    assert chunks == ["web", " answer"]
     assert_no_raw_tool_syntax("".join(chunks))
     assert create_calls[0]["tools"] == [{"type": "web_search"}]
 
