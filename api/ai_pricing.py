@@ -152,7 +152,7 @@ def estimate_vision_reserve_credits(
     image_url = ""
     if image_data:
         image_base64 = base64.b64encode(image_data).decode("utf-8")
-        image_url = f"data:image/jpeg;base64,{image_base64}"
+        image_url = f"data:image/webp;base64,{image_base64}"
     input_payload = [
         {
             "role": "user",
