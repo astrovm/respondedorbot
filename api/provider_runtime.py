@@ -5,12 +5,44 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
 from api.ai_pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT, ensure_mapping
 from api.logging_config import format_log_context, get_logger
 from api.tool_runtime import ToolRuntime
 
 
 logger = get_logger(__name__)
+
+
+def _is_retryable_provider_error(error: Exception) -> bool:
+    if isinstance(error, json.JSONDecodeError):
+        return True
+    if "JSONDecodeError" in type(error).__name__:
+        return True
+    if isinstance(error, (APIConnectionError, APITimeoutError, RateLimitError)):
+        return True
+    if isinstance(error, APIStatusError):
+        return error.status_code == 429 or error.status_code >= 500
+    return False
+
+
+def _format_provider_error_body(error: Exception) -> str:
+    if isinstance(error, json.JSONDecodeError) and error.doc:
+        doc = str(error.doc)
+        return _format_body_preview(doc)
+    response = getattr(error, "response", None)
+    text = getattr(response, "text", "")
+    if text:
+        return _format_body_preview(str(text))
+    return ""
+
+
+def _format_body_preview(body: str) -> str:
+    result = f" body_len={len(body)}"
+    if len(body) > 200:
+        return f"{result} body_preview={body[:100]!r}...{body[-100:]!r}"
+    return f"{result} body={body!r}"
 
 
 @dataclass(frozen=True)
@@ -91,21 +123,9 @@ class ProviderRuntime:
                         response = client.chat.completions.create(**request_kwargs)
                         break
                     except Exception as error:
-                        is_json_error = isinstance(error, json.JSONDecodeError) or (
-                            "JSONDecodeError" in type(error).__name__
-                        )
-                        if is_json_error and attempt < 4:
+                        if _is_retryable_provider_error(error) and attempt < 4:
                             wait = 2**attempt
-                            raw_body = ""
-                            if isinstance(error, json.JSONDecodeError) and error.doc:
-                                doc = str(error.doc)
-                                raw_body = f" body_len={len(doc)}"
-                                if len(doc) > 200:
-                                    raw_body += (
-                                        f" body_preview={doc[:100]!r}...{doc[-100:]!r}"
-                                    )
-                                else:
-                                    raw_body += f" body={doc!r}"
+                            raw_body = _format_provider_error_body(error)
                             retry_context = dict(tool_context or {})
                             retry_context.update(
                                 {
@@ -114,9 +134,10 @@ class ProviderRuntime:
                                 }
                             )
                             logger.warning(
-                                "openrouter: JSONDecodeError retrying in %ss attempt=%d/5%s%s",
+                                "openrouter: transient chat error retrying in %ss attempt=%d/5 error_type=%s%s%s",
                                 wait,
                                 attempt + 1,
+                                type(error).__name__,
                                 format_log_context(retry_context),
                                 raw_body,
                             )
@@ -139,7 +160,7 @@ class ProviderRuntime:
                     {
                         "finish_reason": "error",
                         "enable_web_search": enable_web_search,
-                        "tool_round": round_idx,
+                        "tool_round": round_idx + 1,
                     },
                 )
                 return None
