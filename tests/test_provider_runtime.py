@@ -1,4 +1,8 @@
 from types import SimpleNamespace
+import json
+
+import httpx
+from openai import APIStatusError
 
 from tests.support import *
 from tests.support import assert_no_raw_tool_syntax
@@ -335,3 +339,183 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     assert complete_result.metadata == helper_result.metadata
     assert complete_execute_tool_fn.call_count == 2
     assert helper_execute_tool_fn.call_count == 2
+
+
+def test_provider_runtime_retries_json_decode_errors_then_returns_result():
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="done", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    decode_error = json.JSONDecodeError("Expecting value", "<html>bad gateway</html>", 0)
+    client = _FakeClient([decode_error, response])
+    admin_report = MagicMock()
+
+    def _create(**kwargs):
+        client.calls.append(kwargs)
+        next_response = client._responses.pop(0)
+        if isinstance(next_response, Exception):
+            raise next_response
+        return next_response
+
+    client.chat.completions.create = _create
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=admin_report,
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
+    )
+
+    with patch("api.provider_runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is not None
+    assert result.text == "done"
+    assert len(client.calls) == 2
+    sleep.assert_called_once_with(1)
+    admin_report.assert_not_called()
+
+
+def test_provider_runtime_retries_server_status_errors_then_returns_result():
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="done", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    http_response = httpx.Response(
+        503,
+        text="upstream unavailable",
+        request=httpx.Request("POST", "https://example.test/chat/completions"),
+    )
+    status_error = APIStatusError("service unavailable", response=http_response, body=None)
+    client = _FakeClient([status_error, response])
+
+    def _create(**kwargs):
+        client.calls.append(kwargs)
+        next_response = client._responses.pop(0)
+        if isinstance(next_response, Exception):
+            raise next_response
+        return next_response
+
+    client.chat.completions.create = _create
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
+    )
+
+    with patch("api.provider_runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is not None
+    assert result.text == "done"
+    assert len(client.calls) == 2
+    sleep.assert_called_once_with(1)
+
+
+def test_provider_runtime_does_not_retry_bad_request_and_reports_one_based_round():
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    http_response = httpx.Response(
+        400,
+        text="bad request",
+        request=httpx.Request("POST", "https://example.test/chat/completions"),
+    )
+    status_error = APIStatusError("bad request", response=http_response, body=None)
+    client = _FakeClient([status_error])
+    admin_report = MagicMock()
+
+    def _create(**kwargs):
+        client.calls.append(kwargs)
+        next_response = client._responses.pop(0)
+        if isinstance(next_response, Exception):
+            raise next_response
+        return next_response
+
+    client.chat.completions.create = _create
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=admin_report,
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
+    )
+
+    with patch("api.provider_runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "hola"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is None
+    assert len(client.calls) == 1
+    sleep.assert_not_called()
+    admin_report.assert_called_once()
+    assert admin_report.call_args.args[2]["tool_round"] == 1
