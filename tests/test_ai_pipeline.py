@@ -55,6 +55,25 @@ def _build_chat_response(*, text, finish_reason="stop", annotations=None, usage=
     )
 
 
+def test_openrouter_client_uses_explicit_timeout(monkeypatch):
+    from api import index
+
+    captured_kwargs = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(index, "OpenAI", FakeOpenAI)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
+
+    client = index._get_openrouter_client()
+
+    assert client is not None
+    assert captured_kwargs["timeout"] == 60.0
+
+
 def test_strip_markdown_formatting_removes_bold_markers():
     assert strip_markdown_formatting("**hello**") == "hello"
     assert strip_markdown_formatting("__hello__") == "hello"
