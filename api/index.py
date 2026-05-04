@@ -634,6 +634,7 @@ def _get_openrouter_client(
     client_kwargs: Dict[str, Any] = {
         "api_key": openrouter_api_key,
         "base_url": openrouter_base_url,
+        "timeout": 60.0,
     }
     if headers:
         client_kwargs["default_headers"] = headers
