@@ -108,6 +108,24 @@ class OpenRouterProvider(StreamingAIProvider):
                         yield delta.content
                 return
 
+            if enable_web_search and not extra_tools:
+                self._increment_request_count()
+                request_kwargs = {
+                    "model": self._primary_model,
+                    "messages": [system_message] + list(messages),
+                    "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
+                    "stream": True,
+                    "tools": [self._build_web_search_tool()],
+                }
+
+                for chunk in client.chat.completions.create(**request_kwargs):
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        yield delta.content
+                return
+
             result = self._runtime.complete(
                 system_message,
                 messages,
@@ -116,7 +134,8 @@ class OpenRouterProvider(StreamingAIProvider):
                 tool_context=tool_context,
             )
             if result and result.text:
-                yield result.text
+                for i in range(0, len(result.text), 4):
+                    yield result.text[i : i + 4]
         except Exception as error:
             self._admin_report(
                 f"OpenRouter stream error model={self._primary_model}",
