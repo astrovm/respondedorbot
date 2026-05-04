@@ -207,8 +207,8 @@ def test_provider_chain_stream_forwards_extra_tools_and_tool_context():
         )
     )
 
-    assert result == [("streamer", ""), ("streamer", "done")]
-    assert provider.last_complete_kwargs == {
+    assert result == [("streamer", ""), ("streamer", "ok")]
+    assert provider.last_stream_kwargs == {
         "enable_web_search": False,
         "extra_tools": extra_tools,
         "tool_context": tool_context,
@@ -216,12 +216,11 @@ def test_provider_chain_stream_forwards_extra_tools_and_tool_context():
 
 
 def test_provider_chain_stream_falls_back_with_tool_kwargs_preserved():
-    from api.ai_pricing import AIUsageResult
 
     class FailingProvider:
         def __init__(self, name: str) -> None:
             self._name = name
-            self.complete_calls: list[dict[str, Any]] = []
+            self.stream_calls: list[dict[str, Any]] = []
 
         @property
         def name(self) -> str:
@@ -230,20 +229,21 @@ def test_provider_chain_stream_falls_back_with_tool_kwargs_preserved():
         def is_available(self) -> bool:
             return True
 
-        def complete(self, system_message, messages, **kwargs) -> Optional[AIUsageResult]:
-            self.complete_calls.append(kwargs)
+        def complete(self, system_message, messages, **kwargs):
+            return None
+
+        def stream(self, system_message, messages, **kwargs):
+            self.stream_calls.append(kwargs)
             raise RuntimeError("boom")
 
     class FallbackProvider(FailingProvider):
-        def complete(self, system_message, messages, **kwargs) -> Optional[AIUsageResult]:
-            self.complete_calls.append(kwargs)
-            return AIUsageResult(
-                kind="chat",
-                text="fallback answer",
-                model="test",
-                usage={},
-                metadata={},
-            )
+        def complete(self, system_message, messages, **kwargs):
+            return None
+
+        def stream(self, system_message, messages, **kwargs):
+            self.stream_calls.append(kwargs)
+            yield "fallback"
+            yield " answer"
 
     extra_tools = [{"type": "function", "function": {"name": "web_fetch"}}]
     tool_context = {"chat_id": "123"}
@@ -261,16 +261,16 @@ def test_provider_chain_stream_falls_back_with_tool_kwargs_preserved():
         )
     )
 
-    assert tokens == [("second", ""), ("second", "fallback answer")]
+    assert tokens == [("second", ""), ("second", "fallback"), ("second", " answer")]
     assert_no_raw_tool_syntax("".join(token for _, token in tokens))
-    assert first.complete_calls == [
+    assert first.stream_calls == [
         {
             "enable_web_search": True,
             "extra_tools": extra_tools,
             "tool_context": tool_context,
         }
     ]
-    assert second.complete_calls == [
+    assert second.stream_calls == [
         {
             "enable_web_search": True,
             "extra_tools": extra_tools,

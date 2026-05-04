@@ -120,42 +120,30 @@ class ProviderChain:
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Tuple[str, str]]:
-        """Stream from the first available provider using hybrid behavior.
+        """Stream from the first available provider.
 
-        For requests without tools, stream tokens directly from the first available
-        StreamingAIProvider.
-        For tool-capable requests, call provider.complete() so the provider can run
-        any tool rounds, then yield the final assistant text.
+        All responses are streamed token-by-token. Tool rounds are handled
+        internally; only the final assistant text is yielded.
         """
-        has_tools = bool(extra_tools) or enable_web_search
-
         for provider in self.available_providers:
             try:
-                if not has_tools:
-                    if not isinstance(provider, StreamingAIProvider):
-                        continue
-                    yield provider.name, ""
-                    for token in provider.stream(
-                        system_message,
-                        messages,
-                        enable_web_search=enable_web_search,
-                        extra_tools=extra_tools,
-                        tool_context=tool_context,
-                    ):
-                        yield provider.name, token
-                    return
-
-                result = provider.complete(
+                if not isinstance(provider, StreamingAIProvider):
+                    continue
+                token_iterator = provider.stream(
                     system_message,
                     messages,
                     enable_web_search=enable_web_search,
                     extra_tools=extra_tools,
                     tool_context=tool_context,
                 )
-                if result is None:
+                try:
+                    first_token = next(token_iterator)
+                except StopIteration:
                     continue
                 yield provider.name, ""
-                yield provider.name, result.text
+                yield provider.name, first_token
+                for token in token_iterator:
+                    yield provider.name, token
                 return
             except Exception as e:
                 print(f"Streaming provider {provider.name} failed: {e}")

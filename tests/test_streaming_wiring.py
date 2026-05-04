@@ -244,6 +244,12 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
                 metadata={},
             )
 
+        def stream(self, system_message, messages, **kwargs):
+            result = self.complete(system_message, messages, **kwargs)
+            if result and result.text:
+                for i in range(0, len(result.text), 4):
+                    yield result.text[i : i + 4]
+
     messages = [{"role": "user", "content": "hola"}]
     chain = ProviderChain([FakeToolProvider()])
 
@@ -295,6 +301,12 @@ def test_ask_ai_stream_end_to_end_with_web_search():
                     metadata={},
                 )
             return None
+
+        def stream(self, system_message, messages, **kwargs):
+            result = self.complete(system_message, messages, **kwargs)
+            if result and result.text:
+                for i in range(0, len(result.text), 4):
+                    yield result.text[i : i + 4]
 
     messages = [{"role": "user", "content": "hola"}]
     chain = ProviderChain([FakeToolProvider()])
@@ -407,6 +419,12 @@ def test_provider_chain_stream_uses_complete_fallback_for_tool_requests():
                 usage={},
             )
 
+        def stream(self, system_message, messages, **kwargs):
+            result = self.complete(system_message, messages, **kwargs)
+            if result and result.text:
+                for i in range(0, len(result.text), 4):
+                    yield result.text[i : i + 4]
+
     extra_tools = [{"type": "function", "function": {"name": "echo"}}]
     tool_context = {"chat_id": "123"}
     first = CompleteOnlyProvider("first", None)
@@ -423,7 +441,7 @@ def test_provider_chain_stream_uses_complete_fallback_for_tool_requests():
         )
     )
 
-    assert tokens == [("second", ""), ("second", "hola final")]
+    assert tokens == [("second", ""), ("second", "hola"), ("second", " fin"), ("second", "al")]
     assert first.complete_calls == [
         {
             "enable_web_search": False,
