@@ -3291,7 +3291,7 @@ def estimate_image_context_rate_limit_tokens(
     image_data: bytes, prompt_text: str
 ) -> int:
     image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/jpeg;base64,{image_base64}"
+    image_url = f"data:image/webp;base64,{image_base64}"
     input_payload = [
         {
             "role": "user",
@@ -4524,7 +4524,7 @@ def _describe_image_result(
     print(f"Describing image with {VISION_MODEL}...")
     _increment_ai_provider_request_count()
     image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/jpeg;base64,{image_base64}"
+    image_url = f"data:image/webp;base64,{image_base64}"
     try:
         response = client.chat.completions.create(
             model=VISION_MODEL,
@@ -4860,27 +4860,16 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
         image = Image.open(io.BytesIO(image_data))
         original_size = image.size
 
-        # Check if resize is needed
         if max(original_size) > max_size:
-            # Calculate new size maintaining aspect ratio
             ratio = min(max_size / original_size[0], max_size / original_size[1])
             new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-            # Resize image
-            resized_image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-            # Convert back to bytes
-            output_buffer = io.BytesIO()
-            # Save as JPEG to ensure compatibility and smaller size
-            if resized_image.mode in ("RGBA", "LA", "P"):
-                # Convert to RGB for JPEG
-                resized_image = resized_image.convert("RGB")
-            resized_image.save(output_buffer, format="JPEG", quality=85, optimize=True)
-
-            resized_data = output_buffer.getvalue()
-            return resized_data
-        else:
-            return image_data
+        output_buffer = io.BytesIO()
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGB")
+        image.save(output_buffer, format="WEBP", quality=85, optimize=True)
+        return output_buffer.getvalue()
 
     except ImportError:
         print("WARNING: PIL not available, cannot resize image")

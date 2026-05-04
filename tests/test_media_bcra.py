@@ -1247,19 +1247,27 @@ def test_encode_image_to_base64_empty():
 
 
 def test_resize_image_if_needed_no_resize():
-    """Test resize_image_if_needed when image is already small enough"""
+    """Test resize_image_if_needed always returns WEBP even when no resize needed"""
     from api.index import resize_image_if_needed
 
-    with patch("api.index.Image") as mock_image_module:
-        # Mock small image
+    with (
+        patch("api.index.Image") as mock_image_module,
+        patch("api.index.io.BytesIO") as mock_bytesio,
+    ):
         mock_image = MagicMock()
-        mock_image.size = (200, 150)  # Smaller than max_size of 512
+        mock_image.size = (200, 150)
+        mock_image.mode = "RGB"
         mock_image_module.open.return_value = mock_image
+
+        mock_output_buffer = MagicMock()
+        mock_output_buffer.getvalue.return_value = b"webp bytes"
+        mock_bytesio.return_value = mock_output_buffer
 
         test_data = b"small image data"
         result = resize_image_if_needed(test_data, max_size=512)
 
-        assert result == test_data  # Should return original data unchanged
+        assert result == b"webp bytes"
+        mock_image.save.assert_called_once()
 
 
 def test_resize_image_if_needed_with_resize():
