@@ -936,7 +936,7 @@ def test_cached_requests_basic():
     from api.index import cached_requests
 
     with (
-        patch("requests.get") as mock_get,
+        patch("api.index.http_client.get") as mock_get,
         patch("redis.Redis") as mock_redis,
         patch("time.time") as mock_time,
     ):
@@ -990,7 +990,7 @@ def test_cached_requests_sets_ttl_and_namespaced_keys(monkeypatch):
     monkeypatch.setattr("api.index.config_redis", lambda: FakeRedis())
     monkeypatch.setattr("api.index.redis_get_json", lambda client, key: None)
     monkeypatch.setattr("api.index.redis_set_json", fake_set_json)
-    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.index.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
 
@@ -1092,7 +1092,7 @@ def test_cached_requests_retries_on_failure(monkeypatch):
             raise requests.RequestException("boom")
         return FakeResp(text=json.dumps({"ok": True}))
 
-    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("api.index.http_client.get", fake_get)
 
     with patch("api.index.config_redis") as mock_redis:
         # Fake Redis client that stores in dict
@@ -1161,7 +1161,7 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
     monkeypatch.setattr("api.index.config_redis", fake_config_redis)
     monkeypatch.setattr("api.index.redis_get_json", fake_redis_get_json)
     monkeypatch.setattr("api.index.redis_set_json", fake_redis_set_json)
-    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.index.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
     first_count = len(

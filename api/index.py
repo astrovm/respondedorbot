@@ -69,6 +69,7 @@ from api.services.redis_helpers import (
     redis_set_json,
     redis_setex_json,
 )
+from api.services import http_client
 from api.services.stale_cache import StaleCache, StaleCacheResult
 from api.services.maintenance import (
     GIPHY_STALE_TTL,
@@ -890,7 +891,7 @@ def cached_requests(
             last_err: Optional[Exception] = None
             for attempt in range(2):  # try once, then one retry
                 try:
-                    response = requests.get(
+                    response = http_client.get(
                         api_url,
                         params=parameters,
                         headers=headers,
@@ -1034,13 +1035,18 @@ def _fetch_cmc_quotes(
 
 def refresh_price_caches() -> None:
     """Refresh all price caches and store hourly snapshots for change calculations."""
-    _fetch_criptoya_dollar_data(hourly_cache=True)
-    get_api_or_cache_prices("ARS", hourly_cache=True)
-    get_api_or_cache_prices("USD", hourly_cache=True)
-    try:
-        get_oil_price()
-    except Exception as error:
-        _logger.warning("refresh_price_caches: oil cache refresh failed: %s", error)
+    jobs = [
+        lambda: _fetch_criptoya_dollar_data(hourly_cache=True),
+        lambda: get_api_or_cache_prices("ARS", hourly_cache=True),
+        lambda: get_api_or_cache_prices("USD", hourly_cache=True),
+        get_oil_price,
+    ]
+    futures = [_BACKGROUND_REFRESH_EXECUTOR.submit(job) for job in jobs]
+    for future in futures:
+        try:
+            future.result()
+        except Exception as error:
+            _logger.warning("refresh_price_caches: cache refresh failed: %s", error)
 
 
 def _fetch_polymarket_event(
@@ -2126,7 +2132,7 @@ _FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
 
 def _fetch_top_stocks_by_market_cap() -> List[str]:
     try:
-        resp = requests.get(
+        resp = http_client.get(
             _FINVIZ_SCREENER_URL,
             params={"v": "152", "f": "cap_mega", "o": "-marketcap"},
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
@@ -2194,11 +2200,11 @@ def _telegram_request(
     method_upper = method.upper()
     try:
         if method_upper == "GET" and json_payload is None:
-            response = requests.get(url, params=params, timeout=timeout)
+            response = http_client.get(url, params=params, timeout=timeout)
         elif method_upper == "POST" and params is None:
-            response = requests.post(url, json=json_payload, timeout=timeout)
+            response = http_client.post(url, json=json_payload, timeout=timeout)
         else:
-            response = requests.request(
+            response = http_client.request(
                 method_upper,
                 url,
                 params=params,
@@ -2315,7 +2321,7 @@ def _fetch_giphy_pool(category: str) -> List[str]:
                 "offset": random.randint(0, 100),
                 "rating": "g",
             }
-            response = requests.get(f"{GIPHY_API_URL}/search", params=params, timeout=5)
+            response = http_client.get(f"{GIPHY_API_URL}/search", params=params, timeout=5)
             response.raise_for_status()
             data = response.json()
             for gif in data.get("data", []):

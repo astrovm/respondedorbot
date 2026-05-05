@@ -865,7 +865,7 @@ def test_get_hacker_news_context_uses_cache():
     with (
         patch("api.index.config_redis", return_value=object()),
         patch("api.index.redis_get_json", return_value=cached_items) as mock_cache,
-        patch("api.index.requests.get") as mock_get,
+        patch("api.index.http_client.get") as mock_get,
     ):
         items = get_hacker_news_context(limit=1)
 
@@ -1642,6 +1642,40 @@ def test_get_oil_price_returns_error_when_all_sources_fail():
     assert result == "no pude traer el precio del petróleo boludo"
 
 
+def test_cached_requests_uses_shared_http_get(monkeypatch):
+    from api import index
+
+    class Redis:
+        def __init__(self):
+            self.store = {}
+
+        def get(self, key):
+            return self.store.get(key)
+
+        def setex(self, key, ttl, value):
+            self.store[key] = value
+            return True
+
+    class Response:
+        text = '{"ok": true}'
+
+        def raise_for_status(self):
+            return None
+
+    calls = []
+    monkeypatch.setattr(index, "config_redis", lambda: Redis())
+    monkeypatch.setattr(
+        index.http_client,
+        "get",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or Response(),
+    )
+
+    result = index.cached_requests("https://example.test", None, None, 10)
+
+    assert result["data"] == {"ok": True}
+    assert calls
+
+
 def test_get_dollar_rates_returns_formatted_snapshot(monkeypatch):
     from api import index
 
@@ -1693,3 +1727,24 @@ def test_background_refresh_scheduler_uses_bounded_executor(monkeypatch):
     index._schedule_background_refresh(lambda: None)
 
     assert len(submitted) == 1
+
+
+def test_refresh_price_caches_submits_independent_jobs(monkeypatch):
+    from api import index
+
+    submitted = []
+
+    class Future:
+        def result(self):
+            return None
+
+    class Executor:
+        def submit(self, fn):
+            submitted.append(fn)
+            return Future()
+
+    monkeypatch.setattr(index, "_BACKGROUND_REFRESH_EXECUTOR", Executor())
+
+    index.refresh_price_caches()
+
+    assert len(submitted) == 4
