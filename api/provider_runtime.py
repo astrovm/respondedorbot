@@ -13,6 +13,7 @@ from api.tool_runtime import ToolRuntime
 
 
 logger = get_logger(__name__)
+_MAX_RETRIES = 5
 
 
 def _is_retryable_provider_error(error: Exception) -> bool:
@@ -87,6 +88,109 @@ class ProviderRuntime:
             tool_context=tool_context,
         )
 
+    def _run_chat_completion(
+        self,
+        *,
+        client: Any,
+        system_message: Dict[str, Any],
+        current_messages: List[Dict[str, Any]],
+        enable_web_search: bool,
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> Optional[Any]:
+        """Build request, retry on transient errors, and return the response."""
+        request_kwargs: Dict[str, Any] = {
+            "model": self._deps.primary_model,
+            "messages": [system_message] + current_messages,
+            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+        }
+
+        tools_list: List[Dict[str, Any]] = []
+        if enable_web_search:
+            tools_list.append(self._deps.build_web_search_tool())
+        if extra_tools:
+            tools_list.extend(extra_tools)
+        if tools_list:
+            request_kwargs["tools"] = tools_list
+
+        try:
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    return client.chat.completions.create(**request_kwargs)
+                except Exception as error:
+                    if _is_retryable_provider_error(error) and attempt < _MAX_RETRIES - 1:
+                        wait = 2**attempt
+                        raw_body = _format_provider_error_body(error)
+                        retry_context = dict(tool_context or {})
+                        retry_context.update(
+                            {
+                                "model": self._deps.primary_model,
+                                "tool_round": round_idx + 1,
+                            }
+                        )
+                        logger.warning(
+                            "openrouter: transient chat error retrying in %ss attempt=%d/%d error_type=%s%s%s",
+                            wait,
+                            attempt + 1,
+                            _MAX_RETRIES,
+                            type(error).__name__,
+                            format_log_context(retry_context),
+                            raw_body,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise
+        except Exception as error:
+            error_context = dict(tool_context or {})
+            error_context.update(
+                {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+            )
+            logger.error(
+                "openrouter: chat error %s error=%s",
+                format_log_context(error_context),
+                error,
+            )
+            self._deps.admin_report(
+                f"OpenRouter chat error model={self._deps.primary_model}",
+                error,
+                {
+                    "finish_reason": "error",
+                    "enable_web_search": enable_web_search,
+                    "tool_round": round_idx + 1,
+                },
+            )
+            return None
+
+    def _filter_known_calls(
+        self,
+        tool_calls: List[Any],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> List[Any]:
+        known_calls = []
+        for tool_call in tool_calls:
+            fn = getattr(tool_call, "function", None)
+            if fn is None:
+                continue
+            tool_name = getattr(fn, "name", "")
+            if not self._tool_runtime.has_tool(tool_name):
+                skipped_context = dict(tool_context or {})
+                skipped_context.update(
+                    {
+                        "model": self._deps.primary_model,
+                        "tool_round": round_idx + 1,
+                    }
+                )
+                logger.warning(
+                    "tool call skipped: not registered tool_name=%s%s",
+                    tool_name,
+                    format_log_context(skipped_context),
+                )
+                continue
+            known_calls.append(tool_call)
+        return known_calls
+
     def _execute_tool_rounds(
         self,
         *,
@@ -106,70 +210,19 @@ class ProviderRuntime:
 
         self._deps.increment_request_count()
         for round_idx in range(self._deps.max_tool_rounds):
-            try:
-                request_kwargs: Dict[str, Any] = {
-                    "model": self._deps.primary_model,
-                    "messages": [system_message] + current_messages,
-                    "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-                }
-
-                tools_list: List[Dict[str, Any]] = []
-                if enable_web_search:
-                    tools_list.append(self._deps.build_web_search_tool())
-                if extra_tools:
-                    tools_list.extend(extra_tools)
-                if tools_list:
-                    request_kwargs["tools"] = tools_list
-
-                response = None
-                for attempt in range(5):
-                    try:
-                        response = client.chat.completions.create(**request_kwargs)
-                        break
-                    except Exception as error:
-                        if _is_retryable_provider_error(error) and attempt < 4:
-                            wait = 2**attempt
-                            raw_body = _format_provider_error_body(error)
-                            retry_context = dict(tool_context or {})
-                            retry_context.update(
-                                {
-                                    "model": self._deps.primary_model,
-                                    "tool_round": round_idx + 1,
-                                }
-                            )
-                            logger.warning(
-                                "openrouter: transient chat error retrying in %ss attempt=%d/5 error_type=%s%s%s",
-                                wait,
-                                attempt + 1,
-                                type(error).__name__,
-                                format_log_context(retry_context),
-                                raw_body,
-                            )
-                            time.sleep(wait)
-                            continue
-                        raise
-            except Exception as error:
-                error_context = dict(tool_context or {})
-                error_context.update(
-                    {"model": self._deps.primary_model, "tool_round": round_idx + 1}
-                )
-                logger.error(
-                    "openrouter: chat error %s error=%s",
-                    format_log_context(error_context),
-                    error,
-                )
-                self._deps.admin_report(
-                    f"OpenRouter chat error model={self._deps.primary_model}",
-                    error,
-                    {
-                        "finish_reason": "error",
-                        "enable_web_search": enable_web_search,
-                        "tool_round": round_idx + 1,
-                    },
-                )
+            response = self._run_chat_completion(
+                client=client,
+                system_message=system_message,
+                current_messages=current_messages,
+                enable_web_search=enable_web_search,
+                extra_tools=extra_tools,
+                tool_context=tool_context,
+                round_idx=round_idx,
+            )
+            if response is None:
                 return None
 
-            if not response or not hasattr(response, "choices") or not response.choices:
+            if not hasattr(response, "choices") or not response.choices:
                 return None
 
             choice = response.choices[0]
@@ -184,28 +237,9 @@ class ProviderRuntime:
                         return current_messages
                     return None
 
-                known_calls = []
-                for tool_call in tool_calls:
-                    fn = getattr(tool_call, "function", None)
-                    if fn is None:
-                        continue
-                    tool_name = getattr(fn, "name", "")
-                    if not self._tool_runtime.has_tool(tool_name):
-                        skipped_context = dict(tool_context or {})
-                        skipped_context.update(
-                            {
-                                "model": self._deps.primary_model,
-                                "tool_round": round_idx + 1,
-                            }
-                        )
-                        logger.warning(
-                            "tool call skipped: not registered tool_name=%s%s",
-                            tool_name,
-                            format_log_context(skipped_context),
-                        )
-                        continue
-                    known_calls.append(tool_call)
-
+                known_calls = self._filter_known_calls(
+                    tool_calls, tool_context, round_idx
+                )
                 if not known_calls:
                     text = str(message.content or "").strip()
                     if text:
@@ -241,70 +275,19 @@ class ProviderRuntime:
 
         self._deps.increment_request_count()
         for round_idx in range(self._deps.max_tool_rounds):
-            try:
-                request_kwargs: Dict[str, Any] = {
-                    "model": self._deps.primary_model,
-                    "messages": [system_message] + current_messages,
-                    "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
-                }
-
-                tools_list: List[Dict[str, Any]] = []
-                if enable_web_search:
-                    tools_list.append(self._deps.build_web_search_tool())
-                if extra_tools:
-                    tools_list.extend(extra_tools)
-                if tools_list:
-                    request_kwargs["tools"] = tools_list
-
-                response = None
-                for attempt in range(5):
-                    try:
-                        response = client.chat.completions.create(**request_kwargs)
-                        break
-                    except Exception as error:
-                        if _is_retryable_provider_error(error) and attempt < 4:
-                            wait = 2**attempt
-                            raw_body = _format_provider_error_body(error)
-                            retry_context = dict(tool_context or {})
-                            retry_context.update(
-                                {
-                                    "model": self._deps.primary_model,
-                                    "tool_round": round_idx + 1,
-                                }
-                            )
-                            logger.warning(
-                                "openrouter: transient chat error retrying in %ss attempt=%d/5 error_type=%s%s%s",
-                                wait,
-                                attempt + 1,
-                                type(error).__name__,
-                                format_log_context(retry_context),
-                                raw_body,
-                            )
-                            time.sleep(wait)
-                            continue
-                        raise
-            except Exception as error:
-                error_context = dict(tool_context or {})
-                error_context.update(
-                    {"model": self._deps.primary_model, "tool_round": round_idx + 1}
-                )
-                logger.error(
-                    "openrouter: chat error %s error=%s",
-                    format_log_context(error_context),
-                    error,
-                )
-                self._deps.admin_report(
-                    f"OpenRouter chat error model={self._deps.primary_model}",
-                    error,
-                    {
-                        "finish_reason": "error",
-                        "enable_web_search": enable_web_search,
-                        "tool_round": round_idx + 1,
-                    },
-                )
+            response = self._run_chat_completion(
+                client=client,
+                system_message=system_message,
+                current_messages=current_messages,
+                enable_web_search=enable_web_search,
+                extra_tools=extra_tools,
+                tool_context=tool_context,
+                round_idx=round_idx,
+            )
+            if response is None:
                 return None
 
-            if not response or not hasattr(response, "choices") or not response.choices:
+            if not hasattr(response, "choices") or not response.choices:
                 return None
 
             choice = response.choices[0]
@@ -329,28 +312,9 @@ class ProviderRuntime:
                         )
                     break
 
-                known_calls = []
-                for tool_call in tool_calls:
-                    fn = getattr(tool_call, "function", None)
-                    if fn is None:
-                        continue
-                    tool_name = getattr(fn, "name", "")
-                    if not self._tool_runtime.has_tool(tool_name):
-                        skipped_context = dict(tool_context or {})
-                        skipped_context.update(
-                            {
-                                "model": self._deps.primary_model,
-                                "tool_round": round_idx + 1,
-                            }
-                        )
-                        logger.warning(
-                            "tool call skipped: not registered tool_name=%s%s",
-                            tool_name,
-                            format_log_context(skipped_context),
-                        )
-                        continue
-                    known_calls.append(tool_call)
-
+                known_calls = self._filter_known_calls(
+                    tool_calls, tool_context, round_idx
+                )
                 if not known_calls:
                     text = str(message.content or "").strip()
                     if text:
