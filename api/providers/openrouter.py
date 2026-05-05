@@ -118,12 +118,40 @@ class OpenRouterProvider(StreamingAIProvider):
                     "tools": [self._build_web_search_tool()],
                 }
 
+                has_tool_calls = False
                 for chunk in client.chat.completions.create(**request_kwargs):
                     if not chunk.choices:
                         continue
-                    delta = chunk.choices[0].delta
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    if getattr(choice, "finish_reason", None) == "tool_calls":
+                        has_tool_calls = True
+                        break
                     if delta and delta.content:
                         yield delta.content
+                if has_tool_calls:
+                    final_messages = self._runtime._execute_tool_rounds(
+                        current_messages=list(messages),
+                        system_message=system_message,
+                        enable_web_search=enable_web_search,
+                        extra_tools=extra_tools,
+                        tool_context=tool_context,
+                    )
+                    if final_messages is None:
+                        return
+                    self._increment_request_count()
+                    request_kwargs = {
+                        "model": self._primary_model,
+                        "messages": [system_message] + final_messages,
+                        "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
+                        "stream": True,
+                    }
+                    for chunk in client.chat.completions.create(**request_kwargs):
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if delta and delta.content:
+                            yield delta.content
                 return
 
             final_messages = self._runtime._execute_tool_rounds(
