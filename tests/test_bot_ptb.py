@@ -19,6 +19,23 @@ class _FakeUpdate:
 
 
 class BotPtbTests(unittest.TestCase):
+    def test_get_handler_executor_uses_env_worker_count(self):
+        created = []
+
+        class DummyExecutor:
+            def __init__(self, max_workers, thread_name_prefix):
+                created.append((max_workers, thread_name_prefix))
+
+        with (
+            patch.dict("os.environ", {"BOT_HANDLER_WORKERS": "24"}),
+            patch("api.bot_ptb.concurrent.futures.ThreadPoolExecutor", DummyExecutor),
+            patch.object(bot_ptb, "_HANDLER_EXECUTOR", None),
+        ):
+            executor = bot_ptb._get_handler_executor()
+
+        self.assertIsNotNone(executor)
+        self.assertEqual(created, [(24, "ptb-handler")])
+
     def test_create_application_requires_token(self):
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(ValueError, "TELEGRAM_TOKEN not provided"):

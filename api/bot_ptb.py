@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import importlib
 import logging
 import os
@@ -15,6 +16,7 @@ from api.index import (
 )
 
 logger = logging.getLogger(__name__)
+_HANDLER_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
 
 def _update_to_dict(update: Any) -> Dict[str, Any]:
@@ -23,7 +25,26 @@ def _update_to_dict(update: Any) -> Dict[str, Any]:
 
 async def _run_sync(func: Any, *args: Any) -> Any:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args)
+    return await loop.run_in_executor(_get_handler_executor(), func, *args)
+
+
+def _handler_worker_count() -> int:
+    raw = os.environ.get("BOT_HANDLER_WORKERS", "16")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Invalid BOT_HANDLER_WORKERS=%s, using 16", raw)
+        return 16
+
+
+def _get_handler_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _HANDLER_EXECUTOR
+    if _HANDLER_EXECUTOR is None:
+        _HANDLER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_handler_worker_count(),
+            thread_name_prefix="ptb-handler",
+        )
+    return _HANDLER_EXECUTOR
 
 
 async def _async_handle_message(update: Any, context: Any) -> None:
