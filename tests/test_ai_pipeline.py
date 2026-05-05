@@ -1048,7 +1048,8 @@ def test_build_ai_request_reuses_stable_context(monkeypatch):
     monkeypatch.setattr(index, "_fetch_urls_from_latest_message", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(index, "get_all_tool_schemas", lambda *_args, **_kwargs: [])
 
-    index._STABLE_AI_CONTEXT_CACHE.clear()
+    index._STABLE_AI_CONTEXT_TIMESTAMP = 0
+    index._STABLE_AI_CONTEXT_VALUE = {}
 
     index._build_ai_request([{"role": "user", "content": "hola"}], enable_web_search=False)
     index._build_ai_request([{"role": "user", "content": "chau"}], enable_web_search=False)
