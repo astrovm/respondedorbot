@@ -69,6 +69,7 @@ from api.services.redis_helpers import (
     redis_set_json,
     redis_setex_json,
 )
+from api.services.stale_cache import StaleCache, StaleCacheResult
 from api.services.maintenance import (
     GIPHY_STALE_TTL,
     REQUEST_CACHE_HISTORY_TTL,
@@ -229,8 +230,15 @@ LINK_METADATA_MAX_BYTES = 64_000
 MAX_LINKS_IN_MESSAGE = 3
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
+DOLLAR_FORMATTED_STALE_GRACE = 30 * 60
+STABLE_AI_CONTEXT_TTL = 60
 
 _logger = get_logger(__name__)
+_BACKGROUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="cache-refresh",
+)
+_STABLE_AI_CONTEXT_CACHE: Dict[str, Any] = {}
 
 # Timeframe support for /prices (maps to CMC native fields)
 _CMC_CHANGE_FIELD: Dict[str, str] = {
@@ -1460,6 +1468,23 @@ def get_dollar_rates(msg_text: str = "") -> Optional[str]:
             return f"timeframe '{token}' no soportado, uso: {valid}"
     hours_ago = _DOLLAR_TIMEFRAME_HOURS.get(tf, 24) if tf else 24
 
+    cache_key = f"market:dolar:formatted:{hours_ago}"
+    try:
+        result = _get_dollar_snapshot_cache().get(
+            key=cache_key,
+            lock_key=f"{cache_key}:lock",
+            ttl=TTL_DOLLAR,
+            stale_grace=DOLLAR_FORMATTED_STALE_GRACE,
+            refresh=lambda: _build_dollar_rates_text(hours_ago),
+            schedule_refresh=_schedule_background_refresh,
+        )
+        return cast(Optional[str], result.value)
+    except Exception:
+        _logger.exception("dollar snapshot cache failed")
+        return _build_dollar_rates_text(hours_ago)
+
+
+def _build_dollar_rates_text(hours_ago: int) -> Optional[str]:
     dollars = _fetch_criptoya_dollar_data(
         hourly_cache=True,
         get_history=hours_ago if hours_ago != 24 else 0,
@@ -1480,6 +1505,14 @@ def get_dollar_rates(msg_text: str = "") -> Optional[str]:
         }
 
     return format_dollar_rates(sorted_dollar_rates, hours_ago, band_limits)
+
+
+def _get_dollar_snapshot_cache() -> StaleCache:
+    return StaleCache(redis_client=config_redis())
+
+
+def _schedule_background_refresh(fn: Callable[[], None]) -> None:
+    _BACKGROUND_REFRESH_EXECUTOR.submit(fn)
 
 
 def get_devo(msg_text: str) -> str:
@@ -2064,14 +2097,15 @@ _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 def _fetch_yahoo_stock_price(symbol: str) -> Optional[Tuple[float, float]]:
     try:
-        resp = requests.get(
+        response = cached_requests(
             _YAHOO_CHART_URL.format(symbol=symbol),
-            params={"range": "5d", "interval": "1d"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
+            {"range": "5d", "interval": "1d"},
+            {"User-Agent": "Mozilla/5.0"},
+            TTL_PRICE,
         )
-        resp.raise_for_status()
-        data = resp.json()
+        if not response or "data" not in response:
+            return None
+        data = response["data"]
         result = data.get("chart", {}).get("result", [{}])[0]
         quotes = result.get("indicators", {}).get("quote", [{}])[0]
         closes = [c for c in quotes.get("close", []) if c is not None]
@@ -2523,12 +2557,7 @@ def _build_ai_request(
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
     messages = [_sanitize_bot_message(m) for m in messages or []]
 
-    context_data = {
-        "market": get_market_context(),
-        "weather": get_weather_context(),
-        "time": get_time_context(),
-        "hacker_news": get_hacker_news_context(),
-    }
+    context_data = _get_stable_ai_context()
 
     tool_context: Dict[str, Any] = {
         "get_prices": get_prices,
@@ -2558,6 +2587,22 @@ def _build_ai_request(
         ]
 
     return system_message, messages, extra_tools, tool_context
+
+
+def _get_stable_ai_context() -> Dict[str, Any]:
+    now = int(time.time())
+    cached = _STABLE_AI_CONTEXT_CACHE.get("value")
+    if cached and now - int(cached["timestamp"]) <= STABLE_AI_CONTEXT_TTL:
+        return cast(Dict[str, Any], cached["context"])
+
+    context = {
+        "market": get_market_context(),
+        "weather": get_weather_context(),
+        "time": get_time_context(),
+        "hacker_news": get_hacker_news_context(),
+    }
+    _STABLE_AI_CONTEXT_CACHE["value"] = {"timestamp": now, "context": context}
+    return context
 
 
 def _inject_image_context(

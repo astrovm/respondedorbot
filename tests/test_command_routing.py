@@ -1195,11 +1195,8 @@ def test_get_oil_price_success():
         }
     }
 
-    with patch("api.index.requests.get") as mock_get:
-        mock_get.side_effect = [
-            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
-            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
-        ]
+    with patch("api.index.cached_requests") as mock_get:
+        mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
 
         result = get_oil_price()
 
@@ -1227,11 +1224,8 @@ def test_get_oil_price_success_without_csv_header():
         }
     }
 
-    with patch("api.index.requests.get") as mock_get:
-        mock_get.side_effect = [
-            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
-            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
-        ]
+    with patch("api.index.cached_requests") as mock_get:
+        mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
 
         result = get_oil_price()
 
@@ -1242,7 +1236,7 @@ def test_get_oil_price_success_without_csv_header():
 
 
 def test_get_oil_price_failure():
-    with patch("api.index.requests.get", side_effect=Exception("boom")):
+    with patch("api.index.cached_requests", side_effect=Exception("boom")):
         result = get_oil_price()
 
     assert result == "no pude traer el precio del petróleo boludo"
