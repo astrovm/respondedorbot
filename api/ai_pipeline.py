@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import random
 import re
 import inspect
 import logging
-import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 _logger = logging.getLogger(__name__)
@@ -183,7 +181,6 @@ def handle_ai_response(
 
     if telegram_token:
         send_typing_fn(telegram_token, chat_id)
-    time.sleep(random.uniform(0, 1))
 
     handler_name = getattr(handler_func, "__name__", "")
     is_ask_ai_handler = handler_name == "ask_ai"
