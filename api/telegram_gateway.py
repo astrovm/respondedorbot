@@ -6,9 +6,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
 
-import requests
-
 from api.agent_tools import normalize_http_url
+from api.services import http_client
 
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
@@ -159,8 +158,8 @@ class TelegramGateway:
 
         file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
         try:
-            download_response = requests.get(file_url, timeout=30)
+            download_response = http_client.get(file_url, timeout=30)
             download_response.raise_for_status()
             return download_response.content
-        except requests.RequestException:
+        except Exception:
             return None

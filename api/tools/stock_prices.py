@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
+from api.services import http_client
 from api.tools.registry import ToolResult, register_tool
 
 _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -13,7 +12,7 @@ _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 def _fetch_yahoo_price(symbol: str) -> Optional[Tuple[float, float]]:
     try:
-        resp = requests.get(
+        resp = http_client.get(
             _YAHOO_CHART_URL.format(symbol=symbol),
             params={"range": "5d", "interval": "1d"},
             headers={"User-Agent": "Mozilla/5.0"},

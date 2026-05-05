@@ -1151,9 +1151,11 @@ def test_download_telegram_file_success():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.requests.get") as mock_get,
+        patch("api.services.http_client.get") as mock_get,
     ):
-        mock_env.return_value = "test_token"
+        mock_env.side_effect = lambda key, default=None: (
+            "test_token" if key == "TELEGRAM_TOKEN" else default
+        )
 
         # Mock file info response
         mock_file_info = MagicMock()
@@ -1192,9 +1194,11 @@ def test_download_telegram_file_api_error():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.requests.get") as mock_get,
+        patch("api.services.http_client.get") as mock_get,
     ):
-        mock_env.return_value = "test_token"
+        mock_env.side_effect = lambda key, default=None: (
+            "test_token" if key == "TELEGRAM_TOKEN" else default
+        )
 
         # Mock failed API response
         mock_response = MagicMock()
@@ -1213,9 +1217,11 @@ def test_download_telegram_file_network_error():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.requests.get") as mock_get,
+        patch("api.services.http_client.get") as mock_get,
     ):
-        mock_env.return_value = "test_token"
+        mock_env.side_effect = lambda key, default=None: (
+            "test_token" if key == "TELEGRAM_TOKEN" else default
+        )
         mock_get.side_effect = requests.exceptions.RequestException("Network error")
 
         result = download_telegram_file("test_file_id")
