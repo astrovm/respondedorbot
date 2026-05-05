@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import redis
 
@@ -13,6 +13,8 @@ AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], N
 _bot_config: Optional[Dict[str, Any]] = None
 _admin_reporter: Optional[AdminReporter] = None
 _WORKSPACE_DIR: Optional[Path] = None
+_RedisPoolKey = Tuple[str, int, Optional[str], bool]
+_REDIS_POOLS: Dict[_RedisPoolKey, redis.ConnectionPool] = {}
 
 
 def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
@@ -108,9 +110,18 @@ def config_redis(host=None, port=None, password=None):
         host = host or os.environ.get("REDIS_HOST", "localhost")
         port = int(port or os.environ.get("REDIS_PORT", "6379"))
         password = password or os.environ.get("REDIS_PASSWORD", None)
-        redis_client = redis.Redis(
-            host=host, port=port, password=password, decode_responses=True
-        )
+        decode_responses = True
+        pool_key = (host, port, password, decode_responses)
+        pool = _REDIS_POOLS.get(pool_key)
+        if pool is None:
+            pool = redis.ConnectionPool(
+                host=host,
+                port=port,
+                password=password,
+                decode_responses=decode_responses,
+            )
+            _REDIS_POOLS[pool_key] = pool
+        redis_client = redis.Redis(connection_pool=pool)
         redis_client.ping()
         return redis_client
     except Exception as exc:  # pragma: no cover - passthrough for callers

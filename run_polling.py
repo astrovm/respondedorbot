@@ -10,6 +10,12 @@ import time
 from typing import Optional
 
 
+def refresh_price_caches() -> None:
+    from api.index import refresh_price_caches as _refresh_price_caches
+
+    _refresh_price_caches()
+
+
 def _load_dotenv() -> None:
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if not os.path.isfile(env_path):
@@ -42,9 +48,6 @@ def _load_dotenv() -> None:
 
 
 def _price_refresh_loop() -> None:
-    from api.index import refresh_price_caches
-
-    time.sleep(300)  # wait 5 min after startup before first run
     while True:
         try:
             refresh_price_caches()

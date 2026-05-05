@@ -361,8 +361,14 @@ def test_handle_callback_query_blocks_non_admin():
 def test_config_redis_with_env_vars():
     from api.config import config_redis as _config_config_redis
 
-    with patch("redis.Redis") as mock_redis, patch("os.environ.get") as mock_env:
+    with (
+        patch("redis.ConnectionPool") as mock_pool,
+        patch("redis.Redis") as mock_redis,
+        patch("os.environ.get") as mock_env,
+    ):
         mock_instance = MagicMock()
+        mock_pool_instance = MagicMock()
+        mock_pool.return_value = mock_pool_instance
         mock_redis.return_value = mock_instance
         mock_env.side_effect = lambda key, default=None: {
             "REDIS_HOST": "redis.example.com",
@@ -373,12 +379,13 @@ def test_config_redis_with_env_vars():
         result = _config_config_redis()
 
         assert result == mock_instance
-        mock_redis.assert_called_with(
+        mock_pool.assert_called_with(
             host="redis.example.com",
             port=1234,
             password="secret",
             decode_responses=True,
         )
+        mock_redis.assert_called_with(connection_pool=mock_pool_instance)
 
 
 def test_set_chat_config_updates_link_mode_and_persists():
