@@ -1601,25 +1601,95 @@ def test_get_oil_price_falls_back_to_stooq_quote_endpoint_when_daily_is_empty():
         }
     }
 
-    with patch("api.index.requests.get") as mock_get:
-        mock_get.side_effect = [
-            MagicMock(json=lambda: brent_json, raise_for_status=lambda: None),
-            MagicMock(json=lambda: wti_json, raise_for_status=lambda: None),
-        ]
+    with patch("api.index.cached_requests") as mock_get:
+        mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
         result = get_oil_price()
 
     assert "Brent: 98.15 USD (-8.78% 24hs)" in result
     assert "WTI: 95.45 USD (-10.59% 24hs)" in result
 
 
+def test_get_oil_price_uses_cached_requests(monkeypatch):
+    from api import index
+
+    calls = []
+
+    def fake_cached_requests(api_url, parameters, headers, expiration_time, *args, **kwargs):
+        calls.append((api_url, parameters, headers, expiration_time))
+        return {
+            "data": {
+                "chart": {
+                    "result": [
+                        {"indicators": {"quote": [{"close": [100.0, 101.5]}]}}
+                    ]
+                }
+            }
+        }
+
+    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+
+    result = index.get_oil_price()
+
+    assert "Brent" in result
+    assert "WTI" in result
+    assert len(calls) == 2
+
+
 def test_get_oil_price_returns_error_when_all_sources_fail():
-    class MockResponse:
-        text = ""
-
-        def raise_for_status(self):
-            return None
-
-    with patch("api.index.requests.get", return_value=MockResponse()):
+    with patch("api.index.cached_requests", return_value=None):
         result = get_oil_price()
 
     assert result == "no pude traer el precio del petróleo boludo"
+
+
+def test_get_dollar_rates_returns_formatted_snapshot(monkeypatch):
+    from api import index
+
+    class FakeCache:
+        def get(self, **kwargs):
+            return index.StaleCacheResult(value="cached dolar", status="fresh")
+
+    monkeypatch.setattr(index, "_get_dollar_snapshot_cache", lambda: FakeCache())
+    monkeypatch.setattr(
+        index,
+        "_build_dollar_rates_text",
+        lambda *_args, **_kwargs: "live dolar",
+        raising=False,
+    )
+
+    assert index.get_dollar_rates("") == "cached dolar"
+
+
+def test_get_dollar_rates_keeps_invalid_timeframe_without_cache(monkeypatch):
+    from api import index
+
+    called = False
+
+    def fail_cache():
+        nonlocal called
+        called = True
+        raise AssertionError("cache should not be used")
+
+    monkeypatch.setattr(index, "_get_dollar_snapshot_cache", fail_cache, raising=False)
+
+    result = index.get_dollar_rates("2h")
+
+    assert "no soportado" in result
+    assert called is False
+
+
+def test_background_refresh_scheduler_uses_bounded_executor(monkeypatch):
+    from api import index
+
+    submitted = []
+
+    class DummyExecutor:
+        def submit(self, fn):
+            submitted.append(fn)
+            return object()
+
+    monkeypatch.setattr(index, "_BACKGROUND_REFRESH_EXECUTOR", DummyExecutor())
+
+    index._schedule_background_refresh(lambda: None)
+
+    assert len(submitted) == 1
