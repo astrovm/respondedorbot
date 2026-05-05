@@ -833,7 +833,7 @@ def test_get_hacker_news_context_success():
     with (
         patch("api.index.config_redis", side_effect=RuntimeError("no redis")),
         patch(
-            "api.index.requests.get", return_value=DummyResponse(sample_xml)
+            "api.utils.http.requests.get", return_value=DummyResponse(sample_xml)
         ) as mock_get,
     ):
         items = get_hacker_news_context(limit=2)

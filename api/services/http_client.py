@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
 
 import requests
 
 _SESSION: Optional[requests.Session] = None
+_SESSION_LOCK = threading.Lock()
 
 
 def get_http_session() -> requests.Session:
     global _SESSION
     if _SESSION is None:
-        _SESSION = requests.Session()
+        with _SESSION_LOCK:
+            if _SESSION is None:
+                _SESSION = requests.Session()
     return _SESSION
 
 
