@@ -1024,6 +1024,38 @@ def test_build_message_links_context_keeps_full_youtube_transcript():
     assert context.count(transcript) == 1
 
 
+def test_build_ai_request_reuses_stable_context(monkeypatch):
+    from api import index
+
+    calls = {"market": 0, "weather": 0, "hn": 0}
+
+    def market_context():
+        calls["market"] += 1
+        return {}
+
+    def weather_context():
+        calls["weather"] += 1
+        return {}
+
+    def hacker_news_context():
+        calls["hn"] += 1
+        return []
+
+    monkeypatch.setattr(index, "get_market_context", market_context)
+    monkeypatch.setattr(index, "get_weather_context", weather_context)
+    monkeypatch.setattr(index, "get_hacker_news_context", hacker_news_context)
+    monkeypatch.setattr(index, "get_time_context", lambda: {"formatted": "Monday 12:00"})
+    monkeypatch.setattr(index, "_fetch_urls_from_latest_message", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(index, "get_all_tool_schemas", lambda *_args, **_kwargs: [])
+
+    index._STABLE_AI_CONTEXT_CACHE.clear()
+
+    index._build_ai_request([{"role": "user", "content": "hola"}], enable_web_search=False)
+    index._build_ai_request([{"role": "user", "content": "chau"}], enable_web_search=False)
+
+    assert calls == {"market": 1, "weather": 1, "hn": 1}
+
+
 def test_handle_ai_response_reads_fallback_from_meta(monkeypatch):
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
@@ -1039,6 +1071,21 @@ def test_handle_ai_response_reads_fallback_from_meta(monkeypatch):
 
     assert result == "no boludo"
     assert meta["ai_fallback"] is True
+
+
+def test_handle_ai_response_does_not_sleep_before_provider_call(monkeypatch):
+    import api.ai_pipeline as ai_pipeline
+
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+
+    def fake_handler(_messages):
+        return "respuesta"
+
+    result = handle_ai_response("123", fake_handler, [])
+
+    assert result == "respuesta"
+    assert not hasattr(ai_pipeline, "time")
+    assert not hasattr(ai_pipeline, "random")
 
 
 def test_handle_ai_response_returns_fallback_on_empty(monkeypatch, caplog):
