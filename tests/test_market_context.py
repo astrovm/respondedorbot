@@ -1730,18 +1730,17 @@ def test_background_refresh_scheduler_uses_bounded_executor(monkeypatch):
 
 
 def test_refresh_price_caches_submits_independent_jobs(monkeypatch):
+    from concurrent.futures import Future
     from api import index
 
     submitted = []
 
-    class Future:
-        def result(self):
-            return None
-
     class Executor:
         def submit(self, fn):
             submitted.append(fn)
-            return Future()
+            f = Future()
+            f.set_result(None)
+            return f
 
     monkeypatch.setattr(index, "_BACKGROUND_REFRESH_EXECUTOR", Executor())
 

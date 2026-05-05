@@ -72,7 +72,8 @@ class StaleCache:
         self._redis_client.setex(key, ttl, json.dumps(payload))
 
     def _acquire_lock(self, lock_key: str, ttl: int) -> bool:
-        return bool(self._redis_client.set(lock_key, "1", nx=True, ex=ttl))
+        lock_ttl = min(30, ttl)
+        return bool(self._redis_client.set(lock_key, "1", nx=True, ex=lock_ttl))
 
     def _refresh_and_store(self, key: str, ttl: int, refresh: Callable[[], Any]) -> None:
         try:
