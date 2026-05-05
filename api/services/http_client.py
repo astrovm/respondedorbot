@@ -1,3 +1,5 @@
+"""Shared HTTP session wrapper for connection reuse."""
+
 from __future__ import annotations
 
 from typing import Any, Optional
