@@ -29,6 +29,7 @@ from typing import (
     Literal,
     Iterator,
 )
+import atexit
 import base64
 import concurrent.futures
 import emoji
@@ -231,6 +232,7 @@ LINK_METADATA_MAX_BYTES = 64_000
 MAX_LINKS_IN_MESSAGE = 3
 TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
 TTL_HACKER_NEWS = 600  # 10 minutes
+TTL_STOCK_SCREENER = 3600  # 1 hour
 DOLLAR_FORMATTED_STALE_GRACE = 30 * 60
 STABLE_AI_CONTEXT_TTL = 60
 
@@ -239,7 +241,10 @@ _BACKGROUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="cache-refresh",
 )
-_STABLE_AI_CONTEXT_CACHE: Dict[str, Any] = {}
+atexit.register(_BACKGROUND_REFRESH_EXECUTOR.shutdown, wait=False)
+
+_STABLE_AI_CONTEXT_TIMESTAMP: int = 0
+_STABLE_AI_CONTEXT_VALUE: Dict[str, Any] = {}
 
 # Timeframe support for /prices (maps to CMC native fields)
 _CMC_CHANGE_FIELD: Dict[str, str] = {
@@ -1042,7 +1047,7 @@ def refresh_price_caches() -> None:
         get_oil_price,
     ]
     futures = [_BACKGROUND_REFRESH_EXECUTOR.submit(job) for job in jobs]
-    for future in futures:
+    for future in concurrent.futures.as_completed(futures):
         try:
             future.result()
         except Exception as error:
@@ -1513,8 +1518,14 @@ def _build_dollar_rates_text(hours_ago: int) -> Optional[str]:
     return format_dollar_rates(sorted_dollar_rates, hours_ago, band_limits)
 
 
+_DOLLAR_SNAPSHOT_CACHE: Optional[StaleCache] = None
+
+
 def _get_dollar_snapshot_cache() -> StaleCache:
-    return StaleCache(redis_client=config_redis())
+    global _DOLLAR_SNAPSHOT_CACHE
+    if _DOLLAR_SNAPSHOT_CACHE is None:
+        _DOLLAR_SNAPSHOT_CACHE = StaleCache(redis_client=config_redis())
+    return _DOLLAR_SNAPSHOT_CACHE
 
 
 def _schedule_background_refresh(fn: Callable[[], None]) -> None:
@@ -2131,6 +2142,12 @@ _FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
 
 
 def _fetch_top_stocks_by_market_cap() -> List[str]:
+    redis_client = _optional_redis_client()
+    cache_key = "market:stock_screener:mega_cap"
+    if redis_client:
+        cached = redis_get_json(redis_client, cache_key)
+        if isinstance(cached, list):
+            return cached
     try:
         resp = http_client.get(
             _FINVIZ_SCREENER_URL,
@@ -2146,6 +2163,8 @@ def _fetch_top_stocks_by_market_cap() -> List[str]:
             if company not in seen_companies and len(result) < 10:
                 seen_companies.add(company)
                 result.append(symbol)
+        if redis_client and result:
+            redis_set_json(redis_client, cache_key, result, ttl=TTL_STOCK_SCREENER)
         return result
     except RequestException:
         return []
@@ -2596,10 +2615,10 @@ def _build_ai_request(
 
 
 def _get_stable_ai_context() -> Dict[str, Any]:
+    global _STABLE_AI_CONTEXT_TIMESTAMP, _STABLE_AI_CONTEXT_VALUE
     now = int(time.time())
-    cached = _STABLE_AI_CONTEXT_CACHE.get("value")
-    if cached and now - int(cached["timestamp"]) <= STABLE_AI_CONTEXT_TTL:
-        return cast(Dict[str, Any], cached["context"])
+    if _STABLE_AI_CONTEXT_VALUE and now - _STABLE_AI_CONTEXT_TIMESTAMP <= STABLE_AI_CONTEXT_TTL:
+        return _STABLE_AI_CONTEXT_VALUE
 
     context = {
         "market": get_market_context(),
@@ -2607,7 +2626,8 @@ def _get_stable_ai_context() -> Dict[str, Any]:
         "time": get_time_context(),
         "hacker_news": get_hacker_news_context(),
     }
-    _STABLE_AI_CONTEXT_CACHE["value"] = {"timestamp": now, "context": context}
+    _STABLE_AI_CONTEXT_TIMESTAMP = now
+    _STABLE_AI_CONTEXT_VALUE = context
     return context
 
 

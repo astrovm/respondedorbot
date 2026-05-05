@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import importlib
 import logging
@@ -44,7 +45,15 @@ def _get_handler_executor() -> concurrent.futures.ThreadPoolExecutor:
             max_workers=_handler_worker_count(),
             thread_name_prefix="ptb-handler",
         )
+        atexit.register(_shutdown_handler_executor)
     return _HANDLER_EXECUTOR
+
+
+def _shutdown_handler_executor() -> None:
+    global _HANDLER_EXECUTOR
+    if _HANDLER_EXECUTOR is not None:
+        _HANDLER_EXECUTOR.shutdown(wait=False)
+        _HANDLER_EXECUTOR = None
 
 
 async def _async_handle_message(update: Any, context: Any) -> None:
