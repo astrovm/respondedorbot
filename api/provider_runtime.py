@@ -21,6 +21,14 @@ _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
     re.DOTALL,
 )
+_DSML_TOOL_CALL_PATTERN = re.compile(
+    r'<｜｜DSML｜｜invoke\s+name="(?P<name>[A-Za-z_][A-Za-z0-9_]*)"\s*>\s*'
+    r'<｜｜DSML｜｜parameter\s+name="url"\s+string="true"\s*>'
+    r'(?P<url>https?://[^<\s]+)'
+    r'</｜｜DSML｜｜parameter>\s*'
+    r'</｜｜DSML｜｜invoke>',
+    re.DOTALL,
+)
 
 
 def _is_retryable_provider_error(error: Exception) -> bool:
@@ -217,6 +225,23 @@ class ProviderRuntime:
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
     ) -> Optional[Any]:
+        dsml_match = _DSML_TOOL_CALL_PATTERN.search(str(text or ""))
+        if dsml_match:
+            tool_name = dsml_match.group("name")
+            if tool_name != "web_fetch":
+                return None
+            if tool_name not in _extra_tool_names(extra_tools):
+                return None
+            if not self._tool_runtime.has_tool(tool_name):
+                return None
+            return SimpleNamespace(
+                id=f"pseudo_call_{round_idx + 1}",
+                function=SimpleNamespace(
+                    name=tool_name,
+                    arguments=json.dumps({"url": dsml_match.group("url")}),
+                ),
+            )
+
         lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
         candidate = lines[-1] if lines else ""
         match = _PSEUDO_TOOL_CALL_PATTERN.match(candidate)

@@ -181,6 +181,7 @@ def get_bot_message_metadata(redis_client: redis.Redis, chat_id: str, message_id
 
 RAW_TOOL_LEAKS = (
     'web_fetch(',
+    '<｜｜DSML｜｜tool_calls>',
     '"tool_calls"',
     '"function_call"',
     '"arguments":',
