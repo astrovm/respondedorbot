@@ -367,6 +367,83 @@ def test_provider_runtime_executes_preamble_then_pseudo_web_fetch_call():
     )
 
 
+def test_provider_runtime_executes_dsml_pseudo_web_fetch_call():
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    first_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(
+                    content=(
+                        "<｜｜DSML｜｜tool_calls>\n"
+                        '<｜｜DSML｜｜invoke name="web_fetch">\n'
+                        '<｜｜DSML｜｜parameter name="url" string="true">'
+                        "https://nitter.net/deptofwar/status/2052723504336736284"
+                        "</｜｜DSML｜｜parameter>\n"
+                        "</｜｜DSML｜｜invoke>\n"
+                        "</｜｜DSML｜｜tool_calls>"
+                    ),
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ]
+    )
+    second_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="respuesta final", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    client = _FakeClient([first_response, second_response])
+    execute_tool_fn = MagicMock(return_value=SimpleNamespace(output="tweet"))
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=execute_tool_fn,
+            tool_registry={"web_fetch": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "lee esto"}],
+        enable_web_search=False,
+        extra_tools=[{"type": "function", "function": {"name": "web_fetch"}}],
+        tool_context={"chat_id": "123"},
+    )
+
+    assert result is not None
+    assert result.text == "respuesta final"
+    assert_no_raw_tool_syntax(result.text)
+    execute_tool_fn.assert_called_once_with(
+        "web_fetch",
+        {"url": "https://nitter.net/deptofwar/status/2052723504336736284"},
+        {"chat_id": "123"},
+    )
+
+
 def test_provider_runtime_does_not_execute_pseudo_tool_inside_prose():
     from api.ai_pricing import AIUsageResult
     from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
