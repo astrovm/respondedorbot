@@ -48,6 +48,7 @@ def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
 def test_openrouter_stream_uses_streaming_path_when_tools_present():
     from types import SimpleNamespace
 
+    from api.ai_pricing import AIUsageResult
     from api.providers.openrouter import OpenRouterProvider
 
     create_calls: list[dict[str, Any]] = []
@@ -74,7 +75,13 @@ def test_openrouter_stream_uses_streaming_path_when_tools_present():
         admin_report=lambda *a, **k: None,
         increment_request_count=lambda: None,
         build_web_search_tool=lambda: {},
-        build_usage_result=lambda **kwargs: MagicMock(),
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage={},
+            metadata=kwargs.get("metadata") or {},
+        ),
         extract_usage_map=lambda r: {},
         primary_model="test-model",
     )
@@ -88,10 +95,10 @@ def test_openrouter_stream_uses_streaming_path_when_tools_present():
         )
     )
 
-    assert chunks == ["hola", " final"]
-    assert len(create_calls) == 2
+    assert chunks == ["hola final"]
+    assert len(create_calls) == 1
     assert create_calls[0]["tools"]
-    assert create_calls[1]["stream"]
+    assert "stream" not in create_calls[0]
 
 
 def test_openrouter_stream_uses_web_search_branch_when_enabled():
