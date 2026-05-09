@@ -447,6 +447,7 @@ _parse_currency_band_rows = bcra_service._parse_currency_band_rows
 def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
     """Proxy fetch helper to allow patching API dependencies in tests."""
 
+    _configure_bcra_service()
     return bcra_service.fetch_currency_band_limits(
         list_variables_fn=bcra_list_variables,
         api_get_fn=bcra_api_get,
@@ -456,6 +457,7 @@ def fetch_currency_band_limits() -> Optional[Dict[str, Any]]:
 def get_currency_band_limits() -> Optional[Dict[str, Any]]:
     """Proxy to BCRA service allowing tests to patch the fetcher."""
 
+    _configure_bcra_service()
     return bcra_service.get_currency_band_limits(fetcher=fetch_currency_band_limits)
 
 
@@ -2490,12 +2492,16 @@ def _report_unauthorized_config_attempt(
     )
 
 
-bcra_service.configure(
-    cached_requests=cached_requests,
-    redis_factory=config_redis,
-    admin_reporter=admin_report,
-    cache_history=get_cache_history,
-)
+def _configure_bcra_service() -> None:
+    bcra_service.configure(
+        cached_requests=cached_requests,
+        redis_factory=config_redis,
+        admin_reporter=admin_report,
+        cache_history=get_cache_history,
+    )
+
+
+_configure_bcra_service()
 
 
 configure_app_config(admin_reporter=admin_report)
