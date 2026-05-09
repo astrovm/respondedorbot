@@ -2492,13 +2492,28 @@ def _report_unauthorized_config_attempt(
     )
 
 
+_BCRA_SERVICE_CONFIG_SIGNATURE: Optional[Tuple[int, int, int, int]] = None
+
+
 def _configure_bcra_service() -> None:
+    global _BCRA_SERVICE_CONFIG_SIGNATURE
+
+    signature = (
+        id(cached_requests),
+        id(config_redis),
+        id(admin_report),
+        id(get_cache_history),
+    )
+    if signature == _BCRA_SERVICE_CONFIG_SIGNATURE:
+        return
+
     bcra_service.configure(
         cached_requests=cached_requests,
         redis_factory=config_redis,
         admin_reporter=admin_report,
         cache_history=get_cache_history,
     )
+    _BCRA_SERVICE_CONFIG_SIGNATURE = signature
 
 
 _configure_bcra_service()
