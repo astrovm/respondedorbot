@@ -297,6 +297,76 @@ def test_provider_runtime_executes_standalone_pseudo_web_fetch_call():
     }
 
 
+def test_provider_runtime_executes_preamble_then_pseudo_web_fetch_call():
+    from api.ai_pricing import AIUsageResult
+    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tool_runtime import ToolRuntime
+
+    first_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(
+                    content=(
+                        "ahi me fijo, saco los numeros de memoria no tengo\n"
+                        'web_fetch("https://example.com/bts")'
+                    ),
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ]
+    )
+    second_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="respuesta final", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    client = _FakeClient([first_response, second_response])
+    execute_tool_fn = MagicMock(return_value=SimpleNamespace(output="contenido bts"))
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=execute_tool_fn,
+            tool_registry={"web_fetch": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "bts en mexico?"}],
+        enable_web_search=False,
+        extra_tools=[{"type": "function", "function": {"name": "web_fetch"}}],
+        tool_context={"chat_id": "123"},
+    )
+
+    assert result is not None
+    assert result.text == "respuesta final"
+    assert_no_raw_tool_syntax(result.text)
+    execute_tool_fn.assert_called_once_with(
+        "web_fetch", {"url": "https://example.com/bts"}, {"chat_id": "123"}
+    )
+
+
 def test_provider_runtime_does_not_execute_pseudo_tool_inside_prose():
     from api.ai_pricing import AIUsageResult
     from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -409,7 +479,7 @@ def test_provider_runtime_does_not_execute_pseudo_tool_when_not_advertised():
     execute_tool_fn.assert_not_called()
 
 
-def test_openrouter_stream_executes_pseudo_tool_before_final_stream():
+def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call():
     from api.ai_pricing import AIUsageResult
     from api.providers.openrouter import OpenRouterProvider
     from api.tool_runtime import ToolRuntime
@@ -426,19 +496,15 @@ def test_openrouter_stream_executes_pseudo_tool_before_final_stream():
             )
         ]
     )
-    tool_round_done_response = _FakeResponse(
+    final_response = _FakeResponse(
         [
             _FakeChoice(
                 "stop",
-                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+                SimpleNamespace(content="respuesta final", tool_calls=[], annotations=[]),
             )
         ]
     )
-    stream_response = [
-        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="respuesta "))]),
-        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="final"))]),
-    ]
-    client = _FakeClient([pseudo_call_response, tool_round_done_response, stream_response])
+    client = _FakeClient([pseudo_call_response, final_response])
     execute_tool_fn = MagicMock(return_value=SimpleNamespace(output="contenido bts"))
     provider = OpenRouterProvider(
         get_client=lambda: client,
@@ -471,13 +537,14 @@ def test_openrouter_stream_executes_pseudo_tool_before_final_stream():
         )
     )
 
-    assert chunks == ["respuesta ", "final"]
+    assert chunks == ["respuesta final"]
     assert_no_raw_tool_syntax("".join(chunks))
     execute_tool_fn.assert_called_once_with(
         "web_fetch", {"url": "https://example.com/bts"}, {"chat_id": "123"}
     )
     assert client.calls[1]["messages"][-1]["content"] == "contenido bts"
-    assert "tools" not in client.calls[2]
+    assert len(client.calls) == 2
+    assert "tools" in client.calls[1]
 
 
 def test_provider_runtime_shared_tool_loop_matches_complete():

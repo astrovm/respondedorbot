@@ -217,7 +217,9 @@ class ProviderRuntime:
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
     ) -> Optional[Any]:
-        match = _PSEUDO_TOOL_CALL_PATTERN.match(text or "")
+        lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+        candidate = lines[-1] if lines else ""
+        match = _PSEUDO_TOOL_CALL_PATTERN.match(candidate)
         if not match:
             return None
 
