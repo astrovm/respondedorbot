@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
@@ -14,6 +17,10 @@ from api.tool_runtime import ToolRuntime
 
 logger = get_logger(__name__)
 _MAX_RETRIES = 5
+_PSEUDO_TOOL_CALL_PATTERN = re.compile(
+    r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
+    re.DOTALL,
+)
 
 
 def _is_retryable_provider_error(error: Exception) -> bool:
@@ -44,6 +51,19 @@ def _format_body_preview(body: str) -> str:
     if len(body) > 200:
         return f"{result} body_preview={body[:100]!r}...{body[-100:]!r}"
     return f"{result} body={body!r}"
+
+
+def _extra_tool_names(extra_tools: Optional[List[Dict[str, Any]]]) -> set[str]:
+    names: set[str] = set()
+    for tool in extra_tools or []:
+        function = tool.get("function")
+        if isinstance(function, Mapping):
+            name = function.get("name")
+        else:
+            name = tool.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 @dataclass(frozen=True)
@@ -191,6 +211,54 @@ class ProviderRuntime:
             known_calls.append(tool_call)
         return known_calls
 
+    def _parse_pseudo_tool_call(
+        self,
+        text: str,
+        round_idx: int,
+        extra_tools: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Any]:
+        match = _PSEUDO_TOOL_CALL_PATTERN.match(text or "")
+        if not match:
+            return None
+
+        tool_name = match.group("name")
+        if tool_name not in _extra_tool_names(extra_tools):
+            return None
+        if not self._tool_runtime.has_tool(tool_name):
+            return None
+
+        raw_arguments = match.group("arguments").strip()
+        if tool_name != "web_fetch":
+            return None
+
+        params: Dict[str, Any]
+        if raw_arguments.startswith(("'", '"')):
+            try:
+                url = ast.literal_eval(raw_arguments)
+            except (SyntaxError, ValueError):
+                return None
+            params = {"url": url}
+        else:
+            try:
+                parsed = json.loads(raw_arguments)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            params = parsed
+
+        url = params.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return None
+
+        return SimpleNamespace(
+            id=f"pseudo_call_{round_idx + 1}",
+            function=SimpleNamespace(
+                name=tool_name,
+                arguments=json.dumps({"url": url}),
+            ),
+        )
+
     def _execute_tool_rounds(
         self,
         *,
@@ -228,8 +296,9 @@ class ProviderRuntime:
             choice = response.choices[0]
             finish_reason = choice.finish_reason
 
+            message = choice.message
+
             if finish_reason == "tool_calls":
-                message = choice.message
                 tool_calls = getattr(message, "tool_calls", None) or []
                 if not extra_tools or not tool_calls:
                     text = str(message.content or "").strip()
@@ -255,6 +324,20 @@ class ProviderRuntime:
 
                 self._deps.increment_request_count()
                 continue
+
+            if finish_reason == "stop":
+                pseudo_call = self._parse_pseudo_tool_call(
+                    str(getattr(message, "content", "") or ""), round_idx, extra_tools
+                )
+                if pseudo_call is not None:
+                    current_messages = self._tool_runtime.apply_tool_calls(
+                        SimpleNamespace(content=""),
+                        [pseudo_call],
+                        current_messages,
+                        tool_context or {},
+                    )
+                    self._deps.increment_request_count()
+                    continue
 
             return current_messages
 
@@ -292,9 +375,9 @@ class ProviderRuntime:
 
             choice = response.choices[0]
             finish_reason = choice.finish_reason
+            message = choice.message
 
             if finish_reason == "tool_calls":
-                message = choice.message
                 tool_calls = getattr(message, "tool_calls", None) or []
                 if not extra_tools or not tool_calls:
                     text = str(message.content or "").strip()
@@ -343,7 +426,19 @@ class ProviderRuntime:
 
             if finish_reason == "stop":
                 metadata: Dict[str, Any] = {"provider": "openrouter"}
-                message = choice.message
+                pseudo_call = self._parse_pseudo_tool_call(
+                    str(getattr(message, "content", "") or ""), round_idx, extra_tools
+                )
+                if pseudo_call is not None:
+                    current_messages = self._tool_runtime.apply_tool_calls(
+                        SimpleNamespace(content=""),
+                        [pseudo_call],
+                        current_messages,
+                        tool_context or {},
+                    )
+                    self._deps.increment_request_count()
+                    continue
+
                 usage_map = self._deps.extract_usage_map(response) or {}
                 server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
                 web_search_requests = server_tool_use.get("web_search_requests")
