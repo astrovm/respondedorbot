@@ -561,12 +561,10 @@ def test_handle_transcribe_with_message_photo_success():
     with (
         patch("api.index.get_cached_description") as mock_cached,
         patch("api.index.download_telegram_file") as mock_download,
-        patch("api.index.resize_image_if_needed") as mock_resize,
         patch("api.index._describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"image data"
-        mock_resize.return_value = b"resized image data"
         mock_describe.return_value = MagicMock(
             text="image description",
             kind="vision",
@@ -583,9 +581,8 @@ def test_handle_transcribe_with_message_photo_success():
         result = handle_transcribe_with_message(message)
         assert result == "🖼️ en la imagen veo: image description"
         mock_download.assert_called_once_with("photo123")
-        mock_resize.assert_called_once_with(b"image data")
         mock_describe.assert_called_once_with(
-            b"resized image data",
+            b"image data",
             "describí lo que ves en esta imagen en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
             "photo123",
         )
@@ -597,12 +594,10 @@ def test_handle_transcribe_with_message_sticker_success():
     with (
         patch("api.index.get_cached_description") as mock_cached,
         patch("api.index.download_telegram_file") as mock_download,
-        patch("api.index.resize_image_if_needed") as mock_resize,
         patch("api.index._describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"sticker data"
-        mock_resize.return_value = b"resized sticker data"
         mock_describe.return_value = MagicMock(
             text="sticker description",
             kind="vision",
