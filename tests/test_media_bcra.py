@@ -620,6 +620,41 @@ def test_handle_transcribe_with_message_sticker_success():
         assert result == "🎨 en el sticker veo: sticker description"
 
 
+def test_handle_transcribe_with_message_animated_sticker_uses_thumbnail():
+    from api.index import handle_transcribe_with_message
+
+    with (
+        patch("api.index.get_cached_description", return_value=None),
+        patch("api.index.download_telegram_file") as mock_download,
+        patch("api.index.resize_image_if_needed", return_value=b"thumb image"),
+        patch("api.index._describe_image_result") as mock_describe,
+    ):
+        mock_download.return_value = b"thumb image"
+        mock_describe.return_value = MagicMock(
+            text="animated sticker description",
+            kind="vision",
+            billing_segment=lambda: {"kind": "vision"},
+        )
+
+        message = {
+            "message_id": 1,
+            "chat": {"id": 123},
+            "text": "/transcribe",
+            "reply_to_message": {
+                "sticker": {
+                    "file_id": "animated_sticker",
+                    "is_animated": True,
+                    "thumbnail": {"file_id": "sticker_thumb"},
+                }
+            },
+        }
+
+        result = handle_transcribe_with_message(message)
+
+    assert result == "🎨 en el sticker veo: animated sticker description"
+    mock_download.assert_called_once_with("sticker_thumb")
+
+
 def test_handle_transcribe_with_message_no_media():
     from api.index import handle_transcribe_with_message
 
@@ -1386,7 +1421,10 @@ def test_describe_image_groq_success():
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
-    with patch("api.index._get_openrouter_client", return_value=client):
+    with (
+        patch("api.index._get_openrouter_client", return_value=client),
+        patch("api.index.prepare_vision_image", return_value=(b"image_data", "image/webp")),
+    ):
         result = describe_image_groq(b"image_data")
 
     assert result == "A beautiful landscape with mountains"
@@ -1564,6 +1602,23 @@ def test_extract_message_content_audio_takes_priority_over_video():
     }
     text, photo_id, audio_id = extract_message_content(message)
     assert audio_id == "aud1"
+
+
+def test_extract_message_content_animated_sticker_uses_thumbnail():
+    from api.index import extract_message_content
+
+    message = {
+        "sticker": {
+            "file_id": "animated_sticker",
+            "is_animated": True,
+            "thumbnail": {"file_id": "sticker_thumb"},
+        }
+    }
+
+    text, photo_id, audio_id = extract_message_content(message)
+
+    assert photo_id == "sticker_thumb"
+    assert audio_id is None
 
 
 def test_transcribe_file_by_id_video_fallback():

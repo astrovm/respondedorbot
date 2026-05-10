@@ -1806,7 +1806,9 @@ def handle_transcribe_with_message_result(
                     sticker_source,
                     media_key="sticker",
                     extract_file_id=lambda media: (
-                        media.get("file_id") if isinstance(media, Mapping) else None
+                        _sticker_vision_file_id(media)
+                        if isinstance(media, Mapping)
+                        else None
                     ),
                     prompt="describí lo que ves en este sticker en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
                     success_prefix="🎨 en el sticker veo: ",
@@ -4352,6 +4354,18 @@ def extract_message_text(message: Dict) -> str:
     return ""
 
 
+def _sticker_vision_file_id(sticker: Mapping[str, Any]) -> Optional[str]:
+    if sticker.get("is_animated") or sticker.get("is_video"):
+        thumbnail = sticker.get("thumbnail") or sticker.get("thumb")
+        if isinstance(thumbnail, Mapping):
+            thumbnail_file_id = thumbnail.get("file_id")
+            if thumbnail_file_id:
+                return str(thumbnail_file_id)
+
+    file_id = sticker.get("file_id")
+    return str(file_id) if file_id else None
+
+
 def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional[str]]:
     """Extract text, photo/sticker file_id, and audio file_id from message"""
     text = extract_message_text(message)
@@ -4367,7 +4381,7 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
 
     # Check for sticker in the main message
     elif message.get("sticker"):
-        photo_file_id = message["sticker"]["file_id"]
+        photo_file_id = _sticker_vision_file_id(message["sticker"])
         _logger.debug("media detected type=sticker file_id=%s", photo_file_id)
 
     # If no photo/sticker in main message, check in replied message
@@ -4377,7 +4391,7 @@ def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional
             photo_file_id = replied_msg["photo"][-1]["file_id"]
             _logger.debug("media detected type=photo_quoted file_id=%s", photo_file_id)
         elif replied_msg.get("sticker"):
-            photo_file_id = replied_msg["sticker"]["file_id"]
+            photo_file_id = _sticker_vision_file_id(replied_msg["sticker"])
             _logger.debug("media detected type=sticker_quoted file_id=%s", photo_file_id)
 
     # Extract audio/voice/video
@@ -4614,10 +4628,20 @@ def _describe_image_result(
     if client is None:
         return None
 
+    prepared_image = prepare_vision_image(image_data)
+    if prepared_image is None:
+        _logger.info(
+            "vision image decode failed file_id=%s bytes=%d",
+            file_id,
+            len(image_data),
+        )
+        return None
+    image_bytes, image_mime = prepared_image
+
     print(f"Describing image with {VISION_MODEL}...")
     _increment_ai_provider_request_count()
-    image_base64 = encode_image_to_base64(image_data)
-    image_url = f"data:image/webp;base64,{image_base64}"
+    image_base64 = encode_image_to_base64(image_bytes)
+    image_url = f"data:{image_mime};base64,{image_base64}"
     try:
         response = client.chat.completions.create(
             model=VISION_MODEL,
@@ -4970,6 +4994,30 @@ def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
     except Exception as e:
         print(f"ERROR: Failed to resize image: {e}")
         return image_data
+
+
+def prepare_vision_image(
+    image_data: bytes, max_size: int = 512
+) -> Optional[Tuple[bytes, str]]:
+    """Decode and normalize still images for vision providers."""
+    try:
+        image = Image.open(io.BytesIO(image_data))
+        image.load()
+
+        if max(image.size) > max_size:
+            ratio = min(max_size / image.size[0], max_size / image.size[1])
+            new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGB")
+
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format="WEBP", quality=85, optimize=True)
+        return output_buffer.getvalue(), "image/webp"
+    except Exception as e:
+        _logger.info("vision image prepare failed: %s", e)
+        return None
 
 
 def encode_image_to_base64(image_data: bytes) -> str:

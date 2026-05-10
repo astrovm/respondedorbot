@@ -1255,6 +1255,25 @@ def test_describe_image_result_returns_none_when_provider_raises(
     assert result is None
 
 
+def test_describe_image_result_skips_provider_when_image_is_invalid(
+    monkeypatch,
+):
+    from api.index import _describe_image_result
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
+    monkeypatch.setenv(
+        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
+    )
+
+    client = MagicMock()
+
+    with patch("api.index.OpenAI", return_value=client):
+        result = _describe_image_result(b"not-an-image", file_id="sticker-file")
+
+    assert result is None
+    client.chat.completions.create.assert_not_called()
+
+
 def test_fetch_link_metadata_uses_ttl_constant():
     html_body = '<html><head><meta property="og:title" content="A" /></head></html>'
     mock_response = MagicMock()
