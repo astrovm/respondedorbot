@@ -4958,8 +4958,7 @@ def describe_media_by_id(
     """
 
     def _processor(media: bytes) -> Optional[AIUsageResult]:
-        resized = resize_image_if_needed(media)
-        return _describe_image_result(resized, prompt, file_id)
+        return _describe_image_result(media, prompt, file_id)
 
     return _process_media_with_cache(
         file_id=file_id,

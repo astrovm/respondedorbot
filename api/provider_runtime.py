@@ -32,15 +32,19 @@ _DSML_TOOL_CALL_PATTERN = re.compile(
 
 
 def _is_retryable_provider_error(error: Exception) -> bool:
-    if isinstance(error, json.JSONDecodeError):
-        return True
-    if "JSONDecodeError" in type(error).__name__:
+    if _is_json_decode_error(error):
         return True
     if isinstance(error, (APIConnectionError, APITimeoutError, RateLimitError)):
         return True
     if isinstance(error, APIStatusError):
         return error.status_code == 429 or error.status_code >= 500
     return False
+
+
+def _is_json_decode_error(error: Exception) -> bool:
+    return isinstance(error, json.JSONDecodeError) or (
+        "JSONDecodeError" in type(error).__name__
+    )
 
 
 def _format_provider_error_body(error: Exception) -> str:
@@ -174,10 +178,12 @@ class ProviderRuntime:
             error_context.update(
                 {"model": self._deps.primary_model, "tool_round": round_idx + 1}
             )
+            provider_error_body = _format_provider_error_body(error)
             logger.error(
-                "openrouter: chat error %s error=%s",
+                "openrouter: chat error %s error=%s%s",
                 format_log_context(error_context),
                 error,
+                provider_error_body,
             )
             self._deps.admin_report(
                 f"OpenRouter chat error model={self._deps.primary_model}",
@@ -186,6 +192,7 @@ class ProviderRuntime:
                     "finish_reason": "error",
                     "enable_web_search": enable_web_search,
                     "tool_round": round_idx + 1,
+                    "provider_error_body": provider_error_body,
                 },
             )
             return None
