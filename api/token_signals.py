@@ -187,6 +187,22 @@ def _age_from_ms(value: Any) -> str:
     return f"{max(1, seconds // 60)}m"
 
 
+def _age_from_candles(candles: Sequence[Sequence[float]]) -> str:
+    timestamps = [int(_as_float(candle[0])) for candle in candles if candle]
+    if not timestamps:
+        return "?"
+    seconds = max(0, int(time.time() - min(timestamps)))
+    days = seconds // 86400
+    if days >= 365:
+        return f"{days // 365}y"
+    if days >= 1:
+        return f"{days}d"
+    hours = seconds // 3600
+    if hours >= 1:
+        return f"{hours}h"
+    return f"{max(1, seconds // 60)}m"
+
+
 def _short_address(token: TokenAddress) -> str:
     if token.chain_id == "ethereum":
         return f"{token.address[:4]}...{token.address[-4:]}"
@@ -262,6 +278,18 @@ def _ath(candles: Sequence[Sequence[float]]) -> Tuple[float, Optional[int]]:
     return max(highs, key=lambda item: item[0])
 
 
+def _ath_market_cap(
+    candles: Sequence[Sequence[float]],
+    *,
+    current_price: float,
+    current_market_cap: float,
+) -> Tuple[float, Optional[int]]:
+    ath_price, ath_ts = _ath(candles)
+    if ath_price <= 0 or current_price <= 0 or current_market_cap <= 0:
+        return ath_price, ath_ts
+    return current_market_cap * (ath_price / current_price), ath_ts
+
+
 def format_signal_caption(signal: TokenSignal) -> str:
     pair = signal.pair
     token = signal.token
@@ -275,21 +303,35 @@ def format_signal_caption(signal: TokenSignal) -> str:
     price_change = (pair.get("priceChange") or {}).get("h24")
     one_hour = (pair.get("priceChange") or {}).get("h1")
     buys, sells = _txns(pair, "h1")
-    ath_value, ath_ts = _ath(signal.candles)
     current_price = _as_float(price)
+    current_market_cap = _as_float(market_cap)
+    ath_value, ath_ts = _ath_market_cap(
+        signal.candles,
+        current_price=current_price,
+        current_market_cap=current_market_cap,
+    )
     ath_line = "?"
     if ath_value > 0:
-        drawdown = ((current_price - ath_value) / ath_value) * 100 if current_price else 0
+        drawdown_base = current_market_cap if current_market_cap > 0 else current_price
+        drawdown = (
+            ((drawdown_base - ath_value) / ath_value) * 100
+            if drawdown_base
+            else 0
+        )
         age_days = ""
         if ath_ts:
             age = max(0, int(time.time() - ath_ts))
             age_days = f" / {max(1, age // 86400)}d"
-        ath_line = f"{_fmt_money(ath_value, price=True)} ({_fmt_pct(drawdown)}{age_days})"
+        ath_line = f"{_fmt_money(ath_value)} ({_fmt_pct(drawdown)}{age_days})"
+
+    age_text = _age_from_ms(pair.get("pairCreatedAt"))
+    if age_text == "?":
+        age_text = _age_from_candles(signal.candles)
 
     rows = [
         f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
         f"├ <code>{html.escape(_short_address(token))}</code>",
-        f"└ #{token.tag} | <i>{_age_from_ms(pair.get('pairCreatedAt'))}</i> | 👁️0",
+        f"└ #{token.tag} | <i>{age_text}</i> | 👁️0",
         "",
         "📊 <b>Stats</b>",
         f"├ USD   <b>{_fmt_money(price, price=True)}</b> ({_fmt_pct(price_change)})",
@@ -375,8 +417,12 @@ def render_signal_chart(signal: TokenSignal, *, width: int = 1280, height: int =
         current = _as_float(pair.get("priceUsd")) or _as_float(candles[-1][4])
         current_y = y_for(current)
         draw.line((margin_left, current_y, width - margin_right, current_y), fill="#00b894", width=1)
-        draw.rectangle((width - margin_right + 8, current_y - 24, width - 8, current_y + 24), fill="#0e8f7d")
-        draw.text((width - margin_right + 14, current_y - 18), price, fill="#eafff9", font=_font(18, True))
+        label_font = _font(18, True)
+        label_bbox = draw.textbbox((0, 0), price, font=label_font)
+        label_width = label_bbox[2] - label_bbox[0]
+        label_left = min(width - margin_right + 8, width - label_width - 20)
+        draw.rectangle((label_left, current_y - 24, width - 8, current_y + 24), fill="#0e8f7d")
+        draw.text((label_left + 6, current_y - 18), price, fill="#eafff9", font=label_font)
 
         ath_value, _ath_ts = _ath(candles)
         if ath_value:
