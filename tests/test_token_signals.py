@@ -4,9 +4,12 @@ from api.token_signals import (
     TokenAddress,
     TokenSignal,
     choose_best_pair,
+    choose_symbol_pair,
     detect_token_address,
+    detect_token_symbol,
     format_signal_caption,
     fetch_signal,
+    fetch_signal_by_symbol,
     handle_token_signal_callback,
     handle_token_signal_message,
     render_signal_chart,
@@ -55,11 +58,33 @@ def test_detect_token_address_rejects_extra_words():
     assert detect_token_address("not-a-token") is None
 
 
+def test_detect_token_symbol_accepts_cashtag_only():
+    assert detect_token_symbol("$glorp") == "glorp"
+    assert detect_token_symbol("$GLORP") == "glorp"
+    assert detect_token_symbol("buy $glorp") is None
+    assert detect_token_symbol("glorp") is None
+
+
 def test_choose_best_pair_uses_liquidity_then_volume():
     low = {"liquidity": {"usd": 10}, "volume": {"h24": 999}}
     high = {"liquidity": {"usd": 100}, "volume": {"h24": 1}}
 
     assert choose_best_pair([low, high]) is high
+
+
+def test_choose_symbol_pair_prefers_exact_supported_symbol():
+    unrelated = {
+        "chainId": "solana",
+        "baseToken": {"address": SOL_MINT, "symbol": "NOPE"},
+        "liquidity": {"usd": 1000000},
+    }
+    glorp = {
+        "chainId": "solana",
+        "baseToken": {"address": "FkBF9u1upwEMUPxnXjcydxxVSxgr8f3k1YXbz7G7bmtA", "symbol": "glorp"},
+        "liquidity": {"usd": 1000},
+    }
+
+    assert choose_symbol_pair([unrelated, glorp], "glorp") is glorp
 
 
 def test_format_signal_caption_contains_phanes_style_fields():
@@ -75,6 +100,7 @@ def test_format_signal_caption_contains_phanes_style_fields():
     assert "$TRIPLET" in caption
     assert "#SOL" in caption
     assert "📊 <b>Stats</b>" in caption
+    assert "├ LP    <b>$123.3K</b>" in caption
     assert "DEF" in caption
     assert "DS" in caption
     assert "ATH   <b>$2.50B" in caption
@@ -134,6 +160,31 @@ def test_fetch_signal_uses_first_pair_with_candles(monkeypatch):
     assert len(signal.candles) == 3
 
 
+def test_fetch_signal_by_symbol_resolves_pair_token(monkeypatch):
+    import api.token_signals as token_signals
+
+    pair = {
+        "chainId": "solana",
+        "pairAddress": "pair",
+        "baseToken": {
+            "address": "FkBF9u1upwEMUPxnXjcydxxVSxgr8f3k1YXbz7G7bmtA",
+            "name": "glorp",
+            "symbol": "glorp",
+        },
+        "liquidity": {"usd": 52500},
+        "volume": {"h24": 7400},
+    }
+    monkeypatch.setattr(token_signals, "search_token_pairs", lambda *_args: [pair])
+    monkeypatch.setattr(token_signals, "fetch_ohlcv", lambda *_args: _candles())
+
+    signal = fetch_signal_by_symbol(MagicMock(), "glorp")
+
+    assert signal is not None
+    assert signal.token.address == "FkBF9u1upwEMUPxnXjcydxxVSxgr8f3k1YXbz7G7bmtA"
+    assert signal.pair is pair
+    assert signal.compact_address is True
+
+
 def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
     import api.token_signals as token_signals
 
@@ -163,6 +214,37 @@ def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
     assert send_photo.call_args.kwargs["msg_id"] == "10"
     assert redis_client.setex.called
     assert "source_message_id" in redis_client.setex.call_args.args[2]
+
+
+def test_handle_token_signal_message_accepts_cashtag(monkeypatch):
+    import api.token_signals as token_signals
+
+    redis_client = MagicMock()
+    send_photo = MagicMock(return_value=55)
+    monkeypatch.setattr(
+        token_signals,
+        "fetch_signal_by_symbol",
+        lambda _redis, symbol: TokenSignal(
+            TokenAddress("solana", "solana", "SOL", SOL_MINT),
+            _pair(),
+            _candles(),
+        ),
+    )
+
+    handled = handle_token_signal_message(
+        {
+            "message_id": 10,
+            "chat": {"id": 100, "type": "group"},
+            "from": {"id": 7},
+            "text": "$glorp",
+        },
+        redis_client=redis_client,
+        send_photo=send_photo,
+        admin_report=MagicMock(),
+    )
+
+    assert handled is True
+    send_photo.assert_called_once()
 
 
 def test_handle_token_signal_message_does_not_handle_failed_send(monkeypatch):
