@@ -6,6 +6,7 @@ from api.token_signals import (
     choose_best_pair,
     detect_token_address,
     format_signal_caption,
+    fetch_signal,
     handle_token_signal_callback,
     handle_token_signal_message,
     render_signal_chart,
@@ -91,6 +92,31 @@ def test_render_signal_chart_returns_png():
     assert len(output) > 1000
 
 
+def test_fetch_signal_uses_first_pair_with_candles(monkeypatch):
+    import api.token_signals as token_signals
+
+    pairs = [
+        {"pairAddress": "bad", "liquidity": {"usd": 1000}, "volume": {"h24": 1}},
+        {"pairAddress": "good", "liquidity": {"usd": 100}, "volume": {"h24": 1}},
+    ]
+
+    monkeypatch.setattr(token_signals, "fetch_token_pairs", lambda *_args: pairs)
+    monkeypatch.setattr(
+        token_signals,
+        "fetch_ohlcv",
+        lambda _redis, _token, pair_address: _candles() if pair_address == "good" else [],
+    )
+
+    signal = fetch_signal(
+        MagicMock(),
+        TokenAddress("ethereum", "eth", "ETH", EVM_ADDRESS),
+    )
+
+    assert signal is not None
+    assert signal.pair["pairAddress"] == "good"
+    assert len(signal.candles) == 3
+
+
 def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
     import api.token_signals as token_signals
 
@@ -118,6 +144,32 @@ def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
     assert handled is True
     send_photo.assert_called_once()
     assert send_photo.call_args.kwargs["msg_id"] == "10"
+    assert redis_client.setex.called
+    assert "source_message_id" in redis_client.setex.call_args.args[2]
+
+
+def test_handle_token_signal_message_does_not_handle_failed_send(monkeypatch):
+    import api.token_signals as token_signals
+
+    monkeypatch.setattr(
+        token_signals,
+        "fetch_signal",
+        lambda _redis, token: TokenSignal(token, _pair(), _candles()),
+    )
+
+    handled = handle_token_signal_message(
+        {
+            "message_id": 10,
+            "chat": {"id": 100, "type": "group"},
+            "from": {"id": 7},
+            "text": SOL_MINT,
+        },
+        redis_client=MagicMock(),
+        send_photo=MagicMock(return_value=None),
+        admin_report=MagicMock(),
+    )
+
+    assert handled is False
 
 
 def test_handle_token_signal_callback_deletes_for_requester():
@@ -149,3 +201,42 @@ def test_handle_token_signal_callback_deletes_for_requester():
     assert handled is True
     delete_msg.assert_called_once_with("100", "55")
     answer.assert_called_once()
+
+
+def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
+    import api.token_signals as token_signals
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = (
+        '{"chat_id":"100","message_id":55,"source_message_id":"10",'
+        '"requester_id":"7","chain_id":"solana","network":"solana",'
+        '"tag":"SOL","address":"'
+        + SOL_MINT
+        + '"}'
+    )
+    send_photo = MagicMock(return_value=56)
+    delete_msg = MagicMock()
+    monkeypatch.setattr(
+        token_signals,
+        "fetch_signal",
+        lambda _redis, token: TokenSignal(token, _pair(), _candles()),
+    )
+
+    handled = handle_token_signal_callback(
+        {
+            "id": "cb1",
+            "data": "sig:ref:abc",
+            "from": {"id": 7},
+            "message": {"message_id": 55, "chat": {"id": 100, "type": "group"}},
+        },
+        redis_client=redis_client,
+        delete_msg=delete_msg,
+        send_photo=send_photo,
+        is_chat_admin=MagicMock(return_value=False),
+        answer_callback_query=MagicMock(),
+        admin_report=MagicMock(),
+    )
+
+    assert handled is True
+    assert send_photo.call_args.kwargs["msg_id"] == "10"
+    delete_msg.assert_called_once_with("100", "55")
