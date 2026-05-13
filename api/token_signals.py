@@ -343,8 +343,6 @@ def format_signal_caption(signal: TokenSignal) -> str:
         "",
         *_link_rows(token, pair, symbol),
     ]
-    if token.chain_id == "solana":
-        rows.extend(["", "⏏️ <b>TIP:</b> <i>Save fees on Axiom!</i>"])
     return "\n".join(rows)
 
 
