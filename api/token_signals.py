@@ -331,7 +331,7 @@ def format_signal_caption(signal: TokenSignal) -> str:
     rows = [
         f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
         f"├ <code>{html.escape(_short_address(token))}</code>",
-        f"└ #{token.tag} | <i>{age_text}</i> | 👁️0",
+        f"└ #{token.tag} | <i>{age_text}</i>",
         "",
         "📊 <b>Stats</b>",
         f"├ USD   <b>{_fmt_money(price, price=True)}</b> ({_fmt_pct(price_change)})",
