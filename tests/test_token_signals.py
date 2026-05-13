@@ -80,6 +80,7 @@ def test_format_signal_caption_contains_phanes_style_fields():
     assert "ATH   <b>$2.50B" in caption
     assert "TIP:" not in caption
     assert "Axiom!" not in caption
+    assert "👁️" not in caption
 
 
 def test_format_signal_caption_uses_candles_for_missing_pair_age():
