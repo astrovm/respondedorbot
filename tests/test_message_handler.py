@@ -1609,6 +1609,40 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits(monkey
     mock_send_msg.assert_called_once()
 
 
+def test_handle_msg_token_signal_skips_ai_flow(monkeypatch):
+    from api.message_handler import handle_msg
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+    mock_should = MagicMock(return_value=True)
+    mock_ai_response = MagicMock(return_value="ai")
+
+    monkeypatch.setattr(
+        "api.message_handler.handle_token_signal_message",
+        lambda *_args, **_kwargs: True,
+    )
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        should_gordo_respond=mock_should,
+        handle_ai_response=mock_ai_response,
+        credits_db_service=mock_credits,
+    )
+    message = {
+        "message_id": 10,
+        "chat": {"id": 100, "type": "group"},
+        "from": {"id": 7, "first_name": "Ana", "username": "ana"},
+        "text": "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump",
+    }
+
+    assert handle_msg(message, deps) == "ok"
+    mock_should.assert_not_called()
+    mock_ai_response.assert_not_called()
+
+
 def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_and_media(
     monkeypatch,
 ):
@@ -2273,6 +2307,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "replace_links": lambda text: (text, False, []),
         "send_msg": MagicMock(return_value=999),
         "send_animation": MagicMock(return_value=999),
+        "send_photo": MagicMock(return_value=999),
         "delete_msg": MagicMock(),
         "edit_message": MagicMock(),
         "admin_report": MagicMock(),
@@ -2396,6 +2431,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
         io=MessageIODeps(
             send_msg=flat_defaults["send_msg"],
             send_animation=flat_defaults["send_animation"],
+            send_photo=flat_defaults["send_photo"],
             delete_msg=flat_defaults["delete_msg"],
             edit_message=flat_defaults["edit_message"],
             admin_report=flat_defaults["admin_report"],
@@ -2533,6 +2569,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
         io=MessageIODeps(
             send_msg=MagicMock(),
             send_animation=MagicMock(),
+            send_photo=MagicMock(),
             delete_msg=MagicMock(),
             edit_message=MagicMock(),
             admin_report=MagicMock(),

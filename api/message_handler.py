@@ -18,6 +18,7 @@ from .billing_commands import (
     handle_transfer_command,
 )
 from api.message_state import save_user_chat_compacted_until, save_user_chat_summary
+from api.token_signals import handle_token_signal_message
 from .message_links import handle_link_replacement
 from api.utils.text import sanitize_summary_text
 from api.streaming import (
@@ -105,6 +106,7 @@ class MessageRoutingDeps:
 class MessageIODeps:
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
+    send_photo: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -184,6 +186,7 @@ class MessageHandlerDeps:
     replace_links: Callable[[str], Tuple[str, bool, List[str]]]
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
+    send_photo: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -267,6 +270,7 @@ def build_message_handler_deps(
         replace_links=routing.replace_links,
         send_msg=io.send_msg,
         send_animation=io.send_animation,
+        send_photo=io.send_photo,
         delete_msg=io.delete_msg,
         edit_message=io.edit_message,
         admin_report=io.admin_report,
@@ -1411,6 +1415,14 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             context=context,
             message=message,
         )
+        if handle_token_signal_message(
+            message,
+            redis_client=runtime.redis_client,
+            send_photo=deps.send_photo,
+            admin_report=deps.admin_report,
+        ):
+            return "ok"
+
         if _handle_prepared_message_early_response(
             deps,
             chat_id=context.chat_id,
