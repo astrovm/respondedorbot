@@ -167,6 +167,7 @@ from api.message_handler import (
     handle_msg as _handle_msg_impl,
 )
 from api.ai_service import build_ai_service
+from api.token_signals import handle_token_signal_callback
 from api.price_commands import (
     SUPPORTED_PRICE_SYMBOLS,
     expand_price_tokens,
@@ -2205,6 +2206,8 @@ def _telegram_request(
     method: str = "GET",
     params: Optional[Dict[str, Any]] = None,
     json_payload: Optional[Dict[str, Any]] = None,
+    data_payload: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
     timeout: int = 5,
     token: Optional[str] = None,
     log_errors: bool = True,
@@ -2224,14 +2227,23 @@ def _telegram_request(
     try:
         if method_upper == "GET" and json_payload is None:
             response = http_client.get(url, params=params, timeout=timeout)
-        elif method_upper == "POST" and params is None:
+        elif method_upper == "POST" and params is None and files is None:
             response = http_client.post(url, json=json_payload, timeout=timeout)
+        elif method_upper == "POST" and files is not None:
+            response = http_client.post(
+                url,
+                data=data_payload,
+                files=files,
+                timeout=timeout,
+            )
         else:
             response = http_client.request(
                 method_upper,
                 url,
                 params=params,
                 json=json_payload,
+                data=data_payload,
+                files=files,
                 timeout=timeout,
             )
         response.raise_for_status()
@@ -2290,6 +2302,23 @@ def send_msg(
     reply_markup: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     return telegram_gateway.send_message(chat_id, msg, msg_id, buttons, reply_markup)
+
+
+def send_photo(
+    chat_id: str,
+    photo: bytes,
+    *,
+    caption: str = "",
+    msg_id: str = "",
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    return telegram_gateway.send_photo(
+        chat_id,
+        photo,
+        caption=caption,
+        msg_id=msg_id,
+        reply_markup=reply_markup,
+    )
 
 
 def delete_msg(chat_id: str, msg_id: str) -> None:
@@ -5450,6 +5479,19 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
         handle_task_callback(callback_query)
         return
 
+    if str(callback_data).startswith("sig:"):
+        redis_client = config_redis()
+        handle_token_signal_callback(
+            callback_query,
+            redis_client=redis_client,
+            delete_msg=delete_msg,
+            send_photo=send_photo,
+            is_chat_admin=is_chat_admin,
+            answer_callback_query=_answer_callback_query,
+            admin_report=admin_report,
+        )
+        return
+
     redis_client = config_redis()
     chat_id_str = str(chat_id)
     chat_type = str(chat.get("type", ""))
@@ -5606,6 +5648,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         io=MessageIODeps(
             send_msg=send_msg,
             send_animation=send_animation,
+            send_photo=send_photo,
             delete_msg=delete_msg,
             edit_message=_edit_message_for_stream,
             admin_report=admin_report,
