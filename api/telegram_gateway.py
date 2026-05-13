@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from os import environ
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -112,7 +113,7 @@ class TelegramGateway:
             payload["parse_mode"] = "HTML"
             payload["disable_web_page_preview"] = True
         if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
+            payload["reply_markup"] = json.dumps(reply_markup)
 
         payload_response, error = self._telegram_request(
             "sendPhoto",

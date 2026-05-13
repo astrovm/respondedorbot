@@ -1,4 +1,5 @@
 from api.telegram_gateway import TelegramGateway
+import json
 
 
 class FakeTelegramRequest:
@@ -68,4 +69,7 @@ def test_send_photo_delegates_to_telegram_request():
     assert payload["caption"] == "<b>card</b>"
     assert payload["parse_mode"] == "HTML"
     assert payload["reply_to_message_id"] == "10"
+    assert json.loads(payload["reply_markup"]) == {
+        "inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]
+    }
     assert request.calls[0][1]["files"]["photo"][1] == b"png"

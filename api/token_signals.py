@@ -108,10 +108,13 @@ def fetch_ohlcv(redis_client: Any, token: TokenAddress, pair_address: str) -> Li
         "https://api.geckoterminal.com/api/v2/networks/"
         f"{token.network}/pools/{pair_address}/ohlcv/hour"
     )
-    data = _json_get(
-        url,
-        params={"aggregate": 4, "limit": 60, "currency": "usd"},
-    )
+    try:
+        data = _json_get(
+            url,
+            params={"aggregate": 4, "limit": 60, "currency": "usd"},
+        )
+    except Exception:
+        return []
     attributes = ((data or {}).get("data") or {}).get("attributes") or {}
     candles = attributes.get("ohlcv_list") or []
     _cache_set(redis_client, cache_key, 60, candles)
@@ -119,12 +122,27 @@ def fetch_ohlcv(redis_client: Any, token: TokenAddress, pair_address: str) -> Li
 
 
 def fetch_signal(redis_client: Any, token: TokenAddress) -> Optional[TokenSignal]:
-    pair = choose_best_pair(fetch_token_pairs(redis_client, token))
-    if pair is None:
+    pairs = sorted(
+        fetch_token_pairs(redis_client, token),
+        key=lambda pair: (
+            _as_float((pair.get("liquidity") or {}).get("usd")),
+            _as_float((pair.get("volume") or {}).get("h24")),
+        ),
+        reverse=True,
+    )
+    if not pairs:
         return None
-    pair_address = str(pair.get("pairAddress") or "")
-    candles = fetch_ohlcv(redis_client, token, pair_address) if pair_address else []
-    return TokenSignal(token=token, pair=pair, candles=candles)
+
+    fallback = pairs[0]
+    for pair in pairs:
+        pair_address = str(pair.get("pairAddress") or "")
+        if not pair_address:
+            continue
+        candles = fetch_ohlcv(redis_client, token, pair_address)
+        if candles:
+            return TokenSignal(token=token, pair=pair, candles=candles)
+
+    return TokenSignal(token=token, pair=fallback, candles=[])
 
 
 def _fmt_money(value: Any, *, price: bool = False) -> str:
@@ -416,6 +434,8 @@ def handle_token_signal_message(
             msg_id=message_id,
             reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
         )
+        if sent_id is None:
+            return False
         redis_setex_json(
             redis_client,
             signal_state_key(signal_id),
@@ -423,6 +443,7 @@ def handle_token_signal_message(
             {
                 "chat_id": chat_id,
                 "message_id": sent_id,
+                "source_message_id": message_id,
                 "requester_id": requester_id,
                 "chain_id": token.chain_id,
                 "network": token.network,
@@ -489,13 +510,17 @@ def handle_token_signal_callback(
         if signal is None:
             answer_callback_query(callback_id, text="sin datos", show_alert=True)
             return True
-        delete_msg(chat_id, message_id)
         sent_id = send_photo(
             chat_id,
             render_signal_chart(signal),
             caption=format_signal_caption(signal),
+            msg_id=str(state.get("source_message_id") or ""),
             reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
         )
+        if sent_id is None:
+            answer_callback_query(callback_id, text="falló refresh", show_alert=True)
+            return True
+        delete_msg(chat_id, message_id)
         new_state = dict(state)
         new_state["message_id"] = sent_id
         redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, new_state)
