@@ -18,6 +18,11 @@ from api.services.redis_helpers import redis_get_json, redis_setex_json
 SIGNAL_STATE_TTL = 3600
 _SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?$")
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_SYMBOL_RE = re.compile(r"^\$([A-Za-z][A-Za-z0-9]{1,31})$")
+_CHAIN_NETWORKS = {
+    "solana": ("solana", "SOL"),
+    "ethereum": ("eth", "ETH"),
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,7 @@ class TokenSignal:
     token: TokenAddress
     pair: Mapping[str, Any]
     candles: Sequence[Sequence[float]]
+    compact_address: bool = False
 
 
 def detect_token_address(text: str) -> Optional[TokenAddress]:
@@ -44,6 +50,16 @@ def detect_token_address(text: str) -> Optional[TokenAddress]:
     if _SOLANA_ADDRESS_RE.fullmatch(candidate):
         return TokenAddress("solana", "solana", "SOL", candidate)
     return None
+
+
+def detect_token_symbol(text: str) -> Optional[str]:
+    candidate = (text or "").strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return None
+    match = _SYMBOL_RE.fullmatch(candidate)
+    if not match:
+        return None
+    return match.group(1).lower()
 
 
 def signal_state_key(signal_id: str) -> str:
@@ -98,6 +114,53 @@ def choose_best_pair(pairs: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str
     )
 
 
+def _token_from_pair(pair: Mapping[str, Any]) -> Optional[TokenAddress]:
+    chain_id = str(pair.get("chainId") or "")
+    mapped = _CHAIN_NETWORKS.get(chain_id)
+    if mapped is None:
+        return None
+    base = pair.get("baseToken") or {}
+    address = str(base.get("address") or "")
+    if not address:
+        return None
+    network, tag = mapped
+    if chain_id == "ethereum":
+        address = address.lower()
+    return TokenAddress(chain_id, network, tag, address)
+
+
+def search_token_pairs(redis_client: Any, symbol: str) -> List[Mapping[str, Any]]:
+    normalized_symbol = symbol.lower().lstrip("$")
+    cache_key = f"token_signal:search:{normalized_symbol}"
+    cached = _cache_get(redis_client, cache_key)
+    if isinstance(cached, list):
+        return [item for item in cached if isinstance(item, Mapping)]
+
+    data = _json_get(
+        "https://api.dexscreener.com/latest/dex/search",
+        params={"q": normalized_symbol},
+    )
+    pairs = (data or {}).get("pairs") if isinstance(data, Mapping) else []
+    result = pairs if isinstance(pairs, list) else []
+    _cache_set(redis_client, cache_key, 30, result)
+    return [item for item in result if isinstance(item, Mapping)]
+
+
+def choose_symbol_pair(
+    pairs: Sequence[Mapping[str, Any]],
+    symbol: str,
+) -> Optional[Mapping[str, Any]]:
+    normalized = symbol.lower().lstrip("$")
+    supported = [pair for pair in pairs if _token_from_pair(pair) is not None]
+    exact = [
+        pair
+        for pair in supported
+        if str((pair.get("baseToken") or {}).get("symbol") or "").lower()
+        == normalized
+    ]
+    return choose_best_pair(exact or supported)
+
+
 def fetch_ohlcv(redis_client: Any, token: TokenAddress, pair_address: str) -> List[List[float]]:
     cache_key = f"token_signal:ohlcv:{token.network}:{pair_address}:hour"
     cached = _cache_get(redis_client, cache_key)
@@ -143,6 +206,48 @@ def fetch_signal(redis_client: Any, token: TokenAddress) -> Optional[TokenSignal
             return TokenSignal(token=token, pair=pair, candles=candles)
 
     return TokenSignal(token=token, pair=fallback, candles=[])
+
+
+def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSignal]:
+    pairs = sorted(
+        search_token_pairs(redis_client, symbol),
+        key=lambda pair: (
+            int(
+                str((pair.get("baseToken") or {}).get("symbol") or "").lower()
+                == symbol.lower().lstrip("$")
+            ),
+            _as_float((pair.get("liquidity") or {}).get("usd")),
+            _as_float((pair.get("volume") or {}).get("h24")),
+        ),
+        reverse=True,
+    )
+    pair = choose_symbol_pair(pairs, symbol)
+    token = _token_from_pair(pair or {})
+    if pair is None or token is None:
+        return None
+
+    pair_address = str(pair.get("pairAddress") or "")
+    candles = fetch_ohlcv(redis_client, token, pair_address) if pair_address else []
+    if candles:
+        return TokenSignal(token=token, pair=pair, candles=candles, compact_address=True)
+
+    for candidate in pairs:
+        candidate_token = _token_from_pair(candidate)
+        if candidate_token is None:
+            continue
+        candidate_address = str(candidate.get("pairAddress") or "")
+        if not candidate_address:
+            continue
+        candidate_candles = fetch_ohlcv(redis_client, candidate_token, candidate_address)
+        if candidate_candles:
+            return TokenSignal(
+                token=candidate_token,
+                pair=candidate,
+                candles=candidate_candles,
+                compact_address=True,
+            )
+
+    return TokenSignal(token=token, pair=pair, candles=[], compact_address=True)
 
 
 def _fmt_money(value: Any, *, price: bool = False) -> str:
@@ -207,6 +312,10 @@ def _short_address(token: TokenAddress) -> str:
     if token.chain_id == "ethereum":
         return f"{token.address[:4]}...{token.address[-4:]}"
     return token.address
+
+
+def _compact_address(token: TokenAddress) -> str:
+    return f"{token.address[:3]}...{token.address[-4:]}"
 
 
 def _txns(pair: Mapping[str, Any], key: str) -> Tuple[int, int]:
@@ -299,7 +408,8 @@ def format_signal_caption(signal: TokenSignal) -> str:
     price = pair.get("priceUsd")
     market_cap = pair.get("marketCap") or pair.get("fdv")
     volume = (pair.get("volume") or {}).get("h24")
-    liquidity = (pair.get("liquidity") or {}).get("usd")
+    liquidity = _as_float((pair.get("liquidity") or {}).get("usd"))
+    display_liquidity = liquidity / 2 if token.chain_id == "solana" else liquidity
     price_change = (pair.get("priceChange") or {}).get("h24")
     one_hour = (pair.get("priceChange") or {}).get("h1")
     buys, sells = _txns(pair, "h1")
@@ -330,14 +440,14 @@ def format_signal_caption(signal: TokenSignal) -> str:
 
     rows = [
         f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
-        f"├ <code>{html.escape(_short_address(token))}</code>",
+        f"├ <code>{html.escape(_compact_address(token) if signal.compact_address else _short_address(token))}</code>",
         f"└ #{token.tag} | <i>{age_text}</i>",
         "",
         "📊 <b>Stats</b>",
         f"├ USD   <b>{_fmt_money(price, price=True)}</b> ({_fmt_pct(price_change)})",
         f"├ MC    <b>{_fmt_money(market_cap)}</b>",
         f"├ Vol   <b>{_fmt_money(volume)}</b>",
-        f"├ LP    <b>{_fmt_money(liquidity)}</b>",
+        f"├ LP    <b>{_fmt_money(display_liquidity)}</b>",
         f"├ 1H    <b>{_fmt_pct(one_hour)}</b> 🟩 {buys} 🟥 {sells}",
         f"└ ATH   <b>{ath_line}</b>",
         "",
@@ -455,8 +565,10 @@ def handle_token_signal_message(
     send_photo: Callable[..., Optional[int]],
     admin_report: Callable[..., None],
 ) -> bool:
-    token = detect_token_address(str(message.get("text") or ""))
-    if token is None:
+    message_text = str(message.get("text") or "")
+    token = detect_token_address(message_text)
+    symbol = detect_token_symbol(message_text)
+    if token is None and symbol is None:
         return False
     chat = message.get("chat") or {}
     chat_id = str(chat.get("id") or "")
@@ -465,7 +577,11 @@ def handle_token_signal_message(
     if not chat_id or not message_id:
         return False
     try:
-        signal = fetch_signal(redis_client, token)
+        signal = (
+            fetch_signal(redis_client, token)
+            if token is not None
+            else fetch_signal_by_symbol(redis_client, str(symbol))
+        )
         if signal is None:
             return False
         signal_id = uuid.uuid4().hex[:12]
@@ -476,7 +592,7 @@ def handle_token_signal_message(
             chart,
             caption=caption,
             msg_id=message_id,
-            reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
+            reply_markup=build_signal_keyboard(signal_id, signal.token, signal.pair),
         )
         if sent_id is None:
             return False
@@ -489,15 +605,19 @@ def handle_token_signal_message(
                 "message_id": sent_id,
                 "source_message_id": message_id,
                 "requester_id": requester_id,
-                "chain_id": token.chain_id,
-                "network": token.network,
-                "tag": token.tag,
-                "address": token.address,
+                "chain_id": signal.token.chain_id,
+                "network": signal.token.network,
+                "tag": signal.token.tag,
+                "address": signal.token.address,
             },
         )
         return True
     except Exception as error:
-        admin_report("token signal failed", error, {"chat_id": chat_id, "token": token.address})
+        admin_report(
+            "token signal failed",
+            error,
+            {"chat_id": chat_id, "query": message_text},
+        )
         return False
 
 
