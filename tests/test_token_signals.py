@@ -77,6 +77,20 @@ def test_format_signal_caption_contains_phanes_style_fields():
     assert "📊 <b>Stats</b>" in caption
     assert "DEF" in caption
     assert "DS" in caption
+    assert "ATH   <b>$2.50B" in caption
+
+
+def test_format_signal_caption_uses_candles_for_missing_pair_age():
+    signal = TokenSignal(
+        TokenAddress("solana", "solana", "SOL", SOL_MINT),
+        {**_pair(), "pairCreatedAt": None},
+        _candles(),
+    )
+
+    caption = format_signal_caption(signal)
+
+    assert "#SOL | <i>" in caption
+    assert "#SOL | <i>?</i>" not in caption
 
 
 def test_render_signal_chart_returns_png():
