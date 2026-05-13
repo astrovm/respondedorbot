@@ -95,6 +95,42 @@ class TelegramGateway:
 
         return None
 
+    def send_photo(
+        self,
+        chat_id: str,
+        photo: bytes,
+        *,
+        caption: str = "",
+        msg_id: str = "",
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        payload: Dict[str, Any] = {"chat_id": chat_id}
+        if msg_id:
+            payload["reply_to_message_id"] = msg_id
+        if caption:
+            payload["caption"] = caption
+            payload["parse_mode"] = "HTML"
+            payload["disable_web_page_preview"] = True
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+
+        payload_response, error = self._telegram_request(
+            "sendPhoto",
+            method="POST",
+            data_payload=payload,
+            files={"photo": ("chart.png", photo, "image/png")},
+        )
+        if error or not payload_response:
+            return None
+
+        result = payload_response.get("result")
+        if isinstance(result, dict):
+            message_id = result.get("message_id")
+            if isinstance(message_id, int):
+                return message_id
+
+        return None
+
     def delete_message(self, chat_id: str, msg_id: str) -> None:
         self._telegram_request(
             "deleteMessage",

@@ -47,3 +47,25 @@ def test_delete_message_delegates_to_telegram_request():
     assert request.calls[0][0] == "deleteMessage"
     assert request.calls[0][1]["method"] == "GET"
     assert request.calls[0][1]["params"] == {"chat_id": "123", "message_id": "10"}
+
+
+def test_send_photo_delegates_to_telegram_request():
+    request = FakeTelegramRequest(({"ok": True, "result": {"message_id": 77}}, None))
+    gateway = TelegramGateway(telegram_request=request)
+
+    result = gateway.send_photo(
+        "123",
+        b"png",
+        caption="<b>card</b>",
+        msg_id="10",
+        reply_markup={"inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]},
+    )
+
+    assert result == 77
+    assert request.calls[0][0] == "sendPhoto"
+    payload = request.calls[0][1]["data_payload"]
+    assert payload["chat_id"] == "123"
+    assert payload["caption"] == "<b>card</b>"
+    assert payload["parse_mode"] == "HTML"
+    assert payload["reply_to_message_id"] == "10"
+    assert request.calls[0][1]["files"]["photo"][1] == b"png"
