@@ -2200,6 +2200,10 @@ def get_instance_name() -> str:
     return f"estoy corriendo en {instance} boludo"
 
 
+def _redact_telegram_tokens(value: str) -> str:
+    return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
+
+
 def _telegram_request(
     endpoint: str,
     *,
@@ -2262,11 +2266,11 @@ def _telegram_request(
                 pass
         is_not_modified = "message is not modified" in error_description.lower()
         if log_errors and not is_not_modified:
-            detail = str(error)
+            detail = _redact_telegram_tokens(str(error))
             response_body = ""
             if hasattr(error, "response") and error.response is not None:
                 try:
-                    body = error.response.text
+                    body = _redact_telegram_tokens(error.response.text)
                     response_body = f" response={body[:500]!r}"
                 except Exception:
                     pass
@@ -2505,9 +2509,15 @@ def admin_report(
     # Add error details if provided
     if error:
         error_details = f"\n\ntipo de error: {type(error).__name__}"
-        error_details += f"\nmensaje de error: {error!s}"
+        error_details += f"\nmensaje de error: {_redact_telegram_tokens(str(error))}"
 
-        error_details += f"\n\ntraceback:\n{traceback.format_exc()}"
+        if error.__traceback__ is not None:
+            formatted_traceback = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )
+        else:
+            formatted_traceback = "traceback unavailable"
+        error_details += f"\n\ntraceback:\n{_redact_telegram_tokens(formatted_traceback)}"
 
         formatted_message += error_details
 
