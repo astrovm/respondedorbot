@@ -117,6 +117,8 @@ def test_format_signal_caption_contains_phanes_style_fields():
 
     assert "Tung Tung" in caption
     assert "$TRIPLET" in caption
+    assert "J8P...pump" in caption
+    assert f"<code>{SOL_MINT}</code>" not in caption
     assert "#SOL" in caption
     assert "📊 <b>Stats</b>" in caption
     assert "├ LP    <b>$123.3K</b>" in caption
@@ -286,7 +288,6 @@ def test_fetch_signal_by_symbol_resolves_pair_token(monkeypatch):
     assert signal is not None
     assert signal.token.address == "FkBF9u1upwEMUPxnXjcydxxVSxgr8f3k1YXbz7G7bmtA"
     assert signal.pair is pair
-    assert signal.compact_address is True
 
 
 def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
@@ -445,14 +446,14 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
     delete_msg.assert_called_once_with("100", "55")
 
 
-def test_handle_token_signal_callback_refresh_preserves_compact_address(monkeypatch):
+def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
     import api.token_signals as token_signals
 
     redis_client = MagicMock()
     redis_client.get.return_value = (
         '{"chat_id":"100","message_id":55,"source_message_id":"10",'
         '"requester_id":"7","chain_id":"solana","network":"solana",'
-        '"tag":"SOL","compact_address":true,"address":"'
+        '"tag":"SOL","address":"'
         + SOL_MINT
         + '"}'
     )
