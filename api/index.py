@@ -2260,7 +2260,8 @@ def _telegram_request(
                     error_description = str(parsed_error.get("description") or error)
             except Exception:
                 pass
-        if log_errors:
+        is_not_modified = "message is not modified" in error_description.lower()
+        if log_errors and not is_not_modified:
             detail = str(error)
             response_body = ""
             if hasattr(error, "response") and error.response is not None:
@@ -5512,7 +5513,6 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             callback_query,
             redis_client=redis_client,
             delete_msg=delete_msg,
-            send_photo=send_photo,
             edit_photo=edit_photo,
             is_chat_admin=is_chat_admin,
             answer_callback_query=_answer_callback_query,
