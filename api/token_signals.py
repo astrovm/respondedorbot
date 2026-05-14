@@ -23,6 +23,7 @@ _CHAIN_NETWORKS = {
     "solana": ("solana", "SOL"),
     "ethereum": ("eth", "ETH"),
 }
+_PUMP_PROGRESS_INITIAL_REAL_TOKENS = 793_100_000_000_000
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,10 @@ class TokenSignal:
     pair: Mapping[str, Any]
     candles: Sequence[Sequence[float]]
     compact_address: bool = False
+    supply: Optional[float] = None
+    token_image_url: Optional[str] = None
+    socials: Optional[Mapping[str, str]] = None
+    pump: Optional[Mapping[str, Any]] = None
 
 
 def detect_token_address(text: str) -> Optional[TokenAddress]:
@@ -78,6 +83,120 @@ def _cache_get(redis_client: Any, key: str) -> Optional[Any]:
 
 def _cache_set(redis_client: Any, key: str, ttl: int, value: Any) -> None:
     redis_setex_json(redis_client, key, ttl, value)
+
+
+def fetch_pump_metadata(
+    redis_client: Any,
+    token: TokenAddress,
+) -> Optional[Mapping[str, Any]]:
+    if token.chain_id != "solana" or not token.address.endswith("pump"):
+        return None
+
+    cache_key = f"token_signal:pump:{token.address}"
+    cached = _cache_get(redis_client, cache_key)
+    if isinstance(cached, Mapping):
+        return cached
+
+    try:
+        data = _json_get(f"https://frontend-api-v3.pump.fun/coins/{token.address}")
+    except Exception:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    _cache_set(redis_client, cache_key, 60, data)
+    return data
+
+
+def fetch_solana_supply(redis_client: Any, token: TokenAddress) -> Optional[float]:
+    if token.chain_id != "solana":
+        return None
+
+    cache_key = f"token_signal:supply:{token.address}"
+    cached = _cache_get(redis_client, cache_key)
+    if isinstance(cached, (int, float, str)):
+        supply = _as_float(cached, default=-1)
+        return supply if supply >= 0 else None
+
+    try:
+        response = http_client.post(
+            "https://api.mainnet-beta.solana.com",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenSupply",
+                "params": [token.address],
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+
+    value = ((payload or {}).get("result") or {}).get("value") or {}
+    supply = _as_float(value.get("uiAmountString") or value.get("uiAmount"), default=-1)
+    if supply < 0:
+        return None
+    _cache_set(redis_client, cache_key, 300, supply)
+    return supply
+
+
+def _info_mapping(pair: Mapping[str, Any]) -> Mapping[str, Any]:
+    info = pair.get("info")
+    return info if isinstance(info, Mapping) else {}
+
+
+def _extract_token_image_url(pair: Mapping[str, Any], pump: Optional[Mapping[str, Any]]) -> Optional[str]:
+    if pump:
+        image_uri = pump.get("image_uri")
+        if isinstance(image_uri, str) and image_uri:
+            return image_uri
+    info = _info_mapping(pair)
+    for key in ("header", "imageUrl", "openGraph"):
+        value = info.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_socials(pair: Mapping[str, Any], pump: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    socials: Dict[str, str] = {}
+    if pump:
+        for key, label in (("twitter", "X"), ("telegram", "TG"), ("website", "Web")):
+            value = pump.get(key)
+            if isinstance(value, str) and value.strip():
+                socials[label] = value.strip()
+
+    info = _info_mapping(pair)
+    websites = info.get("websites")
+    if isinstance(websites, list):
+        for website in websites:
+            if not isinstance(website, Mapping):
+                continue
+            url = website.get("url")
+            label = str(website.get("label") or "Web")
+            if isinstance(url, str) and url and "Web" not in socials:
+                socials["Web"] = url
+            elif isinstance(url, str) and url and label:
+                socials.setdefault(label[:12], url)
+
+    raw_socials = info.get("socials")
+    if isinstance(raw_socials, list):
+        for social in raw_socials:
+            if not isinstance(social, Mapping):
+                continue
+            url = social.get("url")
+            social_type = str(social.get("type") or "").lower()
+            label = {
+                "twitter": "X",
+                "x": "X",
+                "telegram": "TG",
+                "tiktok": "TikTok",
+                "discord": "Discord",
+            }.get(social_type, social_type[:12] or "Link")
+            if isinstance(url, str) and url:
+                socials.setdefault(label, url)
+    return socials
 
 
 def fetch_token_pairs(redis_client: Any, token: TokenAddress) -> List[Mapping[str, Any]]:
@@ -184,6 +303,31 @@ def fetch_ohlcv(redis_client: Any, token: TokenAddress, pair_address: str) -> Li
     return [item for item in candles if isinstance(item, list)]
 
 
+def _enrich_signal(
+    redis_client: Any,
+    token: TokenAddress,
+    pair: Mapping[str, Any],
+    candles: Sequence[Sequence[float]],
+    *,
+    compact_address: bool = False,
+) -> TokenSignal:
+    pump = fetch_pump_metadata(redis_client, token)
+    supply = fetch_solana_supply(redis_client, token)
+    if supply is None and pump:
+        supply = _as_float(pump.get("total_supply"), default=0) / 1_000_000
+    socials = _extract_socials(pair, pump)
+    return TokenSignal(
+        token=token,
+        pair=pair,
+        candles=candles,
+        compact_address=compact_address,
+        supply=supply,
+        token_image_url=_extract_token_image_url(pair, pump),
+        socials=socials or None,
+        pump=pump,
+    )
+
+
 def fetch_signal(redis_client: Any, token: TokenAddress) -> Optional[TokenSignal]:
     pairs = sorted(
         fetch_token_pairs(redis_client, token),
@@ -203,9 +347,9 @@ def fetch_signal(redis_client: Any, token: TokenAddress) -> Optional[TokenSignal
             continue
         candles = fetch_ohlcv(redis_client, token, pair_address)
         if candles:
-            return TokenSignal(token=token, pair=pair, candles=candles)
+            return _enrich_signal(redis_client, token, pair, candles)
 
-    return TokenSignal(token=token, pair=fallback, candles=[])
+    return _enrich_signal(redis_client, token, fallback, [])
 
 
 def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSignal]:
@@ -229,7 +373,13 @@ def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSign
     pair_address = str(pair.get("pairAddress") or "")
     candles = fetch_ohlcv(redis_client, token, pair_address) if pair_address else []
     if candles:
-        return TokenSignal(token=token, pair=pair, candles=candles, compact_address=True)
+        return _enrich_signal(
+            redis_client,
+            token,
+            pair,
+            candles,
+            compact_address=True,
+        )
 
     for candidate in pairs:
         candidate_token = _token_from_pair(candidate)
@@ -240,14 +390,15 @@ def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSign
             continue
         candidate_candles = fetch_ohlcv(redis_client, candidate_token, candidate_address)
         if candidate_candles:
-            return TokenSignal(
-                token=candidate_token,
-                pair=candidate,
-                candles=candidate_candles,
+            return _enrich_signal(
+                redis_client,
+                candidate_token,
+                candidate,
+                candidate_candles,
                 compact_address=True,
             )
 
-    return TokenSignal(token=token, pair=pair, candles=[], compact_address=True)
+    return _enrich_signal(redis_client, token, pair, [], compact_address=True)
 
 
 def _fmt_money(value: Any, *, price: bool = False) -> str:
@@ -266,6 +417,18 @@ def _fmt_money(value: Any, *, price: bool = False) -> str:
     if abs_number >= 1_000:
         return f"${number / 1_000:.1f}K".replace(".0", "")
     return f"${number:,.0f}"
+
+
+def _fmt_amount(value: Any) -> str:
+    number = _as_float(value)
+    abs_number = abs(number)
+    if abs_number >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.1f}B".replace(".0B", "B")
+    if abs_number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M".replace(".0M", "M")
+    if abs_number >= 1_000:
+        return f"{number / 1_000:.1f}K".replace(".0K", "K")
+    return f"{number:,.0f}"
 
 
 def _fmt_pct(value: Any) -> str:
@@ -306,6 +469,28 @@ def _age_from_candles(candles: Sequence[Sequence[float]]) -> str:
     if hours >= 1:
         return f"{hours}h"
     return f"{max(1, seconds // 60)}m"
+
+
+def _age_text_from_seconds(seconds: int) -> str:
+    days = max(0, seconds) // 86400
+    if days >= 365:
+        return f"{days // 365}y"
+    if days >= 1:
+        return f"{days}d"
+    hours = max(0, seconds) // 3600
+    if hours >= 1:
+        return f"{hours}h"
+    return f"{max(1, max(0, seconds) // 60)}m"
+
+
+def _pump_progress(pump: Optional[Mapping[str, Any]]) -> Optional[float]:
+    if not pump or bool(pump.get("complete")):
+        return None
+    real_token_reserves = _as_float(pump.get("real_token_reserves"), default=-1)
+    if real_token_reserves < 0:
+        return None
+    progress = 100 - ((real_token_reserves * 100) / _PUMP_PROGRESS_INITIAL_REAL_TOKENS)
+    return max(0.0, min(100.0, progress))
 
 
 def _short_address(token: TokenAddress) -> str:
@@ -349,6 +534,26 @@ def _x_search_url(token: TokenAddress, symbol: str, pair: Mapping[str, Any]) -> 
 
 def _html_link(label: str, url: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+
+
+def _social_rows(socials: Optional[Mapping[str, str]]) -> List[str]:
+    if not socials:
+        return []
+    order = ("X", "TG", "Web", "TikTok", "Discord")
+    links: List[str] = []
+    seen: set[str] = set()
+    for label in order:
+        url = socials.get(label)
+        if isinstance(url, str) and url:
+            links.append(_html_link(label, url))
+            seen.add(label)
+    for label, url in socials.items():
+        if label in seen or not isinstance(url, str) or not url:
+            continue
+        links.append(_html_link(label, url))
+    if not links:
+        return []
+    return ["", "🔗 <b>Socials</b>", f"└ {' • '.join(links)}"]
 
 
 def _link_rows(token: TokenAddress, pair: Mapping[str, Any], symbol: str) -> List[str]:
@@ -415,11 +620,19 @@ def format_signal_caption(signal: TokenSignal) -> str:
     buys, sells = _txns(pair, "h1")
     current_price = _as_float(price)
     current_market_cap = _as_float(market_cap)
-    ath_value, ath_ts = _ath_market_cap(
-        signal.candles,
-        current_price=current_price,
-        current_market_cap=current_market_cap,
-    )
+    pump_ath_value = _as_float((signal.pump or {}).get("ath_market_cap"))
+    pump_ath_ts_ms = _as_float((signal.pump or {}).get("ath_market_cap_timestamp"))
+    if pump_ath_value > 0:
+        ath_value, ath_ts = (
+            pump_ath_value,
+            int(pump_ath_ts_ms / 1000) if pump_ath_ts_ms > 0 else None,
+        )
+    else:
+        ath_value, ath_ts = _ath_market_cap(
+            signal.candles,
+            current_price=current_price,
+            current_market_cap=current_market_cap,
+        )
     ath_line = "?"
     if ath_value > 0:
         drawdown_base = current_market_cap if current_market_cap > 0 else current_price
@@ -435,21 +648,39 @@ def format_signal_caption(signal: TokenSignal) -> str:
         ath_line = f"{_fmt_money(ath_value)} ({_fmt_pct(drawdown)}{age_days})"
 
     age_text = _age_from_ms(pair.get("pairCreatedAt"))
+    if age_text == "?" and signal.pump:
+        age_text = _age_from_ms(signal.pump.get("created_timestamp"))
     if age_text == "?":
         age_text = _age_from_candles(signal.candles)
+    pump_progress = _pump_progress(signal.pump)
+    chain_text = f"#{token.tag}"
+    if pump_progress is not None:
+        chain_text = f"{chain_text} (Pump @ {pump_progress:.0f}%)"
 
-    rows = [
-        f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
-        f"├ <code>{html.escape(_compact_address(token) if signal.compact_address else _short_address(token))}</code>",
-        f"└ #{token.tag} | <i>{age_text}</i>",
-        "",
-        "📊 <b>Stats</b>",
+    stat_rows = [
         f"├ USD   <b>{_fmt_money(price, price=True)}</b> ({_fmt_pct(price_change)})",
         f"├ MC    <b>{_fmt_money(market_cap)}</b>",
         f"├ Vol   <b>{_fmt_money(volume)}</b>",
         f"├ LP    <b>{_fmt_money(display_liquidity)}</b>",
-        f"├ 1H    <b>{_fmt_pct(one_hour)}</b> 🟩 {buys} 🟥 {sells}",
-        f"└ ATH   <b>{ath_line}</b>",
+    ]
+    if signal.supply is not None and signal.supply > 0:
+        supply = _fmt_amount(signal.supply)
+        stat_rows.append(f"├ Sup   <b>{supply}/{supply}</b>")
+    stat_rows.extend(
+        [
+            f"├ 1H    <b>{_fmt_pct(one_hour)}</b> 🟩 {buys} 🟥 {sells}",
+            f"└ ATH   <b>{ath_line}</b>",
+        ]
+    )
+
+    rows = [
+        f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
+        f"├ <code>{html.escape(_compact_address(token) if signal.compact_address else _short_address(token))}</code>",
+        f"└ {chain_text} | <i>{age_text}</i>",
+        "",
+        "📊 <b>Stats</b>",
+        *stat_rows,
+        *_social_rows(signal.socials),
         "",
         *_link_rows(token, pair, symbol),
     ]
@@ -543,6 +774,50 @@ def render_signal_chart(signal: TokenSignal, *, width: int = 1280, height: int =
     return output.getvalue()
 
 
+def has_usable_chart(signal: TokenSignal) -> bool:
+    candles = [c for c in signal.candles if len(c) >= 5]
+    if len(candles) < 5:
+        return False
+    highs = [_as_float(c[2]) for c in candles]
+    lows = [_as_float(c[3]) for c in candles]
+    return max(highs, default=0) > 0 and not math.isclose(
+        min(lows, default=0),
+        max(highs, default=0),
+    )
+
+
+def download_token_image(signal: TokenSignal) -> Optional[bytes]:
+    if not signal.token_image_url:
+        return None
+    try:
+        response = http_client.get(signal.token_image_url, timeout=8)
+        response.raise_for_status()
+    except Exception:
+        return None
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "image/" not in content_type:
+        return None
+    if not response.content:
+        return None
+    try:
+        with Image.open(io.BytesIO(response.content)) as image:
+            image.thumbnail((1280, 900))
+            output = io.BytesIO()
+            image.convert("RGB").save(output, format="PNG", optimize=True)
+            return output.getvalue()
+    except Exception:
+        return None
+
+
+def render_or_fetch_signal_photo(signal: TokenSignal) -> bytes:
+    if has_usable_chart(signal):
+        return render_signal_chart(signal)
+    image_bytes = download_token_image(signal)
+    if image_bytes:
+        return image_bytes
+    return render_signal_chart(signal)
+
+
 def build_signal_keyboard(signal_id: str, token: TokenAddress, pair: Mapping[str, Any]) -> Dict[str, Any]:
     copy_url = f"https://t.me/share/url?url={quote(token.address)}"
     ds_url = str(pair.get("url") or _defined_url(token))
@@ -585,7 +860,7 @@ def handle_token_signal_message(
         if signal is None:
             return False
         signal_id = uuid.uuid4().hex[:12]
-        chart = render_signal_chart(signal)
+        chart = render_or_fetch_signal_photo(signal)
         caption = format_signal_caption(signal)
         sent_id = send_photo(
             chat_id,
@@ -676,7 +951,7 @@ def handle_token_signal_callback(
             return True
         sent_id = send_photo(
             chat_id,
-            render_signal_chart(signal),
+            render_or_fetch_signal_photo(signal),
             caption=format_signal_caption(signal),
             msg_id=str(state.get("source_message_id") or ""),
             reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
