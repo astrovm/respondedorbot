@@ -728,6 +728,61 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
     assert metadata["refunded_credit_units"] == 0
 
 
+def test_settle_reserved_ai_credits_batch_ignores_none_segments():
+    billing = _build_billing_helper()
+
+    billing.settle_reserved_ai_credits_batch(
+        [
+            {
+                "reserved_credit_units": whole_credits_to_units(1),
+                "chat_scope_id": 1,
+                "source": "user",
+                "usage_tag": "ai_response_base",
+            },
+            {
+                "reserved_credit_units": whole_credits_to_units(1),
+                "chat_scope_id": 1,
+                "source": "user",
+                "usage_tag": "image_context_media",
+            },
+        ],
+        [
+            None,
+            {
+                "kind": "chat",
+                "model": "deepseek/deepseek-v4-flash",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                },
+            },
+        ],
+        reason="ai_response_success",
+    )
+
+    billing.credits_db_service.refund_ai_charge.assert_called_once()
+    assert billing.credits_db_service.record_ai_settlement_result.call_count == 1
+
+
+def test_settle_reserved_ai_credits_ignores_none_segments():
+    billing = _build_billing_helper()
+
+    billing.settle_reserved_ai_credits(
+        {
+            "reserved_credit_units": whole_credits_to_units(1),
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "ai_response_base",
+        },
+        [None],
+        reason="ai_response_success",
+    )
+
+    billing.credits_db_service.refund_ai_charge.assert_not_called()
+    billing.credits_db_service.charge_ai_credits.assert_not_called()
+    billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+
+
 def test_settle_reserved_ai_credits_refunds_transcribe_partial_usage():
     billing = _build_billing_helper()
     reserved_credit_units = whole_credits_to_units(3)
