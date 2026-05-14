@@ -443,3 +443,41 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
     assert handled is True
     assert send_photo.call_args.kwargs["msg_id"] == "10"
     delete_msg.assert_called_once_with("100", "55")
+
+
+def test_handle_token_signal_callback_refresh_preserves_compact_address(monkeypatch):
+    import api.token_signals as token_signals
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = (
+        '{"chat_id":"100","message_id":55,"source_message_id":"10",'
+        '"requester_id":"7","chain_id":"solana","network":"solana",'
+        '"tag":"SOL","compact_address":true,"address":"'
+        + SOL_MINT
+        + '"}'
+    )
+    send_photo = MagicMock(return_value=56)
+    monkeypatch.setattr(
+        token_signals,
+        "fetch_signal",
+        lambda _redis, token: TokenSignal(token, _pair(), _candles()),
+    )
+
+    handled = handle_token_signal_callback(
+        {
+            "id": "cb1",
+            "data": "sig:ref:abc",
+            "from": {"id": 7},
+            "message": {"message_id": 55, "chat": {"id": 100, "type": "group"}},
+        },
+        redis_client=redis_client,
+        delete_msg=MagicMock(),
+        send_photo=send_photo,
+        is_chat_admin=MagicMock(return_value=False),
+        answer_callback_query=MagicMock(),
+        admin_report=MagicMock(),
+    )
+
+    assert handled is True
+    caption = send_photo.call_args.kwargs["caption"]
+    assert "J8P...pump" in caption

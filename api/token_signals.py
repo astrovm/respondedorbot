@@ -884,6 +884,7 @@ def handle_token_signal_message(
                 "network": signal.token.network,
                 "tag": signal.token.tag,
                 "address": signal.token.address,
+                "compact_address": signal.compact_address,
             },
         )
         return True
@@ -949,6 +950,17 @@ def handle_token_signal_callback(
         if signal is None:
             answer_callback_query(callback_id, text="sin datos", show_alert=True)
             return True
+        if bool(state.get("compact_address")) and not signal.compact_address:
+            signal = TokenSignal(
+                token=signal.token,
+                pair=signal.pair,
+                candles=signal.candles,
+                compact_address=True,
+                supply=signal.supply,
+                token_image_url=signal.token_image_url,
+                socials=signal.socials,
+                pump=signal.pump,
+            )
         sent_id = send_photo(
             chat_id,
             render_or_fetch_signal_photo(signal),
