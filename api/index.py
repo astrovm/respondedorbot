@@ -2250,6 +2250,16 @@ def _telegram_request(
         if not expect_json:
             return {}, None
     except requests.RequestException as error:
+        error_payload = None
+        error_description = str(error)
+        if hasattr(error, "response") and error.response is not None:
+            try:
+                parsed_error = error.response.json()
+                if isinstance(parsed_error, dict):
+                    error_payload = parsed_error
+                    error_description = str(parsed_error.get("description") or error)
+            except Exception:
+                pass
         if log_errors:
             detail = str(error)
             response_body = ""
@@ -2260,7 +2270,7 @@ def _telegram_request(
                 except Exception:
                     pass
             print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
-        return None, str(error)
+        return error_payload, error_description
 
     try:
         payload = response.json()
