@@ -889,6 +889,7 @@ def handle_token_signal_callback(
     redis_client: Any,
     delete_msg: Callable[[str, str], None],
     send_photo: Callable[..., Optional[int]],
+    edit_photo: Callable[..., bool],
     is_chat_admin: Callable[..., bool],
     answer_callback_query: Callable[..., None],
     admin_report: Callable[..., None],
@@ -936,20 +937,17 @@ def handle_token_signal_callback(
         if signal is None:
             answer_callback_query(callback_id, text="sin datos", show_alert=True)
             return True
-        sent_id = send_photo(
+        edited = edit_photo(
             chat_id,
+            message_id,
             render_or_fetch_signal_photo(signal),
             caption=format_signal_caption(signal),
-            msg_id=str(state.get("source_message_id") or ""),
             reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
         )
-        if sent_id is None:
+        if not edited:
             answer_callback_query(callback_id, text="falló refresh", show_alert=True)
             return True
-        delete_msg(chat_id, message_id)
-        new_state = dict(state)
-        new_state["message_id"] = sent_id
-        redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, new_state)
+        redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, dict(state))
         answer_callback_query(callback_id, text="refrescado")
         return True
     except Exception as error:
