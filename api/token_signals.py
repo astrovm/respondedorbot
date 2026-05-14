@@ -39,7 +39,6 @@ class TokenSignal:
     token: TokenAddress
     pair: Mapping[str, Any]
     candles: Sequence[Sequence[float]]
-    compact_address: bool = False
     supply: Optional[float] = None
     token_image_url: Optional[str] = None
     socials: Optional[Mapping[str, str]] = None
@@ -308,8 +307,6 @@ def _enrich_signal(
     token: TokenAddress,
     pair: Mapping[str, Any],
     candles: Sequence[Sequence[float]],
-    *,
-    compact_address: bool = False,
 ) -> TokenSignal:
     pump = fetch_pump_metadata(redis_client, token)
     supply = fetch_solana_supply(redis_client, token)
@@ -320,7 +317,6 @@ def _enrich_signal(
         token=token,
         pair=pair,
         candles=candles,
-        compact_address=compact_address,
         supply=supply,
         token_image_url=_extract_token_image_url(pair, pump),
         socials=socials or None,
@@ -378,7 +374,6 @@ def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSign
             token,
             pair,
             candles,
-            compact_address=True,
         )
 
     for candidate in pairs:
@@ -395,10 +390,9 @@ def fetch_signal_by_symbol(redis_client: Any, symbol: str) -> Optional[TokenSign
                 candidate_token,
                 candidate,
                 candidate_candles,
-                compact_address=True,
             )
 
-    return _enrich_signal(redis_client, token, pair, [], compact_address=True)
+    return _enrich_signal(redis_client, token, pair, [])
 
 
 def _fmt_money(value: Any, *, price: bool = False) -> str:
@@ -491,12 +485,6 @@ def _pump_progress(pump: Optional[Mapping[str, Any]]) -> Optional[float]:
         return None
     progress = 100 - ((real_token_reserves * 100) / _PUMP_PROGRESS_INITIAL_REAL_TOKENS)
     return max(0.0, min(100.0, progress))
-
-
-def _short_address(token: TokenAddress) -> str:
-    if token.chain_id == "ethereum":
-        return f"{token.address[:4]}...{token.address[-4:]}"
-    return token.address
 
 
 def _compact_address(token: TokenAddress) -> str:
@@ -675,7 +663,7 @@ def format_signal_caption(signal: TokenSignal) -> str:
 
     rows = [
         f"💊 <b>{html.escape(name)}</b> (${html.escape(symbol)})",
-        f"├ <code>{html.escape(_compact_address(token) if signal.compact_address else _short_address(token))}</code>",
+        f"├ <code>{html.escape(_compact_address(token))}</code>",
         f"└ {chain_text} | <i>{age_text}</i>",
         "",
         "📊 <b>Stats</b>",
@@ -884,7 +872,6 @@ def handle_token_signal_message(
                 "network": signal.token.network,
                 "tag": signal.token.tag,
                 "address": signal.token.address,
-                "compact_address": signal.compact_address,
             },
         )
         return True
@@ -950,17 +937,6 @@ def handle_token_signal_callback(
         if signal is None:
             answer_callback_query(callback_id, text="sin datos", show_alert=True)
             return True
-        if bool(state.get("compact_address")) and not signal.compact_address:
-            signal = TokenSignal(
-                token=signal.token,
-                pair=signal.pair,
-                candles=signal.candles,
-                compact_address=True,
-                supply=signal.supply,
-                token_image_url=signal.token_image_url,
-                socials=signal.socials,
-                pump=signal.pump,
-            )
         sent_id = send_photo(
             chat_id,
             render_or_fetch_signal_photo(signal),
