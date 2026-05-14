@@ -102,3 +102,21 @@ def test_edit_photo_delegates_to_telegram_request():
         "inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]
     }
     assert request.calls[0][1]["files"]["photo"][1] == b"png"
+
+
+def test_edit_photo_treats_not_modified_as_success():
+    request = FakeTelegramRequest(
+        (
+            {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+            },
+            "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+        )
+    )
+    gateway = TelegramGateway(telegram_request=request)
+
+    result = gateway.edit_photo("123", "77", b"png", caption="<b>card</b>")
+
+    assert result is True
