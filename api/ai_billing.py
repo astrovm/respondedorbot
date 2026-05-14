@@ -59,6 +59,24 @@ def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
     return None
 
 
+def _segment_has_token_usage(segment: Optional[Mapping[str, Any]]) -> bool:
+    raw_usage = (segment or {}).get("usage") or {}
+    usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
+    raw_prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+    prompt_tokens_details = (
+        dict(raw_prompt_tokens_details)
+        if isinstance(raw_prompt_tokens_details, Mapping)
+        else {}
+    )
+    return (
+        int(usage.get("input_tokens", 0) or 0) > 0
+        or int(usage.get("output_tokens", 0) or 0) > 0
+        or int(usage.get("prompt_tokens", 0) or 0) > 0
+        or int(usage.get("completion_tokens", 0) or 0) > 0
+        or int(prompt_tokens_details.get("cached_tokens", 0) or 0) > 0
+    )
+
+
 def build_topup_keyboard() -> Dict[str, Any]:
     """Build inline keyboard with top-up packs."""
 
@@ -560,19 +578,7 @@ class AIMessageBilling:
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
         raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
-        has_usage = any(
-            int(segment.get("usage", {}).get("input_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("output_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("prompt_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("completion_tokens", 0) or 0) > 0
-            or int(
-                (segment.get("usage", {}).get("prompt_tokens_details", {}) or {}).get(
-                    "cached_tokens", 0
-                )
-                or 0
-            )
-            for segment in billing_segments
-        )
+        has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
         refunded_credit_units = 0
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
@@ -810,19 +816,7 @@ class AIMessageBilling:
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
 
-        has_usage = any(
-            int(segment.get("usage", {}).get("input_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("output_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("prompt_tokens", 0) or 0) > 0
-            or int(segment.get("usage", {}).get("completion_tokens", 0) or 0) > 0
-            or int(
-                (segment.get("usage", {}).get("prompt_tokens_details", {}) or {}).get(
-                    "cached_tokens", 0
-                )
-                or 0
-            )
-            for segment in billing_segments
-        )
+        has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
 
         if raw_usd_micros == 0 and not has_usage:
             actual_credit_units = reserved_credit_units_total
