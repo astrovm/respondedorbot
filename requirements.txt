@@ -1,6 +1,6 @@
 emoji>=2.15.0
 redis>=7.4.0
-requests>=2.33.1
+requests>=2.34.1
 openai>=2.33.0
 groq>=1.2.0
 Pillow>=12.2.0
