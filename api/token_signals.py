@@ -807,14 +807,13 @@ def render_or_fetch_signal_photo(signal: TokenSignal) -> bytes:
 
 
 def build_signal_keyboard(signal_id: str, token: TokenAddress, pair: Mapping[str, Any]) -> Dict[str, Any]:
-    copy_url = f"https://t.me/share/url?url={quote(token.address)}"
     ds_url = str(pair.get("url") or _defined_url(token))
     return {
         "inline_keyboard": [
             [
                 {"text": "🗑", "callback_data": f"sig:del:{signal_id}"},
                 {"text": "🔄", "callback_data": f"sig:ref:{signal_id}"},
-                {"text": "📋", "url": copy_url},
+                {"text": "📋", "copy_text": {"text": token.address}},
                 {"text": "DS", "url": ds_url},
             ]
         ]
