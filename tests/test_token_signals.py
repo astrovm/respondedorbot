@@ -11,6 +11,7 @@ from api.token_signals import (
     format_signal_caption,
     fetch_signal,
     fetch_signal_by_symbol,
+    build_signal_keyboard,
     has_usable_chart,
     handle_token_signal_callback,
     handle_token_signal_message,
@@ -239,6 +240,15 @@ def test_fetch_pump_metadata_uses_api(monkeypatch):
     assert metadata is not None
     assert metadata["twitter"] == "https://x.com/token"
     assert redis_client.setex.called
+
+
+def test_build_signal_keyboard_uses_native_copy_text_button():
+    token = TokenAddress("solana", "solana", "SOL", SOL_MINT)
+
+    keyboard = build_signal_keyboard("abc", token, _pair())
+
+    copy_button = keyboard["inline_keyboard"][0][2]
+    assert copy_button == {"text": "📋", "copy_text": {"text": SOL_MINT}}
 
 
 def test_fetch_signal_uses_first_pair_with_candles(monkeypatch):
