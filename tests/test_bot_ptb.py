@@ -147,6 +147,44 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
             {"id": "pcq1", "invoice_payload": "topup:p50"}
         )
 
+    async def test_polling_network_error_is_warning_only(self):
+        class NetworkError(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = NetworkError("httpx.ConnectError: All connection attempts failed")
+
+        with (
+            patch("api.bot_ptb.admin_report") as admin_report,
+            patch("api.bot_ptb._run_sync") as run_sync,
+            patch("api.bot_ptb.time.monotonic", return_value=1000.0),
+            patch("api.bot_ptb._last_polling_network_report", 0.0),
+            self.assertLogs("api.bot_ptb", level="WARNING") as logs,
+        ):
+            await bot_ptb._error_handler(object(), context)
+
+        admin_report.assert_not_called()
+        run_sync.assert_not_called()
+        self.assertIn("PTB polling network error; polling will retry", logs.output[0])
+
+    async def test_polling_network_error_warning_is_rate_limited(self):
+        class NetworkError(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = NetworkError("httpx.RemoteProtocolError: disconnected")
+
+        with (
+            patch("api.bot_ptb.admin_report") as admin_report,
+            patch("api.bot_ptb._run_sync") as run_sync,
+            patch("api.bot_ptb.time.monotonic", return_value=1001.0),
+            patch("api.bot_ptb._last_polling_network_report", 900.0),
+        ):
+            await bot_ptb._error_handler(object(), context)
+
+        admin_report.assert_not_called()
+        run_sync.assert_not_called()
+
 
 class PollingEntrypointTests(unittest.TestCase):
     def test_main_uses_hardcoded_defaults(self):
