@@ -406,7 +406,6 @@ def test_handle_token_signal_callback_deletes_for_requester():
         },
         redis_client=redis_client,
         delete_msg=delete_msg,
-        send_photo=MagicMock(),
         edit_photo=MagicMock(),
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=answer,
@@ -429,7 +428,6 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
         + SOL_MINT
         + '"}'
     )
-    send_photo = MagicMock()
     edit_photo = MagicMock(return_value=True)
     delete_msg = MagicMock()
     monkeypatch.setattr(
@@ -447,7 +445,6 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
         },
         redis_client=redis_client,
         delete_msg=delete_msg,
-        send_photo=send_photo,
         edit_photo=edit_photo,
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=MagicMock(),
@@ -455,7 +452,6 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
     )
 
     assert handled is True
-    send_photo.assert_not_called()
     edit_photo.assert_called_once()
     assert edit_photo.call_args.args[:2] == ("100", "55")
     delete_msg.assert_not_called()
@@ -472,7 +468,6 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
         + SOL_MINT
         + '"}'
     )
-    send_photo = MagicMock()
     edit_photo = MagicMock(return_value=True)
     monkeypatch.setattr(
         token_signals,
@@ -489,7 +484,6 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
         },
         redis_client=redis_client,
         delete_msg=MagicMock(),
-        send_photo=send_photo,
         edit_photo=edit_photo,
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=MagicMock(),
@@ -497,7 +491,6 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
     )
 
     assert handled is True
-    send_photo.assert_not_called()
     caption = edit_photo.call_args.kwargs["caption"]
     assert "J8P...pump" in caption
 
@@ -524,7 +517,6 @@ def test_handle_token_signal_callback_refresh_rate_limits(monkeypatch):
         },
         redis_client=redis_client,
         delete_msg=MagicMock(),
-        send_photo=MagicMock(),
         edit_photo=edit_photo,
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=answer,
