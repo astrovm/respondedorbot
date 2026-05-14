@@ -6,6 +6,7 @@ import concurrent.futures
 import importlib
 import logging
 import os
+import time
 from typing import Any, Dict, Optional, Sequence
 
 from api.index import (
@@ -18,6 +19,8 @@ from api.index import (
 
 logger = logging.getLogger(__name__)
 _HANDLER_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_POLLING_NETWORK_REPORT_INTERVAL_SECONDS = 300.0
+_last_polling_network_report = 0.0
 
 
 def _update_to_dict(update: Any) -> Dict[str, Any]:
@@ -115,19 +118,40 @@ async def _post_init(application: Any) -> None:
     logger.info("PTB application initialized")
 
 
+def _is_polling_network_error(update_id: Any, error: BaseException) -> bool:
+    return update_id == "unknown" and error.__class__.__name__ == "NetworkError"
+
+
+def _should_log_polling_network_error(now: float) -> bool:
+    global _last_polling_network_report
+    if now - _last_polling_network_report < _POLLING_NETWORK_REPORT_INTERVAL_SECONDS:
+        return False
+    _last_polling_network_report = now
+    return True
+
+
 async def _error_handler(update: object, context: Any) -> None:
     update_id = getattr(update, "update_id", "unknown")
+    error = context.error
+    if error is not None and _is_polling_network_error(update_id, error):
+        if _should_log_polling_network_error(time.monotonic()):
+            logger.warning(
+                "PTB polling network error; polling will retry: %s",
+                error,
+            )
+        return
+
     logger.exception(
         "Unhandled PTB exception while processing update_id=%s",
         update_id,
-        exc_info=context.error,
+        exc_info=error,
     )
 
     try:
         await _run_sync(
             admin_report,
             f"PTB unhandled exception (update_id={update_id})",
-            context.error,
+            error,
         )
     except Exception:
         logger.exception("Failed to report PTB unhandled exception")
