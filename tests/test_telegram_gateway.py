@@ -73,3 +73,32 @@ def test_send_photo_delegates_to_telegram_request():
         "inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]
     }
     assert request.calls[0][1]["files"]["photo"][1] == b"png"
+
+
+def test_edit_photo_delegates_to_telegram_request():
+    request = FakeTelegramRequest(({"ok": True, "result": {"message_id": 77}}, None))
+    gateway = TelegramGateway(telegram_request=request)
+
+    result = gateway.edit_photo(
+        "123",
+        "77",
+        b"png",
+        caption="<b>card</b>",
+        reply_markup={"inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]},
+    )
+
+    assert result is True
+    assert request.calls[0][0] == "editMessageMedia"
+    payload = request.calls[0][1]["data_payload"]
+    assert payload["chat_id"] == "123"
+    assert payload["message_id"] == "77"
+    assert json.loads(payload["media"]) == {
+        "type": "photo",
+        "media": "attach://photo",
+        "caption": "<b>card</b>",
+        "parse_mode": "HTML",
+    }
+    assert json.loads(payload["reply_markup"]) == {
+        "inline_keyboard": [[{"text": "x", "callback_data": "sig"}]]
+    }
+    assert request.calls[0][1]["files"]["photo"][1] == b"png"

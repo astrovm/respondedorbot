@@ -132,6 +132,35 @@ class TelegramGateway:
 
         return None
 
+    def edit_photo(
+        self,
+        chat_id: str,
+        message_id: str,
+        photo: bytes,
+        *,
+        caption: str = "",
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        media: Dict[str, Any] = {"type": "photo", "media": "attach://photo"}
+        if caption:
+            media["caption"] = caption
+            media["parse_mode"] = "HTML"
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": json.dumps(media),
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+
+        payload_response, error = self._telegram_request(
+            "editMessageMedia",
+            method="POST",
+            data_payload=payload,
+            files={"photo": ("chart.png", photo, "image/png")},
+        )
+        return error is None and bool(payload_response)
+
     def delete_message(self, chat_id: str, msg_id: str) -> None:
         self._telegram_request(
             "deleteMessage",

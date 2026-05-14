@@ -407,6 +407,7 @@ def test_handle_token_signal_callback_deletes_for_requester():
         redis_client=redis_client,
         delete_msg=delete_msg,
         send_photo=MagicMock(),
+        edit_photo=MagicMock(),
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=answer,
         admin_report=MagicMock(),
@@ -428,7 +429,8 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
         + SOL_MINT
         + '"}'
     )
-    send_photo = MagicMock(return_value=56)
+    send_photo = MagicMock()
+    edit_photo = MagicMock(return_value=True)
     delete_msg = MagicMock()
     monkeypatch.setattr(
         token_signals,
@@ -446,14 +448,17 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
         redis_client=redis_client,
         delete_msg=delete_msg,
         send_photo=send_photo,
+        edit_photo=edit_photo,
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=MagicMock(),
         admin_report=MagicMock(),
     )
 
     assert handled is True
-    assert send_photo.call_args.kwargs["msg_id"] == "10"
-    delete_msg.assert_called_once_with("100", "55")
+    send_photo.assert_not_called()
+    edit_photo.assert_called_once()
+    assert edit_photo.call_args.args[:2] == ("100", "55")
+    delete_msg.assert_not_called()
 
 
 def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
@@ -467,7 +472,8 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
         + SOL_MINT
         + '"}'
     )
-    send_photo = MagicMock(return_value=56)
+    send_photo = MagicMock()
+    edit_photo = MagicMock(return_value=True)
     monkeypatch.setattr(
         token_signals,
         "fetch_signal",
@@ -484,11 +490,13 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
         redis_client=redis_client,
         delete_msg=MagicMock(),
         send_photo=send_photo,
+        edit_photo=edit_photo,
         is_chat_admin=MagicMock(return_value=False),
         answer_callback_query=MagicMock(),
         admin_report=MagicMock(),
     )
 
     assert handled is True
-    caption = send_photo.call_args.kwargs["caption"]
+    send_photo.assert_not_called()
+    caption = edit_photo.call_args.kwargs["caption"]
     assert "J8P...pump" in caption
