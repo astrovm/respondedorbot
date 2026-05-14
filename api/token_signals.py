@@ -16,6 +16,7 @@ from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 
 SIGNAL_STATE_TTL = 3600
+SIGNAL_REFRESH_COOLDOWN_SECONDS = 15
 _SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?$")
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _SYMBOL_RE = re.compile(r"^\$([A-Za-z][A-Za-z0-9]{1,31})$")
@@ -926,6 +927,18 @@ def handle_token_signal_callback(
         answer_callback_query(callback_id)
         return True
 
+    now = time.time()
+    last_refresh_at = state.get("last_refresh_at")
+    if isinstance(last_refresh_at, (int, float)):
+        elapsed = now - float(last_refresh_at)
+        if elapsed < SIGNAL_REFRESH_COOLDOWN_SECONDS:
+            answer_callback_query(
+                callback_id,
+                text="❌ Podés actualizar cada 15s",
+                show_alert=True,
+            )
+            return True
+
     token = TokenAddress(
         str(state.get("chain_id") or ""),
         str(state.get("network") or ""),
@@ -947,7 +960,9 @@ def handle_token_signal_callback(
         if not edited:
             answer_callback_query(callback_id, text="falló refresh", show_alert=True)
             return True
-        redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, dict(state))
+        new_state = dict(state)
+        new_state["last_refresh_at"] = now
+        redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, new_state)
         answer_callback_query(callback_id, text="refrescado")
         return True
     except Exception as error:
