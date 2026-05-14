@@ -2321,6 +2321,23 @@ def send_photo(
     )
 
 
+def edit_photo(
+    chat_id: str,
+    message_id: str,
+    photo: bytes,
+    *,
+    caption: str = "",
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> bool:
+    return telegram_gateway.edit_photo(
+        chat_id,
+        message_id,
+        photo,
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
 def delete_msg(chat_id: str, msg_id: str) -> None:
     """Delete a Telegram message"""
     telegram_gateway.delete_message(chat_id, msg_id)
@@ -5486,6 +5503,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             redis_client=redis_client,
             delete_msg=delete_msg,
             send_photo=send_photo,
+            edit_photo=edit_photo,
             is_chat_admin=is_chat_admin,
             answer_callback_query=_answer_callback_query,
             admin_report=admin_report,
