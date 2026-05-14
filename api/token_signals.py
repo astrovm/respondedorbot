@@ -889,7 +889,6 @@ def handle_token_signal_callback(
     *,
     redis_client: Any,
     delete_msg: Callable[[str, str], None],
-    send_photo: Callable[..., Optional[int]],
     edit_photo: Callable[..., bool],
     is_chat_admin: Callable[..., bool],
     answer_callback_query: Callable[..., None],
