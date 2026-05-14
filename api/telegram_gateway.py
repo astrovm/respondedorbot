@@ -159,6 +159,8 @@ class TelegramGateway:
             data_payload=payload,
             files={"photo": ("chart.png", photo, "image/png")},
         )
+        if error and "message is not modified" in error.lower():
+            return True
         return error is None and bool(payload_response)
 
     def delete_message(self, chat_id: str, msg_id: str) -> None:
