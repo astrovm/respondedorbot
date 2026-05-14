@@ -500,3 +500,41 @@ def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
     send_photo.assert_not_called()
     caption = edit_photo.call_args.kwargs["caption"]
     assert "J8P...pump" in caption
+
+
+def test_handle_token_signal_callback_refresh_rate_limits(monkeypatch):
+    redis_client = MagicMock()
+    redis_client.get.return_value = (
+        '{"chat_id":"100","message_id":55,"source_message_id":"10",'
+        '"requester_id":"7","chain_id":"solana","network":"solana",'
+        '"tag":"SOL","address":"'
+        + SOL_MINT
+        + '","last_refresh_at":1000}'
+    )
+    answer = MagicMock()
+    edit_photo = MagicMock()
+    monkeypatch.setattr("api.token_signals.time.time", lambda: 1005)
+
+    handled = handle_token_signal_callback(
+        {
+            "id": "cb1",
+            "data": "sig:ref:abc",
+            "from": {"id": 7},
+            "message": {"message_id": 55, "chat": {"id": 100, "type": "group"}},
+        },
+        redis_client=redis_client,
+        delete_msg=MagicMock(),
+        send_photo=MagicMock(),
+        edit_photo=edit_photo,
+        is_chat_admin=MagicMock(return_value=False),
+        answer_callback_query=answer,
+        admin_report=MagicMock(),
+    )
+
+    assert handled is True
+    edit_photo.assert_not_called()
+    answer.assert_called_once_with(
+        "cb1",
+        text="❌ Podés actualizar cada 15s",
+        show_alert=True,
+    )
