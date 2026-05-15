@@ -89,3 +89,19 @@ def test_build_commands_list_includes_tldr_alias_when_documented():
     assert "resumen" in names
     assert "summary" in names
     assert "tldr" in names
+
+
+def test_default_commands_list_excludes_removed_search_commands():
+    from api.command_registry import COMMAND_GROUPS
+    from api.telegram_bot_commands import COMMAND_DESCRIPTIONS, build_commands_list
+
+    commands = build_commands_list(COMMAND_GROUPS)
+    names = {item["command"] for item in commands}
+
+    assert "buscar" not in COMMAND_DESCRIPTIONS
+    assert "search" not in COMMAND_DESCRIPTIONS
+    assert "buscar" not in names
+    assert "search" not in names
+    assert "crypto" in names
+    assert "criptos" in names
+    assert "instance" in names
