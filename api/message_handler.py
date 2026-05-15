@@ -1133,7 +1133,7 @@ def _handle_non_ai_command(
 
         base_prompt = (
             "actualizá el resumen anterior con los mensajes nuevos. "
-            "máximo 10 items cortos y concretos, uno por línea. "
+            "entre 10 y 20 items cortos y concretos si hay material suficiente, uno por línea. "
             "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
             "evitá relleno, repetición, contexto innecesario y frases largas. "
             f"{PROMPT_NO_MARKDOWN} "
