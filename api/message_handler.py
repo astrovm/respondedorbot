@@ -17,7 +17,6 @@ from .billing_commands import (
     handle_balance_command,
     handle_transfer_command,
 )
-from api.message_state import save_user_chat_compacted_until, save_user_chat_summary
 from api.token_signals import handle_token_signal_message
 from .message_links import handle_link_replacement
 from api.utils.text import sanitize_summary_text
@@ -1158,7 +1157,7 @@ def _handle_non_ai_command(
             )
             return final_text
 
-        final_text, pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(
+        final_text, _pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(
             SummaryCommandRequest(
                 chat_id=chat_id,
                 message=message,
@@ -1170,10 +1169,6 @@ def _handle_non_ai_command(
         )
 
         final_text = sanitize_summary_text(final_text)
-
-        if not is_fallback and pending_marker is not None:
-            save_user_chat_summary(redis_client, chat_id, final_text)
-            save_user_chat_compacted_until(redis_client, chat_id, pending_marker)
 
         if is_fallback:
             return final_text, None, False, command

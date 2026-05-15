@@ -193,8 +193,6 @@ from api.message_state import (
     get_chat_compacted_until as _state_get_chat_compacted_until,
     get_chat_history as _state_get_chat_history,
     get_chat_summary as _state_get_chat_summary,
-    get_user_chat_compacted_until as _state_get_user_chat_compacted_until,
-    get_user_chat_summary as _state_get_user_chat_summary,
     save_chat_compacted_until as _state_save_chat_compacted_until,
     save_chat_summary as _state_save_chat_summary,
     save_bot_message_metadata as _state_save_bot_message_metadata,
@@ -3556,6 +3554,7 @@ def _build_summary_messages(
         _load_bot_personality(),
         source.delta_messages,
         prompt_text,
+        prior_summary=source.prior_summary,
     )
 
 
@@ -3588,8 +3587,6 @@ def stream_summary_command(
     redis_client: redis.Redis,
     prompt_text: str,
 ) -> Tuple[Iterator[Tuple[str, str]], Optional[str]]:
-    existing_summary = _state_get_user_chat_summary(redis_client, chat_id)
-    compacted_until = _state_get_user_chat_compacted_until(redis_client, chat_id)
     history = get_chat_history(chat_id, redis_client)
 
     if not history:
@@ -3598,19 +3595,28 @@ def stream_summary_command(
             yield "none", "no hay mensajes para resumir"
         return _empty(), None
 
-    source = _build_incremental_summary_source(
-        history, existing_summary, compacted_until
+    visible_history, summary_text, _retrieved_messages, summary_cost = prepare_chat_memory(
+        redis_client,
+        chat_id,
+        history,
+        prompt_text,
+    )
+    source = IncrementalSummarySource(
+        prior_summary=summary_text,
+        delta_messages=visible_history,
+        is_zero_delta=not visible_history,
+        next_marker=None,
     )
     _summary_logger.info(
-        "summary_stream: chat_id=%s history=%d delta=%d zero_delta=%s has_prior=%s",
+        "summary_stream: chat_id=%s history=%d visible=%d zero_delta=%s has_prior=%s compaction_cost_usd_micros=%d",
         chat_id, len(history), len(source.delta_messages),
-        source.is_zero_delta, bool(source.prior_summary)
+        source.is_zero_delta, bool(source.prior_summary), summary_cost,
     )
     if source.is_zero_delta and source.prior_summary:
         sanitized = sanitize_summary_text(source.prior_summary)
         def _yield_cached():
             yield "cache", sanitized
-        return _yield_cached(), source.next_marker
+        return _yield_cached(), None
 
     api_messages = _build_summary_messages(source, prompt_text)
     provider = _build_summary_provider()
@@ -3629,7 +3635,7 @@ def stream_summary_command(
         _wrap_provider_stream(provider.name, provider.stream(
             system_message, messages, enable_web_search=False, max_tokens=SUMMARY_MAX_TOKENS
         )),
-        source.next_marker,
+        None,
     )
 
 
