@@ -178,7 +178,7 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
     assert captured["compacted_until"] is None
 
 
-def test_stream_summary_command_uses_user_compaction_marker(monkeypatch):
+def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     from api.index import stream_summary_command
 
     redis_client = MagicMock()
@@ -186,19 +186,43 @@ def test_stream_summary_command_uses_user_compaction_marker(monkeypatch):
         {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1},
         {"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2},
     ]
+    captured = {}
 
-    monkeypatch.setattr("api.index._state_get_user_chat_summary", lambda *_: "cached summary")
-    monkeypatch.setattr("api.index._state_get_user_chat_compacted_until", lambda *_: "m2")
-    monkeypatch.setattr(
-        "api.index._state_get_chat_compacted_until",
-        lambda *_: (_ for _ in ()).throw(AssertionError("used internal compaction marker")),
-    )
     monkeypatch.setattr("api.index.get_chat_history", lambda *_: history)
+    monkeypatch.setattr(
+        "api.index.prepare_chat_memory",
+        lambda *_args, **_kwargs: (
+            [{"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2}],
+            "[contexto anterior: msg 1]",
+            [],
+            0,
+        ),
+    )
+    monkeypatch.setattr("api.index._load_bot_personality", lambda: "bot")
+
+    class FakeProvider:
+        name = "openrouter"
+
+        def is_available(self):
+            return True
+
+        def stream(self, system_message, messages, **kwargs):
+            captured["system_message"] = system_message
+            captured["messages"] = messages
+            yield "resumen"
+
+    monkeypatch.setattr("api.index._build_summary_provider", lambda: FakeProvider())
 
     iterator, pending_marker = stream_summary_command("123", redis_client, "resumen")
 
-    assert list(iterator) == [("cache", "cached summary")]
+    assert list(iterator) == [("openrouter", "resumen")]
     assert pending_marker is None
+    assert captured["system_message"] == {"role": "system", "content": "bot"}
+    assert captured["messages"][0] == {
+        "role": "assistant",
+        "content": "[contexto anterior: msg 1]",
+    }
+    assert captured["messages"][1]["content"] == "msg 2"
 
 
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
