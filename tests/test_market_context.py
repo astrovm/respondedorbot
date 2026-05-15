@@ -939,6 +939,9 @@ def test_build_system_message():
         assert "argentin" in content_text.lower()
         assert "gordo" in content_text.lower()
         assert "hacker news" in content_text.lower()
+        assert "CAPACIDADES DEL BOT" in content_text
+        assert "$ticker" in content_text
+        assert "/buscar y /search no existen" in content_text
 
 
 def test_build_system_message_empty_context():
