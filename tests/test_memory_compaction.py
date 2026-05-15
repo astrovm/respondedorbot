@@ -233,7 +233,7 @@ def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
 
     fetch_chat_messages_for_compaction(redis_client, "5162530")
 
-    query = redis_client.execute_command.call_args_list[1].args[2]
+    query = redis_client.execute_command.call_args.args[2]
     assert query == "@chat_id:{5162530}"
     assert "*" not in query
 

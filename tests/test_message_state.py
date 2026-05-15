@@ -54,7 +54,7 @@ def test_save_message_to_redis():
 def test_chat_history_limit_increased_for_busy_groups():
     from api.message_state import CHAT_HISTORY_MAX_MESSAGES
 
-    assert CHAT_HISTORY_MAX_MESSAGES == 100
+    assert CHAT_HISTORY_MAX_MESSAGES == 200
 
 
 def test_get_chat_history():
