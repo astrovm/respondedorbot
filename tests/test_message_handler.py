@@ -3076,33 +3076,32 @@ def test_message_handler_private_text_without_supported_link_still_responds(monk
     deps.handle_ai_stream.assert_called_once()
 
 
-def test_message_handler_command_with_link_bypasses_replacement(monkeypatch):
-    from api.message_handler import handle_msg
-
-    make_deps, _ = _build_message_handler_deps()
-    mock_replace_links = MagicMock(return_value=(
-        "/ask qué onda https://fixupx.com/user/status/1",
-        True,
-        ["https://x.com/user/status/1"],
-    ))
-    deps = make_deps(replace_links=mock_replace_links)
-    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
-
-    message = {
-        "message_id": 504,
-        "chat": {"id": 560, "type": "private"},
-        "from": {"id": 1006, "first_name": "Ana", "username": "ana"},
-        "text": "/ask qué onda https://x.com/user/status/1",
-    }
-
-    result = handle_msg(message, deps)
-
-    assert result == "ok"
-    mock_replace_links.assert_not_called()
-    deps.handle_ai_stream.assert_called_once()
-
-
-def test_message_handler_reply_to_bot_with_link_bypasses_replacement(monkeypatch):
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "message_id": 504,
+            "chat": {"id": 560, "type": "private"},
+            "from": {"id": 1006, "first_name": "Ana", "username": "ana"},
+            "text": "/ask qué onda https://x.com/user/status/1",
+        },
+        {
+            "message_id": 505,
+            "chat": {"id": 561, "type": "group"},
+            "from": {"id": 1007, "first_name": "Ana", "username": "ana"},
+            "reply_to_message": {
+                "message_id": 404,
+                "from": {"username": "testbot"},
+                "text": "respuesta anterior",
+            },
+            "text": "qué onda https://x.com/user/status/1",
+        },
+    ],
+)
+def test_message_handler_explicit_intent_with_link_bypasses_replacement(
+    monkeypatch,
+    message,
+):
     from api.message_handler import handle_msg
 
     make_deps, _ = _build_message_handler_deps()
@@ -3113,18 +3112,6 @@ def test_message_handler_reply_to_bot_with_link_bypasses_replacement(monkeypatch
     ))
     deps = make_deps(replace_links=mock_replace_links)
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
-
-    message = {
-        "message_id": 505,
-        "chat": {"id": 561, "type": "group"},
-        "from": {"id": 1007, "first_name": "Ana", "username": "ana"},
-        "reply_to_message": {
-            "message_id": 404,
-            "from": {"username": "testbot"},
-            "text": "respuesta anterior",
-        },
-        "text": "qué onda https://x.com/user/status/1",
-    }
 
     result = handle_msg(message, deps)
 
