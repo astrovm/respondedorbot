@@ -18,7 +18,7 @@ from .billing_commands import (
     handle_transfer_command,
 )
 from api.token_signals import handle_token_signal_message
-from .message_links import handle_link_replacement
+from .message_links import handle_link_replacement, has_supported_link
 from api.utils.text import sanitize_summary_text
 from api.streaming import (
     consume_stream_to_telegram,
@@ -920,6 +920,16 @@ def _handle_link_replacement(
     )
 
 
+def _should_suppress_unreplaced_supported_link(
+    chat_config: Mapping[str, Any],
+    message_text: str,
+) -> bool:
+    link_mode = str(chat_config.get("link_mode", "reply"))
+    if link_mode == "off" or not message_text or message_text.startswith("/"):
+        return False
+    return has_supported_link(message_text)
+
+
 def _load_reply_metadata(
     deps: MessageHandlerDeps,
     *,
@@ -1435,6 +1445,21 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
             message_id=context.message_id,
             redis_client=runtime.redis_client,
         ):
+            return "ok"
+
+        if _should_suppress_unreplaced_supported_link(
+            runtime.chat_config,
+            runtime.prepared_message.message_text,
+        ):
+            _store_user_message_if_present(
+                deps,
+                chat_id=context.chat_id,
+                message_id=context.message_id,
+                message=message,
+                message_text=runtime.prepared_message.message_text,
+                reply_context_text=None,
+                redis_client=runtime.redis_client,
+            )
             return "ok"
 
         intent = _resolve_message_intent(
