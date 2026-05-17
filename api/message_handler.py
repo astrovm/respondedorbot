@@ -931,6 +931,26 @@ def _should_suppress_unreplaced_supported_link(
     return has_replaceable_link(message_text)
 
 
+def _should_bypass_link_replacement(
+    commands: Mapping[str, CommandTuple],
+    bot_name: str,
+    message_text: str,
+    message: Mapping[str, Any],
+    deps: MessageHandlerDeps,
+) -> bool:
+    command, _ = deps.parse_command(message_text, bot_name)
+    if command in commands:
+        return True
+
+    reply = message.get("reply_to_message")
+    if not isinstance(reply, Mapping):
+        return False
+    reply_from = reply.get("from")
+    if not isinstance(reply_from, Mapping):
+        return False
+    return str(reply_from.get("username") or "") == environ.get("TELEGRAM_USERNAME")
+
+
 def _load_reply_metadata(
     deps: MessageHandlerDeps,
     *,
@@ -1437,31 +1457,38 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         ):
             return "ok"
 
-        if _handle_link_replacement(
-            deps,
-            chat_config=runtime.chat_config,
-            message=message,
-            message_text=runtime.prepared_message.message_text,
-            chat_id=context.chat_id,
-            message_id=context.message_id,
-            redis_client=runtime.redis_client,
-        ):
-            return "ok"
-
-        if _should_suppress_unreplaced_supported_link(
-            runtime.chat_config,
+        if not _should_bypass_link_replacement(
+            runtime.commands,
+            runtime.bot_name,
             runtime.prepared_message.message_text,
+            message,
+            deps,
         ):
-            _store_user_message_if_present(
+            if _handle_link_replacement(
                 deps,
-                chat_id=context.chat_id,
-                message_id=context.message_id,
+                chat_config=runtime.chat_config,
                 message=message,
                 message_text=runtime.prepared_message.message_text,
-                reply_context_text=None,
+                chat_id=context.chat_id,
+                message_id=context.message_id,
                 redis_client=runtime.redis_client,
-            )
-            return "ok"
+            ):
+                return "ok"
+
+            if _should_suppress_unreplaced_supported_link(
+                runtime.chat_config,
+                runtime.prepared_message.message_text,
+            ):
+                _store_user_message_if_present(
+                    deps,
+                    chat_id=context.chat_id,
+                    message_id=context.message_id,
+                    message=message,
+                    message_text=runtime.prepared_message.message_text,
+                    reply_context_text=None,
+                    redis_client=runtime.redis_client,
+                )
+                return "ok"
 
         intent = _resolve_message_intent(
             deps,
