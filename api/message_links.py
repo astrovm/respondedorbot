@@ -1,33 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
-from urllib.parse import urlparse
-
-
-SUPPORTED_LINK_HOSTS = {
-    "twitter.com",
-    "x.com",
-    "xcancel.com",
-    "bsky.app",
-    "instagram.com",
-    "reddit.com",
-}
-
-
-def has_supported_link(text: str) -> bool:
-    if not text:
-        return False
-    for token in text.split():
-        parsed = urlparse(token.strip("()[]{}<>\"'.,;!?"))
-        host = parsed.netloc.lower().split(":", 1)[0]
-        if host.startswith("www."):
-            host = host[4:]
-        if any(
-            host == supported or host.endswith(f".{supported}")
-            for supported in SUPPORTED_LINK_HOSTS
-        ):
-            return True
-    return False
 
 
 class LinkReplacementDeps(Protocol):
@@ -113,4 +86,4 @@ def handle_link_replacement(
     return True
 
 
-__all__ = ["handle_link_replacement", "has_supported_link"]
+__all__ = ["handle_link_replacement"]

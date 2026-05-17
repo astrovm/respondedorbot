@@ -2989,7 +2989,27 @@ def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeyp
     assert kwargs["user_id"] == "1002"
 
 
-def test_message_handler_suppresses_private_supported_link_when_not_replaced(monkeypatch):
+@pytest.mark.parametrize(
+    ("chat_type", "text", "expected_saved"),
+    [
+        (
+            "private",
+            "https://www.instagram.com/reel/DYcbT4OBtyZ/",
+            "Ana: https://www.instagram.com/reel/DYcbT4OBtyZ/",
+        ),
+        (
+            "group",
+            "mirá https://x.com/user/status/1",
+            "Ana: mirá https://x.com/user/status/1",
+        ),
+    ],
+)
+def test_message_handler_suppresses_supported_link_when_not_replaced(
+    monkeypatch,
+    chat_type,
+    text,
+    expected_saved,
+):
     from api.message_handler import handle_msg
 
     make_deps, redis_client = _build_message_handler_deps()
@@ -3002,7 +3022,7 @@ def test_message_handler_suppresses_private_supported_link_when_not_replaced(mon
         save_message_to_redis=mock_save_message,
         replace_links=MagicMock(
             return_value=(
-                "https://www.instagram.com/reel/DYcbT4OBtyZ/",
+                text,
                 False,
                 [],
             )
@@ -3012,9 +3032,9 @@ def test_message_handler_suppresses_private_supported_link_when_not_replaced(mon
 
     message = {
         "message_id": 501,
-        "chat": {"id": 557, "type": "private"},
+        "chat": {"id": 557, "type": chat_type},
         "from": {"id": 1003, "first_name": "Ana", "username": "ana"},
-        "text": "https://www.instagram.com/reel/DYcbT4OBtyZ/",
+        "text": text,
     }
 
     result = handle_msg(message, deps)
@@ -3027,56 +3047,11 @@ def test_message_handler_suppresses_private_supported_link_when_not_replaced(mon
     assert args == (
         "557",
         "501",
-        "Ana: https://www.instagram.com/reel/DYcbT4OBtyZ/",
+        expected_saved,
         redis_client,
     )
     assert kwargs["role"] == "user"
-
-
-def test_message_handler_suppresses_group_supported_link_when_not_replaced(monkeypatch):
-    from api.message_handler import handle_msg
-
-    make_deps, redis_client = _build_message_handler_deps()
-    mock_send_msg = MagicMock()
-    mock_save_message = MagicMock()
-    mock_should_respond = MagicMock(return_value=True)
-    deps = make_deps(
-        should_gordo_respond=mock_should_respond,
-        send_msg=mock_send_msg,
-        save_message_to_redis=mock_save_message,
-        replace_links=MagicMock(
-            return_value=(
-                "mirá https://x.com/user/status/1",
-                False,
-                [],
-            )
-        ),
-    )
-    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
-
-    message = {
-        "message_id": 502,
-        "chat": {"id": 558, "type": "group"},
-        "from": {"id": 1004, "first_name": "Ana", "username": "ana"},
-        "text": "mirá https://x.com/user/status/1",
-    }
-
-    result = handle_msg(message, deps)
-
-    assert result == "ok"
-    mock_should_respond.assert_not_called()
-    mock_send_msg.assert_not_called()
-    mock_save_message.assert_called_once_with(
-        "558",
-        "502",
-        "Ana: mirá https://x.com/user/status/1",
-        redis_client,
-        role="user",
-        user_id="1004",
-        username="ana",
-        reply_to_message_id=None,
-        mentions_bot=False,
-    )
+    assert kwargs["user_id"] == "1003"
 
 
 def test_message_handler_private_text_without_supported_link_still_responds(monkeypatch):
