@@ -37,12 +37,23 @@ ORIGINAL_FRONTENDS: Set[str] = {
     "tiktok.com",
 }
 
+REPLACEABLE_FRONTENDS: Set[str] = {
+    "twitter.com",
+    "x.com",
+    "xcancel.com",
+    "bsky.app",
+    "instagram.com",
+    "reddit.com",
+}
+
 __all__ = [
     "ALTERNATIVE_FRONTENDS",
     "ORIGINAL_FRONTENDS",
+    "REPLACEABLE_FRONTENDS",
     "TELEGRAM_PREVIEW_USER_AGENT",
     "inspect_embed_url",
     "is_social_frontend",
+    "has_replaceable_link",
     "can_embed_url",
     "url_is_embedable",
     "replace_links",
@@ -137,6 +148,19 @@ def is_social_frontend(host: str) -> bool:
     host = host.lower()
     frontends = ALTERNATIVE_FRONTENDS | ORIGINAL_FRONTENDS
     return any(host == domain or host.endswith(f".{domain}") for domain in frontends)
+
+
+def has_replaceable_link(text: str) -> bool:
+    """Return True when text contains a link handled by replace_links."""
+    for match in re.finditer(r"https?://[^\s]+", text or ""):
+        parsed = urlparse(match.group(0).strip("()[]{}<>\"'.,;!?"))
+        host = _normalized_host(parsed)
+        if any(
+            host == domain or host.endswith(f".{domain}")
+            for domain in REPLACEABLE_FRONTENDS
+        ):
+            return True
+    return False
 
 
 def inspect_embed_url(url: str) -> Dict[str, Any]:
