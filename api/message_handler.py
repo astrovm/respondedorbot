@@ -942,6 +942,10 @@ def _should_bypass_link_replacement(
     if command in commands:
         return True
 
+    return _is_reply_to_bot(message)
+
+
+def _is_reply_to_bot(message: Mapping[str, Any]) -> bool:
     reply = message.get("reply_to_message")
     if not isinstance(reply, Mapping):
         return False
@@ -962,7 +966,7 @@ def _load_reply_metadata(
     if not isinstance(reply_msg, Mapping):
         return None
 
-    if reply_msg.get("from", {}).get("username") != environ.get("TELEGRAM_USERNAME"):
+    if not _is_reply_to_bot(message):
         return None
 
     reply_id = reply_msg.get("message_id")
