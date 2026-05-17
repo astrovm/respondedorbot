@@ -18,7 +18,8 @@ from .billing_commands import (
     handle_transfer_command,
 )
 from api.token_signals import handle_token_signal_message
-from .message_links import handle_link_replacement, has_supported_link
+from .message_links import handle_link_replacement
+from api.utils.links import has_replaceable_link
 from api.utils.text import sanitize_summary_text
 from api.streaming import (
     consume_stream_to_telegram,
@@ -927,7 +928,7 @@ def _should_suppress_unreplaced_supported_link(
     link_mode = str(chat_config.get("link_mode", "reply"))
     if link_mode == "off" or not message_text or message_text.startswith("/"):
         return False
-    return has_supported_link(message_text)
+    return has_replaceable_link(message_text)
 
 
 def _load_reply_metadata(
