@@ -408,6 +408,7 @@ def test_xcancel_link_replacement(mock_get):
 def test_can_embed_url_logs_missing_meta(monkeypatch, caplog):
     from api.index import can_embed_url
 
+    caplog.set_level("INFO")
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
