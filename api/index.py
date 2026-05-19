@@ -4359,6 +4359,23 @@ def _send_stars_invoice(
     return error is None and bool(payload_response)
 
 
+def _extract_poll_text(poll: Mapping[str, Any]) -> str:
+    question = str(poll.get("question", "")).strip()
+    option_texts = []
+    for option in poll.get("options") or []:
+        option_text = option.get("text") if isinstance(option, Mapping) else None
+        if option_text:
+            option_texts.append(str(option_text).strip())
+
+    if not option_texts:
+        return question
+
+    options = "\n".join(f"- {option_text}" for option_text in option_texts)
+    if not question:
+        return f"Opciones:\n{options}"
+    return f"{question}\nOpciones:\n{options}"
+
+
 def extract_message_text(message: Dict) -> str:
     """Extract text content from different message types"""
     # Prioritize text, then caption, then poll question/options
@@ -4367,22 +4384,7 @@ def extract_message_text(message: Dict) -> str:
     if message.get("caption"):
         return str(message["caption"]).strip()
     if "poll" in message and isinstance(message["poll"], dict):
-        poll = message["poll"]
-        question = str(poll.get("question", "")).strip()
-        option_texts = []
-        for option in poll.get("options") or []:
-            if isinstance(option, dict):
-                option_text = option.get("text")
-            else:
-                option_text = getattr(option, "text", None)
-            if option_text:
-                option_texts.append(str(option_text).strip())
-        if not option_texts:
-            return question
-        options = "\n".join(f"- {option_text}" for option_text in option_texts)
-        if not question:
-            return f"Opciones:\n{options}"
-        return f"{question}\nOpciones:\n{options}"
+        return _extract_poll_text(message["poll"])
     return ""
 
 
