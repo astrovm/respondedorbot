@@ -557,13 +557,11 @@ def test_extract_message_text_edge_cases():
         "caption": "photo caption",
         "poll": {"question": "poll question"},
     }
-    # Should prioritize text over caption and poll
-    assert extract_message_text(msg) == "text message"
+    assert extract_message_text(msg) == "text message\n\nphoto caption\n\npoll question"
 
     # Test message with caption and poll
     msg = {"caption": "photo caption", "poll": {"question": "poll question"}}
-    # Should prioritize caption over poll
-    assert extract_message_text(msg) == "photo caption"
+    assert extract_message_text(msg) == "photo caption\n\npoll question"
 
     # Test message with invalid poll structure
     msg = {"poll": "invalid poll"}
@@ -760,13 +758,16 @@ def test_extract_message_text_complex_cases():
     msg = {"poll": {"options": [{"text": "First"}, {"text": "Second"}]}}
     assert extract_message_text(msg) == "Opciones:\n- First\n- Second"
 
-    # Test prioritization (text > caption > poll)
+    # Test combining all available text surfaces
     msg = {
         "text": "Primary text",
         "caption": "Secondary caption",
         "poll": {"question": "Tertiary poll question"},
     }
-    assert extract_message_text(msg) == "Primary text"
+    assert (
+        extract_message_text(msg)
+        == "Primary text\n\nSecondary caption\n\nTertiary poll question"
+    )
 
     # Test with spaces to trim
     msg = {"text": "  Text with spaces  "}

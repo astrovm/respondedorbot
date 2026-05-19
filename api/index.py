@@ -4378,14 +4378,16 @@ def _extract_poll_text(poll: Mapping[str, Any]) -> str:
 
 def extract_message_text(message: Dict) -> str:
     """Extract text content from different message types"""
-    # Prioritize text, then caption, then poll question/options
+    parts = []
     if message.get("text"):
-        return str(message["text"]).strip()
+        parts.append(str(message["text"]).strip())
     if message.get("caption"):
-        return str(message["caption"]).strip()
+        parts.append(str(message["caption"]).strip())
     if "poll" in message and isinstance(message["poll"], dict):
-        return _extract_poll_text(message["poll"])
-    return ""
+        poll_text = _extract_poll_text(message["poll"])
+        if poll_text:
+            parts.append(poll_text)
+    return "\n\n".join(parts)
 
 
 def _sticker_vision_file_id(sticker: Mapping[str, Any]) -> Optional[str]:
