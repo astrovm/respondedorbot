@@ -129,8 +129,16 @@ def test_extract_message_text():
     assert extract_message_text(msg) == "photo caption"
 
     # Test poll
-    msg = {"poll": {"question": "poll question"}}
-    assert extract_message_text(msg) == "poll question"
+    msg = {
+        "poll": {
+            "question": "poll question",
+            "options": [{"text": "option one"}, {"text": "option two"}],
+        }
+    }
+    assert (
+        extract_message_text(msg)
+        == "poll question\nOpciones:\n- option one\n- option two"
+    )
 
     # Test empty message
     msg = {}
@@ -747,6 +755,10 @@ def test_extract_message_text_complex_cases():
     # Test with malformed poll
     msg = {"poll": {"not_question": "This shouldn't appear"}}
     assert extract_message_text(msg) == ""
+
+    # Test poll options without question
+    msg = {"poll": {"options": [{"text": "First"}, {"text": "Second"}]}}
+    assert extract_message_text(msg) == "Opciones:\n- First\n- Second"
 
     # Test prioritization (text > caption > poll)
     msg = {
