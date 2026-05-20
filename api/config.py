@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import redis
+from redis.exceptions import BusyLoadingError
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
@@ -15,6 +17,8 @@ _admin_reporter: Optional[AdminReporter] = None
 _WORKSPACE_DIR: Optional[Path] = None
 _RedisPoolKey = Tuple[str, int, Optional[str], bool]
 _REDIS_POOLS: Dict[_RedisPoolKey, redis.ConnectionPool] = {}
+_REDIS_BUSY_LOADING_RETRIES = 30
+_REDIS_BUSY_LOADING_RETRY_DELAY_SECONDS = 1.0
 
 
 def configure(*, admin_reporter: Optional[AdminReporter] = None) -> None:
@@ -122,7 +126,14 @@ def config_redis(host=None, port=None, password=None):
             )
             _REDIS_POOLS[pool_key] = pool
         redis_client = redis.Redis(connection_pool=pool)
-        redis_client.ping()
+        for attempt in range(_REDIS_BUSY_LOADING_RETRIES + 1):
+            try:
+                redis_client.ping()
+                break
+            except BusyLoadingError:
+                if attempt >= _REDIS_BUSY_LOADING_RETRIES:
+                    raise
+                time.sleep(_REDIS_BUSY_LOADING_RETRY_DELAY_SECONDS)
         return redis_client
     except Exception as exc:  # pragma: no cover - passthrough for callers
         error_context = {
