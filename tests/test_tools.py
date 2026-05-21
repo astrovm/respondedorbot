@@ -514,3 +514,40 @@ class TestTaskCancelTool:
     def test_cancel_no_id(self):
         result = execute_tool("task_cancel", {}, {})
         assert "id" in result.output.lower()
+
+
+class TestGetChatMembersTool:
+    @patch("api.tools.get_chat_members.get_chat_members")
+    def test_returns_formatted_members(self, mock_get):
+        mock_get.return_value = [
+            {"user_id": "42", "first_name": "Juan", "username": "juan123", "last_seen": 1000},
+            {"user_id": "99", "first_name": "Maria", "username": "", "last_seen": 2000},
+        ]
+        mock_redis = MagicMock()
+        result = execute_tool(
+            "get_chat_members",
+            {},
+            {"chat_id": "-100123", "config_redis": lambda: mock_redis},
+        )
+        assert "Juan" in result.output
+        assert "juan123" in result.output
+        assert "Maria" in result.output
+
+    @patch("api.tools.get_chat_members.get_chat_members")
+    def test_returns_empty_message_when_no_members(self, mock_get):
+        mock_get.return_value = []
+        mock_redis = MagicMock()
+        result = execute_tool(
+            "get_chat_members",
+            {},
+            {"chat_id": "-100123", "config_redis": lambda: mock_redis},
+        )
+        assert "no conozco" in result.output.lower()
+
+    def test_returns_not_available_without_chat_id(self):
+        result = execute_tool("get_chat_members", {}, {"config_redis": lambda: MagicMock()})
+        assert "no disponible" in result.output.lower()
+
+    def test_returns_not_available_without_config_redis(self):
+        result = execute_tool("get_chat_members", {}, {"chat_id": "-100123"})
+        assert "no disponible" in result.output.lower()
