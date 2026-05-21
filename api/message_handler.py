@@ -12,7 +12,7 @@ from api.ai_billing import AIMessageBilling
 from api.ai_pricing import estimate_transcribe_reserve_credits
 from api.constants import BILLING_UNAVAILABLE_MESSAGE, PROMPT_NO_MARKDOWN
 from api.ai_service import AIConversationRequest, AIService, SummaryCommandRequest
-from api.chat_context import format_user_identity
+from api.chat_context import format_user_identity, is_group_chat_type
 from .billing_commands import (
     handle_balance_command,
     handle_transfer_command,
@@ -120,6 +120,7 @@ class MessageStateDeps:
     build_message_links_context: Callable[[Mapping[str, Any]], str]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
+    save_chat_member: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ class MessageHandlerDeps:
     ]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
+    save_chat_member: Callable[..., None]
     handle_ai_stream: Callable[..., str]
     gen_random: Callable[[str], str]
     build_insufficient_credits_message: Callable[..., str]
@@ -281,6 +283,7 @@ def build_message_handler_deps(
         should_gordo_respond=routing.should_gordo_respond,
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
+        save_chat_member=state.save_chat_member,
         handle_ai_stream=ai.handle_ai_stream,
         gen_random=ai.gen_random,
         build_insufficient_credits_message=ai.build_insufficient_credits_message,
@@ -610,6 +613,16 @@ def _store_user_message_if_present(
         ),
         mentions_bot=("@" in message_text or message_text.startswith("/")),
     )
+
+    chat = cast(Mapping[str, Any], message.get("chat", {}))
+    if is_group_chat_type(str(chat.get("type"))):
+        deps.save_chat_member(
+            redis_client,
+            chat_id,
+            str(sender.get("id") or ""),
+            str(sender.get("first_name") or ""),
+            str(sender.get("username") or ""),
+        )
 
 
 def _send_response_and_store_metadata(

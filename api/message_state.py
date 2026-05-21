@@ -541,6 +541,68 @@ def build_reply_context_text(
     return reply_description
 
 
+def _chat_members_key(chat_id: str) -> str:
+    return f"chat_members:{chat_id}"
+
+
+def save_chat_member(
+    redis_client: redis.Redis,
+    chat_id: str,
+    user_id: Optional[str],
+    first_name: str,
+    username: str,
+) -> None:
+    """Track a chat member from an incoming message."""
+
+    if not user_id:
+        return
+    try:
+        data = json.dumps(
+            {
+                "first_name": str(first_name or ""),
+                "username": str(username or ""),
+                "last_seen": int(time.time()),
+            }
+        )
+        key = _chat_members_key(chat_id)
+        redis_client.hset(key, user_id, data)
+        redis_client.expire(key, CHAT_STATE_TTL)
+    except Exception:
+        pass
+
+
+def get_chat_members(
+    redis_client: redis.Redis,
+    chat_id: str,
+) -> List[Dict[str, Any]]:
+    """Return known members for a chat (users who have sent messages)."""
+
+    try:
+        raw = cast(Dict[Any, Any], redis_client.hgetall(_chat_members_key(chat_id)))
+        if not raw:
+            return []
+        members: List[Dict[str, Any]] = []
+        for user_id_bytes, data_bytes in raw.items():
+            user_id = _decode_redis_text(user_id_bytes) or ""
+            data_str = _decode_redis_text(data_bytes) or "{}"
+            try:
+                parsed = json.loads(data_str)
+            except json.JSONDecodeError:
+                parsed = {}
+            if user_id:
+                members.append(
+                    {
+                        "user_id": user_id,
+                        "first_name": str(parsed.get("first_name") or ""),
+                        "username": str(parsed.get("username") or ""),
+                        "last_seen": int(parsed.get("last_seen") or 0),
+                    }
+                )
+        return members
+    except Exception:
+        return []
+
+
 def format_user_message(
     message: Dict[str, Any],
     message_text: str,
@@ -565,10 +627,12 @@ __all__ = [
     "get_bot_message_metadata",
     "get_chat_compacted_until",
     "get_chat_history",
+    "get_chat_members",
     "get_chat_summary",
     "get_user_chat_compacted_until",
     "get_user_chat_summary",
     "save_chat_compacted_until",
+    "save_chat_member",
     "save_chat_summary",
     "save_user_chat_compacted_until",
     "save_user_chat_summary",

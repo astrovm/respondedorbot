@@ -2443,6 +2443,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             build_message_links_context=flat_defaults["build_message_links_context"],
             format_user_message=flat_defaults["format_user_message"],
             save_message_to_redis=flat_defaults["save_message_to_redis"],
+            save_chat_member=flat_defaults.get("save_chat_member", MagicMock()),
         ),
         ai=MessageAIDeps(
             ai_service=ai_service,
@@ -2581,6 +2582,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             build_message_links_context=MagicMock(),
             format_user_message=MagicMock(),
             save_message_to_redis=MagicMock(),
+            save_chat_member=MagicMock(),
         ),
         ai=MessageAIDeps(
             ai_service=ai_service,

@@ -350,6 +350,73 @@ def test_truncate_text_more_edge_cases():
     assert truncate_text("", 0) == ""
 
 
+def test_save_chat_member_stores_member_info():
+    from api.message_state import save_chat_member
+
+    redis_client = MagicMock()
+    store: dict[str, dict[str, str]] = {}
+
+    def hset(key, field, value):
+        store.setdefault(key, {})[field] = value
+
+    redis_client.hset.side_effect = hset
+
+    save_chat_member(redis_client, "-100123", "42", "Juan", "juan123")
+
+    assert "chat_members:-100123" in store
+    data = json.loads(store["chat_members:-100123"]["42"])
+    assert data["first_name"] == "Juan"
+    assert data["username"] == "juan123"
+    assert "last_seen" in data
+    redis_client.expire.assert_called_once_with("chat_members:-100123", ANY)
+
+
+def test_save_chat_member_skips_when_user_id_missing():
+    from api.message_state import save_chat_member
+
+    redis_client = MagicMock()
+    save_chat_member(redis_client, "-100123", None, "Juan", "juan123")
+    redis_client.hset.assert_not_called()
+
+
+def test_get_chat_members_returns_known_members():
+    from api.message_state import get_chat_members
+
+    redis_client = MagicMock()
+    redis_client.hgetall.return_value = {
+        "42": json.dumps({"first_name": "Juan", "username": "juan123", "last_seen": 1000}),
+        "99": json.dumps({"first_name": "Maria", "username": "", "last_seen": 2000}),
+    }
+
+    members = get_chat_members(redis_client, "-100123")
+    assert len(members) == 2
+    assert members[0]["user_id"] == "42"
+    assert members[0]["first_name"] == "Juan"
+    assert members[0]["username"] == "juan123"
+    assert members[1]["user_id"] == "99"
+    assert members[1]["first_name"] == "Maria"
+
+
+def test_get_chat_members_returns_empty_when_no_members():
+    from api.message_state import get_chat_members
+
+    redis_client = MagicMock()
+    redis_client.hgetall.return_value = {}
+
+    members = get_chat_members(redis_client, "-100123")
+    assert members == []
+
+
+def test_get_chat_members_returns_empty_on_redis_error():
+    from api.message_state import get_chat_members
+
+    redis_client = MagicMock()
+    redis_client.hgetall.side_effect = Exception("connection lost")
+
+    members = get_chat_members(redis_client, "-100123")
+    assert members == []
+
+
 def test_format_user_message_complex_cases():
     from api.index import format_user_message
 

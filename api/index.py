@@ -117,6 +117,7 @@ import api.tools.crypto_prices
 import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.task_set
+import api.tools.get_chat_members
 from api.tools import get_all_tool_schemas
 from api.tool_runtime import ToolRuntime
 from api.tools.task_scheduler import (
@@ -194,6 +195,7 @@ from api.message_state import (
     get_chat_history as _state_get_chat_history,
     get_chat_summary as _state_get_chat_summary,
     save_chat_compacted_until as _state_save_chat_compacted_until,
+    save_chat_member as _state_save_chat_member,
     save_chat_summary as _state_save_chat_summary,
     save_bot_message_metadata as _state_save_bot_message_metadata,
     save_message_to_redis as _state_save_message_to_redis,
@@ -2615,6 +2617,7 @@ def _build_ai_request(
 
     tool_context: Dict[str, Any] = {
         "get_prices": get_prices,
+        "config_redis": config_redis,
     }
     if chat_id:
         tool_context["chat_id"] = chat_id
@@ -4189,6 +4192,22 @@ def save_message_to_redis(
     )
 
 
+def save_chat_member(
+    redis_client: redis.Redis,
+    chat_id: str,
+    user_id: Optional[str],
+    first_name: str,
+    username: str,
+) -> None:
+    _state_save_chat_member(
+        redis_client,
+        chat_id,
+        user_id,
+        first_name,
+        username,
+    )
+
+
 def get_chat_history(
     chat_id: str,
     redis_client: redis.Redis,
@@ -5686,6 +5705,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             build_message_links_context=build_message_links_context,
             format_user_message=_state_format_user_message,
             save_message_to_redis=save_message_to_redis,
+            save_chat_member=save_chat_member,
         ),
         ai=MessageAIDeps(
             ai_service=ai_svc,
