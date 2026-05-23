@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -16,6 +17,8 @@ from api.utils.http import request_with_ssl_fallback
 logger = get_logger(__name__)
 
 EMBED_REQUEST_TIMEOUT = 10
+EEINSTAGRAM_PROBE_ATTEMPTS = 3
+EEINSTAGRAM_PROBE_BACKOFF_SECONDS = 0.25
 TELEGRAM_PREVIEW_USER_AGENT = "TelegramBot (like TwitterBot)"
 
 ALTERNATIVE_FRONTENDS: Set[str] = {
@@ -186,9 +189,11 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             "description": None,
         }
     headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
+    is_eeinstagram_host = _is_eeinstagram_host(parsed)
     try:
-        response = request_with_ssl_fallback(
+        response = _request_embed_url(
             url,
+            retry=is_eeinstagram_host,
             allow_redirects=True,
             timeout=EMBED_REQUEST_TIMEOUT,
             headers=headers,
@@ -269,8 +274,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         "twitter:description"
     )
     canonical_url = meta_tags.get("og:url")
-    host = _normalized_host(parsed)
-    is_eeinstagram_host = host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
+    is_eeinstagram_host = _is_eeinstagram_host(parsed)
 
     has_title = "og:title" in meta_tags or "twitter:title" in meta_tags
     has_description = (
@@ -345,8 +349,7 @@ def can_embed_url(
 def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
     """Return embed eligibility from the eeinstagram HEAD response when available."""
 
-    host = _normalized_host(parsed)
-    if not (host == "eeinstagram.com" or host.endswith(".eeinstagram.com")):
+    if not _is_eeinstagram_host(parsed):
         return None
 
     path_segments = [segment for segment in parsed.path.lower().split("/") if segment]
@@ -355,8 +358,9 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
 
     headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     try:
-        response = request_with_ssl_fallback(
+        response = _request_embed_url(
             url,
+            retry=True,
             method="head",
             allow_redirects=False,
             timeout=EMBED_REQUEST_TIMEOUT,
@@ -388,6 +392,65 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
         return True
 
     return None
+
+
+def _is_eeinstagram_host(parsed: ParseResult) -> bool:
+    host = _normalized_host(parsed)
+    return host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
+
+
+def _request_embed_url(url: str, *, retry: bool, **kwargs: Any) -> Any:
+    attempts = EEINSTAGRAM_PROBE_ATTEMPTS if retry else 1
+    last_exc: Optional[RequestException] = None
+    for attempt in range(attempts):
+        try:
+            response = request_with_ssl_fallback(url, **kwargs)
+        except RequestException as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                raise
+            _sleep_before_embed_retry(url, attempt, error=exc)
+            continue
+
+        if not _should_retry_embed_response(response) or attempt == attempts - 1:
+            return response
+        _sleep_before_embed_retry(url, attempt, status_code=response.status_code)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("embed request retry loop exhausted")
+
+
+def _should_retry_embed_response(response: Any) -> bool:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    return status_code == 429 or status_code >= 500
+
+
+def _sleep_before_embed_retry(
+    url: str,
+    attempt: int,
+    *,
+    error: Optional[BaseException] = None,
+    status_code: Optional[int] = None,
+) -> None:
+    delay = EEINSTAGRAM_PROBE_BACKOFF_SECONDS * (2**attempt)
+    if error is not None:
+        logger.info(
+            "embed: retrying request url=%s attempt=%d delay=%.2f error=%s",
+            url,
+            attempt + 2,
+            delay,
+            error,
+        )
+    else:
+        logger.info(
+            "embed: retrying request url=%s attempt=%d delay=%.2f status=%s",
+            url,
+            attempt + 2,
+            delay,
+            status_code,
+        )
+    time.sleep(delay)
 
 
 def url_is_embedable(url: str) -> bool:
