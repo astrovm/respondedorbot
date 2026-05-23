@@ -598,6 +598,70 @@ def test_can_embed_url_retries_eeinstagram_head_exception(monkeypatch):
     assert sleep_calls == [0.25]
 
 
+def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted(
+    monkeypatch,
+):
+    from requests.exceptions import Timeout
+
+    from api.index import can_embed_url
+
+    sleep_calls = []
+    get_response = MagicMock()
+    get_response.status_code = 200
+    get_response.headers = {"Content-Type": "text/html"}
+    get_response.text = (
+        "<meta property='og:image' content='https://example.com/preview.jpg'>"
+    )
+    calls = {"head": 0, "get": 0}
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            calls["head"] += 1
+            raise Timeout("temporary")
+        calls["get"] += 1
+        return get_response
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+    monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
+
+    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert calls == {"head": 3, "get": 1}
+    assert sleep_calls == [0.25, 0.5]
+
+
+def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
+    monkeypatch,
+):
+    from api.index import can_embed_url
+
+    sleep_calls = []
+    head_response = MagicMock()
+    head_response.status_code = 502
+    head_response.headers = {}
+
+    get_response = MagicMock()
+    get_response.status_code = 200
+    get_response.headers = {"Content-Type": "text/html"}
+    get_response.text = (
+        "<meta property='og:image' content='https://example.com/preview.jpg'>"
+    )
+    calls = {"head": 0, "get": 0}
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            calls["head"] += 1
+            return head_response
+        calls["get"] += 1
+        return get_response
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+    monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
+
+    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert calls == {"head": 3, "get": 1}
+    assert sleep_calls == [0.25, 0.5]
+
+
 def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
     from api.index import can_embed_url
 

@@ -368,11 +368,18 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
         )
     except RequestException as exc:
         logger.warning("embed: HEAD request failed url=%s error=%s", url, exc)
-        return False
+        return None
 
     status_code = response.status_code
     if status_code == 405:
         logger.info("embed: HEAD not allowed, falling back to GET url=%s", url)
+        return None
+    if _should_retry_embed_response(response):
+        logger.info(
+            "embed: HEAD transient status exhausted, falling back to GET url=%s status=%s",
+            url,
+            status_code,
+        )
         return None
     if status_code >= 400:
         logger.info("embed: HEAD returned status url=%s status=%s", url, status_code)
