@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from api.ai_billing import AIMessageBilling
@@ -18,6 +19,7 @@ logger = get_logger(__name__)
 
 _MAX_FALLBACK_RETRIES = 1
 _MAX_EMPTY_RETRIES = 1
+_MULTIPLE_BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 _TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
     [
@@ -25,16 +27,35 @@ _TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
         "- mantené el personaje del gordo",
         "- usá lenguaje coloquial argentino",
         "- respondé en minúsculas, sin emojis, sin punto final",
-        "- si la respuesta tiene varios temas, usá listas con viñetas, párrafos cortos y saltos de línea entre secciones",
+        "- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.",
+        "- dejá una línea en blanco entre cada item numerado",
+        "- cada item debe tener título corto en su propia línea y explicación breve abajo",
         "- no la pongas toda en una sola frase: estructurala para que sea fácil de leer",
     ]
 )
 
 
+def _restore_task_spacing(original: str, cleaned: str) -> str:
+    if "\n\n" not in original:
+        return cleaned
+
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    spaced_lines: list[str] = []
+    for line in lines:
+        is_numbered_item = bool(re.match(r"^\s*\d+\.\s+", line))
+        if is_numbered_item and spaced_lines and spaced_lines[-1] != "":
+            spaced_lines.append("")
+        spaced_lines.append(line)
+
+    return _MULTIPLE_BLANK_LINES_RE.sub("\n\n", "\n".join(spaced_lines)).strip()
+
+
 def _clean_task_response(response: str) -> str:
+    original_response = response
     response = remove_gordo_prefix(response)
     response = clean_duplicate_response(response)
     response = strip_markdown_formatting(response)
+    response = _restore_task_spacing(original_response, response)
     return response.strip()
 
 
