@@ -76,6 +76,8 @@ class TestTaskExecutor:
         sent_prompt = ask_ai.call_args.args[0][0]["content"]
         assert sent_prompt.startswith("decime cuanta aura farmeaste hoy")
         assert "INSTRUCCIONES:" in sent_prompt
+        assert "usá lista numerada: 1., 2., 3." in sent_prompt
+        assert "dejá una línea en blanco entre cada item numerado" in sent_prompt
 
     def test_refunds_reserved_credits_on_fallback(self):
         def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
@@ -206,3 +208,35 @@ class TestTaskExecutor:
 
         assert should_delete is True
         send_msg.assert_called_once_with("123", "astro, tarea «recordame algo»:\nhola\ntitulo")
+
+    def test_preserves_spacing_between_numbered_task_items(self):
+        executor, billing, ask_ai, send_msg = _build_executor(
+            ask_ai_return_value=(
+                "1. noticia uno\n"
+                "detalle uno\n\n"
+                "2. noticia dos\n"
+                "detalle dos"
+            )
+        )
+
+        task = {
+            "id": "abc123",
+            "chat_id": "123",
+            "text": "dame una lista",
+            "user_name": "astro",
+            "user_id": 77,
+            "interval_seconds": None,
+            "trigger_config": None,
+        }
+
+        should_delete = executor.execute(task)
+
+        assert should_delete is True
+        send_msg.assert_called_once_with(
+            "123",
+            "astro, tarea «dame una lista»:\n"
+            "1. noticia uno\n"
+            "detalle uno\n\n"
+            "2. noticia dos\n"
+            "detalle dos",
+        )
