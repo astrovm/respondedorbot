@@ -1181,41 +1181,36 @@ def test_download_telegram_file_success():
 
     with (
         patch("api.index.environ.get") as mock_env,
+        patch("api.index.telegram_gateway._telegram_request") as mock_telegram_request,
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
             "test_token" if key == "TELEGRAM_TOKEN" else default
         )
-
-        # Mock file info response
-        mock_file_info = MagicMock()
-        mock_file_info.json.return_value = {
-            "ok": True,
-            "result": {"file_path": "photos/file_123.jpg"},
-        }
-        mock_file_info.raise_for_status.return_value = None
+        mock_telegram_request.return_value = (
+            {"ok": True, "result": {"file_path": "photos/file_123.jpg"}},
+            None,
+        )
 
         # Mock file download response
         mock_file_download = MagicMock()
         mock_file_download.content = b"fake image data"
         mock_file_download.raise_for_status.return_value = None
-
-        # Configure side effect for two different calls
-        mock_get.side_effect = [mock_file_info, mock_file_download]
+        mock_get.return_value = mock_file_download
 
         result = download_telegram_file("test_file_id")
 
         assert result == b"fake image data"
-        assert mock_get.call_count == 2
-
-        # Verify file info call
-        info_call = mock_get.call_args_list[0]
-        assert "getFile" in info_call[0][0]
-        assert info_call[1]["params"]["file_id"] == "test_file_id"
-
-        # Verify file download call
-        download_call = mock_get.call_args_list[1]
-        assert "photos/file_123.jpg" in download_call[0][0]
+        mock_telegram_request.assert_called_once_with(
+            "getFile",
+            method="GET",
+            params={"file_id": "test_file_id"},
+            log_errors=False,
+        )
+        mock_get.assert_called_once_with(
+            "https://api.telegram.org/file/bottest_token/photos/file_123.jpg",
+            timeout=30,
+        )
 
 
 def test_download_telegram_file_api_error():
