@@ -40,6 +40,7 @@ import random
 import re
 import redis
 import requests
+import pycountry
 import subprocess
 import tempfile
 import time
@@ -307,58 +308,13 @@ POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
-COUNTRY_CODES = {
-    "argentina": "AR",
-    "australia": "AU",
-    "belgium": "BE",
+COUNTRY_NAME_ALIASES = {
     "bosnia-herzegovina": "BA",
-    "brazil": "BR",
-    "cabo verde": "CV",
-    "canada": "CA",
-    "colombia": "CO",
-    "côte d'ivoire": "CI",
-    "curaçao": "CW",
-    "czechia": "CZ",
-    "ecuador": "EC",
-    "egypt": "EG",
     "england": "GB",
-    "france": "FR",
-    "germany": "DE",
-    "haiti": "HT",
     "ir iran": "IR",
-    "iraq": "IQ",
-    "israel": "IL",
-    "japan": "JP",
     "korea republic": "KR",
-    "mexico": "MX",
-    "morocco": "MA",
-    "netherlands": "NL",
-    "new zealand": "NZ",
-    "norway": "NO",
-    "paraguay": "PY",
-    "peru": "PE",
-    "portugal": "PT",
-    "qatar": "QA",
-    "saudi arabia": "SA",
     "scotland": "GB",
-    "senegal": "SN",
-    "south africa": "ZA",
-    "spain": "ES",
-    "sweden": "SE",
-    "switzerland": "CH",
-    "tunisia": "TN",
-    "türkiye": "TR",
-    "united states": "US",
-    "uruguay": "UY",
-}
-ELECTION_TAG_COUNTRY_CODES = {
-    "brazil": "BR",
-    "colombia": "CO",
-    "france": "FR",
-    "israel": "IL",
-    "peru": "PE",
     "uk": "GB",
-    "united-states": "US",
 }
 
 
@@ -1292,16 +1248,30 @@ def _country_flag(country_code: str) -> str:
     return "".join(chr(127397 + ord(char)) for char in code)
 
 
+def _country_code_from_name(name: str) -> str:
+    """Resolve a country name or slug to an ISO alpha-2 code."""
+
+    normalized = re.sub(r"\s+", " ", name.replace("_", " ").strip()).casefold()
+    alias = COUNTRY_NAME_ALIASES.get(normalized)
+    if alias:
+        return alias
+
+    lookup_name = normalized.replace("-", " ")
+    try:
+        return str(pycountry.countries.lookup(lookup_name).alpha_2)
+    except LookupError:
+        return ""
+
+
 def _event_country_flag(event: Dict[str, Any]) -> str:
     """Return an election event's country flag from Polymarket tags."""
 
-    tag_slugs = {
-        str(tag.get("slug") or "").lower()
-        for tag in event.get("tags") or []
-        if isinstance(tag, dict)
-    }
-    for tag_slug, country_code in ELECTION_TAG_COUNTRY_CODES.items():
-        if tag_slug in tag_slugs:
+    for tag in event.get("tags") or []:
+        if isinstance(tag, dict):
+            country_code = _country_code_from_name(str(tag.get("slug") or ""))
+        else:
+            country_code = ""
+        if country_code:
             return _country_flag(country_code)
     return ""
 
@@ -1309,8 +1279,8 @@ def _event_country_flag(event: Dict[str, Any]) -> str:
 def _flagged_country_name(name: str) -> str:
     """Prefix a known country or national team name with its flag."""
 
-    country_code = COUNTRY_CODES.get(name.casefold())
-    flag = _country_flag(country_code) if country_code else ""
+    country_code = _country_code_from_name(name)
+    flag = _country_flag(country_code)
     return f"{flag} {name}" if flag else name
 
 

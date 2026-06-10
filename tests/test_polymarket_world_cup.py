@@ -156,3 +156,12 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
 
     assert ">Team A vs. Team B</a>" in result
     assert "[Draw]" not in result
+
+
+def test_country_flags_use_iso_data_with_sports_aliases():
+    assert index._flagged_country_name("Romania") == "🇷🇴 Romania"
+    assert index._flagged_country_name("Türkiye") == "🇹🇷 Türkiye"
+    assert index._flagged_country_name("Korea Republic") == "🇰🇷 Korea Republic"
+    assert index._flagged_country_name("Bosnia-Herzegovina") == (
+        "🇧🇦 Bosnia-Herzegovina"
+    )

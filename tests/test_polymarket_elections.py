@@ -91,3 +91,7 @@ def test_get_polymarket_global_elections_handles_empty_response(monkeypatch):
         index.get_polymarket_global_elections()
         == "No pude traer las elecciones desde Polymarket"
     )
+
+
+def test_event_country_flag_resolves_new_standard_country_tag():
+    assert index._event_country_flag({"tags": [{"slug": "armenia"}]}) == "🇦🇲"
