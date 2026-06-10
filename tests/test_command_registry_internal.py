@@ -16,7 +16,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "get_oil_price": lambda: "oil",
             "get_stock_prices": prices,
             "summary_command": lambda: "resumen",
-            "get_polymarket_argentina_election": lambda: "election",
+            "get_polymarket_global_elections": lambda: "election",
             "get_rulo": lambda: "rulo",
             "get_devo": prices,
             "powerlaw": lambda: "powerlaw",
@@ -43,6 +43,9 @@ def test_build_command_registry_reuses_alias_metadata():
     assert registry["/prices"] == registry["/precios"]
     assert registry["/transcribe"] == registry["/describe"]
     assert registry["/resumen"] == registry["/tldr"]
+    assert registry["/eleccion"] == registry["/elecciones"]
+    assert registry["/eleccion"] == registry["/election"]
+    assert registry["/eleccion"] == registry["/elections"]
     assert "/purgeailog" not in registry
     assert "/updatecommands" not in registry
 
