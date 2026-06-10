@@ -1150,6 +1150,219 @@ def _handle_transfer_command(
     )
 
 
+def _handle_summary_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_id: str,
+    message: Dict[str, Any],
+    billing_helper: AIMessageBilling,
+    redis_client: Any,
+    sanitized_message_text: str,
+    handler_func: Any = None,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    """Handle /resumen, /summary, /tldr commands."""
+    custom_instruction = None
+    parts = sanitized_message_text.strip().split(None, 1)
+    if parts and parts[0].isdigit() and len(parts) > 1:
+        custom_instruction = parts[1]
+    elif parts and not parts[0].isdigit():
+        custom_instruction = sanitized_message_text.strip()
+
+    base_prompt = (
+        "actualizá el resumen anterior con los mensajes nuevos. "
+        "entre 10 y 20 items cortos y concretos si hay material suficiente, uno por línea. "
+        "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
+        "evitá relleno, repetición, contexto innecesario y frases largas. "
+        f"{PROMPT_NO_MARKDOWN} "
+        "usá solo guiones (-) al inicio de cada item."
+    )
+    if custom_instruction:
+        prompt_text = f"{custom_instruction}. {base_prompt}"
+    else:
+        prompt_text = base_prompt
+
+    raw_message_id = message.get("message_id")
+    reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
+
+    def _consume_summary_stream(iterator):
+        final_text, _message_id = consume_stream_to_telegram(
+            chat_id,
+            iterator,
+            deps.send_msg,
+            deps.edit_message,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return final_text
+
+    final_text, _pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id=chat_id,
+            message=message,
+            billing_helper=billing_helper,
+            prompt_text=prompt_text,
+            redis_client=redis_client,
+        ),
+        stream_consumer=_consume_summary_stream,
+    )
+
+    final_text = sanitize_summary_text(final_text)
+
+    if is_fallback:
+        return final_text, None, False, command
+    return None, None, True, command
+
+
+def _handle_transcribe_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_id: str,
+    message: Dict[str, Any],
+    billing_helper: AIMessageBilling,
+    redis_client: Any = None,
+    sanitized_message_text: str = "",
+    handler_func: Any = None,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    """Handle /transcribe command for audio and images."""
+    reserve_credits = 0
+    replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})
+    if replied_message.get("voice") or replied_message.get("audio"):
+        replied_audio_file_id = None
+        voice = replied_message.get("voice")
+        if isinstance(voice, Mapping):
+            replied_audio_file_id = str(voice.get("file_id") or "") or None
+        audio = replied_message.get("audio")
+        if not replied_audio_file_id and isinstance(audio, Mapping):
+            replied_audio_file_id = str(audio.get("file_id") or "") or None
+        audio_duration_seconds = _resolve_audio_duration_seconds(
+            message,
+            audio_file_id=replied_audio_file_id,
+            deps=deps,
+        )
+        if audio_duration_seconds is None:
+            return "ok", None, False, None
+        if (
+            not deps.check_provider_available(
+                scope="transcribe",
+            )
+            and not deps.has_openrouter_fallback()
+        ):
+            return deps.handle_rate_limit(chat_id, message), None, False, command
+        reserve_credits = estimate_transcribe_reserve_credits(
+            audio_duration_seconds
+        )
+    else:
+        replied_photo_file_id = deps.extract_message_content(message)[1]
+        replied_image_data = (
+            deps.download_telegram_file(replied_photo_file_id)
+            if replied_photo_file_id
+            else None
+        )
+        if (
+            isinstance(replied_image_data, (bytes, bytearray))
+            and replied_image_data
+        ):
+            resized_image = deps.resize_image_if_needed(bytes(replied_image_data))
+            if (
+                not deps.check_provider_available(
+                    scope="vision",
+                )
+                and not deps.has_openrouter_fallback()
+            ):
+                return (
+                    deps.handle_rate_limit(chat_id, message),
+                    None,
+                    False,
+                    command,
+                )
+            reserve_credits = deps.estimate_image_context_reserve_credits(
+                resized_image,
+                "Describe what you see in this image in detail.",
+            )
+        else:
+            reserve_credits = 1
+
+    media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
+        "transcribe_command_media",
+        reserve_credits,
+    )
+    if media_charge_error:
+        return media_charge_error, None, False, command
+
+    response_msg, billing_segments = deps.handle_transcribe_with_message_result(
+        message
+    )
+    transcribe_succeeded = bool(
+        billing_segments
+    ) or billing_helper.is_transcribe_success_response(response_msg)
+    _settle_media_result(
+        billing_helper, media_charge_meta,
+        cast(List[Mapping[str, Any]], billing_segments),
+        transcribe_succeeded,
+        settle_reason="transcribe_command_success",
+        refund_reason="transcribe_command_unsuccessful",
+    )
+    return response_msg, None, False, command
+
+
+def _handle_gif_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    chat_id: str,
+    message: Dict[str, Any],
+    billing_helper: Any = None,
+    redis_client: Any = None,
+    sanitized_message_text: str = "",
+    handler_func: Callable[..., str],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    """Handle /gm and /gn commands."""
+    gif_url = handler_func()
+    msg_id = str(message.get("message_id", ""))
+    if gif_url.startswith("http"):
+        deps.send_animation(chat_id, gif_url, msg_id=msg_id)
+        return None, None, False, command
+    return gif_url, None, False, command
+
+
+def _handle_tasks_command(
+    *,
+    command: str,
+    chat_id: str,
+    handler_func: Callable[..., str],
+    deps: Any = None,
+    message: Any = None,
+    billing_helper: Any = None,
+    redis_client: Any = None,
+    sanitized_message_text: str = "",
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    """Handle /tareas and /tasks commands."""
+    result = handler_func(chat_id)
+    response_markup = None
+    if isinstance(result, tuple):
+        response_msg, response_markup = result
+    else:
+        response_msg = result
+    return response_msg, response_markup, False, command
+
+
+# Registry for commands that need custom handling beyond the generic pattern.
+_SPECIAL_COMMAND_HANDLERS: Dict[
+    str,
+    Callable[..., Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]],
+] = {
+    "/resumen": _handle_summary_command,
+    "/summary": _handle_summary_command,
+    "/tldr": _handle_summary_command,
+    "/transcribe": _handle_transcribe_command,
+    "/gm": _handle_gif_command,
+    "/gn": _handle_gif_command,
+    "/tareas": _handle_tasks_command,
+    "/tasks": _handle_tasks_command,
+}
+
+
 def _handle_non_ai_command(
     deps: MessageHandlerDeps,
     *,
@@ -1171,154 +1384,18 @@ def _handle_non_ai_command(
     if uses_ai:
         return None, None, False, None
 
-    if command in ("/resumen", "/summary", "/tldr"):
-        custom_instruction = None
-        parts = sanitized_message_text.strip().split(None, 1)
-        if parts and parts[0].isdigit() and len(parts) > 1:
-            custom_instruction = parts[1]
-        elif parts and not parts[0].isdigit():
-            custom_instruction = sanitized_message_text.strip()
-
-        base_prompt = (
-            "actualizá el resumen anterior con los mensajes nuevos. "
-            "entre 10 y 20 items cortos y concretos si hay material suficiente, uno por línea. "
-            "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
-            "evitá relleno, repetición, contexto innecesario y frases largas. "
-            f"{PROMPT_NO_MARKDOWN} "
-            "usá solo guiones (-) al inicio de cada item."
+    special_handler = _SPECIAL_COMMAND_HANDLERS.get(command)
+    if special_handler:
+        return special_handler(
+            deps,
+            command=command,
+            chat_id=chat_id,
+            message=message,
+            billing_helper=billing_helper,
+            redis_client=redis_client,
+            sanitized_message_text=sanitized_message_text,
+            handler_func=handler_func,
         )
-        if custom_instruction:
-            prompt_text = f"{custom_instruction}. {base_prompt}"
-        else:
-            prompt_text = base_prompt
-
-        raw_message_id = message.get("message_id")
-        reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
-
-        def _consume_summary_stream(iterator):
-            final_text, _message_id = consume_stream_to_telegram(
-                chat_id,
-                iterator,
-                deps.send_msg,
-                deps.edit_message,
-                reply_to_message_id=reply_to_message_id,
-            )
-            return final_text
-
-        final_text, _pending_marker, is_fallback = deps.ai_service.run_summary_command_stream(
-            SummaryCommandRequest(
-                chat_id=chat_id,
-                message=message,
-                billing_helper=billing_helper,
-                prompt_text=prompt_text,
-                redis_client=redis_client,
-            ),
-            stream_consumer=_consume_summary_stream,
-        )
-
-        final_text = sanitize_summary_text(final_text)
-
-        if is_fallback:
-            return final_text, None, False, command
-        return None, None, True, command
-
-    if command == "/transcribe":
-        reserve_credits = 0
-        replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})
-        if replied_message.get("voice") or replied_message.get("audio"):
-            replied_audio_file_id = None
-            voice = replied_message.get("voice")
-            if isinstance(voice, Mapping):
-                replied_audio_file_id = str(voice.get("file_id") or "") or None
-            audio = replied_message.get("audio")
-            if not replied_audio_file_id and isinstance(audio, Mapping):
-                replied_audio_file_id = str(audio.get("file_id") or "") or None
-            audio_duration_seconds = _resolve_audio_duration_seconds(
-                message,
-                audio_file_id=replied_audio_file_id,
-                deps=deps,
-            )
-            if audio_duration_seconds is None:
-                return "ok", None, False, None
-            if (
-                not deps.check_provider_available(
-                    scope="transcribe",
-                )
-                and not deps.has_openrouter_fallback()
-            ):
-                return deps.handle_rate_limit(chat_id, message), None, False, command
-            reserve_credits = estimate_transcribe_reserve_credits(
-                audio_duration_seconds
-            )
-        else:
-            replied_photo_file_id = deps.extract_message_content(message)[1]
-            replied_image_data = (
-                deps.download_telegram_file(replied_photo_file_id)
-                if replied_photo_file_id
-                else None
-            )
-            if (
-                isinstance(replied_image_data, (bytes, bytearray))
-                and replied_image_data
-            ):
-                resized_image = deps.resize_image_if_needed(bytes(replied_image_data))
-                if (
-                    not deps.check_provider_available(
-                        scope="vision",
-                    )
-                    and not deps.has_openrouter_fallback()
-                ):
-                    return (
-                        deps.handle_rate_limit(chat_id, message),
-                        None,
-                        False,
-                        command,
-                    )
-                reserve_credits = deps.estimate_image_context_reserve_credits(
-                    resized_image,
-                    "Describe what you see in this image in detail.",
-                )
-            else:
-                reserve_credits = 1
-
-        media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
-            "transcribe_command_media",
-            reserve_credits,
-        )
-        if media_charge_error:
-            return media_charge_error, None, False, command
-
-        response_msg, billing_segments = deps.handle_transcribe_with_message_result(
-            message
-        )
-        transcribe_succeeded = bool(
-            billing_segments
-        ) or billing_helper.is_transcribe_success_response(response_msg)
-        _settle_media_result(
-            billing_helper, media_charge_meta,
-            cast(List[Mapping[str, Any]], billing_segments),
-            transcribe_succeeded,
-            settle_reason="transcribe_command_success",
-            refund_reason="transcribe_command_unsuccessful",
-        )
-        return response_msg, None, False, command
-
-    if command in ("/gm", "/gn"):
-        gif_url = handler_func()
-        msg_id = str(message.get("message_id", ""))
-        if gif_url.startswith("http"):
-            deps.send_animation(chat_id, gif_url, msg_id=msg_id)
-            return None, None, False, command
-        return gif_url, None, False, command
-
-    if command in ("/tareas", "/tasks"):
-        result = handler_func(chat_id)
-        response_markup = None
-        if isinstance(result, tuple):
-            response_msg, response_markup = result
-        else:
-            response_msg = result
-        return response_msg, response_markup, False, command
 
     if command in ("/mundial", "/worldcup"):
         response_msg = handler_func(timezone_offset=timezone_offset)
