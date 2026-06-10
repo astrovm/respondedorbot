@@ -1402,6 +1402,7 @@ def get_polymarket_world_cup_games() -> str:
                 ]
             )
 
+    games_by_date: Dict[str, List[Tuple[str, str]]] = {}
     for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
         title = event.get("title")
         slug = event.get("slug")
@@ -1432,16 +1433,38 @@ def get_polymarket_world_cup_games() -> str:
             f'<a href="{escape(event_url, quote=True)}">'
             f"{escape(display_title)}</a>"
         )
-        lines.extend(["", linked_title])
 
         end_date = str(event.get("endDate") or "")
         try:
             kickoff_utc = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             kickoff_ba = kickoff_utc.astimezone(BA_TZ)
-            lines.append(kickoff_ba.strftime("%Y-%m-%d %H:%M UTC-3"))
+            date_str = kickoff_ba.strftime("%a, %B %d").replace(" 0", " ")
+            time_str = kickoff_ba.strftime("%H:%M UTC-3")
         except ValueError:
             if end_date:
-                lines.append(end_date[:16].replace("T", " "))
+                date_str = end_date[:10]
+                time_str = end_date[11:16].replace("T", " ")
+            else:
+                date_str = "Unknown Date"
+                time_str = ""
+
+        if date_str not in games_by_date:
+            games_by_date[date_str] = []
+        games_by_date[date_str].append((linked_title, time_str))
+
+    for date_str, daily_games in games_by_date.items():
+        if date_str != "Unknown Date":
+            lines.extend(["", date_str])
+        else:
+            lines.append("")
+        for linked_title, time_str in daily_games:
+            lines.append(linked_title)
+            if time_str:
+                lines.append(time_str)
+            lines.append("")
+
+    if lines and not lines[-1]:
+        lines.pop()
 
     if len(lines) == 1:
         return "Could not fetch World Cup games from Polymarket"
