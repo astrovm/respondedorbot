@@ -16,6 +16,7 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
         {
             "title": "Higher liquidity election",
             "slug": "higher-election",
+            "tags": [{"slug": "united-states"}],
             "liquidity": 2_500_000,
             "endDate": "2027-04-30T00:00:00Z",
             "markets": [
@@ -78,7 +79,7 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     assert "Liquidity US$2.5M | Closes 2027-04-30" in result
     assert (
         '<a href="https://polymarket.com/event/higher-election">'
-        "Higher liquidity election</a>"
+        "🇺🇸 Higher liquidity election</a>"
     ) in result
     assert "\nhttps://polymarket.com/event/higher-election" not in result
 

@@ -92,18 +92,21 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         },
     ]
     assert "World Cup Winner</a>" in result
-    assert "Spain 18% | France 16% | Brazil 14% | England 12% | Argentina 10%" in result
+    assert (
+        "🇪🇸 Spain 18% | 🇫🇷 France 16% | 🇧🇷 Brazil 14% | "
+        "🇬🇧 England 12% | 🇦🇷 Argentina 10%"
+    ) in result
     assert "Germany" not in result
     assert "Next 8 games" not in result
-    assert result.index("[Mexico] vs. South Africa") < result.index(
-        "Korea Republic vs. Czechia"
+    assert result.index("[🇲🇽 Mexico] vs. 🇿🇦 South Africa") < result.index(
+        "🇰🇷 Korea Republic vs. 🇨🇿 Czechia"
     )
     assert "Exact Score" not in result
-    assert "Mexico 69.5% | Draw 20.5% | South Africa 10.5%" in result
+    assert "🇲🇽 Mexico 69.5% | Draw 20.5% | 🇿🇦 South Africa 10.5%" in result
     assert "2026-06-11 16:00 UTC-3" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
-        'fifwc-mex-rsa-2026-06-11">[Mexico] vs. South Africa</a>'
+        'fifwc-mex-rsa-2026-06-11">[🇲🇽 Mexico] vs. 🇿🇦 South Africa</a>'
     ) in result
 
 

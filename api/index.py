@@ -307,6 +307,60 @@ POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
 
+COUNTRY_CODES = {
+    "argentina": "AR",
+    "australia": "AU",
+    "belgium": "BE",
+    "bosnia-herzegovina": "BA",
+    "brazil": "BR",
+    "cabo verde": "CV",
+    "canada": "CA",
+    "colombia": "CO",
+    "côte d'ivoire": "CI",
+    "curaçao": "CW",
+    "czechia": "CZ",
+    "ecuador": "EC",
+    "egypt": "EG",
+    "england": "GB",
+    "france": "FR",
+    "germany": "DE",
+    "haiti": "HT",
+    "ir iran": "IR",
+    "iraq": "IQ",
+    "israel": "IL",
+    "japan": "JP",
+    "korea republic": "KR",
+    "mexico": "MX",
+    "morocco": "MA",
+    "netherlands": "NL",
+    "new zealand": "NZ",
+    "norway": "NO",
+    "paraguay": "PY",
+    "peru": "PE",
+    "portugal": "PT",
+    "qatar": "QA",
+    "saudi arabia": "SA",
+    "scotland": "GB",
+    "senegal": "SN",
+    "south africa": "ZA",
+    "spain": "ES",
+    "sweden": "SE",
+    "switzerland": "CH",
+    "tunisia": "TN",
+    "türkiye": "TR",
+    "united states": "US",
+    "uruguay": "UY",
+}
+ELECTION_TAG_COUNTRY_CODES = {
+    "brazil": "BR",
+    "colombia": "CO",
+    "france": "FR",
+    "israel": "IL",
+    "peru": "PE",
+    "uk": "GB",
+    "united-states": "US",
+}
+
 
 MESSAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
@@ -1229,6 +1283,37 @@ def _format_usd_compact(value: float) -> str:
     return f"US${fmt_num(value, 0)}"
 
 
+def _country_flag(country_code: str) -> str:
+    """Return the flag emoji for a two-letter country code."""
+
+    code = country_code.upper()
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    return "".join(chr(127397 + ord(char)) for char in code)
+
+
+def _event_country_flag(event: Dict[str, Any]) -> str:
+    """Return an election event's country flag from Polymarket tags."""
+
+    tag_slugs = {
+        str(tag.get("slug") or "").lower()
+        for tag in event.get("tags") or []
+        if isinstance(tag, dict)
+    }
+    for tag_slug, country_code in ELECTION_TAG_COUNTRY_CODES.items():
+        if tag_slug in tag_slugs:
+            return _country_flag(country_code)
+    return ""
+
+
+def _flagged_country_name(name: str) -> str:
+    """Prefix a known country or national team name with its flag."""
+
+    country_code = COUNTRY_CODES.get(name.casefold())
+    flag = _country_flag(country_code) if country_code else ""
+    return f"{flag} {name}" if flag else name
+
+
 def get_polymarket_global_elections() -> str:
     """Return the most liquid active global election events on Polymarket."""
 
@@ -1276,8 +1361,11 @@ def get_polymarket_global_elections() -> str:
             details.append(f"Closes {end_date}")
 
         event_url = f"https://polymarket.com/event/{slug}"
+        flag = _event_country_flag(event)
+        display_title = f"{flag} {title}" if flag else str(title)
         linked_title = (
-            f'<a href="{escape(event_url, quote=True)}">{escape(str(title))}</a>'
+            f'<a href="{escape(event_url, quote=True)}">'
+            f"{escape(display_title)}</a>"
         )
         lines.extend(["", linked_title])
         if outcomes:
@@ -1328,7 +1416,8 @@ def get_polymarket_world_cup_games() -> str:
         ):
             decimals = 2 if probability < 10 else 1
             winner_outcomes.append(
-                f"{escape(outcome_title)} {fmt_num(probability, decimals)}%"
+                f"{escape(_flagged_country_name(outcome_title))} "
+                f"{fmt_num(probability, decimals)}%"
             )
 
         if winner_outcomes:
@@ -1354,6 +1443,8 @@ def get_polymarket_world_cup_games() -> str:
         for outcome_title, probability in game_outcomes:
             decimals = 2 if probability < 10 else 1
             label = "Draw" if outcome_title.startswith("Draw (") else outcome_title
+            if label != "Draw":
+                label = _flagged_country_name(label)
             outcomes.append(f"{escape(label)} {fmt_num(probability, decimals)}%")
 
         event_url = f"https://polymarket.com/sports/world-cup/{slug}"
@@ -1364,8 +1455,15 @@ def get_polymarket_world_cup_games() -> str:
                 "Draw" if favorite_title.startswith("Draw (") else favorite_title
             )
         display_title = str(title)
+        for country_name in (part.strip() for part in display_title.split(" vs. ")):
+            display_title = display_title.replace(
+                country_name, _flagged_country_name(country_name), 1
+            )
         if favorite and favorite != "Draw" and favorite in display_title:
-            display_title = display_title.replace(favorite, f"[{favorite}]", 1)
+            flagged_favorite = _flagged_country_name(favorite)
+            display_title = display_title.replace(
+                flagged_favorite, f"[{flagged_favorite}]", 1
+            )
         linked_title = (
             f'<a href="{escape(event_url, quote=True)}">'
             f"{escape(display_title)}</a>"
