@@ -4,7 +4,7 @@ from api import index
 def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     monkeypatch,
 ):
-    captured = {}
+    captured = []
     events = [
         {
             "title": "Mexico vs. South Africa - Exact Score",
@@ -48,22 +48,53 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         },
     ]
 
+    winner = {
+        "title": "World Cup Winner",
+        "slug": "world-cup-winner",
+        "markets": [
+            {
+                "groupItemTitle": name,
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": f'["{price}", "{1 - price}"]',
+                "active": True,
+                "closed": False,
+            }
+            for name, price in [
+                ("Spain", 0.18),
+                ("France", 0.16),
+                ("Brazil", 0.14),
+                ("England", 0.12),
+                ("Argentina", 0.10),
+                ("Germany", 0.08),
+            ]
+        ],
+    }
+
     def fake_cached_requests(_url, parameters, *_args):
-        captured.update(parameters)
+        captured.append(parameters)
+        if parameters == {"slug": "world-cup-winner"}:
+            return {"data": [winner], "timestamp": 1}
         return {"data": events}
 
     monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
 
     result = index.get_polymarket_world_cup_games()
 
-    assert captured == {
+    assert captured == [
+        {"slug": "world-cup-winner"},
+        {
         "limit": 100,
         "active": "true",
         "closed": "false",
         "series_id": 11433,
         "order": "endDate",
         "ascending": "true",
-    }
+        },
+    ]
+    assert "World Cup Winner</a>" in result
+    assert "Spain 18% | France 16% | Brazil 14% | England 12% | Argentina 10%" in result
+    assert "Germany" not in result
+    assert "Next 8 games" in result
     assert result.index("Mexico vs. South Africa") < result.index(
         "Korea Republic vs. Czechia"
     )
