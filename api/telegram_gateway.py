@@ -71,6 +71,8 @@ class TelegramGateway:
         payload: Dict[str, Any] = {"chat_id": chat_id, "text": _truncate_telegram_text(msg)}
         if self._message_has_domain_link(msg, "polymarket.com"):
             payload["disable_web_page_preview"] = True
+            if '<a href="https://polymarket.com/' in msg:
+                payload["parse_mode"] = "HTML"
         if msg_id:
             payload["reply_to_message_id"] = msg_id
 

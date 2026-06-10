@@ -4,7 +4,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date, UTC
 from email.utils import parsedate_to_datetime
-from html import unescape
+from html import escape, unescape
 from math import log
 from openai import OpenAI
 from groq import Groq as GroqClient
@@ -1242,7 +1242,7 @@ def get_polymarket_global_elections() -> str:
         return "No pude traer las elecciones desde Polymarket"
 
     events.sort(key=lambda event: float(event.get("liquidity") or 0), reverse=True)
-    lines = ["Polymarket - Elecciones globales por liquidez"]
+    lines = ["Polymarket - Global elections by liquidity"]
 
     for event in events[:POLYMARKET_GLOBAL_ELECTIONS_LIMIT]:
         title = event.get("title")
@@ -1255,16 +1255,26 @@ def get_polymarket_global_elections() -> str:
         except (TypeError, ValueError):
             liquidity = 0
 
-        lines.extend(["", str(title)])
+        outcomes = []
         for outcome_title, probability in _polymarket_event_top_outcomes(event):
             decimals = 2 if probability < 10 else 1
-            lines.append(f"- {outcome_title}: {fmt_num(probability, decimals)}%")
-        lines.append(f"- Liquidez: {_format_usd_compact(liquidity)}")
+            outcomes.append(
+                f"{escape(outcome_title)} {fmt_num(probability, decimals)}%"
+            )
 
         end_date = str(event.get("endDate") or "")[:10]
+        details = [f"Liquidity {_format_usd_compact(liquidity)}"]
         if end_date:
-            lines.append(f"- Cierre: {end_date}")
-        lines.append(f"https://polymarket.com/event/{slug}")
+            details.append(f"Closes {end_date}")
+
+        event_url = f"https://polymarket.com/event/{slug}"
+        linked_title = (
+            f'<a href="{escape(event_url, quote=True)}">{escape(str(title))}</a>'
+        )
+        lines.extend(["", linked_title])
+        if outcomes:
+            lines.append(" | ".join(outcomes))
+        lines.append(" | ".join(details))
 
     if len(lines) == 1:
         return "No pude traer las elecciones desde Polymarket"

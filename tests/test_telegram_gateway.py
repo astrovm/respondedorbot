@@ -39,6 +39,20 @@ def test_send_message_delegates_to_telegram_request():
     }
 
 
+def test_send_message_enables_html_for_linked_polymarket_title():
+    request = FakeTelegramRequest(({"ok": True, "result": {"message_id": 42}}, None))
+    gateway = TelegramGateway(telegram_request=request)
+
+    gateway.send_message(
+        "123",
+        '<a href="https://polymarket.com/event/test">Election &amp; runoff</a>',
+    )
+
+    payload = request.calls[0][1]["json_payload"]
+    assert payload["parse_mode"] == "HTML"
+    assert payload["disable_web_page_preview"] is True
+
+
 def test_delete_message_delegates_to_telegram_request():
     request = FakeTelegramRequest(({"ok": True}, None))
     gateway = TelegramGateway(telegram_request=request)
