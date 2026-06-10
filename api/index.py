@@ -300,7 +300,7 @@ POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 POLYMARKET_GLOBAL_ELECTIONS_TAG = "global-elections"
 POLYMARKET_GLOBAL_ELECTIONS_LIMIT = 10
 POLYMARKET_WORLD_CUP_SERIES_ID = 11433
-POLYMARKET_WORLD_CUP_LIMIT = 8
+POLYMARKET_WORLD_CUP_LIMIT = 10
 POLYMARKET_WORLD_CUP_FETCH_LIMIT = 100
 POLYMARKET_WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 POLYMARKET_WORLD_CUP_WINNER_LIMIT = 5
@@ -1409,38 +1409,30 @@ def get_polymarket_world_cup_games() -> str:
             continue
 
         game_outcomes = _polymarket_event_top_outcomes(event, limit=3)
-        outcomes = []
-        for outcome_title, probability in game_outcomes:
+        outcome_probabilities = dict(game_outcomes)
+        team_names = [part.strip() for part in str(title).split(" vs. ")]
+        formatted_teams = []
+        favorite_title = game_outcomes[0][0] if game_outcomes else ""
+        for team_name in team_names:
+            probability = outcome_probabilities.get(team_name)
+            if probability is None:
+                continue
             decimals = 2 if probability < 10 else 1
-            label = "Draw" if outcome_title.startswith("Draw (") else outcome_title
-            if label != "Draw":
-                label = _flagged_country_name(label)
-            outcomes.append(f"{escape(label)} {fmt_num(probability, decimals)}%")
+            label = (
+                f"{_flagged_country_name(team_name)} "
+                f"{fmt_num(probability, decimals)}%"
+            )
+            if team_name == favorite_title:
+                label = f"[{label}]"
+            formatted_teams.append(label)
 
         event_url = f"https://polymarket.com/sports/world-cup/{slug}"
-        favorite = ""
-        if game_outcomes:
-            favorite_title = game_outcomes[0][0]
-            favorite = (
-                "Draw" if favorite_title.startswith("Draw (") else favorite_title
-            )
-        display_title = str(title)
-        for country_name in (part.strip() for part in display_title.split(" vs. ")):
-            display_title = display_title.replace(
-                country_name, _flagged_country_name(country_name), 1
-            )
-        if favorite and favorite != "Draw" and favorite in display_title:
-            flagged_favorite = _flagged_country_name(favorite)
-            display_title = display_title.replace(
-                flagged_favorite, f"[{flagged_favorite}]", 1
-            )
+        display_title = " vs. ".join(formatted_teams)
         linked_title = (
             f'<a href="{escape(event_url, quote=True)}">'
             f"{escape(display_title)}</a>"
         )
         lines.extend(["", linked_title])
-        if outcomes:
-            lines.append(" | ".join(outcomes))
 
         end_date = str(event.get("endDate") or "")
         try:
