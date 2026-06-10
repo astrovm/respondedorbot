@@ -181,9 +181,10 @@ cd respondedorbot
 mkdir -p ~/.config/containers/systemd
 cp quadlets/* ~/.config/containers/systemd/
 
-mkdir -p ~/respondedorbot
+mkdir -p ~/respondedorbot/workspace
 cp .env.example ~/respondedorbot/.env
-# Edit ~/respondedorbot/.env — set REDIS_HOST=respondedorbot-redis
+# Create ~/respondedorbot/workspace/SOUL.md and RULES.md manually.
+# Edit ~/respondedorbot/.env - set REDIS_HOST=respondedorbot-redis
 # Quadlet Redis uses redis-stack-server because the bot needs RediSearch (FT.CREATE / FT.SEARCH)
 
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -193,6 +194,11 @@ systemctl --user daemon-reload
 systemctl --user start respondedorbot-redis.service
 systemctl --user start respondedorbot.service
 ```
+
+The bot container mounts `~/respondedorbot/workspace` read-only at
+`/app/workspace`. Both `SOUL.md` and `RULES.md` live outside Git and must be
+created on the VPS before starting the service. Alternatively,
+`BOT_SYSTEM_PROMPT` can provide the complete prompt through the environment.
 
 The bundled Redis Quadlet uses `redis/redis-stack-server`, not plain `redis`, because chat memory search and compaction require RediSearch commands. The unit intentionally does not override the container command; it passes Redis tuning through `REDIS_ARGS` so the image can boot Redis Stack with its modules enabled.
 

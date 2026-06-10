@@ -16,6 +16,14 @@ class QuadletTests(unittest.TestCase):
         self.assertIn("TimeoutStopSec=630", contents)
         self.assertNotIn("StopTimeout=600", contents)
 
+    def test_bot_container_mounts_external_workspace_read_only(self):
+        contents = BOT_CONTAINER_QUADLET.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Volume=%h/respondedorbot/workspace:/app/workspace:ro",
+            contents,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
