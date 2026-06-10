@@ -57,11 +57,14 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     assert result.index("Higher liquidity election") < result.index(
         "Lower liquidity election"
     )
-    assert result.index("- Candidate B: 61%") < result.index("- Candidate A: 42%")
+    assert "Candidate B 61% | Candidate A 42%" in result
     assert "Candidate C" not in result
-    assert "- Liquidez: US$2.5M" in result
-    assert "- Cierre: 2027-04-30" in result
-    assert "https://polymarket.com/event/higher-election" in result
+    assert "Liquidity US$2.5M | Closes 2027-04-30" in result
+    assert (
+        '<a href="https://polymarket.com/event/higher-election">'
+        "Higher liquidity election</a>"
+    ) in result
+    assert "\nhttps://polymarket.com/event/higher-election" not in result
 
 
 def test_get_polymarket_global_elections_handles_empty_response(monkeypatch):
