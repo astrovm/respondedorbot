@@ -1192,6 +1192,9 @@ def _polymarket_event_top_outcomes(
 
     event_outcomes: List[Tuple[str, float]] = []
     for market in event.get("markets") or []:
+        if market.get("active") is False or market.get("closed") is True:
+            continue
+
         try:
             outcomes = json.loads(market.get("outcomes") or "[]")
             prices = json.loads(market.get("outcomePrices") or "[]")
