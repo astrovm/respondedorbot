@@ -296,7 +296,8 @@ OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 
 # Polymarket constants
 POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-POLYMARKET_ARGENTINA_ELECTION_SLUG = "argentina-presidential-election-winner"
+POLYMARKET_GLOBAL_ELECTIONS_TAG = "global-elections"
+POLYMARKET_GLOBAL_ELECTIONS_LIMIT = 10
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
@@ -1184,36 +1185,86 @@ def _format_polymarket_event_section(
     return lines, latest_stream_timestamp
 
 
-def get_polymarket_argentina_election() -> str:
-    """Return Polymarket probabilities for Argentina's presidential election."""
+def _polymarket_event_leader(event: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+    """Return the highest-priced Yes outcome in a Polymarket event."""
 
-    slug = POLYMARKET_ARGENTINA_ELECTION_SLUG
-    header = "Polymarket - ¿Quién gana las elecciones presidenciales 2027 en Argentina?"
-    url = "https://polymarket.com/event/argentina-presidential-election-winner"
+    leader: Optional[Tuple[str, float]] = None
+    for market in event.get("markets") or []:
+        try:
+            outcomes = json.loads(market.get("outcomes") or "[]")
+            prices = json.loads(market.get("outcomePrices") or "[]")
+            yes_index = outcomes.index("Yes")
+            probability = float(prices[yes_index]) * 100
+        except (AttributeError, TypeError, ValueError, IndexError, json.JSONDecodeError):
+            continue
 
-    fetched_event = _fetch_polymarket_event(slug)
-    if not fetched_event:
-        return "No pude traer las probabilidades desde Polymarket"
-
-    event, response_timestamp = fetched_event
-    formatted = _format_polymarket_event_section(event, header, ())
-    if not formatted:
-        return "No pude traer las probabilidades desde Polymarket"
-
-    lines, latest_stream_timestamp = formatted
-
-    timestamp = latest_stream_timestamp or response_timestamp
-    if isinstance(timestamp, int):
-        updated_at_utc = datetime.fromtimestamp(timestamp, UTC)
-        updated_at_ba = updated_at_utc.astimezone(BA_TZ)
-        lines.extend(
-            [
-                "",
-                f"Actualizado: {updated_at_ba.strftime('%Y-%m-%d %H:%M')} UTC-3",
-            ]
+        title = (
+            market.get("groupItemTitle") or market.get("question") or market.get("slug")
         )
+        if title and (leader is None or probability > leader[1]):
+            leader = str(title), max(0.0, min(probability, 100.0))
 
-    lines.append(url)
+    return leader
+
+
+def _format_usd_compact(value: float) -> str:
+    """Format a USD amount compactly for Telegram."""
+
+    for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if value >= divisor:
+            return f"US${fmt_num(value / divisor, 1)}{suffix}"
+    return f"US${fmt_num(value, 0)}"
+
+
+def get_polymarket_global_elections() -> str:
+    """Return the most liquid active global election events on Polymarket."""
+
+    response = cached_requests(
+        POLYMARKET_EVENTS_URL,
+        {
+            "limit": POLYMARKET_GLOBAL_ELECTIONS_LIMIT,
+            "active": "true",
+            "closed": "false",
+            "tag_slug": POLYMARKET_GLOBAL_ELECTIONS_TAG,
+            "order": "liquidity",
+            "ascending": "false",
+        },
+        None,
+        TTL_POLYMARKET,
+    )
+    events = response.get("data") if response else None
+    if not isinstance(events, list) or not events:
+        return "No pude traer las elecciones desde Polymarket"
+
+    events.sort(key=lambda event: float(event.get("liquidity") or 0), reverse=True)
+    lines = ["Polymarket - Elecciones globales por liquidez"]
+
+    for event in events[:POLYMARKET_GLOBAL_ELECTIONS_LIMIT]:
+        title = event.get("title")
+        slug = event.get("slug")
+        if not title or not slug:
+            continue
+
+        try:
+            liquidity = float(event.get("liquidity") or 0)
+        except (TypeError, ValueError):
+            liquidity = 0
+
+        lines.extend(["", str(title)])
+        leader = _polymarket_event_leader(event)
+        if leader:
+            leader_title, probability = leader
+            decimals = 2 if probability < 10 else 1
+            lines.append(f"- Lidera: {leader_title} ({fmt_num(probability, decimals)}%)")
+        lines.append(f"- Liquidez: {_format_usd_compact(liquidity)}")
+
+        end_date = str(event.get("endDate") or "")[:10]
+        if end_date:
+            lines.append(f"- Cierre: {end_date}")
+        lines.append(f"https://polymarket.com/event/{slug}")
+
+    if len(lines) == 1:
+        return "No pude traer las elecciones desde Polymarket"
 
     return "\n".join(lines)
 
@@ -4137,7 +4188,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_dollar_rates": get_dollar_rates,
             "get_oil_price": get_oil_price,
             "get_stock_prices": get_stock_prices,
-            "get_polymarket_argentina_election": get_polymarket_argentina_election,
+            "get_polymarket_global_elections": get_polymarket_global_elections,
             "get_rulo": get_rulo,
             "get_devo": get_devo,
             "powerlaw": powerlaw,
