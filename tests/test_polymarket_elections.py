@@ -34,6 +34,20 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.20", "0.80"]',
                 },
+                {
+                    "groupItemTitle": "Inactive placeholder",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.99", "0.01"]',
+                    "active": False,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Closed candidate",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.98", "0.02"]',
+                    "active": True,
+                    "closed": True,
+                },
             ],
         },
     ]
@@ -59,6 +73,8 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     )
     assert "Candidate B 61% | Candidate A 42%" in result
     assert "Candidate C" not in result
+    assert "Inactive placeholder" not in result
+    assert "Closed candidate" not in result
     assert "Liquidity US$2.5M | Closes 2027-04-30" in result
     assert (
         '<a href="https://polymarket.com/event/higher-election">'
