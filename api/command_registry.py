@@ -53,6 +53,7 @@ COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = (
         False,
         False,
     ),
+    (("/mundial", "/worldcup"), "get_polymarket_world_cup_games", False, False),
     (("/rulo",), "get_rulo", False, False),
     (("/devo",), "get_devo", False, True),
     (("/powerlaw",), "powerlaw", False, False),

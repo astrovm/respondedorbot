@@ -72,7 +72,8 @@ python run_polling.py
 | `/dolar` | `/dollar`, `/usd` | Dollar rates (CriptoYa) |
 | `/petroleo` | `/oil` | Oil prices |
 | `/acciones` | `/stocks` | Stock prices |
-| `/eleccion` | - | Polymarket Argentina 2027 presidential election odds |
+| `/eleccion` | `/elecciones`, `/election`, `/elections` | Global Polymarket elections by liquidity |
+| `/mundial` | `/worldcup` | Next 10 World Cup games on Polymarket |
 | `/devo` | - | Arbitrage calculator (tarjeta vs crypto) |
 | `/rulo` | - | Dollar arbitrage chains |
 | `/powerlaw` | - | Bitcoin power law |
