@@ -36,7 +36,7 @@ CHAT_SEARCH_INDEX = "idx:chat_messages"
 _SEARCH_INDEX_READY = False
 
 
-def truncate_text(text: Optional[str], max_length: int = 1024) -> str:
+def truncate_text(text: Optional[str], max_length: int = 4096) -> str:
     """Truncate text to max_length and add ellipsis if needed."""
 
     if text is None:
