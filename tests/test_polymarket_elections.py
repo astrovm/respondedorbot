@@ -29,6 +29,11 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.61", "0.39"]',
                 },
+                {
+                    "groupItemTitle": "Candidate C",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.20", "0.80"]',
+                },
             ],
         },
     ]
@@ -52,7 +57,8 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     assert result.index("Higher liquidity election") < result.index(
         "Lower liquidity election"
     )
-    assert "- Lidera: Candidate B (61%)" in result
+    assert result.index("- Candidate B: 61%") < result.index("- Candidate A: 42%")
+    assert "Candidate C" not in result
     assert "- Liquidez: US$2.5M" in result
     assert "- Cierre: 2027-04-30" in result
     assert "https://polymarket.com/event/higher-election" in result
