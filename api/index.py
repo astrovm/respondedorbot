@@ -299,8 +299,10 @@ POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 POLYMARKET_GLOBAL_ELECTIONS_TAG = "global-elections"
 POLYMARKET_GLOBAL_ELECTIONS_LIMIT = 10
 POLYMARKET_WORLD_CUP_SERIES_ID = 11433
-POLYMARKET_WORLD_CUP_LIMIT = 10
+POLYMARKET_WORLD_CUP_LIMIT = 8
 POLYMARKET_WORLD_CUP_FETCH_LIMIT = 100
+POLYMARKET_WORLD_CUP_WINNER_SLUG = "world-cup-winner"
+POLYMARKET_WORLD_CUP_WINNER_LIMIT = 5
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
@@ -1289,9 +1291,10 @@ def get_polymarket_global_elections() -> str:
 
 
 def get_polymarket_world_cup_games() -> str:
-    """Return the next FIFA World Cup games on Polymarket."""
+    """Return World Cup winner odds and the next games on Polymarket."""
 
-    response = cached_requests(
+    winner_event = _fetch_polymarket_event(POLYMARKET_WORLD_CUP_WINNER_SLUG)
+    games_response = cached_requests(
         POLYMARKET_EVENTS_URL,
         {
             "limit": POLYMARKET_WORLD_CUP_FETCH_LIMIT,
@@ -1304,7 +1307,7 @@ def get_polymarket_world_cup_games() -> str:
         None,
         TTL_POLYMARKET,
     )
-    events = response.get("data") if response else None
+    events = games_response.get("data") if games_response else None
     if not isinstance(events, list) or not events:
         return "Could not fetch World Cup games from Polymarket"
 
@@ -1316,7 +1319,31 @@ def get_polymarket_world_cup_games() -> str:
     ]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
 
-    lines = ["Polymarket - Next World Cup games"]
+    lines = ["Polymarket - World Cup"]
+    if winner_event:
+        event, _timestamp = winner_event
+        winner_outcomes = []
+        for outcome_title, probability in _polymarket_event_top_outcomes(
+            event, limit=POLYMARKET_WORLD_CUP_WINNER_LIMIT
+        ):
+            decimals = 2 if probability < 10 else 1
+            winner_outcomes.append(
+                f"{escape(outcome_title)} {fmt_num(probability, decimals)}%"
+            )
+
+        if winner_outcomes:
+            winner_url = (
+                f"https://polymarket.com/event/{POLYMARKET_WORLD_CUP_WINNER_SLUG}"
+            )
+            lines.extend(
+                [
+                    "",
+                    f'<a href="{winner_url}">World Cup Winner</a>',
+                    " | ".join(winner_outcomes),
+                ]
+            )
+
+    lines.extend(["", "Next 8 games"])
     for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
         title = event.get("title")
         slug = event.get("slug")
