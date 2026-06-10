@@ -1185,10 +1185,12 @@ def _format_polymarket_event_section(
     return lines, latest_stream_timestamp
 
 
-def _polymarket_event_leader(event: Dict[str, Any]) -> Optional[Tuple[str, float]]:
-    """Return the highest-priced Yes outcome in a Polymarket event."""
+def _polymarket_event_top_outcomes(
+    event: Dict[str, Any], limit: int = 2
+) -> List[Tuple[str, float]]:
+    """Return the highest-priced Yes outcomes in a Polymarket event."""
 
-    leader: Optional[Tuple[str, float]] = None
+    event_outcomes: List[Tuple[str, float]] = []
     for market in event.get("markets") or []:
         try:
             outcomes = json.loads(market.get("outcomes") or "[]")
@@ -1201,10 +1203,13 @@ def _polymarket_event_leader(event: Dict[str, Any]) -> Optional[Tuple[str, float
         title = (
             market.get("groupItemTitle") or market.get("question") or market.get("slug")
         )
-        if title and (leader is None or probability > leader[1]):
-            leader = str(title), max(0.0, min(probability, 100.0))
+        if title:
+            event_outcomes.append(
+                (str(title), max(0.0, min(probability, 100.0)))
+            )
 
-    return leader
+    event_outcomes.sort(key=lambda item: item[1], reverse=True)
+    return event_outcomes[:limit]
 
 
 def _format_usd_compact(value: float) -> str:
@@ -1251,11 +1256,9 @@ def get_polymarket_global_elections() -> str:
             liquidity = 0
 
         lines.extend(["", str(title)])
-        leader = _polymarket_event_leader(event)
-        if leader:
-            leader_title, probability = leader
+        for outcome_title, probability in _polymarket_event_top_outcomes(event):
             decimals = 2 if probability < 10 else 1
-            lines.append(f"- Lidera: {leader_title} ({fmt_num(probability, decimals)}%)")
+            lines.append(f"- {outcome_title}: {fmt_num(probability, decimals)}%")
         lines.append(f"- Liquidez: {_format_usd_compact(liquidity)}")
 
         end_date = str(event.get("endDate") or "")[:10]
