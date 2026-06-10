@@ -94,8 +94,8 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "World Cup Winner</a>" in result
     assert "Spain 18% | France 16% | Brazil 14% | England 12% | Argentina 10%" in result
     assert "Germany" not in result
-    assert "Next 8 games" in result
-    assert result.index("Mexico vs. South Africa") < result.index(
+    assert "Next 8 games" not in result
+    assert result.index("[Mexico] vs. South Africa") < result.index(
         "Korea Republic vs. Czechia"
     )
     assert "Exact Score" not in result
@@ -103,7 +103,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "2026-06-11 16:00 UTC-3" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
-        'fifwc-mex-rsa-2026-06-11">Mexico vs. South Africa</a>'
+        'fifwc-mex-rsa-2026-06-11">[Mexico] vs. South Africa</a>'
     ) in result
 
 
@@ -114,3 +114,42 @@ def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
         index.get_polymarket_world_cup_games()
         == "Could not fetch World Cup games from Polymarket"
     )
+
+
+def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
+    monkeypatch,
+):
+    event = {
+        "title": "Team A vs. Team B",
+        "slug": "fifwc-a-b-2026-06-11",
+        "endDate": "2026-06-11T19:00:00Z",
+        "markets": [
+            {
+                "groupItemTitle": "Draw (Team A vs. Team B)",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.40", "0.60"]',
+            },
+            {
+                "groupItemTitle": "Team A",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.35", "0.65"]',
+            },
+            {
+                "groupItemTitle": "Team B",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.25", "0.75"]',
+            },
+        ],
+    }
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": [event]}
+
+    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+
+    result = index.get_polymarket_world_cup_games()
+
+    assert ">Team A vs. Team B</a>" in result
+    assert "[Draw]" not in result

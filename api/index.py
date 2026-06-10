@@ -1343,24 +1343,32 @@ def get_polymarket_world_cup_games() -> str:
                 ]
             )
 
-    lines.extend(["", "Next 8 games"])
     for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
         title = event.get("title")
         slug = event.get("slug")
         if not title or not slug:
             continue
 
+        game_outcomes = _polymarket_event_top_outcomes(event, limit=3)
         outcomes = []
-        for outcome_title, probability in _polymarket_event_top_outcomes(
-            event, limit=3
-        ):
+        for outcome_title, probability in game_outcomes:
             decimals = 2 if probability < 10 else 1
             label = "Draw" if outcome_title.startswith("Draw (") else outcome_title
             outcomes.append(f"{escape(label)} {fmt_num(probability, decimals)}%")
 
         event_url = f"https://polymarket.com/sports/world-cup/{slug}"
+        favorite = ""
+        if game_outcomes:
+            favorite_title = game_outcomes[0][0]
+            favorite = (
+                "Draw" if favorite_title.startswith("Draw (") else favorite_title
+            )
+        display_title = str(title)
+        if favorite and favorite != "Draw" and favorite in display_title:
+            display_title = display_title.replace(favorite, f"[{favorite}]", 1)
         linked_title = (
-            f'<a href="{escape(event_url, quote=True)}">{escape(str(title))}</a>'
+            f'<a href="{escape(event_url, quote=True)}">'
+            f"{escape(display_title)}</a>"
         )
         lines.extend(["", linked_title])
         if outcomes:
