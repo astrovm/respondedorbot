@@ -425,6 +425,26 @@ def test_build_ai_messages_includes_reply_context():
     assert "respuesta" in content
 
 
+def test_build_ai_messages_preserves_full_telegram_reply_context():
+    from api.index import build_ai_messages
+
+    message = {
+        "from": {"first_name": "Ana", "username": "ana"},
+        "chat": {"type": "group", "title": "Grupo"},
+        "text": "¿qué pensás?",
+    }
+    reply_context = "Polymarket elections\n" + ("candidate odds\n" * 150)
+
+    messages = build_ai_messages(
+        message,
+        [],
+        "¿qué pensás?",
+        reply_context,
+    )
+
+    assert reply_context in messages[0]["content"]
+
+
 def test_build_ai_messages_includes_links_context():
     from api.index import build_ai_messages
 

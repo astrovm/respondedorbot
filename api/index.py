@@ -298,9 +298,13 @@ OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 POLYMARKET_GLOBAL_ELECTIONS_TAG = "global-elections"
 POLYMARKET_GLOBAL_ELECTIONS_LIMIT = 10
+POLYMARKET_WORLD_CUP_SERIES_ID = 11433
+POLYMARKET_WORLD_CUP_LIMIT = 10
+POLYMARKET_WORLD_CUP_FETCH_LIMIT = 100
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
+REPLY_CONTEXT_MAX_LENGTH = 4096
 
 
 MESSAGE_BLOCK_PATTERN = re.compile(
@@ -1281,6 +1285,72 @@ def get_polymarket_global_elections() -> str:
 
     if len(lines) == 1:
         return "No pude traer las elecciones desde Polymarket"
+
+    return "\n".join(lines)
+
+
+def get_polymarket_world_cup_games() -> str:
+    """Return the next FIFA World Cup games on Polymarket."""
+
+    response = cached_requests(
+        POLYMARKET_EVENTS_URL,
+        {
+            "limit": POLYMARKET_WORLD_CUP_FETCH_LIMIT,
+            "active": "true",
+            "closed": "false",
+            "series_id": POLYMARKET_WORLD_CUP_SERIES_ID,
+            "order": "endDate",
+            "ascending": "true",
+        },
+        None,
+        TTL_POLYMARKET,
+    )
+    events = response.get("data") if response else None
+    if not isinstance(events, list) or not events:
+        return "Could not fetch World Cup games from Polymarket"
+
+    game_slug_pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
+    games = [
+        event
+        for event in events
+        if game_slug_pattern.fullmatch(str(event.get("slug") or ""))
+    ]
+    games.sort(key=lambda event: str(event.get("endDate") or ""))
+
+    lines = ["Polymarket - Next World Cup games"]
+    for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
+        title = event.get("title")
+        slug = event.get("slug")
+        if not title or not slug:
+            continue
+
+        outcomes = []
+        for outcome_title, probability in _polymarket_event_top_outcomes(
+            event, limit=3
+        ):
+            decimals = 2 if probability < 10 else 1
+            label = "Draw" if outcome_title.startswith("Draw (") else outcome_title
+            outcomes.append(f"{escape(label)} {fmt_num(probability, decimals)}%")
+
+        event_url = f"https://polymarket.com/sports/world-cup/{slug}"
+        linked_title = (
+            f'<a href="{escape(event_url, quote=True)}">{escape(str(title))}</a>'
+        )
+        lines.extend(["", linked_title])
+        if outcomes:
+            lines.append(" | ".join(outcomes))
+
+        end_date = str(event.get("endDate") or "")
+        try:
+            kickoff_utc = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            kickoff_ba = kickoff_utc.astimezone(BA_TZ)
+            lines.append(kickoff_ba.strftime("%Y-%m-%d %H:%M UTC-3"))
+        except ValueError:
+            if end_date:
+                lines.append(end_date[:16].replace("T", " "))
+
+    if len(lines) == 1:
+        return "Could not fetch World Cup games from Polymarket"
 
     return "\n".join(lines)
 
@@ -4152,7 +4222,7 @@ def build_ai_messages(
             [
                 "",
                 "MENSAJE AL QUE RESPONDE:",
-                truncate_text(reply_context),
+                truncate_text(reply_context, REPLY_CONTEXT_MAX_LENGTH),
             ]
         )
 
@@ -4205,6 +4275,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
             "get_oil_price": get_oil_price,
             "get_stock_prices": get_stock_prices,
             "get_polymarket_global_elections": get_polymarket_global_elections,
+            "get_polymarket_world_cup_games": get_polymarket_world_cup_games,
             "get_rulo": get_rulo,
             "get_devo": get_devo,
             "powerlaw": powerlaw,
