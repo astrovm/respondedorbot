@@ -76,6 +76,7 @@ class AIService:
             request.reply_context_text,
             summary_text=summary_text,
             retrieved_messages=retrieved_messages,
+            timezone_offset=request.timezone_offset,
         )
 
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
@@ -86,6 +87,7 @@ class AIService:
                 and request.prepared_message.photo_file_id
                 else 0
             ),
+            timezone_offset=request.timezone_offset,
         )
         if (
             not self.check_provider_available(scope="chat")

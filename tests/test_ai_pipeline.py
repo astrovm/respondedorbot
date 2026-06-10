@@ -597,7 +597,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -617,7 +617,7 @@ def test_ask_ai_fetches_url_unconditionally(monkeypatch):
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -654,7 +654,7 @@ def test_ask_ai_fetches_multiple_urls(monkeypatch):
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -693,7 +693,7 @@ def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -728,7 +728,7 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -844,7 +844,7 @@ def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
     monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.build_system_message",
@@ -1079,12 +1079,11 @@ def test_build_ai_request_reuses_stable_context(monkeypatch):
     monkeypatch.setattr(index, "get_market_context", market_context)
     monkeypatch.setattr(index, "get_weather_context", weather_context)
     monkeypatch.setattr(index, "get_hacker_news_context", hacker_news_context)
-    monkeypatch.setattr(index, "get_time_context", lambda: {"formatted": "Monday 12:00"})
+    monkeypatch.setattr(index, "get_time_context", lambda _offset=-3: {"formatted": "Monday 12:00"})
     monkeypatch.setattr(index, "_fetch_urls_from_latest_message", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(index, "get_all_tool_schemas", lambda *_args, **_kwargs: [])
 
-    index._STABLE_AI_CONTEXT_TIMESTAMP = 0
-    index._STABLE_AI_CONTEXT_VALUE = {}
+    index._STABLE_AI_CONTEXT_CACHE.clear()
 
     index._build_ai_request([{"role": "user", "content": "hola"}], enable_web_search=False)
     index._build_ai_request([{"role": "user", "content": "chau"}], enable_web_search=False)

@@ -1320,9 +1320,12 @@ def _handle_non_ai_command(
             response_msg = result
         return response_msg, response_markup, False, command
 
-    response_msg = (
-        handler_func(sanitized_message_text) if takes_params else handler_func()
-    )
+    if command in ("/mundial", "/worldcup"):
+        response_msg = handler_func(timezone_offset=timezone_offset)
+    elif takes_params:
+        response_msg = handler_func(sanitized_message_text)
+    else:
+        response_msg = handler_func()
     return response_msg, None, False, command
 
 
