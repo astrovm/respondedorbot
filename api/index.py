@@ -246,8 +246,7 @@ _BACKGROUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 atexit.register(_BACKGROUND_REFRESH_EXECUTOR.shutdown, wait=False)
 
-_STABLE_AI_CONTEXT_TIMESTAMP: int = 0
-_STABLE_AI_CONTEXT_VALUE: Dict[str, Any] = {}
+_STABLE_AI_CONTEXT_CACHE: Dict[int, Tuple[int, Dict[str, Any]]] = {}
 
 # Timeframe support for /prices (maps to CMC native fields)
 _CMC_CHANGE_FIELD: Dict[str, str] = {
@@ -281,6 +280,10 @@ def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]
 
 
 BA_TZ = timezone(timedelta(hours=-3))
+
+
+def make_chat_tz(offset: int = -3) -> timezone:
+    return timezone(timedelta(hours=offset))
 PRIMARY_CHAT_MODEL = "deepseek/deepseek-v4-flash"
 SUMMARY_MODEL = "deepseek/deepseek-v4-flash"
 SUMMARY_MAX_TOKENS = 2048
@@ -1348,7 +1351,7 @@ def get_polymarket_global_elections() -> str:
     return "\n".join(lines)
 
 
-def get_polymarket_world_cup_games() -> str:
+def get_polymarket_world_cup_games(timezone_offset: int = -3) -> str:
     """Return World Cup winner odds and the next games on Polymarket."""
 
     winner_event = _fetch_polymarket_event(POLYMARKET_WORLD_CUP_WINNER_SLUG)
@@ -1403,6 +1406,8 @@ def get_polymarket_world_cup_games() -> str:
             )
 
     games_by_date: Dict[str, List[Tuple[str, str]]] = {}
+    chat_tz = make_chat_tz(timezone_offset)
+    tz_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
     for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
         title = event.get("title")
         slug = event.get("slug")
@@ -1437,9 +1442,9 @@ def get_polymarket_world_cup_games() -> str:
         end_date = str(event.get("endDate") or "")
         try:
             kickoff_utc = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            kickoff_ba = kickoff_utc.astimezone(BA_TZ)
-            date_str = kickoff_ba.strftime("%a, %B %d").replace(" 0", " ")
-            time_str = kickoff_ba.strftime("%H:%M UTC-3")
+            kickoff_local = kickoff_utc.astimezone(chat_tz)
+            date_str = kickoff_local.strftime("%a, %B %d").replace(" 0", " ")
+            time_str = kickoff_local.strftime(f"%H:%M {tz_label}")
         except ValueError:
             if end_date:
                 date_str = end_date[:10]
@@ -2867,7 +2872,7 @@ def _build_ai_request(
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
     messages = [_sanitize_bot_message(m) for m in messages or []]
 
-    context_data = _get_stable_ai_context()
+    context_data = _get_stable_ai_context(timezone_offset)
 
     tool_context: Dict[str, Any] = {
         "get_prices": get_prices,
@@ -2900,20 +2905,19 @@ def _build_ai_request(
     return system_message, messages, extra_tools, tool_context
 
 
-def _get_stable_ai_context() -> Dict[str, Any]:
-    global _STABLE_AI_CONTEXT_TIMESTAMP, _STABLE_AI_CONTEXT_VALUE
+def _get_stable_ai_context(timezone_offset: int = -3) -> Dict[str, Any]:
     now = int(time.time())
-    if _STABLE_AI_CONTEXT_VALUE and now - _STABLE_AI_CONTEXT_TIMESTAMP <= STABLE_AI_CONTEXT_TTL:
-        return _STABLE_AI_CONTEXT_VALUE
+    cached = _STABLE_AI_CONTEXT_CACHE.get(timezone_offset)
+    if cached and now - cached[0] <= STABLE_AI_CONTEXT_TTL:
+        return cached[1]
 
     context = {
         "market": get_market_context(),
         "weather": get_weather_context(),
-        "time": get_time_context(),
+        "time": get_time_context(timezone_offset),
         "hacker_news": get_hacker_news_context(),
     }
-    _STABLE_AI_CONTEXT_TIMESTAMP = now
-    _STABLE_AI_CONTEXT_VALUE = context
+    _STABLE_AI_CONTEXT_CACHE[timezone_offset] = (now, context)
     return context
 
 
@@ -3441,9 +3445,9 @@ def get_weather_context() -> Optional[Dict]:
         return None
 
 
-def get_time_context() -> Dict:
-    """Get current time in Buenos Aires"""
-    current_time = datetime.now(BA_TZ)
+def get_time_context(timezone_offset: int = -3) -> Dict:
+    """Get current time in the chat's configured timezone."""
+    current_time = datetime.now(make_chat_tz(timezone_offset))
     return {"datetime": current_time, "formatted": current_time.strftime("%A %d/%m/%Y")}
 
 
@@ -3611,13 +3615,14 @@ def estimate_ai_base_reserve_credits(
     messages: List[Dict[str, Any]],
     *,
     extra_input_tokens: int = 0,
+    timezone_offset: int = -3,
 ) -> Tuple[int, Dict[str, Any]]:
     system_message: Optional[Dict[str, Any]] = None
     try:
         context_data = {
             "market": get_market_context(),
             "weather": get_weather_context(),
-            "time": get_time_context(),
+            "time": get_time_context(timezone_offset),
             "hacker_news": get_hacker_news_context(),
         }
         system_message = build_system_message(context_data)
@@ -4274,6 +4279,7 @@ def build_ai_messages(
     enable_web_search: bool = True,
     summary_text: Optional[str] = None,
     retrieved_messages: Optional[List[Dict[str, Any]]] = None,
+    timezone_offset: int = -3,
 ) -> List[Dict]:
     messages = []
 
@@ -4321,7 +4327,7 @@ def build_ai_messages(
     username = str(sender.get("username") or "")
     chat_type = str(chat.get("type") or "private")
     chat_title = str(chat.get("title") or "") if chat_type != "private" else ""
-    current_time = datetime.now(BA_TZ)
+    current_time = datetime.now(make_chat_tz(timezone_offset))
 
     # Build context sections
     context_parts = [

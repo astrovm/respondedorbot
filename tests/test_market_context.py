@@ -788,7 +788,7 @@ def test_get_time_context():
         mock_datetime.now.return_value = fixed_time_ba
         mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
 
-        result = get_time_context()
+        result = get_time_context(timezone_offset=-3)
 
         assert "datetime" in result
         assert "formatted" in result

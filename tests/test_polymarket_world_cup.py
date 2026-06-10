@@ -78,7 +78,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
 
     monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
 
-    result = index.get_polymarket_world_cup_games()
+    result = index.get_polymarket_world_cup_games(timezone_offset=-3)
 
     assert captured == [
         {"slug": "world-cup-winner"},
@@ -117,7 +117,7 @@ def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
     monkeypatch.setattr(index, "cached_requests", lambda *_args, **_kwargs: None)
 
     assert (
-        index.get_polymarket_world_cup_games()
+        index.get_polymarket_world_cup_games(timezone_offset=-3)
         == "Could not fetch World Cup games from Polymarket"
     )
 
@@ -155,7 +155,7 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
 
     monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
 
-    result = index.get_polymarket_world_cup_games()
+    result = index.get_polymarket_world_cup_games(timezone_offset=-3)
 
     assert ">Team A 35% vs. Team B 25%</a>" in result
     assert "[Draw]" not in result
