@@ -104,7 +104,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "Exact Score" not in result
     assert "[🇲🇽 Mexico 69.5%] vs. 🇿🇦 South Africa 10.5%" in result
     assert "Draw 20.5%" not in result
-    assert "2026-06-11\n<a href=" in result
+    assert "Thu, June 11\n<a href=" in result
     assert "16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'

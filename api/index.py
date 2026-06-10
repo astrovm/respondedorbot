@@ -1438,7 +1438,7 @@ def get_polymarket_world_cup_games() -> str:
         try:
             kickoff_utc = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             kickoff_ba = kickoff_utc.astimezone(BA_TZ)
-            date_str = kickoff_ba.strftime("%Y-%m-%d")
+            date_str = kickoff_ba.strftime("%a, %B %d").replace(" 0", " ")
             time_str = kickoff_ba.strftime("%H:%M UTC-3")
         except ValueError:
             if end_date:
