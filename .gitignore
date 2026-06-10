@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Bot personality and response rules are provisioned outside the repository.
+workspace/
+
 # Spyder project settings
 .spyderproject
 .spyproject

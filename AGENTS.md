@@ -43,7 +43,7 @@ To run a single test file: `python -m pytest tests/test_ai_pipeline.py -q`
 - `api/services/` - `bcra.py`, `credits_db.py` (Supabase), `maintenance.py`, `redis_helpers.py`
 - `api/utils/` - formatting, HTTP helpers, link enrichment, YouTube transcript
 
-**Bot personality** lives in `workspace/SOUL.md` (character) and `workspace/RULES.md` (response rules). These are loaded by `api/config.py` at startup. The env var `BOT_SYSTEM_PROMPT` overrides both.
+**Bot personality** lives outside Git in `workspace/SOUL.md` (character) and `workspace/RULES.md` (response rules). In production, the VPS directory `~/respondedorbot/workspace` is mounted read-only at `/app/workspace`. These are loaded by `api/config.py` at startup. The env var `BOT_SYSTEM_PROMPT` overrides both.
 
 **Tests** (`tests/`): `conftest.py` sets up a `_FastFailRedis` that raises on any Redis call, and monkeypatches `config_redis`, `complete_with_providers`, and `time.sleep`. Tests run fully offline with no external services.
 
