@@ -445,6 +445,21 @@ def test_build_ai_messages_preserves_full_telegram_reply_context():
     assert reply_context in messages[0]["content"]
 
 
+def test_build_ai_messages_preserves_full_telegram_user_message():
+    from api.index import build_ai_messages
+
+    message_text = "question context\n" + ("long question\n" * 150)
+    message = {
+        "from": {"first_name": "Ana", "username": "ana"},
+        "chat": {"type": "group", "title": "Grupo"},
+        "text": message_text,
+    }
+
+    messages = build_ai_messages(message, [], message_text)
+
+    assert message_text in messages[0]["content"]
+
+
 def test_build_ai_messages_includes_links_context():
     from api.index import build_ai_messages
 

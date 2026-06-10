@@ -304,7 +304,6 @@ POLYMARKET_WORLD_CUP_FETCH_LIMIT = 100
 POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
 POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
-REPLY_CONTEXT_MAX_LENGTH = 4096
 
 
 MESSAGE_BLOCK_PATTERN = re.compile(
@@ -4222,7 +4221,7 @@ def build_ai_messages(
             [
                 "",
                 "MENSAJE AL QUE RESPONDE:",
-                truncate_text(reply_context, REPLY_CONTEXT_MAX_LENGTH),
+                truncate_text(reply_context),
             ]
         )
 
@@ -4300,7 +4299,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
     )
 
 
-def truncate_text(text: Optional[str], max_length: int = 512) -> str:
+def truncate_text(text: Optional[str], max_length: int = 4096) -> str:
     return _state_truncate_text(text, max_length)
 
 

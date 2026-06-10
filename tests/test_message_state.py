@@ -127,7 +127,7 @@ def test_truncate_text():
     assert truncate_text(long_text, 512) == ("a" * 509) + "..."
 
     # Test with default limit
-    assert len(truncate_text("a" * 1000)) <= 512
+    assert truncate_text("a" * 1000) == "a" * 1000
 
 
 def test_format_user_message_edge_cases():
@@ -158,17 +158,17 @@ def test_truncate_text_edge_cases():
     assert truncate_text(None) == ""
 
     # Test string with exactly max length
-    text = "a" * 1024
+    text = "a" * 4096
     assert truncate_text(text) == text
 
     # Test string with max length minus one
-    text = "a" * 1023
+    text = "a" * 4095
     assert truncate_text(text) == text
 
     # Test string with max length plus one
-    text = "a" * 1025
+    text = "a" * 4097
     truncated = truncate_text(text)
-    assert len(truncated) == 1024
+    assert len(truncated) == 4096
     assert truncated.endswith("...")
 
     # Test with very small max_length
@@ -335,7 +335,7 @@ def test_truncate_text_more_edge_cases():
     # Test with very large text
     large_text = "a" * 10000
     truncated = truncate_text(large_text)
-    assert len(truncated) == 512
+    assert len(truncated) == 4096
 
     # Test with max_length smaller than ellipsis
     assert truncate_text("hello", 1) == "."
