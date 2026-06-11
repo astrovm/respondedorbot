@@ -199,7 +199,45 @@ The bot container mounts `~/respondedorbot/workspace` read-only at
 created on the VPS before starting the service. Alternatively,
 `BOT_SYSTEM_PROMPT` can provide the complete prompt through the environment.
 
-The bundled Redis Quadlet uses `redis/redis-stack-server`, not plain `redis`, because chat memory search and compaction require RediSearch commands. The unit intentionally does not override the container command; it passes Redis tuning through `REDIS_ARGS` so the image can boot Redis Stack with its modules enabled.
+The bundled Redis Quadlet uses the pinned
+`redis/redis-stack-server:7.4.0-v8` image, not plain Redis, because chat memory
+search and compaction require RediSearch commands. Redis does not auto-update;
+upgrade the pinned version only after testing `FT.CREATE` and `FT.SEARCH`. The
+unit intentionally does not override the container command; it passes Redis
+tuning through `REDIS_ARGS` so the image can boot Redis Stack with its modules
+enabled.
+
+### Image publishing and rollback
+
+The CI workflow runs Ruff, mypy, and the complete test suite before building
+the bot image. A successful push to `main` publishes both:
+
+- `ghcr.io/astrovm/respondedorbot:latest` for normal Podman auto-updates.
+- `ghcr.io/astrovm/respondedorbot:sha-<full-commit-sha>` for rollback.
+
+To temporarily roll back the VPS to a known-good commit:
+
+```bash
+ROLLBACK_SHA=<full-commit-sha>
+podman pull "ghcr.io/astrovm/respondedorbot:sha-${ROLLBACK_SHA}"
+sed -i \
+  "s|^Image=.*|Image=ghcr.io/astrovm/respondedorbot:sha-${ROLLBACK_SHA}|" \
+  ~/.config/containers/systemd/respondedorbot.container
+systemctl --user daemon-reload
+systemctl --user restart respondedorbot.service
+systemctl --user status respondedorbot.service --no-pager
+```
+
+The SHA tag prevents Podman auto-update from moving the bot forward. After the
+problem is fixed, return to automatic releases:
+
+```bash
+sed -i \
+  "s|^Image=.*|Image=ghcr.io/astrovm/respondedorbot:latest|" \
+  ~/.config/containers/systemd/respondedorbot.container
+systemctl --user daemon-reload
+systemctl --user restart respondedorbot.service
+```
 
 ### Persist across reboots
 
