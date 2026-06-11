@@ -1,18 +1,18 @@
 ## Commands
 
 ```bash
-ruff check api/ tests/          # lint
-mypy api/                        # typecheck
-python -m pytest -q              # tests (no Redis needed - mocked in conftest)
+uv run --locked ruff check api/ tests/  # lint
+uv run --locked mypy api/               # typecheck
+uv run --locked python -m pytest -q     # tests (no Redis needed - mocked in conftest)
 ```
 
 CI runs all three in that order. Pre-commit runs them too (`ruff --fix`, `mypy api/`, `pytest -q`).
 
-To run a single test file: `python -m pytest tests/test_ai_pipeline.py -q`
+To run a single test file: `uv run --locked python -m pytest tests/test_ai_pipeline.py -q`
 
 ## Stack
 
-- Python 3.14, dependencies in `requirements.txt` (no Poetry/uv/lockfile)
+- Python 3.14, dependencies in `pyproject.toml`, locked by `uv.lock`
 - Lint: ruff (rules in `pyproject.toml`, not defaults - many ignores including `I001`, `E501`, `S101`)
 - Types: mypy with `ignore_missing_imports = true`, `disallow_untyped_defs = false`
 - Tests: pytest, no coverage enforcement

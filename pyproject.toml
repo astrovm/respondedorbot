@@ -1,3 +1,39 @@
+[project]
+name = "respondedorbot"
+version = "0.1.0"
+description = "AI-powered Telegram bot with market data, chat memory, and scheduled tasks"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "apscheduler>=3.11.2,<4.0",
+    "emoji>=2.15.0",
+    "groq>=1.2.0",
+    "mutagen>=1.47.0",
+    "openai>=2.36.0",
+    "openpyxl>=3.1.5",
+    "pillow>=12.2.0",
+    "psycopg[binary]>=3.3.4",
+    "pycountry>=26.2.16",
+    "pykakasi>=2.3.0",
+    "python-telegram-bot>=22.7,<23.0",
+    "redis>=7.4.0",
+    "requests>=2.34.2",
+    "youtube-transcript-api>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.17",
+    "types-requests>=2.33.0.20260518",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.11.20"
+
 [tool.ruff]
 target-version = "py314"
 line-length = 100
