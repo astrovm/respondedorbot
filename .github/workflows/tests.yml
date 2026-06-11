@@ -15,21 +15,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          python-version: "3.14"
+          version: "0.11.20"
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+        run: uv sync --locked
 
       - name: Lint with ruff
-        run: ruff check api/ tests/
+        run: uv run --locked ruff check api/ tests/
 
       - name: Type check with mypy
-        run: mypy api/
+        run: uv run --locked mypy api/
 
       - name: Run test suite
-        run: python -m pytest -q
+        run: uv run --locked python -m pytest -q

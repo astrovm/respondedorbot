@@ -23,12 +23,10 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 ## Quick Start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv sync --locked
 cp .env.example .env
 # Edit .env with your keys
-python run_polling.py
+uv run --locked python run_polling.py
 ```
 
 ## Configuration
@@ -239,5 +237,5 @@ podman exec systemd-respondedorbot python /app/run_maintenance.py
 ## Tests
 
 ```bash
-pytest -q
+uv run --locked pytest -q
 ```
