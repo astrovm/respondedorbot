@@ -1,4 +1,4 @@
-name: Build and Push Container Image
+name: CI
 
 on:
   push:
@@ -12,8 +12,40 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.20"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint with ruff
+        run: uv run --locked ruff check api/ tests/
+
+      - name: Type check with mypy
+        run: uv run --locked mypy api/
+
+      - name: Run test suite
+        run: uv run --locked python -m pytest -q
+
   build-and-push:
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,6 +56,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Log in to GHCR
+        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
             --username "${{ github.actor }}" \
@@ -33,11 +66,8 @@ jobs:
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           TAG_FLAGS="--tag ${REPO}:sha-${{ github.sha }}"
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:${{ github.ref_name }}"
-            if [ "${{ github.ref_name }}" = "main" ]; then
-              TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:latest"
-            fi
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:latest"
           fi
           podman build \
             ${TAG_FLAGS} \
@@ -51,7 +81,4 @@ jobs:
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           podman push "${REPO}:sha-${{ github.sha }}"
-          podman push "${REPO}:${{ github.ref_name }}"
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            podman push "${REPO}:latest"
-          fi
+          podman push "${REPO}:latest"
