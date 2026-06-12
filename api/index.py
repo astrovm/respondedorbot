@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date, UTC
-from email.utils import parsedate_to_datetime
-from html import escape, unescape
 from math import log
 from openai import OpenAI
 from groq import Groq as GroqClient
@@ -21,7 +18,6 @@ from typing import (
     Any,
     cast,
     Set,
-    Iterable,
     Mapping,
     Sequence,
     TypeVar,
@@ -30,9 +26,7 @@ from typing import (
     Iterator,
 )
 import atexit
-import base64
 import concurrent.futures
-import emoji
 import hashlib
 import io
 import json
@@ -40,22 +34,13 @@ import random
 import re
 import redis
 import requests
-import pycountry
-import subprocess
-import tempfile
 import time
-import traceback
-import wave
 from api.provider_backoff import (
     mark_provider_cooldown,
     get_provider_cooldown_remaining as _get_cooldown_remaining,
     is_provider_cooled_down,
 )
-from pykakasi import kakasi
-from mutagen import File as MutagenFile
-import unicodedata
-from xml.etree import ElementTree as ET
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from openai.types.responses import ResponseInputParam
@@ -64,8 +49,62 @@ else:
 
 from api.utils import (
     fmt_num,
-    fmt_signed_pct,
 )
+from api.general_commands import (
+    convert_base,
+    convert_to_command,
+    gen_random,
+    get_instance_name,
+    get_timestamp,
+    is_japanese_text,
+    romanize_japanese,
+    select_random,
+)
+from api import giphy_commands
+from api import media_cache
+from api.cached_http import cached_request as _cached_request
+from api import stock_commands
+from api.prompt_context import (
+    clean_crypto_data,
+    format_hacker_news_info,
+    format_weather_info,
+    get_weather_description,
+)
+from api.prompt_context import build_ai_messages as _build_ai_messages
+from api.message_content import (
+    extract_message_content,
+    extract_message_text,
+    extract_poll_text as _extract_poll_text,
+    sticker_vision_file_id as _sticker_vision_file_id,
+)
+from api.media_utils import extract_audio_from_video, measure_audio_duration_seconds
+from api.crypto_commands import get_prices as _get_prices
+from api import weather_context
+from api import hacker_news
+from api.admin_reporting import admin_report as _admin_report
+from api.system_prompt import build_system_message as _build_system_message
+from api import image_processing
+from api.provider_errors import (
+    extract_error_headers as _extract_error_headers,
+    extract_rate_limit_backoff_seconds as _extract_rate_limit_backoff_seconds,
+    is_rate_limit_error as _is_rate_limit_error,
+    parse_retry_window_seconds as _parse_retry_window_seconds,
+    should_try_next_groq_account as _should_try_next_groq_account_after_error,
+)
+from api import polymarket_commands
+from api import dollar_runtime
+from api import provider_config
+from api import link_context
+from api import provider_support
+from api.memory_compaction import IncrementalSummarySource
+from api import memory_compaction
+from api import billing_callbacks
+from api import summary_runtime
+from api import ai_request_runtime
+from api import callback_runtime
+from api import media_runtime
+from api import response_runtime
+from api import media_commands
 from api.services.redis_helpers import (
     redis_get_json,
     redis_set_json,
@@ -74,11 +113,8 @@ from api.services.redis_helpers import (
 from api.services import http_client
 from api.services.stale_cache import StaleCache, StaleCacheResult
 from api.services.maintenance import (
-    GIPHY_STALE_TTL,
     REQUEST_CACHE_HISTORY_TTL,
     request_cache_history_key,
-    request_cache_key,
-    request_cache_ttl,
 )
 from api.config import (
     config_redis as _config_config_redis,
@@ -111,7 +147,7 @@ from api.ai_pricing import (
     MODEL_PRICING_USD_MICROS,
 )
 from api.agent_tools import fetch_url_content, normalize_http_url
-from api.constants import PROMPT_NO_MARKDOWN
+from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
 from api.providers import OpenRouterProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
@@ -127,7 +163,6 @@ from api.tools.task_scheduler import (
     format_task_summary,
 )
 from api.ai_pipeline import (
-    INSTRUCCIONES_BASE,
     _extract_user_name,
     handle_ai_response as _ai_handle_response,
 )
@@ -183,7 +218,13 @@ from .dollar_commands import sort_dollar_rates
 from .rulo_commands import build_rulo_message
 from .market_commands import format_market_info
 from api.routing_policy import RoutingPolicy
-from api.telegram_gateway import TelegramGateway, _truncate_telegram_text
+from api.telegram_gateway import (
+    TelegramGateway,
+    _redact_telegram_tokens,
+    _truncate_telegram_text,
+    send_typing,
+    telegram_request as _telegram_request,
+)
 from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
 from api.message_state import (
     BOT_MESSAGE_META_TTL,
@@ -298,29 +339,6 @@ OPENROUTER_WEB_SEARCH_MAX_RESULTS = 10
 OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 
 
-# Polymarket constants
-POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-POLYMARKET_GLOBAL_ELECTIONS_TAG = "global-elections"
-POLYMARKET_GLOBAL_ELECTIONS_LIMIT = 10
-POLYMARKET_WORLD_CUP_SERIES_ID = 11433
-POLYMARKET_WORLD_CUP_LIMIT = 10
-POLYMARKET_WORLD_CUP_FETCH_LIMIT = 100
-POLYMARKET_WORLD_CUP_WINNER_SLUG = "world-cup-winner"
-POLYMARKET_WORLD_CUP_WINNER_LIMIT = 5
-POLYMARKET_PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
-POLYMARKET_STREAM_LOOKBACK_SECONDS = 60 * 30  # 30 minutes
-POLYMARKET_STREAM_FIDELITY = 1  # minute buckets
-
-COUNTRY_NAME_ALIASES = {
-    "bosnia-herzegovina": "BA",
-    "england": "GB",
-    "ir iran": "IR",
-    "korea republic": "KR",
-    "scotland": "GB",
-    "uk": "GB",
-}
-
-
 MESSAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
 )
@@ -350,57 +368,11 @@ def _extract_message_block_from_prompt(text: str) -> str:
 def _fetch_polymarket_live_price(
     token_id: str,
 ) -> Optional[Tuple[float, Optional[int]]]:
-    """Return the latest price and timestamp for a Polymarket CLOB token."""
-
-    if not token_id:
-        return None
-
-    now = int(time.time())
-    start_ts = max(0, now - POLYMARKET_STREAM_LOOKBACK_SECONDS)
-    earliest_ts = max(0, start_ts - POLYMARKET_STREAM_LOOKBACK_SECONDS)
-
-    response = cached_requests(
-        POLYMARKET_PRICES_HISTORY_URL,
-        {
-            "startTs": start_ts,
-            "market": token_id,
-            "earliestTimestamp": earliest_ts,
-            "fidelity": POLYMARKET_STREAM_FIDELITY,
-        },
-        None,
-        TTL_POLYMARKET_STREAM,
-        verify_ssl=False,
+    return polymarket_commands.fetch_live_price(
+        token_id,
+        cached_request=cached_requests,
+        cache_ttl=TTL_POLYMARKET_STREAM,
     )
-
-    if not response or "data" not in response:
-        return None
-
-    history_data = response.get("data")
-
-    if not isinstance(history_data, dict):
-        return None
-
-    history = history_data.get("history")
-
-    if not isinstance(history, list) or not history:
-        return None
-
-    latest_entry = history[-1]
-    price = latest_entry.get("p")
-    timestamp = latest_entry.get("t")
-
-    try:
-        price_value = float(price)
-    except (TypeError, ValueError):
-        return None
-
-    entry_timestamp: Optional[int]
-    try:
-        entry_timestamp = int(timestamp) if timestamp is not None else None
-    except (TypeError, ValueError):
-        entry_timestamp = None
-
-    return price_value, entry_timestamp
 
 
 def _fetch_criptoya_dollar_data(
@@ -614,80 +586,41 @@ HACKER_NEWS_MAX_ITEMS = 5
 
 
 def _get_groq_api_key(account: str) -> Optional[str]:
-    env_var = "GROQ_FREE_API_KEY" if account == GROQ_FREE_ACCOUNT else "GROQ_API_KEY"
-    value = environ.get(env_var)
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value or None
+    return provider_config.get_groq_api_key(account, environment=environ)
 
 
 def _get_configured_groq_accounts() -> List[str]:
-    return [account for account in GROQ_ACCOUNT_ORDER if _get_groq_api_key(account)]
+    return provider_config.get_configured_groq_accounts(
+        GROQ_ACCOUNT_ORDER,
+        get_api_key=_get_groq_api_key,
+    )
 
 
 def _get_openrouter_api_key() -> Optional[str]:
-    value = environ.get("OPENROUTER_API_KEY")
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value or None
+    return provider_config.get_openrouter_api_key(environment=environ)
 
 
 def _get_openrouter_base_url() -> Optional[str]:
-    value = environ.get("CF_AIG_BASE_URL")
-    if value is None:
-        return "https://openrouter.ai/api/v1"
-
-    value = str(value).strip()
-    if not value:
-        return "https://openrouter.ai/api/v1"
-    if "gateway.ai.cloudflare.com" not in value:
-        return "https://openrouter.ai/api/v1"
-
-    parsed = urlparse(value)
-    path = parsed.path.rstrip("/")
-    if not path:
-        return "https://openrouter.ai/api/v1"
-
-    base_path = path.rsplit("/", 1)[0]
-    openrouter_path = f"{base_path}/openrouter" if base_path else "/openrouter"
-    return urlunparse(parsed._replace(path=openrouter_path))
+    return provider_config.get_openrouter_base_url(environment=environ)
 
 
 def _get_openrouter_client(
     *, default_headers: Optional[Mapping[str, str]] = None
 ) -> Optional[OpenAI]:
-    openrouter_api_key = _get_openrouter_api_key()
-    openrouter_base_url = _get_openrouter_base_url()
-    if not openrouter_api_key or not openrouter_base_url:
-        return None
-
-    headers: Dict[str, str] = dict(default_headers) if default_headers else {}
-    cf_aig_token = environ.get("CF_AIG_TOKEN")
-    if cf_aig_token:
-        headers["cf-aig-authorization"] = f"Bearer {cf_aig_token}"
-
-    client_kwargs: Dict[str, Any] = {
-        "api_key": openrouter_api_key,
-        "base_url": openrouter_base_url,
-        "timeout": 60.0,
-    }
-    if headers:
-        client_kwargs["default_headers"] = headers
-    return OpenAI(**client_kwargs)
+    return provider_config.build_openrouter_client(
+        get_api_key=_get_openrouter_api_key,
+        get_base_url=_get_openrouter_base_url,
+        environment=environ,
+        client_factory=OpenAI,
+        default_headers=default_headers,
+    )
 
 
 def _build_openrouter_web_search_tool() -> Dict[str, Any]:
-    return {
-        "type": "openrouter:web_search",
-        "parameters": {
-            "engine": "firecrawl",
-            "max_results": OPENROUTER_WEB_SEARCH_MAX_RESULTS,
-            "max_total_results": OPENROUTER_WEB_SEARCH_MAX_RESULTS
-            * OPENROUTER_WEB_SEARCH_MAX_QUERIES,
-        },
-    }
+    return provider_config.build_web_search_tool(
+        OPENROUTER_WEB_SEARCH_MAX_RESULTS,
+        OPENROUTER_WEB_SEARCH_MAX_QUERIES,
+    )
 
 
 def _fetch_urls_from_latest_message(
@@ -761,97 +694,24 @@ def _get_groq_backoff_key(account: str, scope: str) -> str:
     return f"groq:{account}:{scope}".lower()
 
 
-def _extract_error_headers(error: Exception) -> Dict[str, str]:
-    possible_headers = getattr(error, "headers", None)
-    response = getattr(error, "response", None)
-    if not possible_headers and response is not None:
-        possible_headers = getattr(response, "headers", None)
-    if not possible_headers:
-        return {}
-    headers: Dict[str, str] = {}
-    if isinstance(possible_headers, Mapping):
-        for key, value in possible_headers.items():
-            headers[str(key).lower()] = str(value)
-        return headers
-    try:
-        for key, value in dict(possible_headers).items():
-            headers[str(key).lower()] = str(value)
-    except Exception:
-        return {}
-    return headers
-
-
-def _parse_retry_window_seconds(value: Optional[str]) -> Optional[int]:
-    raw_value = str(value or "").strip()
-    if not raw_value:
-        return None
-    try:
-        numeric = float(raw_value)
-        return max(0, int(numeric))
-    except (TypeError, ValueError):
-        pass
-
-    normalized = raw_value.lower()
-    match = re.fullmatch(r"(?P<amount>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)?", normalized)
-    if match:
-        amount = float(match.group("amount"))
-        unit = match.group("unit") or "s"
-        multiplier = {
-            "ms": 0.001,
-            "s": 1.0,
-            "m": 60.0,
-            "h": 3600.0,
-        }.get(unit, 1.0)
-        return max(0, int(amount * multiplier))
-
-    try:
-        parsed_dt = parsedate_to_datetime(raw_value)
-    except (IndexError, KeyError, RequestException, TypeError, ValueError):
-        return None
-    if parsed_dt.tzinfo is None:
-        parsed_dt = parsed_dt.replace(tzinfo=UTC)
-    return max(0, int((parsed_dt - datetime.now(UTC)).total_seconds()))
-
-
-def _extract_rate_limit_backoff_seconds(
-    error: Exception,
-    fallback_seconds: Optional[int] = None,
-) -> Optional[int]:
-    headers = _extract_error_headers(error)
-    for header_name in (
-        "retry-after",
-        "x-ratelimit-reset-requests",
-        "x-ratelimit-reset-tokens",
-        "x-ratelimit-reset",
-    ):
-        parsed = _parse_retry_window_seconds(headers.get(header_name))
-        if parsed is not None:
-            return parsed
-    return fallback_seconds
-
-
 def _get_cached_media(prefix: str, file_id: str) -> Optional[str]:
-    """Retrieve a cached media payload stored under the given prefix."""
-    cache_key = f"{prefix}:{file_id}"
-    try:
-        redis_client = config_redis()
-        cached_value = redis_client.get(cache_key)
-        if cached_value:
-            return str(cached_value)
-        return None
-    except Exception:
-        _logger.exception("Error getting cached %s", prefix)
-        return None
+    return media_cache.get_cached_media(
+        prefix,
+        file_id,
+        redis_factory=config_redis,
+        logger=_logger,
+    )
 
 
 def _cache_media(prefix: str, file_id: str, text: str, ttl: int) -> None:
-    """Persist a media payload using the provided prefix and TTL."""
-    cache_key = f"{prefix}:{file_id}"
-    try:
-        redis_client = config_redis()
-        redis_client.setex(cache_key, ttl, text)
-    except Exception:
-        _logger.exception("Error caching %s", prefix)
+    media_cache.cache_media(
+        prefix,
+        file_id,
+        text,
+        ttl,
+        redis_factory=config_redis,
+        logger=_logger,
+    )
 
 
 def get_cached_transcription(file_id: str) -> Optional[str]:
@@ -895,136 +755,22 @@ def cached_requests(
     get_history=False,
     verify_ssl=True,
 ):
-    """Cache any outbound HTTP request by payload and TTL."""
-    try:
-        arguments_dict = {
-            "api_url": api_url,
-            "parameters": parameters,
-            "headers": headers,
-        }
-        request_hash = hashlib.sha256(
-            json.dumps(arguments_dict, sort_keys=True).encode()
-        ).hexdigest()
-
-        redis_client = config_redis()
-        redis_response = redis_get_json(redis_client, request_cache_key(request_hash))
-        cache_history = (
-            get_cache_history(get_history, request_hash, redis_client)
-            if get_history
-            else None
-        )
-        timestamp = int(time.time())
-
-        def make_request():
-            last_err: Optional[Exception] = None
-            for attempt in range(2):  # try once, then one retry
-                try:
-                    response = http_client.get(
-                        api_url,
-                        params=parameters,
-                        headers=headers,
-                        timeout=5,
-                        verify=verify_ssl,
-                    )
-                    response.raise_for_status()
-                    redis_value = {
-                        "timestamp": timestamp,
-                        "data": json.loads(response.text),
-                    }
-                    redis_set_json(
-                        redis_client,
-                        request_cache_key(request_hash),
-                        redis_value,
-                        ttl=request_cache_ttl(expiration_time),
-                    )
-                    if hourly_cache:
-                        current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-                        hourly_key = request_cache_history_key(
-                            current_hour, request_hash
-                        )
-                        if redis_client.get(hourly_key) is None:
-                            redis_set_json(
-                                redis_client,
-                                hourly_key,
-                                redis_value,
-                                ttl=REQUEST_CACHE_HISTORY_TTL,
-                            )
-                    if cache_history is not None:
-                        redis_value["history"] = cache_history
-                    return redis_value
-                except Exception as e:
-                    last_err = e
-                    if attempt == 0:
-                        time.sleep(0.5)
-                        continue
-            # If both attempts failed
-            raise last_err if last_err else Exception("request failed")
-
-        if redis_response is None:
-            try:
-                return make_request()
-            except Exception as e:
-                _logger.warning("cache request error url=%s error=%s", api_url, e)
-                return None
-        else:
-            cached_data = cast(Dict[str, Any], redis_response)
-            cache_age = timestamp - int(cached_data["timestamp"])
-
-            if cache_history is not None:
-                cached_data["history"] = cache_history
-
-            if cache_age > expiration_time:
-                try:
-                    return make_request()
-                except Exception as e:
-                    _logger.warning("cache update error url=%s error=%s", api_url, e)
-                    return cached_data
-            else:
-                return cached_data
-
-    except Exception as e:
-        error_context = {
-            "api_url": api_url,
-            "parameters": parameters,
-            "headers": headers,
-            "expiration_time": expiration_time,
-        }
-        error_msg = f"Error in cached_requests: {e!s}"
-        print(error_msg)
-        admin_report(error_msg, e, error_context)
-        return None
-
-
-def gen_random(name: str) -> str:
-    rand_res = random.randint(0, 1)
-    rand_name = random.randint(0, 2)
-
-    if rand_res:
-        msg = "si"
-    else:
-        msg = "no"
-
-    if rand_name == 1:
-        msg = f"{msg} boludo"
-    elif rand_name == 2:
-        msg = f"{msg} {name}"
-
-    return msg
-
-
-def select_random(msg_text: str) -> str:
-    values = [v.strip() for v in msg_text.split(",")]
-    if len(values) >= 2:
-        return random.choice(values)
-
-    try:
-        start, end = [int(v.strip()) for v in msg_text.split("-")]
-        if start < end:
-            return str(random.randint(start, end))
-    except ValueError:
-        return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
-
-    return "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+    return _cached_request(
+        api_url,
+        parameters,
+        headers,
+        expiration_time,
+        hourly_cache=hourly_cache,
+        history_hours=get_history,
+        verify_ssl=verify_ssl,
+        redis_factory=config_redis,
+        redis_get_json=redis_get_json,
+        redis_set_json=redis_set_json,
+        get_history=get_cache_history,
+        http_get=http_client.get,
+        admin_report=admin_report,
+        logger=_logger,
+    )
 
 
 def get_api_or_cache_prices(
@@ -1080,30 +826,11 @@ def refresh_price_caches() -> None:
 def _fetch_polymarket_event(
     slug: str,
 ) -> Optional[Tuple[Dict[str, Any], Optional[int]]]:
-    """Fetch a single Polymarket event by slug."""
-
-    response = cached_requests(
-        POLYMARKET_EVENTS_URL,
-        {"slug": slug},
-        None,
-        TTL_POLYMARKET,
+    return polymarket_commands.fetch_event(
+        slug,
+        cached_request=cached_requests,
+        cache_ttl=TTL_POLYMARKET,
     )
-
-    if not response or "data" not in response:
-        return None
-
-    events = response.get("data")
-
-    if not isinstance(events, list) or not events:
-        return None
-
-    event = events[0]
-
-    timestamp = response.get("timestamp")
-    if not isinstance(timestamp, int):
-        timestamp = None
-
-    return event, timestamp
 
 
 def _format_polymarket_event_section(
@@ -1111,370 +838,60 @@ def _format_polymarket_event_section(
     header: str,
     filter_prefixes: Sequence[str],
 ) -> Optional[Tuple[List[str], Optional[int]]]:
-    """Return formatted lines and timestamp for a Polymarket event."""
-
-    markets = event.get("markets") or []
-    odds: List[Tuple[str, float]] = []
-
-    latest_stream_timestamp: Optional[int] = None
-
-    for market in markets:
-        raw_outcomes = market.get("outcomes")
-        raw_prices = market.get("outcomePrices")
-        raw_token_ids = market.get("clobTokenIds")
-
-        if not raw_outcomes or not raw_prices:
-            continue
-
-        try:
-            outcomes = json.loads(raw_outcomes)
-            prices = json.loads(raw_prices)
-        except (TypeError, json.JSONDecodeError):
-            continue
-
-        try:
-            token_ids = json.loads(raw_token_ids) if raw_token_ids else None
-        except (TypeError, json.JSONDecodeError):
-            token_ids = None
-
-        if not outcomes or not prices:
-            continue
-
-        try:
-            yes_index = outcomes.index("Yes")
-        except ValueError:
-            yes_index = 0
-
-        if yes_index >= len(prices):
-            continue
-
-        yes_price: Optional[float] = None
-        yes_timestamp: Optional[int] = None
-
-        if token_ids and yes_index < len(token_ids):
-            stream_result = _fetch_polymarket_live_price(token_ids[yes_index])
-            if stream_result:
-                yes_price, yes_timestamp = stream_result
-
-        if yes_price is None:
-            try:
-                yes_price = float(prices[yes_index])
-            except (TypeError, ValueError):
-                continue
-
-        if yes_timestamp is not None:
-            latest_stream_timestamp = (
-                yes_timestamp
-                if latest_stream_timestamp is None
-                else max(latest_stream_timestamp, yes_timestamp)
-            )
-
-        probability = max(0.0, min(yes_price, 1.0)) * 100
-        title = (
-            market.get("groupItemTitle") or market.get("question") or market.get("slug")
-        )
-
-        if not title:
-            continue
-
-        odds.append((title, probability))
-
-    if not odds:
-        return None
-
-    odds.sort(key=lambda item: item[1], reverse=True)
-
-    filtered_odds: List[Tuple[str, float]] = []
-    for title, probability in odds:
-        normalized_title = title.strip().upper()
-        if any(
-            normalized_title.startswith(prefix.upper()) for prefix in filter_prefixes
-        ):
-            filtered_odds.append((title, probability))
-
-    odds_to_display = filtered_odds or odds
-
-    lines = [header, ""]
-
-    for title, probability in odds_to_display:
-        decimals = 2 if probability < 10 else 1
-        lines.append(f"- {title}: {fmt_num(probability, decimals)}%")
-
-    return lines, latest_stream_timestamp
+    return polymarket_commands.format_event_section(
+        event,
+        header,
+        filter_prefixes,
+        fetch_live=_fetch_polymarket_live_price,
+    )
 
 
 def _polymarket_event_top_outcomes(
     event: Dict[str, Any], limit: int = 2
 ) -> List[Tuple[str, float]]:
-    """Return the highest-priced Yes outcomes in a Polymarket event."""
-
-    event_outcomes: List[Tuple[str, float]] = []
-    for market in event.get("markets") or []:
-        if market.get("active") is False or market.get("closed") is True:
-            continue
-
-        try:
-            outcomes = json.loads(market.get("outcomes") or "[]")
-            prices = json.loads(market.get("outcomePrices") or "[]")
-            yes_index = outcomes.index("Yes")
-            probability = float(prices[yes_index]) * 100
-        except (AttributeError, TypeError, ValueError, IndexError, json.JSONDecodeError):
-            continue
-
-        title = (
-            market.get("groupItemTitle") or market.get("question") or market.get("slug")
-        )
-        if title:
-            event_outcomes.append(
-                (str(title), max(0.0, min(probability, 100.0)))
-            )
-
-    event_outcomes.sort(key=lambda item: item[1], reverse=True)
-    return event_outcomes[:limit]
+    return polymarket_commands.event_top_outcomes(event, limit)
 
 
 def _format_usd_compact(value: float) -> str:
-    """Format a USD amount compactly for Telegram."""
-
-    for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if value >= divisor:
-            return f"US${fmt_num(value / divisor, 1)}{suffix}"
-    return f"US${fmt_num(value, 0)}"
+    return polymarket_commands.format_usd_compact(value)
 
 
 def _country_flag(country_code: str) -> str:
-    """Return the flag emoji for a two-letter country code."""
-
-    code = country_code.upper()
-    if len(code) != 2 or not code.isalpha():
-        return ""
-    return "".join(chr(127397 + ord(char)) for char in code)
+    return polymarket_commands.country_flag(country_code)
 
 
 def _country_code_from_name(name: str) -> str:
-    """Resolve a country name or slug to an ISO alpha-2 code."""
-
-    normalized = re.sub(r"\s+", " ", name.replace("_", " ").strip()).casefold()
-    alias = COUNTRY_NAME_ALIASES.get(normalized)
-    if alias:
-        return alias
-
-    lookup_name = normalized.replace("-", " ")
-    try:
-        return str(pycountry.countries.lookup(lookup_name).alpha_2)
-    except LookupError:
-        return ""
+    return polymarket_commands.country_code_from_name(name)
 
 
 def _event_country_flag(event: Dict[str, Any]) -> str:
-    """Return an election event's country flag from Polymarket tags."""
-
-    for tag in event.get("tags") or []:
-        if isinstance(tag, dict):
-            country_code = _country_code_from_name(str(tag.get("slug") or ""))
-        else:
-            country_code = ""
-        if country_code:
-            return _country_flag(country_code)
-    return ""
+    return polymarket_commands.event_country_flag(event)
 
 
 def _flagged_country_name(name: str) -> str:
-    """Prefix a known country or national team name with its flag."""
-
-    country_code = _country_code_from_name(name)
-    flag = _country_flag(country_code)
-    return f"{flag} {name}" if flag else name
+    return polymarket_commands.flagged_country_name(name)
 
 
 def get_polymarket_global_elections() -> str:
-    """Return the most liquid active global election events on Polymarket."""
-
-    response = cached_requests(
-        POLYMARKET_EVENTS_URL,
-        {
-            "limit": POLYMARKET_GLOBAL_ELECTIONS_LIMIT,
-            "active": "true",
-            "closed": "false",
-            "tag_slug": POLYMARKET_GLOBAL_ELECTIONS_TAG,
-            "order": "liquidity",
-            "ascending": "false",
-        },
-        None,
-        TTL_POLYMARKET,
+    return polymarket_commands.get_global_elections(
+        cached_request=cached_requests,
+        cache_ttl=TTL_POLYMARKET,
+        get_top_outcomes=_polymarket_event_top_outcomes,
+        get_event_flag=_event_country_flag,
+        format_liquidity=_format_usd_compact,
     )
-    events = response.get("data") if response else None
-    if not isinstance(events, list) or not events:
-        return "No pude traer las elecciones desde Polymarket"
-
-    events.sort(key=lambda event: float(event.get("liquidity") or 0), reverse=True)
-    lines = ["Polymarket - Global elections by liquidity"]
-
-    for event in events[:POLYMARKET_GLOBAL_ELECTIONS_LIMIT]:
-        title = event.get("title")
-        slug = event.get("slug")
-        if not title or not slug:
-            continue
-
-        try:
-            liquidity = float(event.get("liquidity") or 0)
-        except (TypeError, ValueError):
-            liquidity = 0
-
-        outcomes = []
-        for outcome_title, probability in _polymarket_event_top_outcomes(event):
-            decimals = 2 if probability < 10 else 1
-            outcomes.append(
-                f"{escape(outcome_title)} {fmt_num(probability, decimals)}%"
-            )
-
-        end_date = str(event.get("endDate") or "")[:10]
-        details = [f"Liquidity {_format_usd_compact(liquidity)}"]
-        if end_date:
-            details.append(f"Closes {end_date}")
-
-        event_url = f"https://polymarket.com/event/{slug}"
-        flag = _event_country_flag(event)
-        display_title = f"{flag} {title}" if flag else str(title)
-        linked_title = (
-            f'<a href="{escape(event_url, quote=True)}">'
-            f"{escape(display_title)}</a>"
-        )
-        lines.extend(["", linked_title])
-        if outcomes:
-            lines.append(" | ".join(outcomes))
-        lines.append(" | ".join(details))
-
-    if len(lines) == 1:
-        return "No pude traer las elecciones desde Polymarket"
-
-    return "\n".join(lines)
 
 
 def get_polymarket_world_cup_games(timezone_offset: int = -3) -> str:
-    """Return World Cup winner odds and the next games on Polymarket."""
-
-    winner_event = _fetch_polymarket_event(POLYMARKET_WORLD_CUP_WINNER_SLUG)
-    games_response = cached_requests(
-        POLYMARKET_EVENTS_URL,
-        {
-            "limit": POLYMARKET_WORLD_CUP_FETCH_LIMIT,
-            "active": "true",
-            "closed": "false",
-            "series_id": POLYMARKET_WORLD_CUP_SERIES_ID,
-            "order": "endDate",
-            "ascending": "true",
-        },
-        None,
-        TTL_POLYMARKET,
+    return polymarket_commands.get_world_cup_games(
+        timezone_offset,
+        fetch_winner_event=_fetch_polymarket_event,
+        cached_request=cached_requests,
+        cache_ttl=TTL_POLYMARKET,
+        get_top_outcomes=_polymarket_event_top_outcomes,
+        format_country=_flagged_country_name,
+        make_timezone=make_chat_tz,
     )
-    events = games_response.get("data") if games_response else None
-    if not isinstance(events, list) or not events:
-        return "Could not fetch World Cup games from Polymarket"
-
-    game_slug_pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
-    games = [
-        event
-        for event in events
-        if game_slug_pattern.fullmatch(str(event.get("slug") or ""))
-    ]
-    games.sort(key=lambda event: str(event.get("endDate") or ""))
-
-    lines = ["Polymarket - World Cup"]
-    if winner_event:
-        event, _timestamp = winner_event
-        winner_outcomes = []
-        for outcome_title, probability in _polymarket_event_top_outcomes(
-            event, limit=POLYMARKET_WORLD_CUP_WINNER_LIMIT
-        ):
-            decimals = 2 if probability < 10 else 1
-            winner_outcomes.append(
-                f"{escape(_flagged_country_name(outcome_title))} "
-                f"{fmt_num(probability, decimals)}%"
-            )
-
-        if winner_outcomes:
-            winner_url = (
-                f"https://polymarket.com/event/{POLYMARKET_WORLD_CUP_WINNER_SLUG}"
-            )
-            lines.extend(
-                [
-                    "",
-                    f'<a href="{winner_url}">World Cup Winner</a>',
-                    " | ".join(winner_outcomes),
-                ]
-            )
-
-    games_by_date: Dict[str, List[Tuple[str, str]]] = {}
-    chat_tz = make_chat_tz(timezone_offset)
-    tz_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
-    for event in games[:POLYMARKET_WORLD_CUP_LIMIT]:
-        title = event.get("title")
-        slug = event.get("slug")
-        if not title or not slug:
-            continue
-
-        game_outcomes = _polymarket_event_top_outcomes(event, limit=3)
-        outcome_probabilities = dict(game_outcomes)
-        team_names = [part.strip() for part in str(title).split(" vs. ")]
-        formatted_teams = []
-        favorite_title = game_outcomes[0][0] if game_outcomes else ""
-        for team_name in team_names:
-            probability = outcome_probabilities.get(team_name)
-            if probability is None:
-                continue
-            decimals = 2 if probability < 10 else 1
-            label = (
-                f"{_flagged_country_name(team_name)} "
-                f"{fmt_num(probability, decimals)}%"
-            )
-            if team_name == favorite_title:
-                label = f"[{label}]"
-            formatted_teams.append(label)
-
-        event_url = f"https://polymarket.com/sports/world-cup/{slug}"
-        display_title = " vs. ".join(formatted_teams)
-        linked_title = (
-            f'<a href="{escape(event_url, quote=True)}">'
-            f"{escape(display_title)}</a>"
-        )
-
-        end_date = str(event.get("endDate") or "")
-        try:
-            kickoff_utc = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            kickoff_local = kickoff_utc.astimezone(chat_tz)
-            date_str = kickoff_local.strftime("%a, %B %d").replace(" 0", " ")
-            time_str = kickoff_local.strftime(f"%H:%M {tz_label}")
-        except ValueError:
-            if end_date:
-                date_str = end_date[:10]
-                time_str = end_date[11:16].replace("T", " ")
-            else:
-                date_str = "Unknown Date"
-                time_str = ""
-
-        if date_str not in games_by_date:
-            games_by_date[date_str] = []
-        games_by_date[date_str].append((linked_title, time_str))
-
-    for date_str, daily_games in games_by_date.items():
-        if date_str != "Unknown Date":
-            lines.extend(["", date_str])
-        else:
-            lines.append("")
-        for linked_title, time_str in daily_games:
-            lines.append(linked_title)
-            if time_str:
-                lines.append(time_str)
-            lines.append("")
-
-    if lines and not lines[-1]:
-        lines.pop()
-
-    if len(lines) == 1:
-        return "Could not fetch World Cup games from Polymarket"
-
-    return "\n".join(lines)
 
 
 def get_btc_price(convert_to: str = "USD") -> Optional[float]:
@@ -1500,194 +917,12 @@ def get_btc_price(convert_to: str = "USD") -> Optional[float]:
 
 
 def get_prices(msg_text: str) -> Optional[str]:
-    msg_text, tf = _parse_timeframe(msg_text, _CMC_CHANGE_FIELD)
-    if tf is None and msg_text.strip():
-        last_token = msg_text.strip().rsplit(None, 1)[-1].lower()
-        if re.fullmatch(r"\d+[hd]", last_token):
-            valid = ", ".join(_CMC_CHANGE_FIELD)
-            return f"timeframe '{last_token}' no soportado, uso: {valid}"
-    cmc_change_field = _CMC_CHANGE_FIELD.get(tf or "24h", "percent_change_24h")
-    tf_label = tf or "24h"
-
-    prices_number = 0
-    convert_to = "USD"
-    convert_to_parameter = "USD"
-
-    # symmetric behavior: amount + source_asset + in + target_currency
-    conversion_request = parse_amount_conversion(msg_text)
-    if conversion_request:
-        amount = conversion_request.amount
-        source_symbol = conversion_request.source_symbol
-        convert_to = conversion_request.target_symbol
-
-        if convert_to not in SUPPORTED_PRICE_SYMBOLS:
-            return f"no laburo con {convert_to} gordo"
-
-        convert_to_parameter = conversion_request.target_parameter
-        prices = get_api_or_cache_prices(convert_to_parameter)
-
-        if not prices or "data" not in prices:
-            return "no pude traer precios de crypto boludo"
-
-        requested_asset = find_coin_by_symbol_or_name(prices["data"], source_symbol)
-
-        if not requested_asset:
-            source_parameter = price_query_parameter(source_symbol)
-            reverse_prices = get_api_or_cache_prices(source_parameter)
-            if not reverse_prices or "data" not in reverse_prices:
-                return "no pude traer precios de crypto boludo"
-
-            requested_target_asset = find_coin_by_symbol_or_name(
-                reverse_prices["data"], convert_to
-            )
-
-            if not requested_target_asset:
-                return "no laburo con esos ponzis boludo"
-
-            source_amount = amount
-            if source_symbol == "SATS":
-                source_amount = source_amount / 100000000
-
-            asset_price_in_source = requested_target_asset["quote"][source_parameter][
-                "price"
-            ]
-            converted_value = source_amount / asset_price_in_source
-            return (
-                f"{fmt_num(amount, 8)} {source_symbol} = "
-                f"{fmt_num(converted_value, 8)} {requested_target_asset['symbol'].upper()}"
-            )
-
-        quote_price = requested_asset["quote"][convert_to_parameter]["price"]
-        if convert_to == "SATS":
-            quote_price = quote_price * 100000000
-
-        converted_value = amount * quote_price
-        return (
-            f"{fmt_num(amount, 8)} {requested_asset['symbol'].upper()} = "
-            f"{fmt_num(converted_value, 8)} {convert_to}"
-        )
-
-    msg_text, convert_to, convert_to_parameter = parse_conversion_only(msg_text)
-    if convert_to not in SUPPORTED_PRICE_SYMBOLS:
-        return f"no laburo con {convert_to} gordo"
-
-    prices = get_api_or_cache_prices(convert_to_parameter)
-
-    if msg_text != "":
-        numbers = msg_text.upper().replace(" ", "").split(",")
-
-        for number in numbers:
-            try:
-                parsed = int(float(number))
-                if parsed > prices_number:
-                    prices_number = parsed
-            except ValueError:
-                continue
-
-    if msg_text.upper().isupper():
-        new_prices = []
-        coins = expand_price_tokens(msg_text.split(","))
-
-        if not prices or "data" not in prices:
-            return "no pude traer precios de crypto boludo"
-
-        for coin in prices["data"]:
-            symbol = coin["symbol"].upper().replace(" ", "")
-            name = coin["name"].upper().replace(" ", "")
-
-            if symbol in coins or name in coins:
-                new_prices.append(coin)
-            elif (
-                prices_number > 0
-                and "data" in prices
-                and coin in prices["data"][:prices_number]
-            ):
-                new_prices.append(coin)
-
-        if not new_prices:
-            found = []
-            not_found = []
-            for coin_token in coins:
-                token = coin_token.upper().replace(" ", "")
-                quote_data = _fetch_cmc_quotes([token], convert_to_parameter)
-                if quote_data:
-                    for cid, cdata in quote_data.items():
-                        price = (
-                            cdata.get("quote", {})
-                            .get(convert_to_parameter, {})
-                            .get("price")
-                        )
-                        if price:
-                            found.append(cdata)
-                            break
-                    else:
-                        quote_by_slug = _fetch_cmc_quotes(
-                            [token.lower()], convert_to_parameter, by_slug=True
-                        )
-                        if quote_by_slug:
-                            for cid, cdata in quote_by_slug.items():
-                                price = (
-                                    cdata.get("quote", {})
-                                    .get(convert_to_parameter, {})
-                                    .get("price")
-                                )
-                                if price:
-                                    found.append(cdata)
-                                    break
-                            else:
-                                not_found.append(token)
-                        else:
-                            not_found.append(token)
-                else:
-                    not_found.append(token)
-
-            if not found and not_found:
-                return f"no encontre esos ponzis: {', '.join(not_found)}"
-
-            if not found:
-                return "no pude traer precios de crypto boludo"
-
-            new_prices = found
-
-        prices_number = len(new_prices)
-        prices["data"] = new_prices
-
-    if prices_number < 1:
-        prices_number = 10
-
-    msg = ""
-    if not prices or "data" not in prices:
-        return "no pude traer precios de crypto boludo"
-
-    for coin in prices["data"][:prices_number]:
-        if convert_to == "SATS":
-            coin["quote"][convert_to_parameter]["price"] = (
-                coin["quote"][convert_to_parameter]["price"] * 100000000
-            )
-
-        decimals = f"{coin['quote'][convert_to_parameter]['price']:.12f}".split(".")[-1]
-        zeros = len(decimals) - len(decimals.lstrip("0"))
-
-        ticker = coin["symbol"]
-        price = f"{coin['quote'][convert_to_parameter]['price']:.{zeros + 4}f}".rstrip(
-            "0"
-        ).rstrip(".")
-        percentage = f"{coin['quote'][convert_to_parameter].get(cmc_change_field, 0):+.2f}".rstrip(
-            "0"
-        ).rstrip(".")
-        line = f"{ticker}: {price} {convert_to} ({percentage}% {tf_label})"
-
-        if (
-            prices
-            and "data" in prices
-            and len(prices["data"]) > 0
-            and prices["data"][0]["symbol"] == coin["symbol"]
-        ):
-            msg = line
-        else:
-            msg = f"{msg}\n{line}"
-
-    return msg
+    return _get_prices(
+        msg_text,
+        change_fields=_CMC_CHANGE_FIELD,
+        fetch_prices=get_api_or_cache_prices,
+        fetch_quotes=_fetch_cmc_quotes,
+    )
 
 
 def format_dollar_rates(
@@ -1695,90 +930,35 @@ def format_dollar_rates(
     hours_ago: int,
     band_limits: Optional[Dict[str, Any]] = None,
 ) -> str:
-    rates = list(dollar_rates)
-
-    if band_limits:
-        band_entries: List[Dict[str, Any]] = []
-        for label, key in (("Banda piso", "lower"), ("Banda techo", "upper")):
-            value = band_limits.get(key)
-            if not isinstance(value, (int, float)):
-                continue
-            history = band_limits.get(f"{key}_change_pct")
-            band_entries.append(
-                {
-                    "name": label,
-                    "price": float(value),
-                    "history": history if isinstance(history, (int, float)) else None,
-                }
-            )
-        if band_entries:
-            rates.extend(band_entries)
-
-    # Ensure we keep ascending order when band entries are appended
-    rates.sort(key=lambda item: item.get("price", 0))
-
-    msg_lines: List[str] = []
-    for dollar in rates:
-        price_formatted = fmt_num(dollar["price"], 2)
-        line = f"{dollar['name']}: {price_formatted}"
-        if dollar["history"] is not None:
-            percentage = dollar["history"]
-            formatted_percentage = fmt_signed_pct(percentage, 2)
-            line += f" ({formatted_percentage}% {hours_ago}hs)"
-        msg_lines.append(line)
-
-    if hours_ago != 24 and all(r.get("history") is None for r in rates):
-        msg_lines.append(f"\n(sin datos historicos para {hours_ago}hs todavia)")
-
-    return "\n".join(msg_lines)
+    return dollar_runtime.format_dollar_rates(
+        dollar_rates,
+        hours_ago,
+        band_limits,
+    )
 
 
 def get_dollar_rates(msg_text: str = "") -> Optional[str]:
-    _, tf = _parse_timeframe(msg_text, _DOLLAR_TIMEFRAME_HOURS)
-    if tf is None and msg_text.strip():
-        token = msg_text.strip().lower()
-        if re.fullmatch(r"\d+[hd]", token):
-            valid = ", ".join(_DOLLAR_TIMEFRAME_HOURS)
-            return f"timeframe '{token}' no soportado, uso: {valid}"
-    hours_ago = _DOLLAR_TIMEFRAME_HOURS.get(tf, 24) if tf else 24
-
-    cache_key = f"market:dolar:formatted:{hours_ago}"
-    try:
-        result = _get_dollar_snapshot_cache().get(
-            key=cache_key,
-            lock_key=f"{cache_key}:lock",
-            ttl=TTL_DOLLAR,
-            stale_grace=DOLLAR_FORMATTED_STALE_GRACE,
-            refresh=lambda: _build_dollar_rates_text(hours_ago),
-            schedule_refresh=_schedule_background_refresh,
-        )
-        return cast(Optional[str], result.value)
-    except Exception:
-        _logger.exception("dollar snapshot cache failed")
-        return _build_dollar_rates_text(hours_ago)
+    return dollar_runtime.get_dollar_rates(
+        msg_text,
+        timeframes=_DOLLAR_TIMEFRAME_HOURS,
+        get_cache=_get_dollar_snapshot_cache,
+        build_text=_build_dollar_rates_text,
+        cache_ttl=TTL_DOLLAR,
+        stale_grace=DOLLAR_FORMATTED_STALE_GRACE,
+        schedule_refresh=_schedule_background_refresh,
+        logger=_logger,
+    )
 
 
 def _build_dollar_rates_text(hours_ago: int) -> Optional[str]:
-    dollars = _fetch_criptoya_dollar_data(
-        hourly_cache=True,
-        get_history=hours_ago if hours_ago != 24 else 0,
+    return dollar_runtime.build_dollar_rates_text(
+        hours_ago,
+        fetch_dollars=_fetch_criptoya_dollar_data,
+        get_tcrm=get_cached_tcrm_100,
+        sort_rates=sort_dollar_rates,
+        get_band_limits=get_currency_band_limits,
+        format_rates=format_dollar_rates,
     )
-
-    tcrm_100, tcrm_history = get_cached_tcrm_100(hours_ago)
-
-    sorted_dollar_rates = sort_dollar_rates(
-        dollars, tcrm_100, tcrm_history, hours_ago=hours_ago
-    )
-
-    band_limits = get_currency_band_limits()
-
-    # Band deltas are daily-only values from the BCRA API - hide them for non-24h
-    if band_limits and hours_ago != 24:
-        band_limits = {
-            k: v for k, v in band_limits.items() if not k.endswith("_change_pct")
-        }
-
-    return format_dollar_rates(sorted_dollar_rates, hours_ago, band_limits)
 
 
 _DOLLAR_SNAPSHOT_CACHE: Optional[StaleCache] = None
@@ -1796,141 +976,36 @@ def _schedule_background_refresh(fn: Callable[[], None]) -> None:
 
 
 def get_devo(msg_text: str) -> str:
-    try:
-        fee = 0
-        compra = 0
-
-        if "," in msg_text:
-            numbers = msg_text.replace(" ", "").split(",")
-            fee = float(numbers[0]) / 100
-            if len(numbers) > 1:
-                compra = float(numbers[1])
-        else:
-            fee = float(msg_text) / 100
-
-        if fee != fee or fee > 1 or compra != compra or compra < 0:
-            return "mandá bien los datos capo: fee entre 0 y 100, y monto de compra positivo"
-
-        dollars = _fetch_criptoya_dollar_data()
-
-        if not dollars or "data" not in dollars:
-            return "no pude traer cotizaciones del dólar boludo"
-
-        usdt_ask = float(dollars["data"]["cripto"]["usdt"]["ask"])
-        usdt_bid = float(dollars["data"]["cripto"]["usdt"]["bid"])
-        usdt = (usdt_ask + usdt_bid) / 2
-        oficial = float(dollars["data"]["oficial"]["price"])
-        tarjeta = float(dollars["data"]["tarjeta"]["price"])
-
-        profit = -(fee * usdt + oficial - usdt) / tarjeta
-
-        msg = f"""ganancia: {fmt_num(profit * 100, 2)}%
-
-comisión: {fmt_num(fee * 100, 2)}%
-oficial: {fmt_num(oficial, 2)}
-usdt: {fmt_num(usdt, 2)}
-tarjeta: {fmt_num(tarjeta, 2)}"""
-
-        if compra > 0:
-            compra_ars = compra * tarjeta
-            compra_usdt = compra_ars / usdt
-            ganancia_ars = compra_ars * profit
-            ganancia_usdt = ganancia_ars / usdt
-            msg = f"""{fmt_num(compra, 2)} USD Tarjeta = {fmt_num(compra_ars, 2)} ARS = {fmt_num(compra_usdt, 2)} USDT
-Ganarias {fmt_num(ganancia_ars, 2)} ARS / {fmt_num(ganancia_usdt, 2)} USDT
-Total: {fmt_num(compra_ars + ganancia_ars, 2)} ARS / {fmt_num(compra_usdt + ganancia_usdt, 2)} USDT
-
-{msg}"""
-
-        return msg
-    except ValueError:
-        return "uso: /devo <fee_porcentaje>[, <monto_compra>]"
+    return dollar_runtime.get_devo(
+        msg_text,
+        fetch_dollars=_fetch_criptoya_dollar_data,
+    )
 
 
 def get_rulo() -> str:
-    cache_expiration_time = TTL_DOLLAR
-    usd_amount = 1000.0
-    amount_param = (
-        f"{int(usd_amount)}"
-        if isinstance(usd_amount, float) and usd_amount.is_integer()
-        else str(usd_amount)
-    )
-
-    dollars = _fetch_criptoya_dollar_data()
-
-    if not dollars or "data" not in dollars:
-        return "error consiguiendo cotizaciones del dólar"
-
-    usd_usdt = cached_requests(
-        f"https://criptoya.com/api/USDT/USD/{amount_param}",
-        None,
-        None,
-        cache_expiration_time,
-        True,
-    )
-    usdt_ars = cached_requests(
-        f"https://criptoya.com/api/USDT/ARS/{amount_param}",
-        None,
-        None,
-        cache_expiration_time,
-        True,
-    )
-    return build_rulo_message(
-        dollars["data"],
-        usd_usdt.get("data") if usd_usdt and "data" in usd_usdt else None,
-        usdt_ars.get("data") if usdt_ars and "data" in usdt_ars else None,
-        usd_amount=usd_amount,
+    return dollar_runtime.get_rulo(
+        fetch_dollars=_fetch_criptoya_dollar_data,
+        cached_request=cached_requests,
+        cache_ttl=TTL_DOLLAR,
+        build_message=build_rulo_message,
     )
 
 
 def satoshi() -> str:
-    """Calculate the value of 1 satoshi in USD and ARS"""
-    try:
-        btc_price_usd = get_btc_price("USD")
-        btc_price_ars = get_btc_price("ARS")
-
-        if btc_price_usd is None:
-            return "no pude traer el precio de btc en usd"
-        if btc_price_ars is None:
-            return "no pude traer el precio de btc en ars"
-
-        sat_value_usd = btc_price_usd / 100_000_000
-        sat_value_ars = btc_price_ars / 100_000_000
-        sats_per_dollar = int(100_000_000 / btc_price_usd)
-        sats_per_peso = 100_000_000 / btc_price_ars
-
-        msg = f"""1 satoshi = ${sat_value_usd:.8f} USD
-1 satoshi = ${sat_value_ars:.4f} ARS
-
-$1 USD = {sats_per_dollar:,} sats
-$1 ARS = {sats_per_peso:.3f} sats"""
-
-        return msg
-    except (TypeError, ValueError, ZeroDivisionError):
-        return "no pude conseguir el precio de btc boludo"
-    except Exception as error:
-        _logger.exception("satoshi failed: %s", error)
-        return "no pude conseguir el precio de btc boludo"
+    return dollar_runtime.satoshi(get_btc_price=get_btc_price, logger=_logger)
 
 
 def handle_bcra_variables() -> str:
-    try:
-        variables = get_or_refresh_bcra_variables()
-
-        if not variables:
-            return "No pude obtener las variables del BCRA en este momento, probá más tarde"
-        return format_bcra_variables(variables)
-
-    except Exception:
-        _logger.exception("Error handling BCRA variables")
-        return "error al obtener las variables del BCRA"
+    return dollar_runtime.handle_bcra_variables(
+        get_variables=get_or_refresh_bcra_variables,
+        format_variables=format_bcra_variables,
+        logger=_logger,
+    )
 
 
-_DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
-    "download": "no pude bajar el audio, mandalo de nuevo",
-    "duration": "no pude medir la duración del audio",
-    "transcribe": "no pude sacar nada de ese audio, probá más tarde",
-}
+_DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = (
+    media_commands.DEFAULT_TRANSCRIPTION_ERROR_MESSAGES
+)
 
 
 def _transcribe_audio_file(
@@ -1947,15 +1022,11 @@ def _transcription_error_message(
     download_message: Optional[str] = None,
     transcribe_message: Optional[str] = None,
 ) -> Optional[str]:
-    """Map transcription error codes to user-facing messages."""
-
-    if not error_code:
-        return None
-
-    if error_code == "download":
-        return download_message or _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["download"]
-
-    return transcribe_message or _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"]
+    return media_commands.transcription_error_message(
+        error_code,
+        download_message=download_message,
+        transcribe_message=transcribe_message,
+    )
 
 
 def _describe_replied_media(
@@ -1968,124 +1039,31 @@ def _describe_replied_media(
     download_error: str,
     describe_error: str,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    media = replied_msg.get(media_key)
-    if not media:
-        return None, None
-
-    file_id = extract_file_id(media)
-    if not file_id:
-        return None, None
-
-    description, error_code, billing_segment = describe_media_by_id(file_id, prompt)
-    if description:
-        return f"{success_prefix}{sanitize_summary_text(description)}", billing_segment
-
-    if error_code == "download":
-        return download_error, None
-
-    return describe_error, None
+    return media_commands.describe_replied_media(
+        replied_msg,
+        media_key=media_key,
+        extract_file_id=extract_file_id,
+        prompt=prompt,
+        success_prefix=success_prefix,
+        download_error=download_error,
+        describe_error=describe_error,
+        describe_media=describe_media_by_id,
+        sanitize_text=sanitize_summary_text,
+    )
 
 
 def handle_transcribe_with_message_result(
     message: Dict,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Transcribe audio or describe image from replied message with billing metadata."""
-    try:
-        # Check if this is a reply to another message
-        if "reply_to_message" not in message:
-            return (
-                "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí",
-                [],
-            )
-
-        replied_msg = message["reply_to_message"]
-
-        _, photo_file_id, audio_file_id = extract_message_content(replied_msg)
-
-        if audio_file_id:
-            text, error_code, billing_segment = _transcribe_audio_file(
-                audio_file_id, use_cache=True
-            )
-            if text:
-                return (
-                    f"🎵 te saqué esto del audio: {text}",
-                    [billing_segment] if billing_segment else [],
-                )
-            error_message = _transcription_error_message(error_code)
-            if error_message:
-                return error_message, []
-            return _DEFAULT_TRANSCRIPTION_ERROR_MESSAGES["transcribe"], []
-
-        if photo_file_id:
-
-            def _find_media_message(
-                container: Mapping[str, Any], key: str
-            ) -> Optional[Mapping[str, Any]]:
-                current: Optional[Mapping[str, Any]] = container
-                while isinstance(current, Mapping):
-                    value = current.get(key)
-                    if key == "photo":
-                        if (
-                            isinstance(value, Sequence)
-                            and not isinstance(value, (str, bytes))
-                            and value
-                        ):
-                            return current
-                    elif value:
-                        return current
-
-                    next_msg = current.get("reply_to_message")
-                    if isinstance(next_msg, Mapping):
-                        current = next_msg
-                    else:
-                        break
-                return None
-
-            photo_source = _find_media_message(replied_msg, "photo")
-            if photo_source:
-                photo_response, billing_segment = _describe_replied_media(
-                    photo_source,
-                    media_key="photo",
-                    extract_file_id=lambda media: (
-                        media[-1]["file_id"]
-                        if isinstance(media, Sequence)
-                        and not isinstance(media, (str, bytes))
-                        and media
-                        else None
-                    ),
-                    prompt="describí lo que ves en esta imagen en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
-                    success_prefix="🖼️ en la imagen veo: ",
-                    download_error="no pude bajar la imagen, mandala de nuevo",
-                    describe_error="no pude sacar qué mierda tiene la imagen, probá más tarde",
-                )
-                if photo_response:
-                    return photo_response, [billing_segment] if billing_segment else []
-
-            sticker_source = _find_media_message(replied_msg, "sticker")
-            if sticker_source:
-                sticker_response, billing_segment = _describe_replied_media(
-                    sticker_source,
-                    media_key="sticker",
-                    extract_file_id=lambda media: (
-                        _sticker_vision_file_id(media)
-                        if isinstance(media, Mapping)
-                        else None
-                    ),
-                    prompt="describí lo que ves en este sticker en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino",
-                    success_prefix="🎨 en el sticker veo: ",
-                    download_error="no pude bajar el sticker, mandalo de nuevo",
-                    describe_error="no pude sacar qué carajo tiene el sticker, probá más tarde",
-                )
-                if sticker_response:
-                    return sticker_response, (
-                        [billing_segment] if billing_segment else []
-                    )
-
-        return "ese mensaje no tiene audio, video, imagen ni sticker para laburar", []
-
-    except Exception as e:
-        _logger.exception("handle_transcribe failed: %s", e)
-        return "se trabó el /transcribe, probá más tarde", []
+    return media_commands.handle_transcribe_with_message_result(
+        message,
+        extract_message_content=extract_message_content,
+        transcribe_audio_file=_transcribe_audio_file,
+        error_message=_transcription_error_message,
+        describe_media=_describe_replied_media,
+        sticker_file_id=_sticker_vision_file_id,
+        logger=_logger,
+    )
 
 
 def handle_transcribe_with_message(message: Dict) -> str:
@@ -2141,118 +1119,6 @@ def rainbow() -> str:
     return msg
 
 
-def convert_base(msg_text: str) -> str:
-    try:
-        input_parts = msg_text.split(",")
-        if len(input_parts) != 3:
-            return "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
-        number_str, base_from_str, base_to_str = map(str.strip, input_parts)
-        base_from, base_to = map(int, (base_from_str, base_to_str))
-
-        if not all(c.isalnum() for c in number_str):
-            return "el numero tiene que ser alfanumerico boludo"
-        if not 2 <= base_from <= 36:
-            return f"base origen '{base_from_str}' tiene que ser entre 2 y 36 gordo"
-        if not 2 <= base_to <= 36:
-            return f"base destino '{base_to_str}' tiene que ser entre 2 y 36 boludo"
-
-        digits = []
-        value = 0
-        for digit in number_str:
-            if digit.isdigit():
-                digit_value = int(digit)
-            else:
-                digit_value = ord(digit.upper()) - ord("A") + 10
-            value = value * base_from + digit_value
-        while value > 0:
-            digit_value = value % base_to
-            if digit_value >= 10:
-                digit = chr(digit_value - 10 + ord("A"))
-            else:
-                digit = str(digit_value)
-            digits.append(digit)
-            value //= base_to
-        result = "".join(reversed(digits))
-
-        return f"ahi tenes boludo, {number_str} en base {base_from} es {result} en base {base_to}"
-    except ValueError:
-        return "mandate numeros posta gordo, no me hagas perder el tiempo"
-
-
-def get_timestamp() -> str:
-    return f"{int(time.time())}"
-
-
-JAPANESE_TEXT_RE = re.compile(
-    r"[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF65-\uFF9F\u3400-\u4DBF"
-    r"\u4E00-\u9FFF\uF900-\uFAFF\U00020000-\U0002A6DF\U0002A700-\U0002B73F"
-    r"\U0002B740-\U0002B81F\U0002B820-\U0002CEAF\U0002CEB0-\U0002EBEF"
-    r"\U0002F800-\U0002FA1F\U00030000-\U0003134F]"
-)
-
-
-def romanize_japanese(text: str) -> str:
-    """Convert Japanese kana/kanji text to romaji when possible."""
-    segments = kakasi().convert(text)
-    return "".join(
-        str(segment.get("hepburn") or segment.get("orig") or "") for segment in segments
-    )
-
-
-def is_japanese_text(text: str) -> bool:
-    """Return True when the text includes Japanese scripts or CJK extensions."""
-    return bool(JAPANESE_TEXT_RE.search(text))
-
-
-def convert_to_command(msg_text: str) -> str:
-    if not msg_text:
-        return "y que queres que convierta boludo? mandate texto"
-
-    emoji_text = emoji.demojize(msg_text, delimiters=("_", "_"), language="es")
-    if is_japanese_text(emoji_text):
-        romanized_text = romanize_japanese(emoji_text)
-    else:
-        romanized_text = emoji_text
-
-    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", romanized_text.upper()).replace(
-        "Ñ", "NI"
-    )
-
-    single_spaced_text = re.sub(
-        r"\s+",
-        " ",
-        unicodedata.normalize("NFD", replaced_ni_text)
-        .encode("ascii", "ignore")
-        .decode("utf-8"),
-    )
-
-    translated_punctuation = re.sub(
-        r"\.{3}", "_PUNTOSSUSPENSIVOS_", single_spaced_text
-    ).translate(
-        str.maketrans(
-            {
-                " ": "_",
-                "\n": "_",
-                "?": "_SIGNODEPREGUNTA_",
-                "!": "_SIGNODEEXCLAMACION_",
-                ".": "_PUNTO_",
-            }
-        )
-    )
-
-    cleaned_text = re.sub(
-        r"^_+|_+$",
-        "",
-        re.sub(r"[^A-Za-z0-9_]", "", re.sub(r"_+", "_", translated_punctuation)),
-    )
-
-    if not cleaned_text:
-        return "no me mandes giladas boludo, tiene que tener letras o numeros"
-
-    command = f"/{cleaned_text}"
-    return command
-
-
 def _build_tasks_message(
     tasks: List[Dict[str, Any]],
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
@@ -2284,228 +1150,32 @@ def get_help() -> str:
 
 
 def get_oil_price() -> str:
-    """Return latest Brent and WTI oil prices in USD with daily variation."""
-
-    symbols = {
-        "Brent": "BZ=F",
-        "WTI": "CL=F",
-    }
-    prices: Dict[str, Dict[str, float]] = {}
-
-    for name, symbol in symbols.items():
-        parsed = _fetch_yahoo_stock_price(symbol)
-        if not parsed:
-            continue
-        current_value, variation = parsed
-        prices[name] = {"price": current_value, "variation": variation}
-
-    if not prices:
-        return "no pude traer el precio del petróleo boludo"
-
-    lines = []
-    for name in ("Brent", "WTI"):
-        if name not in prices:
-            continue
-        price = fmt_num(prices[name]["price"], 2)
-        percentage = fmt_num(prices[name]["variation"], 2)
-        sign = "+" if prices[name]["variation"] >= 0 else ""
-        lines.append(f"{name}: {price} USD ({sign}{percentage}% 24hs)")
-
-    return "\n".join(lines)
-
-
-_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    return stock_commands.get_oil_price(fetch_stock=_fetch_yahoo_stock_price)
 
 
 def _fetch_yahoo_stock_price(symbol: str) -> Optional[Tuple[float, float]]:
-    try:
-        response = cached_requests(
-            _YAHOO_CHART_URL.format(symbol=symbol),
-            {"range": "5d", "interval": "1d"},
-            {"User-Agent": "Mozilla/5.0"},
-            TTL_PRICE,
-        )
-        if not response or "data" not in response:
-            return None
-        data = response["data"]
-        result = data.get("chart", {}).get("result", [{}])[0]
-        quotes = result.get("indicators", {}).get("quote", [{}])[0]
-        closes = [c for c in quotes.get("close", []) if c is not None]
-        if len(closes) < 2:
-            return None
-        prev_close = closes[-2]
-        current = closes[-1]
-        if prev_close == 0:
-            return None
-        change_pct = ((current - prev_close) / prev_close) * 100
-        return current, change_pct
-    except Exception:
-        return None
-
-
-_FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
+    return stock_commands.fetch_yahoo_stock_price(
+        symbol,
+        cached_request=cached_requests,
+        cache_ttl=TTL_PRICE,
+    )
 
 
 def _fetch_top_stocks_by_market_cap() -> List[str]:
-    redis_client = _optional_redis_client()
-    cache_key = "market:stock_screener:mega_cap"
-    if redis_client:
-        cached = redis_get_json(redis_client, cache_key)
-        if isinstance(cached, list):
-            return cached
-    try:
-        resp = http_client.get(
-            _FINVIZ_SCREENER_URL,
-            params={"v": "152", "f": "cap_mega", "o": "-marketcap"},
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        seen_companies: set[str] = set()
-        result: List[str] = []
-        for match in re.finditer(r'data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)"', resp.text):
-            symbol, company = match.group(1), match.group(2)
-            if company not in seen_companies and len(result) < 10:
-                seen_companies.add(company)
-                result.append(symbol)
-        if redis_client and result:
-            redis_set_json(redis_client, cache_key, result, ttl=TTL_STOCK_SCREENER)
-        return result
-    except RequestException:
-        return []
+    return stock_commands.fetch_top_stocks_by_market_cap(
+        redis_factory=_optional_redis_client,
+        redis_get_json=redis_get_json,
+        redis_set_json=redis_set_json,
+        http_get=http_client.get,
+        cache_ttl=TTL_STOCK_SCREENER,
+    )
 
 
 def get_stock_prices(msg_text: str) -> str:
-    symbols = [s.strip() for s in str(msg_text or "").split() if s.strip()]
-    if not symbols:
-        symbols = _fetch_top_stocks_by_market_cap()
-        if not symbols:
-            return "no pude traer el top de acciones, probá de nuevo"
-
-    lines: List[str] = []
-    for sym in symbols:
-        parsed = _fetch_yahoo_stock_price(sym.upper())
-        if parsed:
-            price, var = parsed
-            sign = "+" if var >= 0 else ""
-            lines.append(f"{sym.upper()}: {price:.2f} USD ({sign}{var:.2f}% 24h)")
-        else:
-            lines.append(f"{sym.upper()}: no se pudo obtener")
-
-    return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
-
-
-def get_instance_name() -> str:
-    instance = environ.get("FRIENDLY_INSTANCE_NAME")
-    return f"estoy corriendo en {instance} boludo"
-
-
-def _redact_telegram_tokens(value: str) -> str:
-    return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
-
-
-def _telegram_request(
-    endpoint: str,
-    *,
-    method: str = "GET",
-    params: Optional[Dict[str, Any]] = None,
-    json_payload: Optional[Dict[str, Any]] = None,
-    data_payload: Optional[Dict[str, Any]] = None,
-    files: Optional[Dict[str, Any]] = None,
-    timeout: int = 5,
-    token: Optional[str] = None,
-    log_errors: bool = True,
-    expect_json: bool = True,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Perform a Telegram Bot API request and return the parsed JSON payload."""
-
-    resolved_token = token or environ.get("TELEGRAM_TOKEN")
-    if not resolved_token:
-        error_msg = "Telegram token not configured"
-        if log_errors:
-            print(error_msg)
-        return None, error_msg
-
-    url = f"https://api.telegram.org/bot{resolved_token}/{endpoint}"
-    method_upper = method.upper()
-    try:
-        if method_upper == "GET" and json_payload is None:
-            response = http_client.get(url, params=params, timeout=timeout)
-        elif method_upper == "POST" and params is None and files is None:
-            response = http_client.post(url, json=json_payload, timeout=timeout)
-        elif method_upper == "POST" and files is not None:
-            response = http_client.post(
-                url,
-                data=data_payload,
-                files=files,
-                timeout=timeout,
-            )
-        else:
-            response = http_client.request(
-                method_upper,
-                url,
-                params=params,
-                json=json_payload,
-                data=data_payload,
-                files=files,
-                timeout=timeout,
-            )
-        response.raise_for_status()
-        if not expect_json:
-            return {}, None
-    except requests.RequestException as error:
-        error_payload = None
-        error_description = str(error)
-        if hasattr(error, "response") and error.response is not None:
-            try:
-                parsed_error = error.response.json()
-                if isinstance(parsed_error, dict):
-                    error_payload = parsed_error
-                    error_description = str(parsed_error.get("description") or error)
-            except Exception:
-                pass
-        is_not_modified = "message is not modified" in error_description.lower()
-        if log_errors and not is_not_modified:
-            detail = _redact_telegram_tokens(str(error))
-            response_body = ""
-            if hasattr(error, "response") and error.response is not None:
-                try:
-                    body = _redact_telegram_tokens(error.response.text)
-                    response_body = f" response={body[:500]!r}"
-                except Exception:
-                    pass
-            print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
-        return error_payload, error_description
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        if log_errors:
-            print(f"Telegram request to {endpoint} returned invalid JSON: {exc}")
-        return None, str(exc)
-
-    if not isinstance(payload, dict):
-        if log_errors:
-            print(f"Telegram request to {endpoint} returned unexpected payload type")
-        return None, "unexpected response"
-
-    if not payload.get("ok"):
-        description = str(payload.get("description") or "telegram request failed")
-        if log_errors:
-            print(f"Telegram request to {endpoint} returned ok=false: {description}")
-        return payload, description
-
-    return payload, None
-
-
-def send_typing(token: str, chat_id: str) -> None:
-    _telegram_request(
-        "sendChatAction",
-        method="GET",
-        params={"chat_id": chat_id, "action": "typing"},
-        token=token,
-        log_errors=False,
-        expect_json=False,
+    return stock_commands.get_stock_prices(
+        msg_text,
+        fetch_stock=_fetch_yahoo_stock_price,
+        fetch_top_stocks=_fetch_top_stocks_by_market_cap,
     )
 
 
@@ -2568,110 +1238,29 @@ def send_animation(
     return telegram_gateway.send_animation(chat_id, animation_url, msg_id, caption)
 
 
-# Giphy API constants
-GIPHY_API_URL = "https://api.giphy.com/v1/gifs"
-TTL_GIPHY_POOL = 86400  # 24 hours
-
-GIPHY_GM_TERMS = [
-    "good morning",
-    "buenos dias",
-    "morning coffee",
-    "rise and shine",
-]
-GIPHY_GN_TERMS = [
-    "good night",
-    "buenas noches",
-    "sweet dreams",
-    "go to sleep",
-]
-
-
 def _fetch_giphy_pool(category: str) -> List[str]:
-    """Fetch a pool of GIF URLs from GIPHY for a category. Returns list of URLs."""
-    api_key = environ.get("GIPHY_API_KEY")
-    if not api_key:
-        return []
-
-    terms = GIPHY_GM_TERMS if category == "gm" else GIPHY_GN_TERMS
-    urls: List[str] = []
-
-    # One call per term to cover all search terms
-    for term in terms:
-        try:
-            params = {
-                "api_key": api_key,
-                "q": term,
-                "limit": 25,
-                "offset": random.randint(0, 100),
-                "rating": "g",
-            }
-            response = http_client.get(f"{GIPHY_API_URL}/search", params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            for gif in data.get("data", []):
-                url = gif.get("images", {}).get("original", {}).get("url")
-                if url:
-                    urls.append(url)
-        except Exception:
-            _logger.exception("Error fetching Giphy pool for %s", category)
-
-    return urls
+    return giphy_commands.fetch_giphy_pool(category, logger=_logger)
 
 
 def _get_giphy_pool(category: str) -> List[str]:
-    """Return cached GIF pool, refreshing from API if expired or empty.
-    Falls back to stale pool if refresh fails."""
-    pool_key = f"giphy_pool:{category}"
-    stale_key = f"giphy_pool_stale:{category}"
-    redis_client = _optional_redis_client()
-
-    if redis_client:
-        try:
-            cached = redis_get_json(redis_client, pool_key)
-            if cached is not None:
-                return cached
-        except Exception:
-            _logger.exception("Error reading Giphy pool from cache")
-
-    urls = _fetch_giphy_pool(category)
-
-    if urls and redis_client:
-        try:
-            redis_client.setex(pool_key, TTL_GIPHY_POOL, json.dumps(urls))
-            redis_client.setex(stale_key, GIPHY_STALE_TTL, json.dumps(urls))
-        except Exception:
-            _logger.exception("Error caching Giphy pool")
-    elif not urls and redis_client:
-        try:
-            stale = redis_get_json(redis_client, stale_key)
-            if stale is not None:
-                _logger.warning("Giphy API failed, using stale pool for %s", category)
-                return stale
-        except Exception:
-            _logger.exception("Error reading stale Giphy pool")
-
-    return urls
+    return giphy_commands.get_giphy_pool(
+        category,
+        redis_factory=_optional_redis_client,
+        fetch_pool=_fetch_giphy_pool,
+        logger=_logger,
+    )
 
 
 def _get_random_gif(category: str) -> Optional[str]:
-    pool = _get_giphy_pool(category)
-    if not pool:
-        return None
-    return random.choice(pool)
+    return giphy_commands.get_random_gif(category, get_pool=_get_giphy_pool)
 
 
 def get_good_morning() -> str:
-    gif_url = _get_random_gif("gm")
-    if gif_url:
-        return gif_url
-    return "buen día boludo"
+    return giphy_commands.get_good_morning(get_gif=_get_random_gif)
 
 
 def get_good_night() -> str:
-    gif_url = _get_random_gif("gn")
-    if gif_url:
-        return gif_url
-    return "buenas noches boludo"
+    return giphy_commands.get_good_night(get_gif=_get_random_gif)
 
 
 def admin_report(
@@ -2679,50 +1268,13 @@ def admin_report(
     error: Optional[Exception] = None,
     extra_context: Optional[Dict] = None,
 ) -> None:
-    """Enhanced admin reporting with optional error details and extra context"""
-    admin_chat_id = environ.get("ADMIN_CHAT_ID")
-    instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
-
-    # Basic error message
-    formatted_message = f"reporte admin desde {instance_name}: {message}"
-
-    # Add extra context if provided
-    if extra_context:
-
-        def _format_context_value(key: str, value: Any) -> Any:
-            key_name = str(key or "").lower()
-            if "credit_units" not in key_name:
-                return value
-            if isinstance(value, bool):
-                return value
-            try:
-                units = int(value)
-            except (TypeError, ValueError):
-                return value
-            return f"{format_credit_units(units)} créditos ({units} unidades)"
-
-        context_details = "\n\ncontexto adicional:"
-        for key, value in extra_context.items():
-            context_details += f"\n{key}: {_format_context_value(key, value)}"
-        formatted_message += context_details
-
-    # Add error details if provided
-    if error:
-        error_details = f"\n\ntipo de error: {type(error).__name__}"
-        error_details += f"\nmensaje de error: {_redact_telegram_tokens(str(error))}"
-
-        if error.__traceback__ is not None:
-            formatted_traceback = "".join(
-                traceback.format_exception(type(error), error, error.__traceback__)
-            )
-        else:
-            formatted_traceback = "traceback unavailable"
-        error_details += f"\n\ntraceback:\n{_redact_telegram_tokens(formatted_traceback)}"
-
-        formatted_message += error_details
-
-    if admin_chat_id:
-        send_msg(admin_chat_id, formatted_message)
+    _admin_report(
+        message,
+        error,
+        extra_context,
+        send_message=send_msg,
+        redact=_redact_telegram_tokens,
+    )
 
 
 def is_chat_admin(
@@ -2792,72 +1344,16 @@ configure_app_config(admin_reporter=admin_report)
 
 
 def get_weather() -> dict:
-    """Get current weather for Buenos Aires"""
-    try:
-        weather_url = "https://api.open-meteo.com/v1/forecast"
-        parameters = {
-            "latitude": -34.5429,
-            "longitude": -58.7119,
-            "hourly": "apparent_temperature,precipitation_probability,weather_code,cloud_cover,visibility",
-            "timezone": "auto",
-            "forecast_days": 2,
-        }
-
-        response = cached_requests(
-            weather_url, parameters, None, TTL_WEATHER
-        )  # Cache por 30 minutos
-        if response and "data" in response:
-            hourly = response["data"]["hourly"]
-
-            # Get current time in Buenos Aires
-            current_time = datetime.now(BA_TZ)
-
-            # Find the current hour index by matching with timestamps
-            current_index = None
-            for i, timestamp in enumerate(hourly["time"]):
-                forecast_time = datetime.fromisoformat(timestamp)
-                if (
-                    forecast_time.year == current_time.year
-                    and forecast_time.month == current_time.month
-                    and forecast_time.day == current_time.day
-                    and forecast_time.hour == current_time.hour
-                ):
-                    current_index = i
-                    break
-
-            if current_index is None:
-                return {}
-
-            # Get current values
-            return {
-                "apparent_temperature": hourly["apparent_temperature"][current_index],
-                "precipitation_probability": hourly["precipitation_probability"][
-                    current_index
-                ],
-                "weather_code": hourly["weather_code"][current_index],
-                "cloud_cover": hourly["cloud_cover"][current_index],
-                "visibility": hourly["visibility"][current_index],
-            }
-        return {}
-    except Exception:
-        _logger.exception("Error getting weather")
-        return {}
+    return weather_context.get_weather(
+        cached_request=cached_requests,
+        cache_ttl=TTL_WEATHER,
+        local_timezone=BA_TZ,
+        datetime_type=datetime,
+        logger=_logger,
+    )
 
 def _sanitize_bot_message(msg: Dict[str, Any]) -> Dict[str, Any]:
-    if msg.get("role") != "assistant":
-        return msg
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        content = content.lower()
-        content = "".join(c for c in content if not (0x1F000 <= ord(c) <= 0x1FFFF))
-        content = content.rstrip(".")
-    elif isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                part["text"] = part["text"].lower()
-                part["text"] = "".join(c for c in part["text"] if not (0x1F000 <= ord(c) <= 0x1FFFF))
-                part["text"] = part["text"].rstrip(".")
-    return {**msg, "content": content}
+    return ai_request_runtime.sanitize_bot_message(msg)
 
 
 def _build_ai_request(
@@ -2870,55 +1366,35 @@ def _build_ai_request(
     task_mode: bool = False,
     enable_web_search: bool = True,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
-    messages = [_sanitize_bot_message(m) for m in messages or []]
-
-    context_data = _get_stable_ai_context(timezone_offset)
-
-    tool_context: Dict[str, Any] = {
-        "get_prices": get_prices,
-        "config_redis": config_redis,
-    }
-    if chat_id:
-        tool_context["chat_id"] = chat_id
-    tool_context["timezone_offset"] = timezone_offset
-    if user_name:
-        tool_context["user_name"] = user_name
-    if user_id is not None:
-        tool_context["user_id"] = user_id
-
-    extra_tools = get_all_tool_schemas(tool_context, task_mode=task_mode)
-    system_message = build_system_message(
-        context_data,
-        tools_active=bool(extra_tools),
-        tool_schemas=extra_tools,
+    return ai_request_runtime.build_ai_request(
+        messages,
+        chat_id=chat_id,
+        user_name=user_name,
+        user_id=user_id,
+        timezone_offset=timezone_offset,
         task_mode=task_mode,
+        enable_web_search=enable_web_search,
+        sanitize_message=_sanitize_bot_message,
+        get_context=_get_stable_ai_context,
+        get_prices=get_prices,
+        config_redis=config_redis,
+        get_tool_schemas=get_all_tool_schemas,
+        build_system_message=build_system_message,
+        fetch_urls=_fetch_urls_from_latest_message,
     )
-
-    fetched_contents = (
-        _fetch_urls_from_latest_message(messages) if enable_web_search else ""
-    )
-    if fetched_contents:
-        messages = list(messages) + [
-            {"role": "system", "content": fetched_contents}
-        ]
-
-    return system_message, messages, extra_tools, tool_context
 
 
 def _get_stable_ai_context(timezone_offset: int = -3) -> Dict[str, Any]:
-    now = int(time.time())
-    cached = _STABLE_AI_CONTEXT_CACHE.get(timezone_offset)
-    if cached and now - cached[0] <= STABLE_AI_CONTEXT_TTL:
-        return cached[1]
-
-    context = {
-        "market": get_market_context(),
-        "weather": get_weather_context(),
-        "time": get_time_context(timezone_offset),
-        "hacker_news": get_hacker_news_context(),
-    }
-    _STABLE_AI_CONTEXT_CACHE[timezone_offset] = (now, context)
-    return context
+    return ai_request_runtime.get_stable_ai_context(
+        timezone_offset,
+        cache=_STABLE_AI_CONTEXT_CACHE,
+        ttl=STABLE_AI_CONTEXT_TTL,
+        now=time.time,
+        get_market_context=get_market_context,
+        get_weather_context=get_weather_context,
+        get_time_context=get_time_context,
+        get_hacker_news_context=get_hacker_news_context,
+    )
 
 
 def _inject_image_context(
@@ -2927,33 +1403,15 @@ def _inject_image_context(
     image_file_id: Optional[str],
     response_meta: Optional[Dict[str, Any]],
 ) -> None:
-    if image_data is None:
-        return
-
-    _logger.info("vision model processing image")
-
-    user_text = (
-        "describí lo que ves en esta imagen en detalle, "
-        "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+    ai_request_runtime.inject_image_context(
+        messages,
+        image_data,
+        image_file_id,
+        response_meta,
+        describe_image=_describe_image_result,
+        append_billing_segment=_append_billing_segment,
+        logger=_logger,
     )
-
-    image_result = _describe_image_result(image_data, user_text, image_file_id)
-    image_description = image_result.text if image_result else None
-
-    if image_description:
-        _append_billing_segment(response_meta, image_result)
-        image_context = f"[Imagen: {image_description}]"
-
-        if messages:
-            last_message = messages[-1]
-            if isinstance(last_message.get("content"), str):
-                last_message["content"] = (
-                    last_message["content"] + f"\n\n{image_context}"
-                )
-
-        _logger.info("vision model described image, continuing ai flow")
-    else:
-        print("Failed to describe image, continuing without description...")
 
 
 def ask_ai(
@@ -2968,50 +1426,24 @@ def ask_ai(
     timezone_offset: int = -3,
     task_mode: bool = False,
     ) -> str:
-    try:
-        system_message, messages, extra_tools, tool_context = _build_ai_request(
-            messages,
-            chat_id=chat_id,
-            user_name=user_name,
-            user_id=user_id,
-            timezone_offset=timezone_offset,
-            task_mode=task_mode,
-            enable_web_search=enable_web_search,
-        )
-
-        if image_data is not None:
-            _inject_image_context(messages, image_data, image_file_id, response_meta)
-
-        response = complete_with_providers(
-            system_message,
-            messages,
-            response_meta=response_meta,
-            enable_web_search=enable_web_search,
-            extra_tools=extra_tools or None,
-            tool_context=tool_context,
-        )
-        response = str(response or "")
-        if response:
-            _logger.info(
-                "ask_ai response len=%d preview='%s'",
-                len(response),
-                response[:160].replace(chr(10), " "),
-            )
-            return response
-
-        if response_meta is not None:
-            response_meta["ai_fallback"] = True
-        return get_fallback_response(messages)
-
-    except Exception as e:
-        error_context = {
-            "messages_count": len(messages),
-            "messages_preview": [msg.get("content", "")[:100] for msg in messages],
-        }
-        admin_report("Error in ask_ai", e, error_context)
-        if response_meta is not None:
-            response_meta["ai_fallback"] = True
-        return get_fallback_response(messages)
+    return ai_request_runtime.ask_ai(
+        messages,
+        image_data=image_data,
+        image_file_id=image_file_id,
+        response_meta=response_meta,
+        enable_web_search=enable_web_search,
+        chat_id=chat_id,
+        user_name=user_name,
+        user_id=user_id,
+        timezone_offset=timezone_offset,
+        task_mode=task_mode,
+        build_request=_build_ai_request,
+        inject_image=_inject_image_context,
+        complete=complete_with_providers,
+        fallback=get_fallback_response,
+        admin_report=admin_report,
+        logger=_logger,
+    )
 
 
 def ask_ai_stream(
@@ -3023,22 +1455,15 @@ def ask_ai_stream(
     user_id: Optional[int] = None,
     timezone_offset: int = -3,
 ) -> Iterator[Tuple[str, str]]:
-    system_message, messages, extra_tools, tool_context = _build_ai_request(
+    return ai_request_runtime.ask_ai_stream(
         messages,
+        enable_web_search=enable_web_search,
         chat_id=chat_id,
         user_name=user_name,
         user_id=user_id,
         timezone_offset=timezone_offset,
-        task_mode=False,
-        enable_web_search=enable_web_search,
-    )
-
-    return stream_with_providers(
-        system_message,
-        messages,
-        enable_web_search=enable_web_search,
-        extra_tools=extra_tools,
-        tool_context=tool_context,
+        build_request=_build_ai_request,
+        stream=stream_with_providers,
     )
 
 
@@ -3117,23 +1542,14 @@ def _truncate_link_metadata_text(
 
 
 def _utf16_slice(text: str, offset: int, length: int) -> str:
-    if not text or length <= 0:
-        return ""
-
-    utf16 = text.encode("utf-16-le")
-    start = max(0, int(offset)) * 2
-    end = max(start, start + max(0, int(length)) * 2)
-    try:
-        return utf16[start:end].decode("utf-16-le", errors="ignore")
-    except Exception:
-        return ""
+    return link_context.utf16_slice(text, offset, length)
 
 
 def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
-    candidate = str(raw_url or "").strip().rstrip(".,;:!?)\"]}'")
-    if not candidate:
-        return None
-    return normalize_http_url(candidate)
+    return link_context.normalize_detected_url(
+        raw_url,
+        normalize_url=normalize_http_url,
+    )
 
 
 def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
@@ -3149,60 +1565,21 @@ def _extract_urls_from_entity_list(
     source_text: str,
     entities: Any,
 ) -> List[str]:
-    urls: List[str] = []
-    if not source_text or not isinstance(entities, Sequence):
-        return urls
-
-    for entity in entities:
-        if not isinstance(entity, Mapping):
-            continue
-        entity_type = str(entity.get("type") or "").strip().lower()
-        if entity_type == "text_link":
-            candidate = str(entity.get("url") or "").strip()
-        elif entity_type == "url":
-            try:
-                offset = int(entity.get("offset") or 0)
-                length = int(entity.get("length") or 0)
-            except (TypeError, ValueError):
-                continue
-            candidate = _utf16_slice(source_text, offset, length).strip()
-        else:
-            continue
-
-        normalized = _normalize_detected_message_url(candidate)
-        if normalized:
-            urls.append(normalized)
-    return urls
+    return link_context.extract_urls_from_entities(
+        source_text,
+        entities,
+        normalize_url=_normalize_detected_message_url,
+    )
 
 
 def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
-    """Extract normalized URLs from Telegram message text/caption and entities."""
-
-    candidates: List[str] = []
-    for text_key, entities_key in (
-        ("text", "entities"),
-        ("caption", "caption_entities"),
-    ):
-        source_text = str(message.get(text_key) or "")
-        if source_text:
-            candidates.extend(
-                _extract_urls_from_entity_list(source_text, message.get(entities_key))
-            )
-            for match in MESSAGE_URL_PATTERN.finditer(source_text):
-                normalized = _normalize_detected_message_url(match.group(1))
-                if normalized:
-                    candidates.append(normalized)
-
-    unique_urls: List[str] = []
-    seen: Set[str] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        unique_urls.append(candidate)
-        if len(unique_urls) >= MAX_LINKS_IN_MESSAGE:
-            break
-    return unique_urls
+    return link_context.extract_message_urls(
+        message,
+        url_pattern=MESSAGE_URL_PATTERN,
+        max_links=MAX_LINKS_IN_MESSAGE,
+        normalize_url=_normalize_detected_message_url,
+        extract_entities=_extract_urls_from_entity_list,
+    )
 
 
 def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
@@ -3221,193 +1598,33 @@ def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
 
 
 def build_message_links_context(message: Mapping[str, Any]) -> str:
-    """Build an AI-only context block with link metadata from the message."""
-
-    urls = extract_message_urls(message)
-    if not urls:
-        return ""
-
-    _logger.info(
-        "links context: extracted urls count=%d urls=%s%s",
-        len(urls),
-        urls,
-        format_log_context(
-            {
-                "source": "build_message_links_context",
-                "chat_id": message.get("chat", {}).get("id")
-                if isinstance(message.get("chat"), Mapping)
-                else message.get("chat_id"),
-                "chat_title": message.get("chat", {}).get("title")
-                if isinstance(message.get("chat"), Mapping)
-                else None,
-                "message_id": message.get("message_id"),
-                "user_id": message.get("from", {}).get("id")
-                if isinstance(message.get("from"), Mapping)
-                else None,
-                "user_name": message.get("from", {}).get("username")
-                if isinstance(message.get("from"), Mapping)
-                else None,
-            }
-        ),
+    return link_context.build_message_links_context(
+        message,
+        extract_urls=extract_message_urls,
+        fetch_metadata=fetch_link_metadata,
+        fetch_tweet=_links_fetch_tweet_content,
+        truncate_text=_truncate_link_metadata_text,
+        extract_video_id=extract_youtube_video_id,
+        fetch_transcript=get_youtube_transcript_context,
+        logger=_logger,
+        format_log_context=format_log_context,
     )
-
-    lines = ["LINKS DEL MENSAJE:"]
-    transcript_parts: List[str] = []
-
-    for index, url in enumerate(urls, 1):
-        tweet = _links_fetch_tweet_content(url)
-        if tweet:
-            final_url = str(tweet.get("url") or url).strip() or url
-            lines.append(f"{index}. {final_url}")
-            tweet_error = tweet.get("error")
-            if tweet_error:
-                lines.append(f"error: {tweet_error}")
-                continue
-            author = _truncate_link_metadata_text(tweet.get("author"), limit=160)
-            date = _truncate_link_metadata_text(tweet.get("date"), limit=80)
-            text = _truncate_link_metadata_text(tweet.get("text"), limit=500)
-            if author:
-                lines.append(f"autor: {author}")
-            if date:
-                lines.append(f"fecha: {date}")
-            if text:
-                lines.append(f"tweet: {text}")
-            continue
-
-        metadata = fetch_link_metadata(url)
-        final_url = str(metadata.get("url") or url).strip() or url
-        lines.append(f"{index}. {final_url}")
-        title = _truncate_link_metadata_text(metadata.get("title"), limit=160)
-        description = _truncate_link_metadata_text(
-            metadata.get("description"), limit=280
-        )
-        if title:
-            lines.append(f"titulo: {title}")
-        if description:
-            lines.append(f"descripcion: {description}")
-
-        video_id = extract_youtube_video_id(final_url)
-        if video_id:
-            transcript = get_youtube_transcript_context(video_id)
-            if transcript:
-                transcript_parts.append(transcript)
-
-    if transcript_parts:
-        lines.append("")
-        lines.extend(transcript_parts)
-
-    return "\n".join(lines)
 
 
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
-    """Return top Hacker News stories from the best RSS feed (cached)."""
-
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = HACKER_NEWS_MAX_ITEMS
-
-    if limit < 1:
-        limit = 1
-    if limit > HACKER_NEWS_MAX_ITEMS:
-        limit = HACKER_NEWS_MAX_ITEMS
-
-    redis_client = _optional_redis_client()
-
-    cached_items: Optional[List[Dict[str, Any]]] = None
-    if redis_client:
-        cached = redis_get_json(redis_client, HACKER_NEWS_CACHE_KEY)
-        if isinstance(cached, list):
-            cached_items = cached
-            if cached_items:
-                return cached_items[:limit]
-
-    try:
-        response = request_with_ssl_fallback(HACKER_NEWS_RSS_URL, timeout=10)
-        response.raise_for_status()
-    except RequestException:
-        _logger.warning("HN RSS primary failed, trying fallback")
-        try:
-            response = request_with_ssl_fallback(
-                HACKER_NEWS_RSS_FALLBACK_URL, timeout=10
-            )
-            response.raise_for_status()
-        except RequestException:
-            _logger.exception("Error fetching Hacker News RSS (both URLs)")
-            return (cached_items or [])[:limit]
-
-    response_text = response.text
-
-    try:
-        root = ET.fromstring(response_text)
-        channel = root.find("channel")
-        if channel is None:
-            return (cached_items or [])[:limit]
-
-        items: List[Dict[str, Any]] = []
-        for item_el in channel.findall("item"):
-            title_raw = item_el.findtext("title", "")
-            title = unescape(str(title_raw or "")).strip()
-            if not title:
-                continue
-
-            link = str(item_el.findtext("link", "") or "").strip()
-            description = item_el.findtext("description", "") or ""
-
-            points_val: Optional[int] = None
-            points_match = re.search(r"Points:\s*(\d+)", description)
-            if points_match:
-                try:
-                    points_val = int(points_match.group(1))
-                except ValueError:
-                    points_val = None
-
-            comments_val: Optional[int] = None
-            comments_match = re.search(r"# Comments:\s*(\d+)", description)
-            if comments_match:
-                try:
-                    comments_val = int(comments_match.group(1))
-                except ValueError:
-                    comments_val = None
-
-            comments_url_match = re.search(
-                r"Comments URL: <a href=\"([^\"]+)\"", description
-            )
-            comments_url = (
-                comments_url_match.group(1).strip() if comments_url_match else ""
-            )
-
-            items.append(
-                {
-                    "title": title,
-                    "url": link,
-                    "points": points_val,
-                    "comments": comments_val,
-                    "comments_url": comments_url,
-                }
-            )
-
-            if len(items) >= HACKER_NEWS_MAX_ITEMS:
-                break
-
-        if redis_client and items:
-            try:
-                redis_setex_json(
-                    redis_client, HACKER_NEWS_CACHE_KEY, TTL_HACKER_NEWS, items
-                )
-            except Exception as cache_error:
-                _logger.warning(
-                    "get_hacker_news_context: failed to cache RSS items: %s",
-                    cache_error,
-                )
-
-        return items[:limit] if items else (cached_items or [])[:limit]
-    except ET.ParseError:
-        _logger.exception("Error parsing Hacker News RSS")
-        return (cached_items or [])[:limit]
-    except Exception:
-        _logger.exception("get_hacker_news_context failed")
-        return (cached_items or [])[:limit]
+    return hacker_news.get_hacker_news_context(
+        limit,
+        max_items=HACKER_NEWS_MAX_ITEMS,
+        cache_key=HACKER_NEWS_CACHE_KEY,
+        cache_ttl=TTL_HACKER_NEWS,
+        primary_url=HACKER_NEWS_RSS_URL,
+        fallback_url=HACKER_NEWS_RSS_FALLBACK_URL,
+        redis_factory=_optional_redis_client,
+        redis_get_json=redis_get_json,
+        redis_setex_json=redis_setex_json,
+        request_get=request_with_ssl_fallback,
+        logger=_logger,
+    )
 
 
 def get_market_context() -> Dict:
@@ -3434,15 +1651,11 @@ def get_market_context() -> Dict:
 
 
 def get_weather_context() -> Optional[Dict]:
-    """Get weather data with descriptions"""
-    try:
-        weather = get_weather()
-        if weather:
-            weather["description"] = get_weather_description(weather["weather_code"])
-        return weather
-    except Exception:
-        _logger.exception("Error fetching weather data")
-        return None
+    return weather_context.get_weather_context(
+        get_weather_data=get_weather,
+        get_description=get_weather_description,
+        logger=_logger,
+    )
 
 
 def get_time_context(timezone_offset: int = -3) -> Dict:
@@ -3459,82 +1672,26 @@ def _invoke_provider(
     label: Optional[str] = None,
     backoff_key: Optional[str] = None,
 ) -> Optional[Any]:
-    """Execute a provider call with shared backoff and error handling."""
-
-    display_name = label or provider_name.capitalize()
-    normalized_backoff_key = str(backoff_key or provider_name or "").lower()
-    if normalized_backoff_key and is_provider_backoff_active(normalized_backoff_key):
-        remaining = int(get_provider_backoff_remaining(normalized_backoff_key))
-        print(
-            f"{display_name} backoff active ({remaining}s remaining), skipping API call"
-        )
-        return None
-
-    try:
-        return attempt()
-    except Exception as error:
-        print(f"{display_name} error: {error}")
-        if _is_rate_limit_error(error):
-            backoff_seconds = _extract_rate_limit_backoff_seconds(
-                error, rate_limit_backoff or GROQ_BACKOFF_DEFAULT_SECONDS
-            )
-            _set_provider_backoff(
-                normalized_backoff_key or provider_name,
-                backoff_seconds,
-            )
-            remaining = int(
-                get_provider_backoff_remaining(normalized_backoff_key or provider_name)
-            )
-            print(f"{display_name} rate limit detected; backing off for {remaining}s")
-        return None
-
-
-def _is_rate_limit_error(error: Exception) -> bool:
-    """Detect whether the provided exception represents a rate limit."""
-
-    status_code = getattr(error, "status_code", None)
-    if status_code == 429:
-        return True
-
-    status = getattr(error, "status", None)
-    if status == 429:
-        return True
-
-    message = str(getattr(error, "message", "") or error)
-    lowered = message.lower()
-    if "rate limit" in lowered:
-        return True
-
-    return "429" in lowered
-
-
-def _should_try_next_groq_account_after_error(error: Exception) -> bool:
-    """Return True when a Groq request should fall through to the next account."""
-
-    status_code = getattr(error, "status_code", None)
-    if status_code == 413:
-        return True
-
-    status = getattr(error, "status", None)
-    if status == 413:
-        return True
-
-    code = str(getattr(error, "code", "") or "").strip().lower()
-    if code == "request_too_large":
-        return True
-
-    message = str(getattr(error, "message", "") or error)
-    lowered = message.lower()
-    return "request_too_large" in lowered or "payload too large" in lowered
+    return provider_support.invoke_provider(
+        provider_name,
+        attempt=attempt,
+        rate_limit_backoff=rate_limit_backoff,
+        label=label,
+        backoff_key=backoff_key,
+        is_backoff_active=is_provider_backoff_active,
+        get_backoff_remaining=get_provider_backoff_remaining,
+        is_rate_limit_error=_is_rate_limit_error,
+        extract_backoff_seconds=_extract_rate_limit_backoff_seconds,
+        set_backoff=_set_provider_backoff,
+        default_backoff=GROQ_BACKOFF_DEFAULT_SECONDS,
+    )
 
 
 def _append_billing_segment(
     response_meta: Optional[Dict[str, Any]],
     result: Optional[AIUsageResult],
 ) -> None:
-    if response_meta is None or result is None:
-        return
-    response_meta.setdefault("billing_segments", []).append(result.billing_segment())
+    provider_support.append_billing_segment(response_meta, result)
 
 
 def _log_groq_request_result(
@@ -3546,69 +1703,33 @@ def _log_groq_request_result(
     audio_seconds: float,
     result: Optional[AIUsageResult],
 ) -> None:
-    log_entry: Dict[str, Any] = {
-        "scope": "groq_request",
-        "label": label,
-        "request_scope": scope,
-        "account": account,
-        "estimated_token_count": int(max(0, token_count)),
-        "estimated_audio_seconds": float(max(0.0, audio_seconds)),
-        "status": "success" if result else "empty",
-    }
-
-    if result is not None:
-        billing = calculate_billing_for_segments([result.billing_segment()])
-        log_entry.update(
-            {
-                "kind": result.kind,
-                "model": result.model,
-                "cached": bool(result.cached),
-                "text_length": len(result.text or ""),
-                "usage": ensure_mapping(result.usage) or {},
-                "audio_seconds": result.audio_seconds,
-                "metadata": dict(result.metadata or {}),
-                "local_billing": {
-                    "raw_usd_micros": billing.get("raw_usd_micros", 0),
-                    "charged_credit_units": billing.get("charged_credit_units", 0),
-                    "charged_credits_display": billing.get(
-                        "charged_credits_display", "0.0"
-                    ),
-                    "model_breakdown": billing.get("model_breakdown", []),
-                    "tool_breakdown": billing.get("tool_breakdown", []),
-                    "unsupported_notes": billing.get("unsupported_notes", []),
-                },
-            }
-        )
-
-    _logger.info("groq request: %s", json.dumps(log_entry, ensure_ascii=False, default=str))
+    provider_support.log_groq_request_result(
+        label=label,
+        scope=scope,
+        account=account,
+        token_count=token_count,
+        audio_seconds=audio_seconds,
+        result=result,
+        calculate_billing=calculate_billing_for_segments,
+        ensure_mapping=ensure_mapping,
+        logger=_logger,
+    )
 
 
 def _extract_groq_usage_map(response: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(response, dict):
-        return ensure_mapping(response.get("usage"))
-    return ensure_mapping(getattr(response, "usage", None))
+    return provider_support.extract_usage_map(
+        response,
+        ensure_mapping=ensure_mapping,
+    )
 
 
 def _extract_latest_user_query_info(
     messages: Sequence[Mapping[str, Any]],
 ) -> Tuple[str, str, Optional[int]]:
-    latest_user_text = ""
-    latest_user_message = ""
-    latest_user_index: Optional[int] = None
-
-    for idx in range(len(messages) - 1, -1, -1):
-        msg = messages[idx]
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str):
-            continue
-        latest_user_text = content
-        latest_user_message = _extract_message_block_from_prompt(content)
-        latest_user_index = idx
-        break
-
-    return latest_user_text, latest_user_message, latest_user_index
+    return provider_support.extract_latest_user_query_info(
+        messages,
+        extract_message=_extract_message_block_from_prompt,
+    )
 
 
 def estimate_ai_base_reserve_credits(
@@ -3677,14 +1798,15 @@ def _build_groq_usage_result(
     cached: bool = False,
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> AIUsageResult:
-    return AIUsageResult(
+    return provider_support.build_usage_result(
         kind=kind,
         text=text,
         model=model,
-        usage=_extract_groq_usage_map(response),
+        response=response,
         audio_seconds=audio_seconds,
         cached=cached,
-        metadata=dict(metadata or {}),
+        metadata=metadata,
+        extract_usage=_extract_groq_usage_map,
     )
 
 
@@ -3696,57 +1818,15 @@ _summary_logger = get_logger(__name__)
 
 
 def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], int]:
-    client = _get_openrouter_client()
-    if client is None:
-        _summary_logger.warning("summary: no openrouter client available")
-        return None, 0
-
-    prompt_tokens = estimate_message_tokens(messages)
-    _summary_logger.info(
-        "summary: calling model=%s max_tokens=%d prompt_tokens_est=%d",
-        SUMMARY_MODEL,
-        SUMMARY_MAX_TOKENS,
-        prompt_tokens,
+    return summary_runtime.call_summary_model(
+        messages,
+        get_client=_get_openrouter_client,
+        estimate_tokens=estimate_message_tokens,
+        estimate_cost=_estimate_summary_cost_usd_micros,
+        model=SUMMARY_MODEL,
+        max_tokens=SUMMARY_MAX_TOKENS,
+        logger=_summary_logger,
     )
-
-    try:
-        resp = client.chat.completions.create(
-            model=SUMMARY_MODEL,
-            messages=messages,
-            max_tokens=SUMMARY_MAX_TOKENS,
-        )
-        if resp and resp.choices and resp.choices[0].message:
-            text = str(resp.choices[0].message.content or "").strip()
-            usage = resp.usage or {}
-            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-            finish_reason = resp.choices[0].finish_reason
-            cost = _estimate_summary_cost_usd_micros(
-                input_tokens, output_tokens, SUMMARY_MODEL
-            )
-            _summary_logger.info(
-                "summary: model=%s input=%d output=%d finish_reason=%s cost_usd_micros=%d text_len=%d",
-                SUMMARY_MODEL,
-                input_tokens,
-                output_tokens,
-                finish_reason,
-                cost,
-                len(text),
-            )
-            if not text:
-                _summary_logger.warning("summary: model=%s returned empty text", SUMMARY_MODEL)
-            elif finish_reason == "length":
-                _summary_logger.warning(
-                    "summary: model=%s hit max_tokens, output truncated", SUMMARY_MODEL
-                )
-            return text, cost
-        else:
-            _summary_logger.warning("summary: model=%s returned empty response", SUMMARY_MODEL)
-    except Exception as e:
-        _summary_logger.warning("summary: model=%s failed: %s", SUMMARY_MODEL, e)
-
-    _summary_logger.error("summary: model failed")
-    return None, 0
 
 
 def _load_bot_personality() -> str:
@@ -3762,61 +1842,38 @@ def _build_chat_messages(
     prompt_text: str,
     prior_summary: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    api_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": bot_personality}
-    ]
-    if prior_summary:
-        api_messages.append({"role": "assistant", "content": prior_summary})
-    for msg in messages:
-        content = msg.get("content") or msg.get("text", "")
-        if content:
-            api_messages.append({
-                "role": msg.get("role", "user"),
-                "content": content,
-            })
-    api_messages.append({"role": "user", "content": prompt_text})
-    return api_messages
+    return summary_runtime.build_chat_messages(
+        bot_personality,
+        messages,
+        prompt_text,
+        prior_summary,
+    )
 
 
 def _compact_conversation(
     messages: List[Dict[str, Any]],
     prior_summary: Optional[str] = None,
 ) -> Tuple[str, int]:
-    if len(messages) > COMPACTION_MAX_SUMMARY_MESSAGES:
-        messages = messages[-COMPACTION_MAX_SUMMARY_MESSAGES:]
-    api_messages = _build_chat_messages(
-        _load_bot_personality(),
+    return summary_runtime.compact_conversation(
         messages,
-        (
-            "actualizá el resumen previo con los mensajes nuevos. "
-            "usá formato denso: temas, hechos clave, decisiones y pendientes. "
-            "omití saludos y chat casual. mantené el idioma original. "
-            f"{PROMPT_NO_MARKDOWN}"
-        ),
-        prior_summary=prior_summary,
+        prior_summary,
+        load_personality=_load_bot_personality,
+        call_model=_call_summary_model,
+        sanitize_text=sanitize_summary_text,
+        no_markdown_prompt=PROMPT_NO_MARKDOWN,
+        max_summary_messages=COMPACTION_MAX_SUMMARY_MESSAGES,
+        truncate_lines=COMPACTION_TRUNCATE_LINES,
     )
-
-    result, cost = _call_summary_model(api_messages)
-    if result:
-        return f"[contexto anterior: {sanitize_summary_text(result)}]", cost
-    fallback_lines = []
-    for msg in messages:
-        content = msg.get("content") or msg.get("text", "")
-        if content:
-            fallback_lines.append(f"{msg.get('role', 'user')}: {content}")
-    truncated = "\n".join(fallback_lines[:COMPACTION_TRUNCATE_LINES])
-    return f"[contexto anterior truncado: {truncated}]", 0
 
 
 def _build_summary_messages(
     source: IncrementalSummarySource,
     prompt_text: str,
 ) -> List[Dict[str, Any]]:
-    return _build_chat_messages(
-        _load_bot_personality(),
-        source.delta_messages,
+    return summary_runtime.build_summary_messages(
+        source,
         prompt_text,
-        prior_summary=source.prior_summary,
+        load_personality=_load_bot_personality,
     )
 
 
@@ -3836,12 +1893,11 @@ def _build_summary_provider() -> OpenRouterProvider:
 def _wrap_provider_stream(
     provider_name: str, token_iter: Iterator[str]
 ) -> Iterator[Tuple[str, str]]:
-    try:
-        for token in token_iter:
-            yield provider_name, token
-    except Exception:
-        _summary_logger.exception("summary_stream: provider=%s failed", provider_name)
-        raise
+    return summary_runtime.wrap_provider_stream(
+        provider_name,
+        token_iter,
+        logger=_summary_logger,
+    )
 
 
 def stream_summary_command(
@@ -3849,64 +1905,18 @@ def stream_summary_command(
     redis_client: redis.Redis,
     prompt_text: str,
 ) -> Tuple[Iterator[Tuple[str, str]], Optional[str]]:
-    history = get_chat_history(chat_id, redis_client)
-
-    if not history:
-        _summary_logger.info("summary_stream: no history for chat_id=%s", chat_id)
-        def _empty():
-            yield "none", "no hay mensajes para resumir"
-        return _empty(), None
-
-    visible_history, summary_text, _retrieved_messages, summary_cost = prepare_chat_memory(
-        redis_client,
+    return summary_runtime.stream_summary_command(
         chat_id,
-        history,
+        redis_client,
         prompt_text,
+        get_history=get_chat_history,
+        prepare_memory=prepare_chat_memory,
+        load_personality=_load_bot_personality,
+        build_provider=_build_summary_provider,
+        sanitize_text=sanitize_summary_text,
+        max_tokens=SUMMARY_MAX_TOKENS,
+        logger=_summary_logger,
     )
-    source = IncrementalSummarySource(
-        prior_summary=summary_text,
-        delta_messages=visible_history,
-        is_zero_delta=not visible_history,
-        next_marker=None,
-    )
-    _summary_logger.info(
-        "summary_stream: chat_id=%s history=%d visible=%d zero_delta=%s has_prior=%s compaction_cost_usd_micros=%d",
-        chat_id, len(history), len(source.delta_messages),
-        source.is_zero_delta, bool(source.prior_summary), summary_cost,
-    )
-    if source.is_zero_delta and source.prior_summary:
-        sanitized = sanitize_summary_text(source.prior_summary)
-        def _yield_cached():
-            yield "cache", sanitized
-        return _yield_cached(), None
-
-    api_messages = _build_summary_messages(source, prompt_text)
-    provider = _build_summary_provider()
-    _summary_logger.info(
-        "summary_stream: chat_id=%s provider_available=%s messages=%d",
-        chat_id, provider.is_available(), len(api_messages)
-    )
-    if not provider.is_available():
-        def _unavailable():
-            yield "none", "no pude generar el resumen"
-        return _unavailable(), source.next_marker
-
-    system_message = api_messages[0]
-    messages = api_messages[1:]
-    return (
-        _wrap_provider_stream(provider.name, provider.stream(
-            system_message, messages, enable_web_search=False, max_tokens=SUMMARY_MAX_TOKENS
-        )),
-        None,
-    )
-
-
-@dataclass
-class IncrementalSummarySource:
-    prior_summary: Optional[str]
-    delta_messages: List[Dict[str, Any]]
-    is_zero_delta: bool
-    next_marker: Optional[str]
 
 
 def _build_incremental_summary_source(
@@ -3914,26 +1924,10 @@ def _build_incremental_summary_source(
     existing_summary: Optional[str],
     compacted_until: Optional[str],
 ) -> IncrementalSummarySource:
-    start_idx = 0
-    marker_found = False
-    if compacted_until:
-        for idx, msg in enumerate(history):
-            if str(msg.get("id")) == compacted_until:
-                start_idx = idx + 1
-                marker_found = True
-                break
-    if compacted_until and not marker_found:
-        start_idx = 0
-
-    delta_messages = history[start_idx:]
-    is_zero_delta = len(delta_messages) == 0
-    next_marker = str(delta_messages[-1].get("id")) if delta_messages else None
-
-    return IncrementalSummarySource(
-        prior_summary=existing_summary,
-        delta_messages=delta_messages,
-        is_zero_delta=is_zero_delta,
-        next_marker=next_marker,
+    return memory_compaction.build_incremental_summary_source(
+        history,
+        existing_summary,
+        compacted_until,
     )
 
 
@@ -3941,9 +1935,11 @@ def _resolve_compaction_params(
     threshold: Optional[int] = None,
     keep: Optional[int] = None,
 ) -> Tuple[int, int]:
-    return (
-        threshold if threshold is not None else COMPACTION_THRESHOLD,
-        keep if keep is not None else COMPACTION_KEEP,
+    return memory_compaction.resolve_compaction_params(
+        threshold,
+        keep,
+        default_threshold=COMPACTION_THRESHOLD,
+        default_keep=COMPACTION_KEEP,
     )
 
 
@@ -3960,26 +1956,19 @@ def compact_chat_memory(
     compaction_threshold, compaction_keep = _resolve_compaction_params(
         compaction_threshold, compaction_keep
     )
-    if not messages:
-        return existing_summary, [], compacted_until, 0
-
-    source = _build_incremental_summary_source(messages, existing_summary, compacted_until)
-    if source.is_zero_delta or len(source.delta_messages) <= compaction_threshold:
-        return existing_summary, source.delta_messages, compacted_until, 0
-
-    dropped = source.delta_messages[: -compaction_keep]
-    if not dropped:
-        return existing_summary, source.delta_messages, compacted_until, 0
-    summary, summary_cost = compact_fn(dropped, source.prior_summary)
-    if not summary:
-        return existing_summary, source.delta_messages[-compaction_keep:], compacted_until, 0
-
-    new_marker = str(dropped[-1].get("id")) if dropped else compacted_until
-    if redis_client is not None and chat_id:
-        _state_save_chat_summary(redis_client, chat_id, summary)
-        if new_marker:
-            _state_save_chat_compacted_until(redis_client, chat_id, new_marker)
-    return summary, source.delta_messages[-compaction_keep:], new_marker, summary_cost
+    return memory_compaction.compact_chat_memory(
+        redis_client,
+        chat_id,
+        messages,
+        existing_summary,
+        compacted_until,
+        compact_fn=compact_fn,
+        compaction_threshold=compaction_threshold,
+        compaction_keep=compaction_keep,
+        build_source=_build_incremental_summary_source,
+        save_summary=_state_save_chat_summary,
+        save_marker=_state_save_chat_compacted_until,
+    )
 
 
 def prepare_chat_memory(
@@ -3994,59 +1983,32 @@ def prepare_chat_memory(
     compaction_threshold, compaction_keep = _resolve_compaction_params(
         compaction_threshold, compaction_keep
     )
-    summary_text = (
-        _state_get_chat_summary(redis_client, chat_id)
-        if redis_client is not None and chat_id
-        else None
-    )
-    searchable_history = (
-        _state_fetch_chat_messages_for_compaction(
-            redis_client,
-            chat_id,
-            admin_reporter=admin_report,
-        )
-        if redis_client is not None and chat_id
-        else []
-    )
-    base_history = searchable_history if len(searchable_history) > len(chat_history) else chat_history
-    compacted_until = (
-        _state_get_chat_compacted_until(redis_client, chat_id)
-        if redis_client is not None and chat_id and summary_text
-        else None
-    )
-    summary_text, visible_history, _, summary_cost = compact_chat_memory(
+    return memory_compaction.prepare_chat_memory(
         redis_client,
         chat_id,
-        base_history,
-        summary_text,
-        compacted_until,
+        chat_history,
+        query_text,
+        reply_to_message_id=reply_to_message_id,
         compaction_threshold=compaction_threshold,
         compaction_keep=compaction_keep,
+        get_summary=_state_get_chat_summary,
+        get_marker=_state_get_chat_compacted_until,
+        fetch_full_history=_state_fetch_chat_messages_for_compaction,
+        compact_memory=compact_chat_memory,
+        search_history=_state_search_chat_history,
+        admin_report=admin_report,
     )
-    recent_ids = {str(msg.get("id")) for msg in visible_history if msg.get("id") is not None}
-    retrieved_messages = (
-        _state_search_chat_history(
-            redis_client,
-            chat_id,
-            query_text,
-            reply_to_message_id=reply_to_message_id,
-            limit=5,
-            exclude_message_ids=recent_ids,
-            admin_reporter=admin_report,
-        )
-        if redis_client is not None and chat_id and query_text.strip()
-        else []
-    )
-    return visible_history, summary_text, retrieved_messages, summary_cost
 
 
 def _estimate_summary_cost_usd_micros(
     input_tokens: int, output_tokens: int, model: str
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS.get(model, {})
-    input_rate = pricing.get("input_per_million", 100_000)
-    output_rate = pricing.get("output_per_million", 400_000)
-    return (input_tokens * input_rate + output_tokens * output_rate) // 1_000_000
+    return summary_runtime.estimate_summary_cost_usd_micros(
+        input_tokens,
+        output_tokens,
+        model,
+        pricing_by_model=MODEL_PRICING_USD_MICROS,
+    )
 
 
 
@@ -4062,75 +2024,6 @@ def get_fallback_response(messages: List[Dict]) -> str:
     return gen_random(display_name)
 
 
-def clean_crypto_data(cryptos: List[Dict]) -> List[Dict]:
-    """Clean and format crypto data"""
-    cleaned = []
-    for crypto in cryptos:
-        cleaned.append(
-            {
-                "name": crypto["name"],
-                "symbol": crypto["symbol"],
-                "slug": crypto["slug"],
-                "supply": {
-                    "max": crypto["max_supply"],
-                    "circulating": crypto["circulating_supply"],
-                    "total": crypto["total_supply"],
-                    "infinite": crypto["infinite_supply"],
-                },
-                "quote": {
-                    "USD": {
-                        "price": crypto["quote"]["USD"]["price"],
-                        "volume_24h": crypto["quote"]["USD"]["volume_24h"],
-                        "changes": {
-                            "1h": crypto["quote"]["USD"]["percent_change_1h"],
-                            "24h": crypto["quote"]["USD"]["percent_change_24h"],
-                            "7d": crypto["quote"]["USD"]["percent_change_7d"],
-                            "30d": crypto["quote"]["USD"]["percent_change_30d"],
-                        },
-                        "market_cap": crypto["quote"]["USD"]["market_cap"],
-                        "dominance": crypto["quote"]["USD"]["market_cap_dominance"],
-                    }
-                },
-            }
-        )
-    return cleaned
-
-
-def get_weather_description(code: int) -> str:
-    """Get weather description from code"""
-    descriptions = {
-        0: "despejado",
-        1: "mayormente despejado",
-        2: "parcialmente nublado",
-        3: "nublado",
-        45: "neblina",
-        48: "niebla",
-        51: "llovizna leve",
-        53: "llovizna moderada",
-        55: "llovizna intensa",
-        56: "llovizna helada leve",
-        57: "llovizna helada intensa",
-        61: "lluvia leve",
-        63: "lluvia moderada",
-        65: "lluvia intensa",
-        66: "lluvia helada leve",
-        67: "lluvia helada intensa",
-        71: "nevada leve",
-        73: "nevada moderada",
-        75: "nevada intensa",
-        77: "granizo",
-        80: "lluvia leve intermitente",
-        81: "lluvia moderada intermitente",
-        82: "lluvia fuerte intermitente",
-        85: "nevada leve intermitente",
-        86: "nevada intensa intermitente",
-        95: "tormenta",
-        96: "tormenta con granizo leve",
-        99: "tormenta con granizo intenso",
-    }
-    return descriptions.get(code, "clima raro")
-
-
 def build_system_message(
     context: Dict,
     *,
@@ -4138,136 +2031,16 @@ def build_system_message(
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
     task_mode: bool = False,
 ) -> Dict[str, Any]:
-    """Build system message with personality and context."""
-    config = load_bot_config()
-    market_info = format_market_info(context.get("market") or {})
-    weather_source = context.get("weather")
-    weather_info = format_weather_info(weather_source) if weather_source else ""
-    news_info = format_hacker_news_info(context.get("hacker_news"))
-    time_context = context.get("time") or {}
-    formatted_time = str(time_context.get("formatted", "")).strip()
-
-    base_prompt = config.get("system_prompt", "")
-    capabilities_prompt = render_ai_capabilities_prompt()
-
-    task_prefix = ""
-    if task_mode:
-        task_prefix = (
-            "EJECUTANDO TAREA PROGRAMADA:\n"
-            "Responde la siguiente instruccion y nada mas.\n"
-            "No hagas preguntas, no ofrezcas seguimientos, no pidas confirmacion.\n"
-            "Genera tu respuesta y terminá.\n\n"
-        )
-
-    tool_instruction = ""
-    if tools_active and tool_schemas:
-        summaries = []
-        for entry in tool_schemas:
-            fn = entry.get("function", {})
-            name = fn.get("name", "")
-            desc = fn.get("description", "")
-            summaries.append(f"- {name}: {desc}")
-        tool_summaries = "\n".join(summaries) + "\n"
-        tool_instruction = (
-            f"\n\nHERRAMIENTAS DISPONIBLES:\n{tool_summaries}"
-            "Llamalas directamente, sin pedir permiso ni narrar antes.\n"
-            "No expliques que vas a hacer antes de usar una herramienta simple.\n"
-            "Usa las herramientas exactamente como estan nombradas arriba.\n"
-            "\n"
-            "task_set detalles:\n"
-            "- task_set.text debe contener solo el contenido a ejecutar despues.\n"
-            "- no incluyas tiempo ni frecuencia en text si ya van en delay_seconds, interval_seconds o trigger_config.\n"
-            "- no reescribas pronombres ni cambies sujeto al guardar la tarea.\n"
-            "- si el usuario dice 'decime', 'avisame' o pide que el bot hable de si mismo, preserva eso en el contenido restante.\n"
-            "- ejemplo: 'A las 20:30 todos los dias decime cuanta aura farmeaste hoy' -> text=\"decime cuanta aura farmeaste hoy\" y trigger_config con hour=20, minute=30.\n"
-            "- ejemplo: 'deci fumareeemooss todos los dias a las 4:20 am' -> text=\"deci fumareeemooss\" y trigger_config con hour=4, minute=20.\n"
-            "- ejemplo: 'mañana recordame pagar el alquiler' -> text=\"recordame pagar el alquiler\" y el tiempo va en el parametro de schedule.\n"
-            "- trigger_config con type='interval' y days=N para cada N dias.\n"
-            "- trigger_config con type='cron', hour, minute para horarios especificos.\n"
-            "- cron puede tener day_of_week='lun,mie,vie' o 'mon,wed,fri'; se normaliza internamente. Tambien puede usar day=1 para primer dia del mes.\n"
-            "- si no especificas hora para cron, elegi una hora razonable segun el contexto.\n"
-        )
-
-    contextual_info = f"""
-{tool_instruction}
-{capabilities_prompt}
-
-FECHA ACTUAL:
-{formatted_time}
-
-CONTEXTO DEL MERCADO:
-{market_info}
-
-CLIMA EN BUENOS AIRES:
-{weather_info}
-
-NOTICIAS DE HACKER NEWS:
-{news_info}
-"""
-
-    return {
-        "role": "system",
-        "content": [
-            {
-                "type": "text",
-                "text": task_prefix + base_prompt + contextual_info,
-            }
-        ],
-    }
-
-
-def format_hacker_news_info(
-    news: Optional[Iterable[Dict[str, Any]]], include_discussion: bool = True
-) -> str:
-    """Format Hacker News context for system prompts."""
-
-    if not news:
-        return "- sin datos por ahora"
-
-    lines: List[str] = []
-    for item in news:
-        if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "(sin título)").strip()
-        url = str(item.get("url") or "").strip()
-
-        stats: List[str] = []
-        points_val = item.get("points")
-        if isinstance(points_val, int):
-            stats.append(f"{points_val} pts")
-        comments_val = item.get("comments")
-        if isinstance(comments_val, int):
-            stats.append(f"{comments_val} coms")
-
-        stats_text = f" ({', '.join(stats)})" if stats else ""
-        entry = f"- {title}{stats_text}"
-
-        if url:
-            entry += f" → {url}"
-
-        if include_discussion:
-            hn_url = str(item.get("comments_url") or "").strip()
-            if hn_url:
-                entry += f" (HN: {hn_url})"
-
-        lines.append(entry)
-
-    return "\n".join(lines) if lines else "- sin datos por ahora"
-
-
-def format_weather_info(weather: Dict) -> str:
-    """Format weather data for context"""
-    visibility_km = weather.get("visibility")
-    visibility_str = (
-        f"{visibility_km / 1000:.1f}km" if visibility_km is not None else "sin datos"
-    )
-    return (
-        f"- Temperatura aparente: {weather.get('apparent_temperature', '?')}°C\n"
-        f"- Probabilidad de lluvia: {weather.get('precipitation_probability', '?')}%\n"
-        f"- Estado: {weather.get('description', 'sin datos')}\n"
-        f"- Nubosidad: {weather.get('cloud_cover', '?')}%\n"
-        f"- Visibilidad: {visibility_str}"
+    return _build_system_message(
+        context,
+        tools_active=tools_active,
+        tool_schemas=tool_schemas,
+        task_mode=task_mode,
+        load_config=load_bot_config,
+        format_market=format_market_info,
+        format_weather=format_weather_info,
+        format_news=format_hacker_news_info,
+        render_capabilities=render_ai_capabilities_prompt,
     )
 
 
@@ -4281,99 +2054,19 @@ def build_ai_messages(
     retrieved_messages: Optional[List[Dict[str, Any]]] = None,
     timezone_offset: int = -3,
 ) -> List[Dict]:
-    messages = []
-
-    if summary_text:
-        messages.append(
-            {
-                "role": "system",
-                "content": f"RESUMEN ACUMULADO DEL CHAT:\n{summary_text}",
-            }
-        )
-
-    if retrieved_messages:
-        retrieval_lines = ["MENSAJES ANTERIORES RELEVANTES:"]
-        for item in retrieved_messages:
-            role = str(item.get("role") or "user")
-            text = str(item.get("text") or "")
-            if text:
-                retrieval_lines.append(f"- {role}: {text}")
-        if len(retrieval_lines) > 1:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "\n".join(retrieval_lines),
-                }
-            )
-
-    # Add chat history messages (which already includes replies)
-    for msg in chat_history:
-        messages.append(
-            {
-                "role": msg["role"],
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg["text"],
-                    }
-                ],
-            }
-        )
-
-    # Get user info and context
-    sender = cast(Mapping[str, Any], message.get("from", {}))
-    chat = cast(Mapping[str, Any], message.get("chat", {}))
-    first_name = str(sender.get("first_name") or "Usuario")
-    username = str(sender.get("username") or "")
-    chat_type = str(chat.get("type") or "private")
-    chat_title = str(chat.get("title") or "") if chat_type != "private" else ""
-    current_time = datetime.now(make_chat_tz(timezone_offset))
-
-    # Build context sections
-    context_parts = [
-        "CONTEXTO:",
-        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
-        f"- Hora: {current_time.strftime('%H:%M')}",
-    ]
-
-    last_in_history_is_assistant = (
-        bool(messages) and messages[-1].get("role") == "assistant"
+    return _build_ai_messages(
+        message,
+        chat_history,
+        message_text,
+        reply_context=reply_context,
+        enable_web_search=enable_web_search,
+        summary_text=summary_text,
+        retrieved_messages=retrieved_messages,
+        timezone_offset=timezone_offset,
+        make_timezone=make_chat_tz,
+        truncate_text=truncate_text,
+        build_links_context=build_message_links_context,
     )
-    if reply_context and not last_in_history_is_assistant:
-        context_parts.extend(
-            [
-                "",
-                "MENSAJE AL QUE RESPONDE:",
-                truncate_text(reply_context),
-            ]
-        )
-
-    link_context = build_message_links_context(message)
-    if link_context:
-        context_parts.extend(["", link_context])
-
-    instructions = [""] + INSTRUCCIONES_BASE[:]
-    if enable_web_search:
-        instructions.append("- si no estás seguro de algo podes buscarlo en internet")
-
-    context_parts.extend(
-        [
-            "",
-            "MENSAJE:",
-            truncate_text(message_text),
-        ]
-        + instructions
-    )
-
-    messages.append(
-        {
-            "role": "user",
-            "content": "\n".join(context_parts),
-        }
-    )
-
-    return messages
 
 
 def _noop_command() -> str:
@@ -4620,125 +2313,13 @@ def _send_stars_invoice(
     user_id: int,
     pack: Mapping[str, int],
 ) -> bool:
-    payload = f"topup:{pack['id']}:{user_id}"
-    pack_credits = format_credit_units(pack["credits"])
-    request_payload: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "title": f"Pack IA {pack_credits} créditos",
-        "description": f"Recarga de {pack_credits} créditos para mensajes IA",
-        "payload": payload,
-        "provider_token": "",
-        "currency": "XTR",
-        "prices": [{"label": f"{pack_credits} créditos IA", "amount": pack["xtr"]}],
-    }
-    payload_response, error = _telegram_request(
-        "sendInvoice",
-        method="POST",
-        json_payload=request_payload,
+    return billing_callbacks.send_stars_invoice(
+        chat_id=chat_id,
+        user_id=user_id,
+        pack=pack,
+        format_credits=format_credit_units,
+        telegram_request=_telegram_request,
     )
-    return error is None and bool(payload_response)
-
-
-def _extract_poll_text(poll: Mapping[str, Any]) -> str:
-    question = str(poll.get("question", "")).strip()
-    option_texts = []
-    for option in poll.get("options") or []:
-        option_text = option.get("text") if isinstance(option, Mapping) else None
-        if option_text:
-            option_texts.append(str(option_text).strip())
-
-    if not option_texts:
-        return question
-
-    options = "\n".join(f"- {option_text}" for option_text in option_texts)
-    if not question:
-        return f"Opciones:\n{options}"
-    return f"{question}\nOpciones:\n{options}"
-
-
-def extract_message_text(message: Dict) -> str:
-    """Extract text content from different message types"""
-    parts = []
-    if message.get("text"):
-        parts.append(str(message["text"]).strip())
-    if message.get("caption"):
-        parts.append(str(message["caption"]).strip())
-    if "poll" in message and isinstance(message["poll"], dict):
-        poll_text = _extract_poll_text(message["poll"])
-        if poll_text:
-            parts.append(poll_text)
-    return "\n\n".join(parts)
-
-
-def _sticker_vision_file_id(sticker: Mapping[str, Any]) -> Optional[str]:
-    if sticker.get("is_animated") or sticker.get("is_video"):
-        thumbnail = sticker.get("thumbnail") or sticker.get("thumb")
-        if isinstance(thumbnail, Mapping):
-            thumbnail_file_id = thumbnail.get("file_id")
-            if thumbnail_file_id:
-                return str(thumbnail_file_id)
-
-    file_id = sticker.get("file_id")
-    return str(file_id) if file_id else None
-
-
-def extract_message_content(message: Dict) -> Tuple[str, Optional[str], Optional[str]]:
-    """Extract text, photo/sticker file_id, and audio file_id from message"""
-    text = extract_message_text(message)
-
-    # Extract photo or sticker (get highest resolution)
-    photo_file_id = None
-
-    # First, check for photo in the main message
-    if message.get("photo"):
-        # Telegram sends array of photos in different resolutions
-        # Take the last one (highest resolution)
-        photo_file_id = message["photo"][-1]["file_id"]
-
-    # Check for sticker in the main message
-    elif message.get("sticker"):
-        photo_file_id = _sticker_vision_file_id(message["sticker"])
-        _logger.debug("media detected type=sticker file_id=%s", photo_file_id)
-
-    # If no photo/sticker in main message, check in replied message
-    elif message.get("reply_to_message"):
-        replied_msg = message["reply_to_message"]
-        if replied_msg.get("photo"):
-            photo_file_id = replied_msg["photo"][-1]["file_id"]
-            _logger.debug("media detected type=photo_quoted file_id=%s", photo_file_id)
-        elif replied_msg.get("sticker"):
-            photo_file_id = _sticker_vision_file_id(replied_msg["sticker"])
-            _logger.debug("media detected type=sticker_quoted file_id=%s", photo_file_id)
-
-    # Extract audio/voice/video
-    audio_file_id = None
-    if message.get("voice"):
-        audio_file_id = message["voice"]["file_id"]
-    elif message.get("audio"):
-        audio_file_id = message["audio"]["file_id"]
-    elif message.get("video"):
-        audio_file_id = message["video"]["file_id"]
-        _logger.debug("media detected type=video file_id=%s", audio_file_id)
-    elif message.get("video_note"):
-        audio_file_id = message["video_note"]["file_id"]
-        _logger.debug("media detected type=video_note file_id=%s", audio_file_id)
-    # Also check for audio/video in replied message
-    elif message.get("reply_to_message"):
-        replied_msg = message["reply_to_message"]
-        if replied_msg.get("voice"):
-            audio_file_id = replied_msg["voice"]["file_id"]
-            _logger.debug("media detected type=voice_quoted file_id=%s", audio_file_id)
-        elif replied_msg.get("audio"):
-            audio_file_id = replied_msg["audio"]["file_id"]
-            _logger.debug("media detected type=audio_quoted file_id=%s", audio_file_id)
-        elif replied_msg.get("video"):
-            audio_file_id = replied_msg["video"]["file_id"]
-            _logger.debug("media detected type=video_quoted file_id=%s", audio_file_id)
-        elif replied_msg.get("video_note"):
-            audio_file_id = replied_msg["video_note"]["file_id"]
-            _logger.debug("media detected type=video_note_quoted file_id=%s", audio_file_id)
-
-    return text, photo_file_id, audio_file_id
 
 
 def download_telegram_file(file_id: str) -> Optional[bytes]:
@@ -4751,39 +2332,23 @@ def _get_groq_client(
     *,
     default_headers: Optional[Mapping[str, str]] = None,
 ) -> Optional[OpenAI]:
-    groq_api_key = _get_groq_api_key(account)
-    if not groq_api_key:
-        print(f"Groq API key not configured for account={account}")
-        return None
-
-    cf_aig_token = environ.get("CF_AIG_TOKEN")
-    cf_gateway_base_url = environ.get(
-        "CF_AIG_BASE_URL", "https://api.groq.com/openai/v1"
+    return provider_config.build_groq_openai_client(
+        account,
+        get_api_key=_get_groq_api_key,
+        environment=environ,
+        client_factory=OpenAI,
+        default_headers=default_headers,
     )
-
-    headers: Dict[str, str] = dict(default_headers) if default_headers else {}
-    if cf_aig_token:
-        headers["cf-aig-authorization"] = f"Bearer {cf_aig_token}"
-
-    client_kwargs: Dict[str, Any] = {
-        "api_key": groq_api_key,
-        "base_url": cf_gateway_base_url,
-    }
-    if headers:
-        client_kwargs["default_headers"] = headers
-    return OpenAI(**client_kwargs)
 
 
 def _get_groq_native_client(
     account: str,
 ) -> Optional[GroqClient]:
-    """Create native Groq client using groq library (not OpenAI SDK)."""
-    groq_api_key = _get_groq_api_key(account)
-    if not groq_api_key:
-        print(f"Groq API key not configured for account={account}")
-        return None
-
-    return GroqClient(api_key=groq_api_key)
+    return provider_config.build_groq_native_client(
+        account,
+        get_api_key=_get_groq_api_key,
+        client_factory=GroqClient,
+    )
 
 
 def _execute_groq_request_with_fallback(
@@ -4794,130 +2359,20 @@ def _execute_groq_request_with_fallback(
     audio_seconds: float = 0.0,
     attempt: Callable[[str], Optional[AIUsageResult]],
 ) -> Optional[AIUsageResult]:
-    configured_accounts = list(_get_groq_accounts_for_scope())
-    if not configured_accounts:
-        print("Groq API key not configured")
-        return None
-
-    for account in configured_accounts:
-        last_error: Optional[Exception] = None
-
-        def _wrapped_attempt() -> Optional[AIUsageResult]:
-            nonlocal last_error
-            try:
-                return attempt(account)
-            except Exception as error:
-                last_error = error
-                raise
-
-        request_started_at = time.monotonic()
-        result = cast(
-            Optional[AIUsageResult],
-            _invoke_provider(
-                "groq",
-                attempt=_wrapped_attempt,
-                rate_limit_backoff=GROQ_BACKOFF_DEFAULT_SECONDS,
-                label=f"{label} ({account})",
-                backoff_key=_get_groq_backoff_key(account, scope),
-            ),
-        )
-        request_elapsed_seconds = max(0.0, time.monotonic() - request_started_at)
-        if result is not None:
-            result.metadata.setdefault(
-                "request_elapsed_seconds", request_elapsed_seconds
-            )
-        _log_groq_request_result(
-            label=label,
-            scope=scope,
-            account=account,
-            token_count=token_count,
-            audio_seconds=audio_seconds,
-            result=result,
-        )
-        if result:
-            result.metadata.setdefault("groq_account", account)
-            return result
-        if last_error and _should_try_next_groq_account_after_error(last_error):
-            print(
-                f"{label} retrying with next account after recoverable error on account={account}"
-            )
-            continue
-        if is_provider_backoff_active(_get_groq_backoff_key(account, scope)):
-            continue
-        break
-
-    return None
-
-
-def measure_audio_duration_seconds(audio_data: bytes) -> Optional[float]:
-    """Measure audio duration from file bytes, returning None when it cannot be determined."""
-
-    if not audio_data:
-        return None
-
-    try:
-        parsed = MutagenFile(io.BytesIO(audio_data))
-        info = getattr(parsed, "info", None)
-        length = getattr(info, "length", None)
-        if isinstance(length, (int, float)) and length > 0:
-            return float(length)
-    except Exception:
-        pass
-
-    try:
-        with wave.open(io.BytesIO(audio_data), "rb") as wav_file:
-            frame_rate = wav_file.getframerate()
-            frame_count = wav_file.getnframes()
-            if frame_rate > 0 and frame_count > 0:
-                return float(frame_count) / float(frame_rate)
-    except Exception:
-        pass
-
-    return None
-
-
-def extract_audio_from_video(video_data: bytes) -> Optional[bytes]:
-    """Extract audio track from video bytes using ffmpeg.
-
-    Returns audio bytes in OGG/Opus format, or None on failure.
-    """
-    if not video_data:
-        return None
-    try:
-        with (
-            tempfile.NamedTemporaryFile(suffix=".mp4") as vid_f,
-            tempfile.NamedTemporaryFile(suffix=".ogg") as aud_f,
-        ):
-            vid_f.write(video_data)
-            vid_f.flush()
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    vid_f.name,
-                    "-vn",
-                    "-acodec",
-                    "libopus",
-                    "-b:a",
-                    "64k",
-                    aud_f.name,
-                ],
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-            if result.returncode != 0:
-                print(f"ffmpeg failed: {result.stderr[:500]}")
-                return None
-            aud_f.seek(0)
-            audio_bytes = aud_f.read()
-            if len(audio_bytes) == 0:
-                return None
-            return audio_bytes
-    except Exception:
-        _logger.exception("Error extracting audio from video")
-        return None
+    return media_runtime.execute_groq_request_with_fallback(
+        scope,
+        label=label,
+        token_count=token_count,
+        audio_seconds=audio_seconds,
+        attempt=attempt,
+        get_accounts=_get_groq_accounts_for_scope,
+        invoke_provider=_invoke_provider,
+        get_backoff_key=_get_groq_backoff_key,
+        log_result=_log_groq_request_result,
+        should_try_next_account=_should_try_next_groq_account_after_error,
+        is_backoff_active=is_provider_backoff_active,
+        default_backoff_seconds=GROQ_BACKOFF_DEFAULT_SECONDS,
+    )
 
 
 def _describe_image_result(
@@ -4927,87 +2382,24 @@ def _describe_image_result(
     *,
     use_cache: bool = True,
 ) -> Optional[AIUsageResult]:
-    """Describe image using OpenRouter vision model."""
-
-    if file_id and use_cache:
-        cached = get_cached_description(file_id)
-        if cached:
-            return AIUsageResult(
-                kind="vision",
-                text=str(cached),
-                model=VISION_MODEL,
-                cached=True,
-                metadata={"file_id": file_id, "cache_hit": True},
-            )
-
-    client = _get_openrouter_client()
-    if client is None:
-        return None
-
-    prepared_image = prepare_vision_image(image_data)
-    if prepared_image is None:
-        _logger.info(
-            "vision image decode failed file_id=%s bytes=%d",
-            file_id,
-            len(image_data),
-        )
-        return None
-    image_bytes, image_mime = prepared_image
-
-    print(f"Describing image with {VISION_MODEL}...")
-    _increment_ai_provider_request_count()
-    image_base64 = encode_image_to_base64(image_bytes)
-    image_url = f"data:{image_mime};base64,{image_base64}"
-    try:
-        response = client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=cast(
-                Any,
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "respondé siempre en minúsculas, "
-                            "sin emojis, sin markdown, en lenguaje coloquial argentino. "
-                            f"{PROMPT_NO_MARKDOWN}"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_text},
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                        ],
-                    },
-                ],
-            ),
-            max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
-        )
-    except Exception as error:
-        admin_report(
-            f"Vision error model={VISION_MODEL}",
-            error,
-            {"model": VISION_MODEL},
-        )
-        return None
-
-    if response and hasattr(response, "choices") and response.choices:
-        content = getattr(response.choices[0].message, "content", None)
-        if content:
-            description = str(content)
-            _logger.info("image description success preview='%s'", description[:100])
-            result = _build_groq_usage_result(
-                kind="vision",
-                text=description,
-                model=VISION_MODEL,
-                response=response,
-                metadata={"file_id": file_id, "provider": "openrouter"},
-            )
-            if file_id:
-                cache_description(file_id, description)
-            return result
-
-    return None
+    return media_runtime.describe_image_result(
+        image_data,
+        user_text,
+        file_id,
+        use_cache=use_cache,
+        get_cached_description=get_cached_description,
+        get_client=_get_openrouter_client,
+        prepare_image=prepare_vision_image,
+        encode_image=encode_image_to_base64,
+        increment_request_count=_increment_ai_provider_request_count,
+        build_usage_result=_build_groq_usage_result,
+        cache_description=cache_description,
+        admin_report=admin_report,
+        logger=_logger,
+        model=VISION_MODEL,
+        max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
+        no_markdown_prompt=PROMPT_NO_MARKDOWN,
+    )
 
 
 def describe_image_groq(
@@ -5035,74 +2427,14 @@ def _transcribe_audio_openrouter_result(
     audio_data: bytes,
     file_id: Optional[str] = None,
 ) -> Optional[AIUsageResult]:
-    """Transcribe audio using OpenRouter with Gemini (fallback for Groq)."""
-    model = OPENROUTER_TRANSCRIBE_MODEL
-
-    client = _get_openrouter_client()
-    if client is None:
-        print("OpenRouter transcription: no client available")
-        return None
-
-    audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-
-    audio_format = "webm"
-    if audio_data.startswith(b"\x1aE\xdf\xa3"):
-        audio_format = "mp3"
-    elif audio_data.startswith(b"ID3"):
-        audio_format = "mp3"
-    elif audio_data.startswith(b"OggS"):
-        audio_format = "ogg"
-
-    print(f"Transcribing audio with OpenRouter Gemini using model={model}...")
-    _increment_ai_provider_request_count()
-
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=cast(
-                Any,
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_audio",
-                                "input_audio": {
-                                    "format": audio_format,
-                                    "data": audio_base64,
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": "Transcribe this audio exactly as spoken.",
-                            },
-                        ],
-                    }
-                ],
-            ),
-            max_tokens=4096,
-        )
-    except Exception as e:
-        print(f"OpenRouter transcription error: {e}")
-        return None
-
-    if response and hasattr(response, "choices") and response.choices:
-        content = getattr(response.choices[0].message, "content", None)
-        if content:
-            print(f"Audio transcribed successfully: {content[:100]}...")
-            return _build_groq_usage_result(
-                kind="transcribe",
-                text=str(content),
-                model=model,
-                response=response,
-                audio_seconds=0.0,
-                metadata={
-                    "file_id": file_id,
-                    "cache_hit": False,
-                    "provider": "openrouter",
-                },
-            )
-    return None
+    return media_runtime.transcribe_audio_openrouter_result(
+        audio_data,
+        file_id,
+        get_client=_get_openrouter_client,
+        increment_request_count=_increment_ai_provider_request_count,
+        build_usage_result=_build_groq_usage_result,
+        model=OPENROUTER_TRANSCRIBE_MODEL,
+    )
 
 
 def _transcribe_audio_result(
@@ -5111,70 +2443,19 @@ def _transcribe_audio_result(
     *,
     use_cache: bool = True,
 ) -> Optional[AIUsageResult]:
-    """Transcribe audio using Groq Whisper, falling back to OpenRouter."""
-
-    if file_id and use_cache:
-        cached = get_cached_transcription(file_id)
-        if cached:
-            return AIUsageResult(
-                kind="transcribe",
-                text=str(cached),
-                model=GROQ_TRANSCRIBE_MODEL,
-                cached=True,
-                metadata={"file_id": file_id, "cache_hit": True},
-            )
-
-    measured_audio_seconds = measure_audio_duration_seconds(audio_data)
-
-    def _attempt(account: str) -> Optional[AIUsageResult]:
-        native_client = _get_groq_native_client(account)
-        if native_client is None:
-            return None
-        print(f"Transcribing audio with Groq Whisper using account={account}...")
-
-        audio_file = io.BytesIO(audio_data)
-        audio_file.name = "audio.webm"
-        response = native_client.audio.transcriptions.create(
-            model=GROQ_TRANSCRIBE_MODEL,
-            file=audio_file,
-        )
-        transcription = None
-        if isinstance(response, dict):
-            transcription = response.get("text")
-        else:
-            transcription = getattr(response, "text", None)
-
-        if transcription:
-            print(f"Audio transcribed successfully: {transcription[:100]}...")
-            return _build_groq_usage_result(
-                kind="transcribe",
-                text=str(transcription),
-                model=GROQ_TRANSCRIBE_MODEL,
-                response=response,
-                audio_seconds=measured_audio_seconds,
-                metadata={
-                    "file_id": file_id,
-                    "cache_hit": False,
-                    "groq_account": account,
-                },
-            )
-        return None
-
-    result = _execute_groq_request_with_fallback(
-        attempt=_attempt,
-        scope="transcribe",
-        label="Groq Whisper",
-        audio_seconds=measured_audio_seconds or 0.0,
+    return media_runtime.transcribe_audio_result(
+        audio_data,
+        file_id,
+        use_cache=use_cache,
+        get_cached_transcription=get_cached_transcription,
+        measure_duration=measure_audio_duration_seconds,
+        get_native_client=_get_groq_native_client,
+        build_usage_result=_build_groq_usage_result,
+        execute_with_fallback=_execute_groq_request_with_fallback,
+        openrouter_fallback=_transcribe_audio_openrouter_result,
+        cache_transcription=cache_transcription,
+        model=GROQ_TRANSCRIBE_MODEL,
     )
-
-    if result is None:
-        print("Groq transcription failed, trying OpenRouter fallback...")
-        result = _transcribe_audio_openrouter_result(audio_data, file_id)
-
-    if result and result.text and file_id:
-        cache_transcription(file_id, result.text)
-
-    return result
 
 
 def transcribe_audio_groq(
@@ -5202,145 +2483,68 @@ def _process_media_with_cache(
     downloader: Optional[Callable[[str], Optional[bytes]]] = None,
     failure_code: str,
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
-    """Shared helper for cached Telegram media download + processing."""
-
-    try:
-        if use_cache and cache_lookup:
-            cached_value = cache_lookup(file_id)
-            if cached_value:
-                return str(cached_value), None, None
-
-        media_fetcher = downloader or download_telegram_file
-        media_bytes = media_fetcher(file_id)
-        if not media_bytes:
-            return None, "download", None
-
-        result = processor(media_bytes)
-        if result:
-            if not result.audio_seconds and result.kind == "transcribe":
-                result.audio_seconds = measure_audio_duration_seconds(media_bytes)
-            return result.text, None, result.billing_segment()
-        return None, failure_code, None
-    except Exception:
-        _logger.exception("Error processing media %s", file_id)
-        return None, failure_code, None
+    return media_runtime.process_media_with_cache(
+        file_id=file_id,
+        use_cache=use_cache,
+        cache_lookup=cache_lookup,
+        processor=processor,
+        downloader=downloader or download_telegram_file,
+        measure_duration=measure_audio_duration_seconds,
+        failure_code=failure_code,
+        logger=_logger,
+    )
 
 
 def transcribe_file_by_id(
     file_id: str, use_cache: bool = True
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
-    """Fetch transcription for a Telegram file_id with cache and retries.
-
-    Returns (text, error):
-    - On success: (transcription, None)
-    - If download failed: (None, "download")
-    - If transcription failed: (None, "transcribe")
-    """
-
-    def _processor(media_bytes: bytes) -> Optional[AIUsageResult]:
-        duration_seconds = measure_audio_duration_seconds(media_bytes)
-        if duration_seconds is None:
-            extracted = extract_audio_from_video(media_bytes)
-            if extracted:
-                _logger.info("Extracted audio from video for transcription")
-                media_bytes = extracted
-                duration_seconds = measure_audio_duration_seconds(media_bytes)
-            if duration_seconds is None:
-                return None
-
-        result = _transcribe_audio_result(media_bytes, file_id, use_cache=use_cache)
-        if result and not result.audio_seconds:
-            result.audio_seconds = duration_seconds
-        return result
-
-    return _process_media_with_cache(
-        file_id=file_id,
-        use_cache=use_cache,
-        cache_lookup=get_cached_transcription,
-        processor=_processor,
-        failure_code="transcribe",
+    return media_runtime.transcribe_file_by_id(
+        file_id,
+        use_cache,
+        get_cached_transcription=get_cached_transcription,
+        download_file=download_telegram_file,
+        measure_duration=measure_audio_duration_seconds,
+        extract_audio=extract_audio_from_video,
+        transcribe=_transcribe_audio_result,
+        process_media=_process_media_with_cache,
+        logger=_logger,
     )
 
 
 def describe_media_by_id(
     file_id: str, prompt: str
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
-    """Fetch description for an image/sticker by Telegram file_id using OpenRouter vision.
-
-    Returns (description, error):
-    - On success: (description, None)
-    - If download failed: (None, "download")
-    - If description failed: (None, "describe")
-    """
-
-    def _processor(media: bytes) -> Optional[AIUsageResult]:
-        return _describe_image_result(media, prompt, file_id)
-
-    return _process_media_with_cache(
-        file_id=file_id,
-        use_cache=True,
-        cache_lookup=get_cached_description,
-        processor=_processor,
-        failure_code="describe",
+    return media_runtime.describe_media_by_id(
+        file_id,
+        prompt,
+        get_cached_description=get_cached_description,
+        download_file=download_telegram_file,
+        describe_image=_describe_image_result,
+        process_media=_process_media_with_cache,
     )
 
 
 def resize_image_if_needed(image_data: bytes, max_size: int = 512) -> bytes:
-    """Resize image if it's too large for vision processing"""
-    try:
-        # Open the image
-        image = Image.open(io.BytesIO(image_data))
-        original_size = image.size
-
-        if max(original_size) > max_size:
-            ratio = min(max_size / original_size[0], max_size / original_size[1])
-            new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-        output_buffer = io.BytesIO()
-        if image.mode in ("RGBA", "LA", "P"):
-            image = image.convert("RGB")
-        image.save(output_buffer, format="WEBP", quality=85, optimize=True)
-        return output_buffer.getvalue()
-
-    except ImportError:
-        print("WARNING: PIL not available, cannot resize image")
-        return image_data
-    except Exception as e:
-        print(f"ERROR: Failed to resize image: {e}")
-        return image_data
+    return image_processing.resize_image_if_needed(
+        image_data,
+        max_size,
+        image_module=Image,
+    )
 
 
 def prepare_vision_image(
     image_data: bytes, max_size: int = 512
 ) -> Optional[Tuple[bytes, str]]:
-    """Decode and normalize still images for vision providers."""
-    try:
-        image = Image.open(io.BytesIO(image_data))
-        image.load()
-
-        if max(image.size) > max_size:
-            ratio = min(max_size / image.size[0], max_size / image.size[1])
-            new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-        if image.mode in ("RGBA", "LA", "P"):
-            image = image.convert("RGB")
-
-        output_buffer = io.BytesIO()
-        image.save(output_buffer, format="WEBP", quality=85, optimize=True)
-        return output_buffer.getvalue(), "image/webp"
-    except Exception as e:
-        _logger.info("vision image prepare failed: %s", e)
-        return None
+    return image_processing.prepare_vision_image(
+        image_data,
+        max_size,
+        image_module=Image,
+        logger=_logger,
+    )
 
 
 def encode_image_to_base64(image_data: bytes) -> str:
-    """Convert image bytes to base64 string for AI models"""
-
-    base64_encoded = base64.b64encode(image_data).decode("utf-8")
-
-    return base64_encoded
+    return image_processing.encode_image_to_base64(image_data)
 
 
 def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
@@ -5442,8 +2646,7 @@ def _billing_unavailable_alert_text() -> str:
 
 
 def _billing_unavailable_message_text() -> str:
-    from api.constants import BILLING_UNAVAILABLE_MESSAGE
-    return BILLING_UNAVAILABLE_MESSAGE
+    return billing_callbacks.billing_unavailable_message()
 
 
 def _billing_is_available() -> bool:
@@ -5451,51 +2654,15 @@ def _billing_is_available() -> bool:
 
 
 def handle_topup_callback(callback_query: Dict[str, Any]) -> None:
-    callback_data = str(callback_query.get("data") or "")
-    callback_id = callback_query.get("id")
-    message = cast(Dict[str, Any], callback_query.get("message") or {})
-    chat = cast(Dict[str, Any], message.get("chat") or {})
-    user = cast(Dict[str, Any], callback_query.get("from") or {})
-    chat_id = chat.get("id")
-    chat_type = str(chat.get("type", ""))
-
-    if _guard_callback(callback_id, chat_id is None):
-        return
-    if _guard_callback(
-        callback_id, not _billing_is_available(),
-        text=_billing_unavailable_alert_text(), show_alert=True,
-    ):
-        return
-    if _guard_callback(
-        callback_id, chat_type != "private",
-        text="cargá por privado, maestro", show_alert=True,
-    ):
-        return
-
-    parts = callback_data.split(":", 1)
-    pack = get_ai_billing_pack(parts[1] if len(parts) == 2 else "")
-    if _guard_callback(
-        callback_id, not pack,
-        text="ese pack es fruta, elegí otro", show_alert=True,
-    ):
-        return
-
-    try:
-        user_id = int(user.get("id"))
-    except (TypeError, ValueError):
-        _guard_callback(callback_id, True)
-        return
-
-    sent_ok = _send_stars_invoice(chat_id=str(chat_id), user_id=user_id, pack=pack)
-    if callback_id:
-        if sent_ok:
-            _answer_callback_query(callback_id, text="listo, te dejé la factura")
-        else:
-            _answer_callback_query(
-                callback_id,
-                text="no pude armar la factura, probá de nuevo",
-                show_alert=True,
-            )
+    billing_callbacks.handle_topup_callback(
+        callback_query,
+        guard_callback=_guard_callback,
+        billing_available=_billing_is_available,
+        get_pack=get_ai_billing_pack,
+        send_invoice=_send_stars_invoice,
+        answer_callback=_answer_callback_query,
+        unavailable_alert=_billing_unavailable_alert_text,
+    )
 
 
 def _answer_pre_checkout_query(
@@ -5517,212 +2684,45 @@ def _answer_pre_checkout_query(
 
 
 def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]) -> None:
-    query_id = pre_checkout_query.get("id")
-    if not query_id:
-        return
-
-    if not _billing_is_available():
-        _answer_pre_checkout_query(
-            str(query_id),
-            ok=False,
-            error_message=_billing_unavailable_alert_text(),
-        )
-        return
-
-    payload = str(pre_checkout_query.get("invoice_payload") or "")
-    currency = str(pre_checkout_query.get("currency") or "")
-    from_user = cast(Dict[str, Any], pre_checkout_query.get("from") or {})
-    pack_id, payload_user_id = _parse_topup_payload(payload)
-    pack = get_ai_billing_pack(pack_id or "")
-
-    try:
-        user_id = int(from_user.get("id"))
-    except (TypeError, ValueError):
-        _answer_pre_checkout_query(
-            str(query_id),
-            ok=False,
-            error_message="tu usuario vino medio roto para cobrar",
-        )
-        return
-
-    try:
-        total_amount = int(pre_checkout_query.get("total_amount"))
-    except (TypeError, ValueError):
-        total_amount = -1
-
-    if (
-        not pack
-        or currency != "XTR"
-        or int(pack["xtr"]) != total_amount
-        or (payload_user_id is not None and payload_user_id != user_id)
-    ):
-        _answer_pre_checkout_query(
-            str(query_id),
-            ok=False,
-            error_message="ese pago vino raro y no te lo pude validar",
-        )
-        return
-
-    _answer_pre_checkout_query(str(query_id), ok=True)
+    billing_callbacks.handle_pre_checkout_query(
+        pre_checkout_query,
+        billing_available=_billing_is_available,
+        answer_query=_answer_pre_checkout_query,
+        unavailable_alert=_billing_unavailable_alert_text,
+        parse_payload=_parse_topup_payload,
+        get_pack=get_ai_billing_pack,
+    )
 
 
 def handle_successful_payment_message(message: Dict[str, Any]) -> str:
-    chat = cast(Dict[str, Any], message.get("chat") or {})
-    chat_id_raw = chat.get("id")
-    if chat_id_raw is None:
-        return "ok"
-    chat_id = str(chat_id_raw)
-
-    if not _billing_is_available():
-        send_msg(chat_id, _billing_unavailable_message_text())
-        return "ok"
-
-    user_id = _extract_user_id(message)
-    if user_id is None:
-        return "ok"
-
-    successful_payment = cast(Dict[str, Any], message.get("successful_payment") or {})
-    currency = str(successful_payment.get("currency") or "")
-    payload = str(successful_payment.get("invoice_payload") or "")
-    charge_id = str(successful_payment.get("telegram_payment_charge_id") or "")
-    pack_id, payload_user_id = _parse_topup_payload(payload)
-    pack = get_ai_billing_pack(pack_id or "")
-
-    try:
-        total_amount = int(successful_payment.get("total_amount"))
-    except (TypeError, ValueError):
-        total_amount = -1
-
-    if (
-        not charge_id
-        or not pack
-        or currency != "XTR"
-        or total_amount != int(pack["xtr"])
-        or (payload_user_id is not None and payload_user_id != user_id)
-    ):
-        send_msg(chat_id, "me cayó un pago raro y no lo pude validar, avisale al admin")
-        admin_report(
-            "Invalid successful payment payload",
-            None,
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "currency": currency,
-                "payload": payload,
-                "total_amount": total_amount,
-                "charge_id": charge_id,
-            },
-        )
-        return "ok"
-
-    try:
-        payment_result = credits_db_service.record_star_payment(
-            telegram_payment_charge_id=charge_id,
-            user_id=user_id,
-            pack_id=str(pack["id"]),
-            xtr_amount=int(pack["xtr"]),
-            credits_awarded=int(pack["credits"]),
-            payload=payload,
-        )
-    except Exception as error:
-        admin_report(
-            "falló persistencia de pago exitoso",
-            error,
-            {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
-        )
-        send_msg(
-            chat_id, "me entró la guita pero se trabó la acreditación, avisale al admin"
-        )
-        return "ok"
-
-    balance = int(payment_result.get("user_balance", 0))
-    pack_credits = format_credit_units(pack["credits"])
-    if payment_result.get("inserted"):
-        send_msg(
-            chat_id,
-            (
-                f"listo, te cargué {pack_credits} créditos\n"
-                f"ahora te quedaron {format_credit_units(balance)}\n"
-                "si querés mandarle al grupo: /transfer <monto>"
-            ),
-        )
-    else:
-        send_msg(
-            chat_id,
-            (
-                "ese pago ya estaba cargado, no rompas las bolas\n"
-                f"te quedaron {format_credit_units(balance)}"
-            ),
-        )
-    return "ok"
+    return billing_callbacks.handle_successful_payment(
+        message,
+        billing_available=_billing_is_available,
+        unavailable_message=_billing_unavailable_message_text,
+        send_message=send_msg,
+        extract_user_id=_extract_user_id,
+        parse_payload=_parse_topup_payload,
+        get_pack=get_ai_billing_pack,
+        record_payment=credits_db_service.record_star_payment,
+        admin_report=admin_report,
+        format_credits=format_credit_units,
+    )
 
 
 def handle_task_callback(callback_query: Dict[str, Any]) -> None:
-    callback_data = callback_query.get("data")
-    callback_id = callback_query.get("id")
-    message = callback_query.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    message_id = message.get("message_id")
-    user = callback_query.get("from") or {}
-
-    if _guard_callback(callback_id, not callback_data or chat_id is None):
-        return
-
-    parts = str(callback_data).split(":", 2)
-    if _guard_callback(
-        callback_id, len(parts) != 3 or parts[0] != "task",
-    ):
-        return
-
-    _, _, task_id = parts
-
-    tasks = _task_list_tasks(str(chat_id))
-    target_task = next((t for t in tasks if str(t.get("id")) == str(task_id)), None)
-    if _guard_callback(
-        callback_id, not target_task,
-        text="esa tarea no existe", show_alert=True,
-    ):
-        return
-
-    request_user_id = user.get("id")
-    task_owner_id = target_task.get("user_id")
-    is_owner = task_owner_id and str(request_user_id) == str(task_owner_id)
-
-    chat_type = str(chat.get("type", ""))
-    is_admin = False
-    if is_group_chat_type(chat_type):
-        redis_client = config_redis()
-        is_admin = is_chat_admin(
-            str(chat_id), request_user_id, redis_client=redis_client
-        )
-    else:
-        is_admin = True
-
-    if _guard_callback(
-        callback_id, not is_owner and not is_admin,
-        text="solo el creador o un admin pueden borrar esta tarea",
-        show_alert=True,
-    ):
-        return
-
-    _task_cancel_task(task_id)
-
-    if callback_id:
-        _answer_callback_query(callback_id, text=f"tarea {task_id} borrada")
-
-    if message_id:
-        tasks = _task_list_tasks(str(chat_id))
-        new_text, new_keyboard = _build_tasks_message(tasks)
-        try:
-            edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
-        except Exception as error:
-            _logger.exception(
-                "handle_task_callback: failed to edit task message chat_id=%s message_id=%s: %s",
-                chat_id,
-                message_id,
-                error,
-            )
+    callback_runtime.handle_task_callback(
+        callback_query,
+        guard_callback=_guard_callback,
+        list_tasks=_task_list_tasks,
+        cancel_task=_task_cancel_task,
+        is_group_chat_type=is_group_chat_type,
+        config_redis=config_redis,
+        is_chat_admin=is_chat_admin,
+        answer_callback=_answer_callback_query,
+        build_tasks_message=_build_tasks_message,
+        edit_message=edit_message,
+        logger=_logger,
+    )
 
 
 def edit_message(
@@ -5745,154 +2745,32 @@ def edit_message(
 
 
 def handle_callback_query(callback_query: Dict[str, Any]) -> None:
-    callback_data = callback_query.get("data")
-    callback_id = callback_query.get("id")
-    message = callback_query.get("message") or {}
-    chat = message.get("chat") or {}
-    user = callback_query.get("from") or {}
-    chat_id = chat.get("id")
-    message_id = message.get("message_id")
-
-    if _guard_callback(
-        callback_id, not callback_data or chat_id is None or message_id is None,
-    ):
-        return
-
-    if str(callback_data).startswith("topup:"):
-        handle_topup_callback(callback_query)
-        return
-
-    if str(callback_data).startswith("task:"):
-        handle_task_callback(callback_query)
-        return
-
-    if str(callback_data).startswith("sig:"):
-        redis_client = config_redis()
-        handle_token_signal_callback(
-            callback_query,
-            redis_client=redis_client,
-            delete_msg=delete_msg,
-            edit_photo=edit_photo,
-            is_chat_admin=is_chat_admin,
-            answer_callback_query=_answer_callback_query,
-            admin_report=admin_report,
-        )
-        return
-
-    redis_client = config_redis()
-    chat_id_str = str(chat_id)
-    chat_type = str(chat.get("type", ""))
-
-    is_config_callback = str(callback_data).startswith("cfg:")
-    if is_config_callback and is_group_chat_type(chat_type):
-        if not is_chat_admin(chat_id_str, user.get("id"), redis_client=redis_client):
-            from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE
-            denial_message = ADMIN_CONFIG_DENIAL_MESSAGE
-            _guard_callback(callback_id, True)
-            send_msg(chat_id_str, denial_message, str(message_id))
-            _report_unauthorized_config_attempt(
-                chat_id_str,
-                user,
-                chat_type=chat_type,
-                action="callback:config",
-                callback_data=str(callback_data),
-            )
-            return
-
-    config = get_chat_config(redis_client, chat_id_str)
-
-    try:
-        _, action, value = callback_data.split(":", 2)
-    except ValueError:
-        _guard_callback(callback_id, True)
-        return
-
-    if action == "link" and value in {"reply", "delete", "off"}:
-        config = set_chat_config(redis_client, chat_id_str, link_mode=value)
-    elif action == "random":
-        current = coerce_bool(config.get("ai_random_replies"), default=True)
-        config = set_chat_config(
-            redis_client,
-            chat_id_str,
-            ai_random_replies=not current,
-        )
-    elif action == "followups":
-        current = coerce_bool(config.get("ai_command_followups"), default=True)
-        config = set_chat_config(
-            redis_client,
-            chat_id_str,
-            ai_command_followups=not current,
-        )
-    elif action == "linkfixfollowups":
-        current = coerce_bool(config.get("ignore_link_fix_followups"), default=True)
-        config = set_chat_config(
-            redis_client,
-            chat_id_str,
-            ignore_link_fix_followups=not current,
-        )
-    elif action == "timezone":
-        if _guard_callback(callback_id, value == "current"):
-            return
-        try:
-            offset = max(TIMEZONE_OFFSET_MIN, min(int(value), TIMEZONE_OFFSET_MAX))
-            config = set_chat_config(
-                redis_client,
-                chat_id_str,
-                timezone_offset=offset,
-            )
-        except ValueError:
-            _log_config_event(
-                "Invalid timezone callback value",
-                {"chat_id": chat_id_str, "value": value},
-            )
-    elif action == "creditless":
-        try:
-            current_limit = int(
-                config.get(
-                    "creditless_user_hourly_limit",
-                    config.get("creditless_user_daily_limit", 5),
-                )
-            )
-            if value == "none":
-                limit = 0
-            elif value == "decrease":
-                limit = (
-                    current_limit if current_limit < 0 else max(0, current_limit - 1)
-                )
-            elif _guard_callback(callback_id, value == "current"):
-                return
-            elif value == "increase":
-                limit = current_limit if current_limit < 0 else current_limit + 1
-            elif value == "unlimited":
-                limit = -1
-            else:
-                limit = int(value)
-                if limit < -1:
-                    raise ValueError
-            config = set_chat_config(
-                redis_client,
-                chat_id_str,
-                creditless_user_hourly_limit=limit,
-            )
-        except ValueError:
-            _log_config_event(
-                "Invalid creditless callback value",
-                {"chat_id": chat_id_str, "value": value},
-            )
-
-    text = build_config_text(config, chat_type)
-    keyboard = build_config_keyboard(config, chat_type)
-    try:
-        edit_succeeded = edit_message(chat_id_str, int(message_id), text, keyboard)
-        if not edit_succeeded:
-            _log_config_event(
-                "Falling back to new config message",
-                {"chat_id": chat_id_str, "message_id": message_id},
-            )
-            send_msg(chat_id_str, text, reply_markup=keyboard)
-    finally:
-        if callback_id:
-            _answer_callback_query(callback_id)
+    callback_runtime.handle_callback_query(
+        callback_query,
+        guard_callback=_guard_callback,
+        handle_topup=handle_topup_callback,
+        handle_task=handle_task_callback,
+        handle_signal=handle_token_signal_callback,
+        config_redis=config_redis,
+        delete_msg=delete_msg,
+        edit_photo=edit_photo,
+        is_chat_admin=is_chat_admin,
+        answer_callback=_answer_callback_query,
+        admin_report=admin_report,
+        is_group_chat_type=is_group_chat_type,
+        send_msg=send_msg,
+        report_unauthorized=_report_unauthorized_config_attempt,
+        denial_message=ADMIN_CONFIG_DENIAL_MESSAGE,
+        get_chat_config=get_chat_config,
+        set_chat_config=set_chat_config,
+        coerce_bool=coerce_bool,
+        log_config_event=_log_config_event,
+        timezone_offset_min=TIMEZONE_OFFSET_MIN,
+        timezone_offset_max=TIMEZONE_OFFSET_MAX,
+        build_config_text=build_config_text,
+        build_config_keyboard=build_config_keyboard,
+        edit_message=edit_message,
+    )
 
 
 def format_user_message(
@@ -6009,14 +2887,15 @@ def handle_msg(message: Dict) -> str:
 
 
 def handle_rate_limit(chat_id: str, message: Dict) -> str:
-    """Handle rate limited responses"""
-    token = environ.get("TELEGRAM_TOKEN")
-    if token:
-        send_typing(token, chat_id)
-    time.sleep(random.uniform(0, 1))
-    return build_random_reply(
-        gen_random,
-        cast(Mapping[str, Any], message.get("from") or {}),
+    return response_runtime.handle_rate_limit(
+        chat_id,
+        message,
+        telegram_token=environ.get("TELEGRAM_TOKEN"),
+        send_typing=send_typing,
+        sleep=time.sleep,
+        random_delay=random.uniform,
+        build_random_reply=build_random_reply,
+        gen_random=gen_random,
     )
 
 
@@ -6033,33 +2912,11 @@ def handle_ai_response(
     timezone_offset: int = -3,
     reply_to_message_id: Optional[str] = None,
 ) -> str:
-    effective_handler = handler_func
-    if handler_func is handle_ai_stream_response:
-        user_name = _extract_user_name(user_identity)
-
-        def _stream_handler(
-            handler_messages: List[Dict[str, Any]],
-            *,
-            response_meta: Optional[Dict[str, Any]] = None,
-        ) -> str:
-            return handle_ai_stream_response(
-                handler_messages,
-                response_meta=response_meta,
-                chat_id=chat_id,
-                user_id=user_id,
-                user_name=user_name or None,
-                timezone_offset=timezone_offset,
-                reply_to_message_id=reply_to_message_id,
-                image_data=image_data,
-                image_file_id=image_file_id,
-            )
-
-        effective_handler = _stream_handler
-
-    return _ai_handle_response(
+    return response_runtime.handle_ai_response(
         chat_id,
-        effective_handler,
+        handler_func,
         messages,
+        stream_handler=handle_ai_stream_response,
         image_data=image_data,
         image_file_id=image_file_id,
         context_texts=context_texts,
@@ -6068,34 +2925,36 @@ def handle_ai_response(
         user_id=user_id,
         timezone_offset=timezone_offset,
         reply_to_message_id=reply_to_message_id,
-        send_typing_fn=send_typing,
+        extract_user_name=_extract_user_name,
+        handle_response=_ai_handle_response,
+        send_typing=send_typing,
         telegram_token=environ.get("TELEGRAM_TOKEN"),
-        reset_request_count_fn=_reset_ai_provider_request_count,
-        restore_request_count_fn=_restore_ai_provider_request_count,
-        get_request_count_fn=_get_ai_provider_request_count,
+        reset_request_count=_reset_ai_provider_request_count,
+        restore_request_count=_restore_ai_provider_request_count,
+        get_request_count=_get_ai_provider_request_count,
     )
 
 
 def _send_message_for_stream(
     chat_id: str, text: str, reply_to_message_id: Optional[str] = None
 ) -> Optional[int]:
-    try:
-        return send_msg(chat_id, text, reply_to_message_id or "")
-    except Exception as error:
-        _logger.exception("stream: failed to send message chat_id=%s: %s", chat_id, error)
-        return None
+    return response_runtime.send_message_for_stream(
+        chat_id,
+        text,
+        reply_to_message_id,
+        send_message=send_msg,
+        logger=_logger,
+    )
 
 
 def _edit_message_for_stream(chat_id: str, text: str, message_id: str) -> None:
-    try:
-        edit_message(chat_id, int(message_id), text)
-    except Exception as error:
-        _logger.exception(
-            "stream: failed to edit message chat_id=%s message_id=%s: %s",
-            chat_id,
-            message_id,
-            error,
-        )
+    response_runtime.edit_message_for_stream(
+        chat_id,
+        text,
+        message_id,
+        edit_message=edit_message,
+        logger=_logger,
+    )
 
 
 def handle_ai_stream_response(
@@ -6111,57 +2970,27 @@ def handle_ai_stream_response(
     image_file_id: Optional[str] = None,
     **_: Any,
 ) -> str:
-    if not chat_id:
-        return "me quedé reculando y no te pude responder, probá de nuevo"
-
-    if image_data:
-        _inject_image_context(messages, image_data, image_file_id, response_meta)
-
-    token = environ.get("TELEGRAM_TOKEN")
-    if token:
-        send_typing(token, chat_id)
-
-    token_iterator = ask_ai_stream(
+    return response_runtime.handle_ai_stream_response(
         messages,
+        response_meta=response_meta,
         chat_id=chat_id,
-        user_name=user_name,
         user_id=user_id,
+        user_name=user_name,
         timezone_offset=timezone_offset,
+        reply_to_message_id=reply_to_message_id,
+        image_data=image_data,
+        image_file_id=image_file_id,
+        inject_image_context=_inject_image_context,
+        telegram_token=environ.get("TELEGRAM_TOKEN"),
+        send_typing=send_typing,
+        ask_ai_stream=ask_ai_stream,
+        consume_stream=consume_stream_to_telegram,
+        send_stream_message=_send_message_for_stream,
+        edit_stream_message=_edit_message_for_stream,
+        ask_ai=ask_ai,
+        gen_random=gen_random,
+        set_stream_metadata=set_streamed_response_metadata,
     )
-
-    try:
-        final_text, message_id = consume_stream_to_telegram(
-            chat_id,
-            token_iterator,
-            _send_message_for_stream,
-            _edit_message_for_stream,
-            reply_to_message_id=reply_to_message_id,
-        )
-    except RuntimeError:
-        final_text = ask_ai(
-            messages,
-            chat_id=chat_id,
-            user_name=user_name,
-            user_id=user_id,
-            timezone_offset=timezone_offset,
-            response_meta=response_meta,
-        )
-        if not final_text.strip():
-            final_text = gen_random(user_name or "")
-        message_id = _send_message_for_stream(
-            chat_id, final_text, reply_to_message_id
-        )
-        set_streamed_response_metadata(
-            str(message_id) if message_id is not None else None, final_text
-        )
-
-    if response_meta is not None:
-        response_meta["billing_segments"] = list(
-            cast(List[Dict[str, Any]], response_meta.get("billing_segments") or [])
-        )
-        response_meta["streamed_text"] = final_text
-        response_meta["streamed_message_id"] = message_id
-    return final_text
 
 
 def update_telegram_bot_commands() -> bool:

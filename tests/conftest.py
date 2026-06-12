@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import Future
 
 import pytest
 import redis as redis_module
@@ -18,6 +19,15 @@ class _FastFailRedis:
             raise redis_module.ConnectionError("test: Redis not available")
 
         return raiser
+
+
+class _NoopExecutor:
+    """Prevent background work from escaping an individual test."""
+
+    def submit(self, _fn):
+        future = Future()
+        future.set_result(None)
+        return future
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -47,5 +57,6 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *_, **__: None)
     monkeypatch.setattr(index_module, "complete_with_providers", lambda *_, **__: "")
     monkeypatch.setattr(index_module, "config_redis", lambda *_, **__: _FastFailRedis())
+    monkeypatch.setattr(index_module, "_BACKGROUND_REFRESH_EXECUTOR", _NoopExecutor())
     config_module.reset_cache()
     yield
