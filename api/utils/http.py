@@ -1,6 +1,6 @@
 """HTTP helper utilities for resilient requests."""
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 import warnings
 
 import requests
@@ -23,12 +23,12 @@ def request_with_ssl_fallback(
 
     requester = getattr(session or requests, method.lower())
     try:
-        return requester(url, **kwargs)
+        return cast(Response, requester(url, **kwargs))
     except SSLError:
         fallback_kwargs = dict(kwargs)
         fallback_kwargs["verify"] = False
         if suppress_warning:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                return requester(url, **fallback_kwargs)
-        return requester(url, **fallback_kwargs)
+                return cast(Response, requester(url, **fallback_kwargs))
+        return cast(Response, requester(url, **fallback_kwargs))

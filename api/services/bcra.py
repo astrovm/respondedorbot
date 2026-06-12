@@ -178,13 +178,13 @@ def _require_configured(func_name: str) -> None:
         raise RuntimeError(f"BCRA service not configured before calling {func_name}")
 
 
-def _call_cached_requests(*args, **kwargs):
+def _call_cached_requests(*args: Any, **kwargs: Any) -> Optional[Dict[str, Any]]:
     _require_configured("cached_requests")
     assert _cached_requests_fn is not None
     return _cached_requests_fn(*args, **kwargs)
 
 
-def _config_redis(*args, **kwargs) -> redis.Redis:
+def _config_redis(*args: Any, **kwargs: Any) -> redis.Redis:
     _require_configured("config_redis")
     assert _redis_factory_fn is not None
     return _redis_factory_fn(*args, **kwargs)

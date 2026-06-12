@@ -44,7 +44,9 @@ def _safe_eval(expr: str) -> Union[float, int, str]:
         if result == int(result):
             return int(result)
         return round(result, 8)
-    return result
+    if isinstance(result, (int, float, str)):
+        return result
+    return str(result)
 
 
 def _execute_calculate(

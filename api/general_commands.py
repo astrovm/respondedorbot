@@ -5,9 +5,13 @@ import re
 import time
 import unicodedata
 from os import environ
+from typing import Any, Callable, cast
 
 import emoji
 from pykakasi import kakasi
+
+KakasiFactory = Callable[[], Any]
+_kakasi = cast(KakasiFactory, kakasi)
 
 
 def gen_random(name: str) -> str:
@@ -94,7 +98,7 @@ JAPANESE_TEXT_RE = re.compile(
 
 def romanize_japanese(text: str) -> str:
     """Convert Japanese kana/kanji text to romaji when possible."""
-    segments = kakasi().convert(text)
+    segments = _kakasi().convert(text)
     return "".join(
         str(segment.get("hepburn") or segment.get("orig") or "") for segment in segments
     )

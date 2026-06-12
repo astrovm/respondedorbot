@@ -19,6 +19,7 @@ from typing import (
     Protocol,
     Tuple,
     runtime_checkable,
+    cast,
 )
 
 
@@ -150,7 +151,8 @@ def parse_tool_call_arguments(arguments: Any) -> Dict[str, Any]:
         return arguments
     if isinstance(arguments, str):
         try:
-            return json.loads(arguments)
+            parsed = json.loads(arguments)
+            return cast(Dict[str, Any], parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError):
             return {}
     return {}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import redis
 from redis.exceptions import BusyLoadingError
@@ -109,7 +109,11 @@ def _admin_report(
         _admin_reporter(message, error, extra)
 
 
-def config_redis(host=None, port=None, password=None):
+def config_redis(
+    host: Optional[str] = None,
+    port: Optional[Union[int, str]] = None,
+    password: Optional[str] = None,
+) -> redis.Redis:
     try:
         host = host or os.environ.get("REDIS_HOST", "localhost")
         port = int(port or os.environ.get("REDIS_PORT", "6379"))

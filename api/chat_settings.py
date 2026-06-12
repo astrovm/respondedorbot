@@ -15,6 +15,7 @@ from api.chat_config_defaults import (
     TIMEZONE_OFFSET_MIN,
 )
 from api.chat_config_service import (
+    ChatConfigService,
     build_chat_config_service,
     decode_redis_value,
 )
@@ -30,7 +31,7 @@ def _build_service(
     chat_config_db_service: Any = None,
     admin_reporter: Optional[AdminReporter] = None,
     log_event: Optional[ConfigLogger] = None,
-):
+) -> ChatConfigService:
     repo = (
         chat_config_db_service
         if chat_config_db_service is not None
@@ -65,7 +66,7 @@ def _get_cached_service(
     chat_config_db_service: Any = None,
     admin_reporter: Optional[AdminReporter] = None,
     log_event: Optional[ConfigLogger] = None,
-):
+) -> ChatConfigService:
     global _cached_service, _cached_service_key
     cache_key = _service_cache_key(
         chat_config_db_service=chat_config_db_service,
@@ -79,6 +80,7 @@ def _get_cached_service(
             log_event=log_event,
         )
         _cached_service_key = cache_key
+    assert _cached_service is not None
     return _cached_service
 
 

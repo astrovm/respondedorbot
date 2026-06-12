@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from api.utils import fmt_num, parse_date_string
 
@@ -115,7 +115,7 @@ def format_bcra_variables(
     if not variables:
         return "No se pudieron obtener las variables del BCRA"
 
-    specs = [
+    specs: List[Tuple[str, Callable[[Any], str]]] = [
         (
             r"base\s*monetaria",
             lambda v: f"base monetaria: ${format_bcra_value(v)} mill. pesos",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, cast
 
 
 def _pct_change(current: float, historical: float) -> Optional[float]:
@@ -14,11 +14,11 @@ def _pct_change(current: float, historical: float) -> Optional[float]:
 
 
 def sort_dollar_rates(
-    dollar_rates,
+    dollar_rates: Mapping[str, Any],
     tcrm_100: Optional[float] = None,
     tcrm_history: Optional[float] = None,
     hours_ago: int = 24,
-):
+) -> list[Dict[str, Any]]:
     dollars = dollar_rates["data"]
 
     hist_dollars: Optional[Dict[str, Any]] = None
@@ -28,10 +28,10 @@ def sort_dollar_rates(
             hist_dollars = history_entry["data"]
 
     def _var(
-        current_price: float, criptoya_variation, *hist_path: str
+        current_price: float, criptoya_variation: Any, *hist_path: str
     ) -> Optional[float]:
         if hours_ago == 24:
-            return criptoya_variation
+            return cast(Optional[float], criptoya_variation)
         if hist_dollars is None:
             return None
         try:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 from requests.exceptions import RequestException
@@ -486,8 +486,8 @@ def replace_links(
     original_links: List[str] = []
     checker = embed_checker or url_is_embedable
 
-    def make_sub(repl: str):
-        def _sub(match: re.Match) -> str:
+    def make_sub(repl: str) -> Callable[[re.Match[str]], str]:
+        def _sub(match: re.Match[str]) -> str:
             original = match.group(0)
             parsed_original = urlparse(original)
             if _is_twitter_user_profile(parsed_original):
@@ -518,7 +518,7 @@ def replace_links(
 
     url_pattern = re.compile(r"(https?://[^\s]+)")
 
-    def strip_tracking(match: re.Match) -> str:
+    def strip_tracking(match: re.Match[str]) -> str:
         url = match.group(0)
         parsed = urlparse(url)
         if is_social_frontend(parsed.netloc):
@@ -621,7 +621,8 @@ def fetch_tweet_via_oembed(url: str) -> Optional[Dict[str, Any]]:
             headers=headers,
         )
         if response.status_code == 200:
-            return response.json()
+            payload = response.json()
+            return cast(Dict[str, Any], payload) if isinstance(payload, dict) else None
     except RequestException:
         pass
     return None

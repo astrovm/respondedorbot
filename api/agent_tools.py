@@ -130,7 +130,9 @@ class HtmlTextExtractor(HTMLParser):
         self._title_parts: List[str] = []
         self._in_title = False
 
-    def handle_starttag(self, tag: str, attrs: list) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, Optional[str]]]
+    ) -> None:
         tag_lower = tag.lower()
         if tag_lower in self._SKIP_TAGS:
             self._skip_depth += 1

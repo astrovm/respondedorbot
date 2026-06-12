@@ -308,7 +308,9 @@ _DOLLAR_TIMEFRAME_HOURS: Dict[str, int] = {
 }
 
 
-def _parse_timeframe(msg_text: str, valid: Mapping) -> Tuple[str, Optional[str]]:
+def _parse_timeframe(
+    msg_text: str, valid: Mapping[str, Any]
+) -> Tuple[str, Optional[str]]:
     """Strip a trailing timeframe token from msg_text.
 
     Returns (cleaned_text, tf_key) where tf_key is None if no timeframe found.
@@ -398,7 +400,11 @@ def _fetch_criptoya_dollar_data(
     )
 
 
-def config_redis(host=None, port=None, password=None):
+def config_redis(
+    host: Optional[str] = None,
+    port: Optional[Union[int, str]] = None,
+    password: Optional[str] = None,
+) -> redis.Redis:
     configure_app_config(admin_reporter=globals().get("admin_report"))
     return _config_config_redis(host=host, port=port, password=password)
 
@@ -549,11 +555,11 @@ _ai_provider_request_count: ContextVar[int] = ContextVar(
 _link_metadata_local_cache: Dict[str, Dict[str, Any]] = {}
 
 
-def _reset_ai_provider_request_count() -> Token:
+def _reset_ai_provider_request_count() -> Token[int]:
     return _ai_provider_request_count.set(0)
 
 
-def _restore_ai_provider_request_count(token: Token) -> None:
+def _restore_ai_provider_request_count(token: Token[int]) -> None:
     _ai_provider_request_count.reset(token)
 
 
@@ -741,28 +747,26 @@ def cache_description(
 
 
 # get cached data from previous hour
-def get_cache_history(hours_ago, request_hash, redis_client):
+def get_cache_history(
+    hours_ago: int, request_hash: str, redis_client: redis.Redis
+) -> Optional[Dict[str, Any]]:
     timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d-%H")
     cached_data = redis_client.get(request_cache_history_key(timestamp, request_hash))
     if cached_data is None:
         return None
     cache_history = json.loads(cached_data)
-    return (
-        cache_history
-        if cache_history is not None and "timestamp" in cache_history
-        else None
-    )
+    return cache_history if isinstance(cache_history, dict) and "timestamp" in cache_history else None
 
 
 def cached_requests(
-    api_url,
-    parameters,
-    headers,
-    expiration_time,
-    hourly_cache=False,
-    get_history=False,
-    verify_ssl=True,
-):
+    api_url: str,
+    parameters: Optional[Mapping[str, Any]],
+    headers: Optional[Mapping[str, Any]],
+    expiration_time: int,
+    hourly_cache: bool = False,
+    get_history: Union[int, bool] = False,
+    verify_ssl: bool = True,
+) -> Optional[Dict[str, Any]]:
     return _cached_request(
         api_url,
         parameters,
@@ -783,7 +787,7 @@ def cached_requests(
 
 def get_api_or_cache_prices(
     convert_to: str, limit: Optional[int] = None, hourly_cache: bool = False
-):
+) -> Optional[Dict[str, Any]]:
     api_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     parameters = {"start": "1", "limit": "100", "convert": convert_to}
     headers = {
@@ -945,7 +949,7 @@ def get_prices(msg_text: str) -> Optional[str]:
 
 
 def format_dollar_rates(
-    dollar_rates: List[Dict],
+    dollar_rates: List[Dict[str, Any]],
     hours_ago: int,
     band_limits: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -1072,7 +1076,7 @@ def _describe_replied_media(
 
 
 def handle_transcribe_with_message_result(
-    message: Dict,
+    message: Dict[str, Any],
 ) -> Tuple[str, List[Dict[str, Any]]]:
     return media_commands.handle_transcribe_with_message_result(
         message,
@@ -1085,7 +1089,7 @@ def handle_transcribe_with_message_result(
     )
 
 
-def handle_transcribe_with_message(message: Dict) -> str:
+def handle_transcribe_with_message(message: Dict[str, Any]) -> str:
     response_text, _billing_segments = handle_transcribe_with_message_result(message)
     return response_text
 
@@ -1285,7 +1289,7 @@ def get_good_night() -> str:
 def admin_report(
     message: str,
     error: Optional[Exception] = None,
-    extra_context: Optional[Dict] = None,
+    extra_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     _admin_report(
         message,
@@ -1362,7 +1366,7 @@ _configure_bcra_service()
 configure_app_config(admin_reporter=admin_report)
 
 
-def get_weather() -> dict:
+def get_weather() -> dict[str, Any]:
     return weather_context.get_weather(
         cached_request=cached_requests,
         cache_ttl=TTL_WEATHER,
@@ -1646,7 +1650,7 @@ def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str
     )
 
 
-def get_market_context() -> Dict:
+def get_market_context() -> Dict[str, Any]:
     """Get crypto and dollar market data for the system prompt."""
     market_data = {}
 
@@ -1669,7 +1673,7 @@ def get_market_context() -> Dict:
     return market_data
 
 
-def get_weather_context() -> Optional[Dict]:
+def get_weather_context() -> Optional[Dict[str, Any]]:
     return weather_context.get_weather_context(
         get_weather_data=get_weather,
         get_description=get_weather_description,
@@ -1677,7 +1681,7 @@ def get_weather_context() -> Optional[Dict]:
     )
 
 
-def get_time_context(timezone_offset: int = -3) -> Dict:
+def get_time_context(timezone_offset: int = -3) -> Dict[str, Any]:
     """Get current time in the chat's configured timezone."""
     current_time = datetime.now(make_chat_tz(timezone_offset))
     return {"datetime": current_time, "formatted": current_time.strftime("%A %d/%m/%Y")}
@@ -1850,7 +1854,8 @@ def _call_summary_model(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], 
 
 def _load_bot_personality() -> str:
     try:
-        return load_bot_config().get("system_prompt", "")
+        system_prompt = load_bot_config().get("system_prompt", "")
+        return system_prompt if isinstance(system_prompt, str) else ""
     except Exception:
         return ""
 
@@ -2033,7 +2038,7 @@ def _estimate_summary_cost_usd_micros(
 
 
 
-def get_fallback_response(messages: List[Dict]) -> str:
+def get_fallback_response(messages: List[Dict[str, Any]]) -> str:
     """Generate fallback random response"""
     display_name = ""
     if messages:
@@ -2044,7 +2049,7 @@ def get_fallback_response(messages: List[Dict]) -> str:
 
 
 def build_system_message(
-    context: Dict,
+    context: Dict[str, Any],
     *,
     tools_active: bool = False,
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
@@ -2064,15 +2069,15 @@ def build_system_message(
 
 
 def build_ai_messages(
-    message: Dict,
-    chat_history: List[Dict],
+    message: Dict[str, Any],
+    chat_history: List[Dict[str, Any]],
     message_text: str,
     reply_context: Optional[str] = None,
     enable_web_search: bool = True,
     summary_text: Optional[str] = None,
     retrieved_messages: Optional[List[Dict[str, Any]]] = None,
     timezone_offset: int = -3,
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     return _build_ai_messages(
         message,
         chat_history,
@@ -2185,7 +2190,7 @@ def get_chat_history(
     chat_id: str,
     redis_client: redis.Redis,
     max_messages: int = CHAT_HISTORY_MAX_MESSAGES,
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     return _state_get_chat_history(
         chat_id,
         redis_client,
@@ -2259,7 +2264,7 @@ def _has_ai_credits_for_random_reply(message: Mapping[str, Any]) -> bool:
 
 
 def should_auto_process_media(
-    commands: Mapping[str, Tuple[Callable, bool, bool]],
+    commands: Mapping[str, Tuple[Callable[..., Any], bool, bool]],
     command: str,
     message_text: str,
     message: Mapping[str, Any],
@@ -2793,7 +2798,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
 
 
 def format_user_message(
-    message: Dict,
+    message: Dict[str, Any],
     message_text: str,
     reply_context: Optional[str] = None,
 ) -> str:
@@ -2901,11 +2906,11 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
     )
 
 
-def handle_msg(message: Dict) -> str:
+def handle_msg(message: Dict[str, Any]) -> str:
     return _handle_msg_impl(message, _build_message_handler_deps())
 
 
-def handle_rate_limit(chat_id: str, message: Dict) -> str:
+def handle_rate_limit(chat_id: str, message: Dict[str, Any]) -> str:
     return response_runtime.handle_rate_limit(
         chat_id,
         message,
@@ -2920,8 +2925,8 @@ def handle_rate_limit(chat_id: str, message: Dict) -> str:
 
 def handle_ai_response(
     chat_id: str,
-    handler_func: Callable,
-    messages: List[Dict],
+    handler_func: Callable[..., str],
+    messages: List[Dict[str, Any]],
     image_data: Optional[bytes] = None,
     image_file_id: Optional[str] = None,
     context_texts: Optional[Sequence[Optional[str]]] = None,
