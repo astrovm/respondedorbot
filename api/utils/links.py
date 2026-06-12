@@ -500,8 +500,9 @@ def replace_links(
             replaced_full = urlunparse(cleaned)
             candidates = [replaced_full]
             if _is_eeinstagram_host(cleaned):
-                candidates.append(
-                    urlunparse(cleaned._replace(netloc="kkinstagram.com"))
+                candidates.insert(
+                    0,
+                    urlunparse(cleaned._replace(netloc="kkinstagram.com")),
                 )
 
             for candidate in candidates:
