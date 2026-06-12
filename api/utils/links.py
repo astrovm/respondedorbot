@@ -26,6 +26,7 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fixupx.com",
     "fxbsky.app",
     "eeinstagram.com",
+    "kkinstagram.com",
     "rxddit.com",
 }
 
@@ -497,16 +498,28 @@ def replace_links(
             parsed = _normalize_twitter_status_path(parsed)
             cleaned = parsed._replace(query="", fragment="")
             replaced_full = urlunparse(cleaned)
-            if checker(replaced_full):
-                nonlocal changed
-                changed = True
-                cleaned_original = parsed_original._replace(query="", fragment="")
-                original_links.append(urlunparse(cleaned_original))
-                logger.info("link: replacing original=%s replacement=%s", original, replaced_full)
-                return replaced_full
+            candidates = [replaced_full]
+            if _is_eeinstagram_host(cleaned):
+                candidates.append(
+                    urlunparse(cleaned._replace(netloc="kkinstagram.com"))
+                )
+
+            for candidate in candidates:
+                if checker(candidate):
+                    nonlocal changed
+                    changed = True
+                    cleaned_original = parsed_original._replace(query="", fragment="")
+                    original_links.append(urlunparse(cleaned_original))
+                    logger.info(
+                        "link: replacing original=%s replacement=%s",
+                        original,
+                        candidate,
+                    )
+                    return candidate
+                logger.info("link: cannot embed replacement=%s", candidate)
 
             logger.info(
-                "link: cannot embed replacement=%s keeping=%s", replaced_full, original
+                "link: no embeddable replacement keeping=%s", original
             )
             return original
 
