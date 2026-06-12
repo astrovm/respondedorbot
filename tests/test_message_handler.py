@@ -1857,6 +1857,7 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
         ["https://x.com/user/status/1"],
     )
     deps.build_message_links_context.return_value = "links: x original"
+    deps.download_oversized_instagram_video.return_value = None
     deps.send_msg.return_value = 777
     redis_client = MagicMock()
     message = {
@@ -1887,6 +1888,73 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
         "bot_777",
         "mirá https://fixupx.com/user/status/1\n\ncompartido por Ana Pérez\n\nlinks: x original",
         redis_client,
+    )
+
+
+def test_message_links_uploads_oversized_instagram_video():
+    from api.message_links import handle_link_replacement
+
+    deps = MagicMock()
+    deps.replace_links.return_value = (
+        "https://eeinstagram.com/reel/example?tg=2",
+        True,
+        ["https://www.instagram.com/reel/example"],
+    )
+    deps.download_oversized_instagram_video.return_value = b"video"
+    deps.send_video.return_value = 778
+    deps.build_message_links_context.return_value = ""
+
+    handled = handle_link_replacement(
+        deps,
+        chat_config={"link_mode": "reply"},
+        message={"from": {"username": "ana"}},
+        message_text="https://www.instagram.com/reel/example",
+        chat_id="555",
+        message_id="100",
+        redis_client=MagicMock(),
+    )
+
+    assert handled is True
+    deps.send_video.assert_called_once_with(
+        "555",
+        b"video",
+        caption="https://eeinstagram.com/reel/example?tg=2\n\ncompartido por @ana",
+        msg_id="100",
+        buttons=["https://www.instagram.com/reel/example"],
+    )
+    deps.send_msg.assert_not_called()
+
+
+def test_message_links_falls_back_to_link_when_video_upload_fails():
+    from api.message_links import handle_link_replacement
+
+    deps = MagicMock()
+    deps.replace_links.return_value = (
+        "https://eeinstagram.com/reel/example?tg=2",
+        True,
+        ["https://www.instagram.com/reel/example"],
+    )
+    deps.download_oversized_instagram_video.return_value = b"video"
+    deps.send_video.return_value = None
+    deps.send_msg.return_value = 779
+    deps.build_message_links_context.return_value = ""
+
+    handled = handle_link_replacement(
+        deps,
+        chat_config={"link_mode": "reply"},
+        message={"from": {}},
+        message_text="https://www.instagram.com/reel/example",
+        chat_id="555",
+        message_id="100",
+        redis_client=MagicMock(),
+    )
+
+    assert handled is True
+    deps.send_msg.assert_called_once_with(
+        "555",
+        "https://eeinstagram.com/reel/example?tg=2",
+        "100",
+        ["https://www.instagram.com/reel/example"],
     )
 
 
@@ -2305,9 +2373,11 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "should_auto_process_media": _api_index.should_auto_process_media,
         "extract_message_content": _api_index.extract_message_content,
         "replace_links": lambda text: (text, False, []),
+        "download_oversized_instagram_video": MagicMock(return_value=None),
         "send_msg": MagicMock(return_value=999),
         "send_animation": MagicMock(return_value=999),
         "send_photo": MagicMock(return_value=999),
+        "send_video": MagicMock(return_value=999),
         "delete_msg": MagicMock(),
         "edit_message": MagicMock(),
         "admin_report": MagicMock(),
@@ -2425,6 +2495,9 @@ def _build_grouped_message_handler_deps(flat_defaults):
             parse_command=flat_defaults["parse_command"],
             should_auto_process_media=flat_defaults["should_auto_process_media"],
             replace_links=flat_defaults["replace_links"],
+            download_oversized_instagram_video=flat_defaults[
+                "download_oversized_instagram_video"
+            ],
             should_gordo_respond=flat_defaults["should_gordo_respond"],
             is_group_chat_type=flat_defaults["is_group_chat_type"],
         ),
@@ -2432,6 +2505,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             send_msg=flat_defaults["send_msg"],
             send_animation=flat_defaults["send_animation"],
             send_photo=flat_defaults["send_photo"],
+            send_video=flat_defaults["send_video"],
             delete_msg=flat_defaults["delete_msg"],
             edit_message=flat_defaults["edit_message"],
             admin_report=flat_defaults["admin_report"],
@@ -2564,6 +2638,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             parse_command=MagicMock(),
             should_auto_process_media=MagicMock(),
             replace_links=MagicMock(),
+            download_oversized_instagram_video=MagicMock(),
             should_gordo_respond=MagicMock(),
             is_group_chat_type=MagicMock(),
         ),
@@ -2571,6 +2646,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             send_msg=MagicMock(),
             send_animation=MagicMock(),
             send_photo=MagicMock(),
+            send_video=MagicMock(),
             delete_msg=MagicMock(),
             edit_message=MagicMock(),
             admin_report=MagicMock(),

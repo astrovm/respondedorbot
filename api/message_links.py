@@ -6,11 +6,15 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
 class LinkReplacementDeps(Protocol):
     def replace_links(self, text: str) -> Tuple[str, bool, List[str]]: ...
 
+    def download_oversized_instagram_video(self, text: str) -> Optional[bytes]: ...
+
     def build_message_links_context(self, message: Mapping[str, Any]) -> str: ...
 
     def delete_msg(self, chat_id: str, message_id: str) -> None: ...
 
     def send_msg(self, *args: Any, **kwargs: Any) -> Optional[int]: ...
+
+    def send_video(self, *args: Any, **kwargs: Any) -> Optional[int]: ...
 
     def save_message_to_redis(self, *args: Any, **kwargs: Any) -> None: ...
 
@@ -55,15 +59,31 @@ def handle_link_replacement(
 
     reply_id = message.get("reply_to_message", {}).get("message_id")
     reply_id = str(reply_id) if reply_id is not None else None
+    oversized_video = deps.download_oversized_instagram_video(fixed_text)
+
+    def send_replacement(target_reply_id: Optional[str]) -> Optional[int]:
+        if oversized_video is not None:
+            sent_video_id = deps.send_video(
+                chat_id,
+                oversized_video,
+                caption=fixed_text,
+                msg_id=target_reply_id or "",
+                buttons=original_links,
+            )
+            if sent_video_id is not None:
+                return sent_video_id
+        if target_reply_id:
+            return deps.send_msg(
+                chat_id,
+                fixed_text,
+                target_reply_id,
+                original_links,
+            )
+        return deps.send_msg(chat_id, fixed_text, buttons=original_links)
 
     if link_mode == "delete":
         deps.delete_msg(chat_id, message_id)
-        if reply_id:
-            sent_message_id = deps.send_msg(
-                chat_id, fixed_text, reply_id, original_links
-            )
-        else:
-            sent_message_id = deps.send_msg(chat_id, fixed_text, buttons=original_links)
+        sent_message_id = send_replacement(reply_id)
         if sent_message_id is not None:
             deps.save_message_to_redis(
                 chat_id,
@@ -73,9 +93,7 @@ def handle_link_replacement(
             )
         return True
 
-    sent_message_id = deps.send_msg(
-        chat_id, fixed_text, reply_id or message_id, original_links
-    )
+    sent_message_id = send_replacement(reply_id or message_id)
     if sent_message_id is not None:
         deps.save_message_to_redis(
             chat_id,

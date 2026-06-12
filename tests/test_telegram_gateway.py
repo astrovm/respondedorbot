@@ -89,6 +89,43 @@ def test_send_photo_delegates_to_telegram_request():
     assert request.calls[0][1]["files"]["photo"][1] == b"png"
 
 
+def test_send_video_delegates_to_telegram_request():
+    request = FakeTelegramRequest(({"ok": True, "result": {"message_id": 78}}, None))
+    gateway = TelegramGateway(telegram_request=request)
+
+    result = gateway.send_video(
+        "123",
+        b"video",
+        caption="Instagram reel",
+        msg_id="10",
+        buttons=["https://www.instagram.com/reel/example"],
+    )
+
+    assert result == 78
+    assert request.calls[0][0] == "sendVideo"
+    payload = request.calls[0][1]["data_payload"]
+    assert payload["chat_id"] == "123"
+    assert payload["caption"] == "Instagram reel"
+    assert payload["supports_streaming"] == "true"
+    assert payload["reply_to_message_id"] == "10"
+    assert json.loads(payload["reply_markup"]) == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "abrir en la app",
+                    "url": "https://www.instagram.com/reel/example",
+                }
+            ]
+        ]
+    }
+    assert request.calls[0][1]["files"]["video"] == (
+        "instagram.mp4",
+        b"video",
+        "video/mp4",
+    )
+    assert request.calls[0][1]["timeout"] == 60
+
+
 def test_edit_photo_delegates_to_telegram_request():
     request = FakeTelegramRequest(({"ok": True, "result": {"message_id": 77}}, None))
     gateway = TelegramGateway(telegram_request=request)
