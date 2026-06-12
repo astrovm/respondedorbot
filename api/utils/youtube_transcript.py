@@ -47,7 +47,7 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
 
 def fetch_youtube_transcript(
     video_id: str,
-    languages: List[str] = None,
+    languages: Optional[List[str]] = None,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """Fetch transcript for a YouTube video.
 
@@ -136,7 +136,7 @@ def format_youtube_transcript_for_context(
 
 def get_youtube_transcript_context(
     video_id: str,
-    languages: List[str] = None,
+    languages: Optional[List[str]] = None,
 ) -> str:
     """Get formatted transcript context for a YouTube video.
 

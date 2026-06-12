@@ -97,11 +97,5 @@ disallow_incomplete_defs = false
 module = [
     "api.index",
     "api.message_handler",
-    "api.ai_billing",
-    "api.provider_runtime",
-    "api.services.bcra",
-    "api.services.maintenance",
-    "api.agent_tools",
-    "api.utils.youtube_transcript",
 ]
 ignore_errors = true
