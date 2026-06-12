@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from html import escape
@@ -13,7 +12,7 @@ import pycountry
 from api.utils import fmt_num
 
 EVENTS_URL = "https://gamma-api.polymarket.com/events"
-PRICES_HISTORY_URL = "https://clob.polymarket.com/prices-history"
+MIDPOINT_URL = "https://clob.polymarket.com/midpoint"
 GLOBAL_ELECTIONS_TAG = "global-elections"
 GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
@@ -21,9 +20,6 @@ WORLD_CUP_LIMIT = 10
 WORLD_CUP_FETCH_LIMIT = 100
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
-STREAM_LOOKBACK_SECONDS = 60 * 30
-STREAM_FIDELITY = 1
-
 COUNTRY_NAME_ALIASES = {
     "bosnia-herzegovina": "BA",
     "england": "GB",
@@ -50,34 +46,24 @@ def fetch_live_price(
     if not token_id:
         return None
 
-    start_ts = max(0, int(time.time()) - STREAM_LOOKBACK_SECONDS)
     response = cached_request(
-        PRICES_HISTORY_URL,
-        {
-            "startTs": start_ts,
-            "market": token_id,
-            "earliestTimestamp": max(0, start_ts - STREAM_LOOKBACK_SECONDS),
-            "fidelity": STREAM_FIDELITY,
-        },
+        MIDPOINT_URL,
+        {"token_id": token_id},
         None,
         cache_ttl,
         verify_ssl=False,
     )
-    history_data = response.get("data") if response else None
-    history = history_data.get("history") if isinstance(history_data, dict) else None
-    if not isinstance(history, list) or not history:
+    midpoint_data = response.get("data") if response else None
+    if not isinstance(midpoint_data, dict):
         return None
-
-    latest = history[-1]
-    try:
-        price = float(latest.get("p"))
-    except (TypeError, ValueError):
+    raw_midpoint = midpoint_data.get("mid")
+    if not isinstance(raw_midpoint, (str, int, float)):
         return None
     try:
-        timestamp = int(latest["t"]) if latest.get("t") is not None else None
+        price = float(raw_midpoint)
     except (TypeError, ValueError):
-        timestamp = None
-    return price, timestamp
+        return None
+    return price, None
 
 
 def fetch_event(
@@ -177,6 +163,8 @@ def format_event_section(
 def event_top_outcomes(
     event: dict[str, Any],
     limit: int = 2,
+    *,
+    fetch_live: LivePriceFetcher | None = None,
 ) -> list[tuple[str, float]]:
     event_outcomes: list[tuple[str, float]] = []
     for market in event.get("markets") or []:
@@ -185,7 +173,7 @@ def event_top_outcomes(
         try:
             outcomes = json.loads(market.get("outcomes") or "[]")
             prices = json.loads(market.get("outcomePrices") or "[]")
-            probability = float(prices[outcomes.index("Yes")]) * 100
+            yes_index = outcomes.index("Yes")
         except (
             AttributeError,
             TypeError,
@@ -194,6 +182,21 @@ def event_top_outcomes(
             json.JSONDecodeError,
         ):
             continue
+        probability: float | None = None
+        if fetch_live:
+            try:
+                token_ids = json.loads(market.get("clobTokenIds") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                token_ids = []
+            if yes_index < len(token_ids):
+                live = fetch_live(str(token_ids[yes_index]))
+                if live:
+                    probability = live[0] * 100
+        if probability is None:
+            try:
+                probability = float(prices[yes_index]) * 100
+            except (TypeError, ValueError, IndexError):
+                continue
         title = (
             market.get("groupItemTitle")
             or market.get("question")
@@ -325,6 +328,7 @@ def get_world_cup_games(
     cached_request: CachedRequest,
     cache_ttl: int,
     get_top_outcomes: OutcomesGetter,
+    fetch_live: LivePriceFetcher,
     format_country: CountryFormatter,
     make_timezone: TimezoneFactory,
 ) -> str:
@@ -383,7 +387,7 @@ def get_world_cup_games(
         title, slug = event.get("title"), event.get("slug")
         if not title or not slug:
             continue
-        outcomes = get_top_outcomes(event, limit=3)
+        outcomes = get_top_outcomes(event, limit=3, fetch_live=fetch_live)
         probabilities = dict(outcomes)
         favorite = outcomes[0][0] if outcomes else ""
         teams = []

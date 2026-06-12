@@ -847,9 +847,18 @@ def _format_polymarket_event_section(
 
 
 def _polymarket_event_top_outcomes(
-    event: Dict[str, Any], limit: int = 2
+    event: Dict[str, Any],
+    limit: int = 2,
+    *,
+    fetch_live: Optional[
+        Callable[[str], Optional[Tuple[float, Optional[int]]]]
+    ] = None,
 ) -> List[Tuple[str, float]]:
-    return polymarket_commands.event_top_outcomes(event, limit)
+    return polymarket_commands.event_top_outcomes(
+        event,
+        limit,
+        fetch_live=fetch_live,
+    )
 
 
 def _format_usd_compact(value: float) -> str:
@@ -889,6 +898,7 @@ def get_polymarket_world_cup_games(timezone_offset: int = -3) -> str:
         cached_request=cached_requests,
         cache_ttl=TTL_POLYMARKET,
         get_top_outcomes=_polymarket_event_top_outcomes,
+        fetch_live=_fetch_polymarket_live_price,
         format_country=_flagged_country_name,
         make_timezone=make_chat_tz,
     )

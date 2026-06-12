@@ -1,4 +1,26 @@
 from api import index
+from api import polymarket_commands
+
+
+def test_fetch_live_price_uses_clob_midpoint():
+    captured = {}
+
+    def fake_cached_request(url, parameters, *_args, **kwargs):
+        captured.update({"url": url, "parameters": parameters, **kwargs})
+        return {"data": {"mid": "0.525"}}
+
+    result = polymarket_commands.fetch_live_price(
+        "token-123",
+        cached_request=fake_cached_request,
+        cache_ttl=5,
+    )
+
+    assert result == (0.525, None)
+    assert captured == {
+        "url": "https://clob.polymarket.com/midpoint",
+        "parameters": {"token_id": "token-123"},
+        "verify_ssl": False,
+    }
 
 
 def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
@@ -27,6 +49,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
                     "groupItemTitle": "Mexico",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.695", "0.305"]',
+                    "clobTokenIds": '["mex-yes", "mex-no"]',
                     "active": True,
                     "closed": False,
                 },
@@ -34,6 +57,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
                     "groupItemTitle": "Draw (Mexico vs. South Africa)",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.205", "0.795"]',
+                    "clobTokenIds": '["draw-yes", "draw-no"]',
                     "active": True,
                     "closed": False,
                 },
@@ -41,6 +65,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
                     "groupItemTitle": "South Africa",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.105", "0.895"]',
+                    "clobTokenIds": '["rsa-yes", "rsa-no"]',
                     "active": True,
                     "closed": False,
                 },
@@ -77,6 +102,15 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         return {"data": events}
 
     monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(
+        index,
+        "_fetch_polymarket_live_price",
+        lambda token_id: {
+            "mex-yes": (0.72, 1),
+            "draw-yes": (0.18, 1),
+            "rsa-yes": (0.10, 1),
+        }.get(token_id),
+    )
 
     result = index.get_polymarket_world_cup_games(timezone_offset=-3)
 
@@ -102,14 +136,15 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         "fifwc-kr-cze-2026-06-11"
     )
     assert "Exact Score" not in result
-    assert "[🇲🇽 Mexico 69.5%] vs. 🇿🇦 South Africa 10.5%" in result
-    assert "Draw 20.5%" not in result
+    assert "[🇲🇽 Mexico 72%] vs. 🇿🇦 South Africa 10%" in result
+    assert "Mexico 69.5%" not in result
+    assert "Draw 18%" not in result
     assert "Thu, June 11\n<a href=" in result
     assert "16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
-        'fifwc-mex-rsa-2026-06-11">[🇲🇽 Mexico 69.5%] vs. '
-        "🇿🇦 South Africa 10.5%</a>"
+        'fifwc-mex-rsa-2026-06-11">[🇲🇽 Mexico 72%] vs. '
+        "🇿🇦 South Africa 10%</a>"
     ) in result
 
 
