@@ -28,6 +28,12 @@ COUNTRY_NAME_ALIASES = {
     "korea republic": "KR",
     "scotland": "GB",
     "uk": "GB",
+    "wales": "GB",
+}
+REGIONAL_COUNTRY_FLAGS = {
+    "england": "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+    "scotland": "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+    "wales": "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f",
 }
 
 CachedRequest = Callable[..., dict[str, Any] | None]
@@ -274,20 +280,28 @@ def country_code_from_name(name: str) -> str:
         return ""
 
 
+def country_flag_from_name(name: str) -> str:
+    normalized = re.sub(r"\s+", " ", name.replace("_", " ").strip()).casefold()
+    regional_flag = REGIONAL_COUNTRY_FLAGS.get(normalized)
+    if regional_flag:
+        return regional_flag
+    return country_flag(country_code_from_name(name))
+
+
 def event_country_flag(event: dict[str, Any]) -> str:
     for tag in event.get("tags") or []:
-        code = (
-            country_code_from_name(str(tag.get("slug") or ""))
+        flag = (
+            country_flag_from_name(str(tag.get("slug") or ""))
             if isinstance(tag, dict)
             else ""
         )
-        if code:
-            return country_flag(code)
+        if flag:
+            return flag
     return ""
 
 
 def flagged_country_name(name: str) -> str:
-    flag = country_flag(country_code_from_name(name))
+    flag = country_flag_from_name(name)
     return f"{flag} {name}" if flag else name
 
 

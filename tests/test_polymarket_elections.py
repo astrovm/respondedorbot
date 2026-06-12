@@ -135,3 +135,19 @@ def test_get_polymarket_global_elections_handles_empty_response(monkeypatch):
 
 def test_event_country_flag_resolves_new_standard_country_tag():
     assert index._event_country_flag({"tags": [{"slug": "armenia"}]}) == "🇦🇲"
+
+
+def test_event_country_flag_resolves_uk_regional_tags():
+    assert index._event_country_flag({"tags": [{"slug": "england"}]}) == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
+        "\U000e0067\U000e007f"
+    )
+    assert index._event_country_flag({"tags": [{"slug": "scotland"}]}) == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063"
+        "\U000e0074\U000e007f"
+    )
+    assert index._event_country_flag({"tags": [{"slug": "wales"}]}) == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c"
+        "\U000e0073\U000e007f"
+    )
+    assert index._event_country_flag({"tags": [{"slug": "uk"}]}) == "🇬🇧"
