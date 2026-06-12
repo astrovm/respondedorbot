@@ -196,6 +196,7 @@ class ProviderRuntime:
                 },
             )
             return None
+        return None
 
     def _filter_known_calls(
         self,
@@ -435,7 +436,7 @@ class ProviderRuntime:
                 if not known_calls:
                     text = str(message.content or "").strip()
                     if text:
-                        metadata = {
+                        tool_metadata = {
                             "provider": "openrouter",
                             "tool_rounds": round_idx + 1,
                         }
@@ -444,7 +445,7 @@ class ProviderRuntime:
                             text=text,
                             model=self._deps.primary_model,
                             response=response,
-                            metadata=metadata,
+                            metadata=tool_metadata,
                         )
                     break
 

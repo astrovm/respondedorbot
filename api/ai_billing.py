@@ -13,6 +13,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    TypedDict,
     cast,
 )
 
@@ -30,7 +31,13 @@ from api.random_replies import build_random_reply
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 
-AI_BILLING_DEFAULT_PACKS = [
+class AIBillingPack(TypedDict):
+    id: str
+    credits: int
+    xtr: int
+
+
+AI_BILLING_DEFAULT_PACKS: List[AIBillingPack] = [
     {"id": "p50", "credits": whole_credits_to_units(50), "xtr": 25},
     {"id": "p100", "credits": whole_credits_to_units(100), "xtr": 50},
     {"id": "p250", "credits": whole_credits_to_units(250), "xtr": 125},
@@ -45,18 +52,23 @@ def get_ai_onboarding_credits() -> int:
     return whole_credits_to_units(3)
 
 
-def get_ai_billing_packs() -> List[Dict[str, int]]:
+def get_ai_billing_packs() -> List[AIBillingPack]:
     """Return Stars billing packs."""
     return list(AI_BILLING_DEFAULT_PACKS)
 
 
-def get_ai_billing_pack(pack_id: str) -> Optional[Dict[str, int]]:
+def get_ai_billing_pack(pack_id: str) -> Optional[AIBillingPack]:
     """Return the pack dict matching pack_id."""
 
     for pack in get_ai_billing_packs():
         if str(pack.get("id")) == str(pack_id):
             return pack
     return None
+
+
+def _billing_summary_int(summary: Mapping[str, Any], key: str) -> int:
+    value = summary.get(key, 0)
+    return int(value) if isinstance(value, (int, float, str)) else 0
 
 
 def _segment_has_token_usage(segment: Optional[Mapping[str, Any]]) -> bool:
@@ -576,8 +588,10 @@ class AIMessageBilling:
             self.clear_persisted_reservation_fn(usage_tag)
             return
         breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
-        raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
+        actual_credit_units = _billing_summary_int(
+            breakdown, "charged_credit_units"
+        )
+        raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
         has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
         refunded_credit_units = 0
         extra_charged_credit_units = 0
@@ -810,8 +824,10 @@ class AIMessageBilling:
             return
 
         breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
-        raw_usd_micros = int(breakdown.get("raw_usd_micros", 0) or 0)
+        actual_credit_units = _billing_summary_int(
+            breakdown, "charged_credit_units"
+        )
+        raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
         refunded_credit_units = 0
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0

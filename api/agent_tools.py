@@ -73,7 +73,7 @@ def _hostname_resolves_private(hostname: Optional[str]) -> bool:
         sockaddr = entry[4]
         if not sockaddr:
             continue
-        if _is_private_host(sockaddr[0]):
+        if _is_private_host(str(sockaddr[0])):
             return True
     return False
 
