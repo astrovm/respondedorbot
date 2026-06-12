@@ -9,10 +9,17 @@ CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[
 
 
 class BillingCommandDeps(Protocol):
-    credits_db_service: Any
-    balance_formatter: Any
-    admin_report: Any
-    maybe_grant_onboarding_credits: Any
+    @property
+    def credits_db_service(self) -> Any: ...
+
+    @property
+    def balance_formatter(self) -> Any: ...
+
+    @property
+    def admin_report(self) -> Any: ...
+
+    @property
+    def maybe_grant_onboarding_credits(self) -> Any: ...
 
     def is_group_chat_type(self, chat_type: Optional[str]) -> bool: ...
 

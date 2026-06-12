@@ -92,10 +92,3 @@ warn_return_any = false
 strict_optional = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
-
-[[tool.mypy.overrides]]
-module = [
-    "api.index",
-    "api.message_handler",
-]
-ignore_errors = true

@@ -21,7 +21,7 @@ class OpenRouterProvider(StreamingAIProvider):
         increment_request_count: Callable[[], Any],
         build_web_search_tool: Callable[[], Dict[str, Any]],
         build_usage_result: Callable[..., AIUsageResult],
-        extract_usage_map: Callable[[Any], Dict[str, Any]],
+        extract_usage_map: Callable[[Any], Optional[Dict[str, Any]]],
         primary_model: str,
         max_tool_rounds: int = 5,
         tool_runtime: Optional[ToolRuntime] = None,

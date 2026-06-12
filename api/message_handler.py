@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 from .admin_commands import (
     handle_admin_creditlog_command,
@@ -26,7 +26,7 @@ from api.streaming import (
     extract_stream_metadata,
 )
 
-CommandTuple = Tuple[Callable[..., str], bool, bool]
+CommandTuple = Tuple[Callable[..., Any], bool, bool]
 
 
 def _reserve_media_credits(
@@ -37,7 +37,7 @@ def _reserve_media_credits(
     *,
     reason: str,
     metadata: Optional[Dict[str, Any]] = None,
-) -> Tuple[Optional[AIMessageBilling], Optional[str]]:
+) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
     if (
         not deps.check_provider_available(scope=scope)
         and not deps.has_openrouter_fallback()
@@ -53,8 +53,8 @@ def _reserve_media_credits(
 
 def _settle_media_result(
     billing_helper: AIMessageBilling,
-    media_charge_meta: Optional[AIMessageBilling],
-    billing_segments: List[Dict[str, Any]],
+    media_charge_meta: Optional[Mapping[str, Any]],
+    billing_segments: Sequence[Mapping[str, Any]],
     success: bool,
     *,
     settle_reason: str,
@@ -67,7 +67,7 @@ def _settle_media_result(
     else:
         billing_helper.settle_reserved_ai_credits_batch(
             [media_charge_meta] if media_charge_meta else [],
-            billing_segments,
+            list(billing_segments),
             reason=settle_reason,
         )
 
@@ -1424,6 +1424,7 @@ def _handle_known_command(
     redis_client: Any,
     timezone_offset: int = -3,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    response_msg: Optional[str]
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
 

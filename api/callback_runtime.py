@@ -191,7 +191,7 @@ def handle_callback_query(
     guard_callback: Callable[..., bool],
     handle_topup: Callable[[dict[str, Any]], None],
     handle_task: Callable[[dict[str, Any]], None],
-    handle_signal: Callable[..., None],
+    handle_signal: Callable[..., bool],
     config_redis: Callable[..., Any],
     delete_msg: Callable[..., Any],
     edit_photo: Callable[..., Any],
