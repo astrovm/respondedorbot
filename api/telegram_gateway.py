@@ -5,6 +5,7 @@ import re
 from os import environ
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import requests
 from urllib.parse import urlparse
 
 from api.agent_tools import normalize_http_url
@@ -12,6 +13,115 @@ from api.services import http_client
 
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
+
+
+def _redact_telegram_tokens(value: str) -> str:
+    return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
+
+
+def telegram_request(
+    endpoint: str,
+    *,
+    method: str = "GET",
+    params: Optional[Dict[str, Any]] = None,
+    json_payload: Optional[Dict[str, Any]] = None,
+    data_payload: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    timeout: int = 5,
+    token: Optional[str] = None,
+    log_errors: bool = True,
+    expect_json: bool = True,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Perform a Telegram Bot API request and return its parsed payload."""
+
+    resolved_token = token or environ.get("TELEGRAM_TOKEN")
+    if not resolved_token:
+        error_msg = "Telegram token not configured"
+        if log_errors:
+            print(error_msg)
+        return None, error_msg
+
+    url = f"https://api.telegram.org/bot{resolved_token}/{endpoint}"
+    method_upper = method.upper()
+    try:
+        if method_upper == "GET" and json_payload is None:
+            response = http_client.get(url, params=params, timeout=timeout)
+        elif method_upper == "POST" and params is None and files is None:
+            response = http_client.post(url, json=json_payload, timeout=timeout)
+        elif method_upper == "POST" and files is not None:
+            response = http_client.post(
+                url,
+                data=data_payload,
+                files=files,
+                timeout=timeout,
+            )
+        else:
+            response = http_client.request(
+                method_upper,
+                url,
+                params=params,
+                json=json_payload,
+                data=data_payload,
+                files=files,
+                timeout=timeout,
+            )
+        response.raise_for_status()
+        if not expect_json:
+            return {}, None
+    except requests.RequestException as error:
+        error_payload = None
+        error_description = str(error)
+        if error.response is not None:
+            try:
+                parsed_error = error.response.json()
+                if isinstance(parsed_error, dict):
+                    error_payload = parsed_error
+                    error_description = str(parsed_error.get("description") or error)
+            except Exception:
+                pass
+        is_not_modified = "message is not modified" in error_description.lower()
+        if log_errors and not is_not_modified:
+            detail = _redact_telegram_tokens(str(error))
+            response_body = ""
+            if error.response is not None:
+                try:
+                    body = _redact_telegram_tokens(error.response.text)
+                    response_body = f" response={body[:500]!r}"
+                except Exception:
+                    pass
+            print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
+        return error_payload, error_description
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned invalid JSON: {exc}")
+        return None, str(exc)
+
+    if not isinstance(payload, dict):
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned unexpected payload type")
+        return None, "unexpected response"
+
+    if not payload.get("ok"):
+        description = str(payload.get("description") or "telegram request failed")
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned ok=false: {description}")
+        return payload, description
+
+    return payload, None
+
+
+def send_typing(token: str, chat_id: str) -> None:
+    telegram_request(
+        "sendChatAction",
+        method="GET",
+        params={"chat_id": chat_id, "action": "typing"},
+        token=token,
+        log_errors=False,
+        expect_json=False,
+    )
 
 
 def _truncate_telegram_text(text: str) -> str:
