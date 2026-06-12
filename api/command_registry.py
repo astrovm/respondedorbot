@@ -81,6 +81,7 @@ LINK_REPLACEMENT_DOMAINS = (
     "fixupx.com",
     "fxbsky.app",
     "eeinstagram.com",
+    "vxinstagram.com",
     "kkinstagram.com",
     "rxddit.com",
 )

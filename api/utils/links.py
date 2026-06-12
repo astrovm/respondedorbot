@@ -26,6 +26,7 @@ ALTERNATIVE_FRONTENDS: Set[str] = {
     "fixupx.com",
     "fxbsky.app",
     "eeinstagram.com",
+    "vxinstagram.com",
     "kkinstagram.com",
     "rxddit.com",
 }
@@ -409,8 +410,12 @@ def _is_eeinstagram_host(parsed: ParseResult) -> bool:
 
 def _is_instagram_frontend_host(parsed: ParseResult) -> bool:
     host = _normalized_host(parsed)
-    return _is_eeinstagram_host(parsed) or host == "kkinstagram.com" or host.endswith(
-        ".kkinstagram.com"
+    return (
+        _is_eeinstagram_host(parsed)
+        or host == "vxinstagram.com"
+        or host.endswith(".vxinstagram.com")
+        or host == "kkinstagram.com"
+        or host.endswith(".kkinstagram.com")
     )
 
 
@@ -507,8 +512,11 @@ def replace_links(
             replaced_full = urlunparse(cleaned)
             candidates = [replaced_full]
             if _is_eeinstagram_host(cleaned):
-                candidates.append(
-                    urlunparse(cleaned._replace(netloc="kkinstagram.com")),
+                candidates.extend(
+                    [
+                        urlunparse(cleaned._replace(netloc="vxinstagram.com")),
+                        urlunparse(cleaned._replace(netloc="kkinstagram.com")),
+                    ]
                 )
 
             for candidate in candidates:
