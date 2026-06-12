@@ -7,6 +7,7 @@ def test_is_social_frontend():
     assert is_social_frontend("twitter.com")
     assert is_social_frontend("mobile.twitter.com")
     assert is_social_frontend("xcancel.com")
+    assert is_social_frontend("kkinstagram.com")
     assert not is_social_frontend("example.com")
 
 
@@ -130,6 +131,52 @@ def test_replace_links_instagram_uses_eeinstagram_directly():
     assert changed is True
     assert originals == ["https://www.instagram.com/qux"]
     assert checks == ["https://eeinstagram.com/qux"]
+
+
+def test_replace_links_instagram_falls_back_to_kkinstagram():
+    checks = []
+
+    def checker(url):
+        checks.append(url)
+        return "kkinstagram.com" in url
+
+    from api.utils.links import replace_links as links_replace_links
+
+    fixed, changed, originals = links_replace_links(
+        "Check https://www.instagram.com/p/example?igsh=abc123",
+        embed_checker=checker,
+    )
+
+    assert fixed == "Check https://kkinstagram.com/p/example"
+    assert changed is True
+    assert originals == ["https://www.instagram.com/p/example"]
+    assert checks == [
+        "https://eeinstagram.com/p/example",
+        "https://kkinstagram.com/p/example",
+    ]
+
+
+def test_replace_links_instagram_keeps_original_when_both_frontends_fail():
+    checks = []
+
+    def checker(url):
+        checks.append(url)
+        return False
+
+    from api.utils.links import replace_links as links_replace_links
+
+    fixed, changed, originals = links_replace_links(
+        "Check https://www.instagram.com/p/example?igsh=abc123",
+        embed_checker=checker,
+    )
+
+    assert fixed == "Check https://www.instagram.com/p/example"
+    assert changed is False
+    assert originals == []
+    assert checks == [
+        "https://eeinstagram.com/p/example",
+        "https://kkinstagram.com/p/example",
+    ]
 
 
 def test_handle_msg_link_reply():
