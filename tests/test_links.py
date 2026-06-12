@@ -7,6 +7,7 @@ def test_is_social_frontend():
     assert is_social_frontend("twitter.com")
     assert is_social_frontend("mobile.twitter.com")
     assert is_social_frontend("xcancel.com")
+    assert is_social_frontend("vxinstagram.com")
     assert is_social_frontend("kkinstagram.com")
     assert not is_social_frontend("example.com")
 
@@ -137,6 +138,30 @@ def test_replace_links_instagram_uses_eeinstagram_first(_mock_time):
 
 
 @patch("api.utils.links.time.time", return_value=7_200)
+def test_replace_links_instagram_falls_back_to_vxinstagram(_mock_time):
+    checks = []
+
+    def checker(url):
+        checks.append(url)
+        return "vxinstagram.com" in url
+
+    from api.utils.links import replace_links as links_replace_links
+
+    fixed, changed, originals = links_replace_links(
+        "Check https://www.instagram.com/p/example?igsh=abc123",
+        embed_checker=checker,
+    )
+
+    assert fixed == "Check https://vxinstagram.com/p/example?tg=2"
+    assert changed is True
+    assert originals == ["https://www.instagram.com/p/example"]
+    assert checks == [
+        "https://eeinstagram.com/p/example",
+        "https://vxinstagram.com/p/example",
+    ]
+
+
+@patch("api.utils.links.time.time", return_value=7_200)
 def test_replace_links_instagram_falls_back_to_kkinstagram(_mock_time):
     checks = []
 
@@ -156,11 +181,12 @@ def test_replace_links_instagram_falls_back_to_kkinstagram(_mock_time):
     assert originals == ["https://www.instagram.com/p/example"]
     assert checks == [
         "https://eeinstagram.com/p/example",
+        "https://vxinstagram.com/p/example",
         "https://kkinstagram.com/p/example",
     ]
 
 
-def test_replace_links_instagram_keeps_original_when_both_frontends_fail():
+def test_replace_links_instagram_keeps_original_when_all_frontends_fail():
     checks = []
 
     def checker(url):
@@ -179,6 +205,7 @@ def test_replace_links_instagram_keeps_original_when_both_frontends_fail():
     assert originals == []
     assert checks == [
         "https://eeinstagram.com/p/example",
+        "https://vxinstagram.com/p/example",
         "https://kkinstagram.com/p/example",
     ]
 
