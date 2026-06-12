@@ -1,4 +1,32 @@
 from api import index
+from api import polymarket_commands
+
+
+def test_fetch_live_prices_uses_clob_midpoints():
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"token-a": "0.72", "token-b": "invalid"}
+
+    def fake_post(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return FakeResponse()
+
+    result = polymarket_commands.fetch_live_prices(
+        ["token-a", "token-b", "token-a"],
+        http_post=fake_post,
+    )
+
+    assert result == {"token-a": 0.72}
+    assert captured == {
+        "url": "https://clob.polymarket.com/midpoints",
+        "json": [{"token_id": "token-a"}, {"token_id": "token-b"}],
+        "timeout": 5,
+    }
 
 
 def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
@@ -24,16 +52,19 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
                     "groupItemTitle": "Candidate A",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.42", "0.58"]',
+                    "clobTokenIds": '["candidate-a", "candidate-a-no"]',
                 },
                 {
                     "groupItemTitle": "Candidate B",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.61", "0.39"]',
+                    "clobTokenIds": '["candidate-b", "candidate-b-no"]',
                 },
                 {
                     "groupItemTitle": "Candidate C",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.20", "0.80"]',
+                    "clobTokenIds": '["candidate-c", "candidate-c-no"]',
                 },
                 {
                     "groupItemTitle": "Inactive placeholder",
@@ -58,6 +89,14 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
         return {"data": events}
 
     monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(
+        index,
+        "_fetch_polymarket_live_prices",
+        lambda token_ids: {
+            "candidate-a": 0.72,
+            "candidate-b": 0.55,
+        },
+    )
 
     result = index.get_polymarket_global_elections()
 
@@ -72,7 +111,8 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     assert result.index("Higher liquidity election") < result.index(
         "Lower liquidity election"
     )
-    assert "Candidate B 61% | Candidate A 42%" in result
+    assert "Candidate A 72% | Candidate B 55%" in result
+    assert "Candidate B 61%" not in result
     assert "Candidate C" not in result
     assert "Inactive placeholder" not in result
     assert "Closed candidate" not in result
