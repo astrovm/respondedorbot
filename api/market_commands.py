@@ -17,7 +17,7 @@ def _safe_float(value: Any) -> Optional[float]:
     return None
 
 
-def format_market_info(market: Dict) -> str:
+def format_market_info(market: Dict[str, Any]) -> str:
     info: List[str] = []
 
     crypto_rows = market.get("crypto")

@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.logging_config import get_logger
+from api.general_commands import gen_random
+from api.services import credits_db as credits_db_service
 from api.task_executor import (
     build_task_executor,
     TaskExecutor,
@@ -69,8 +71,8 @@ def _ensure_runtime_deps() -> None:
                 "ask_ai": _index.ask_ai,
                 "send_msg": _index.send_msg,
                 "admin_report": _index.admin_report,
-                "credits_db_service": _index.credits_db_service,
-                "gen_random_fn": _index.gen_random,
+                "credits_db_service": credits_db_service,
+                "gen_random_fn": gen_random,
                 "build_insufficient_credits_message_fn": (
                     _index.build_insufficient_credits_message
                 ),

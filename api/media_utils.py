@@ -4,12 +4,13 @@ import io
 import subprocess
 import tempfile
 import wave
-
-from mutagen import File as MutagenFile
+from importlib import import_module
+from typing import Any, Callable, cast
 
 from api.logging_config import get_logger
 
 logger = get_logger(__name__)
+MutagenFile = cast(Callable[[Any], Any], import_module("mutagen").File)
 
 
 def measure_audio_duration_seconds(audio_data: bytes) -> float | None:

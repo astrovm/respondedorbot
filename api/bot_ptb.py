@@ -7,7 +7,7 @@ import importlib
 import logging
 import os
 import time
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from api.index import (
     admin_report,
@@ -24,7 +24,8 @@ _last_polling_network_report = 0.0
 
 
 def _update_to_dict(update: Any) -> Dict[str, Any]:
-    return update.to_dict()
+    payload = update.to_dict()
+    return dict(payload) if isinstance(payload, Mapping) else {}
 
 
 async def _run_sync(func: Any, *args: Any) -> Any:

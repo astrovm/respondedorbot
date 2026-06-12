@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from .admin_commands import (
     handle_admin_creditlog_command,
@@ -27,6 +38,7 @@ from api.streaming import (
 )
 
 CommandTuple = Tuple[Callable[..., Any], bool, bool]
+CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
 
 
 def _reserve_media_credits(
@@ -1185,7 +1197,9 @@ def _handle_summary_command(
     raw_message_id = message.get("message_id")
     reply_to_message_id = str(raw_message_id) if raw_message_id is not None else None
 
-    def _consume_summary_stream(iterator):
+    def _consume_summary_stream(
+        iterator: Iterator[Tuple[str, str]],
+    ) -> str:
         final_text, _message_id = consume_stream_to_telegram(
             chat_id,
             iterator,
@@ -1428,7 +1442,9 @@ def _handle_known_command(
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
 
-    def _dispatch(cmd_handlers):
+    def _dispatch(
+        cmd_handlers: Sequence[Callable[[], CommandResponse]],
+    ) -> Optional[CommandResponse]:
         for handler in cmd_handlers:
             resp = handler()
             if resp[0] is not None or resp[3] is not None:

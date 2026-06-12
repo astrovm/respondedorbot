@@ -36,6 +36,11 @@ CHAT_SEARCH_INDEX = "idx:chat_messages"
 _SEARCH_INDEX_READY = False
 
 
+def _execute_redis_command(redis_client: redis.Redis, *args: Any) -> Any:
+    execute: Callable[..., Any] = redis_client.execute_command
+    return execute(*args)
+
+
 def truncate_text(text: Optional[str], max_length: int = 4096) -> str:
     """Truncate text to max_length and add ellipsis if needed."""
 
@@ -98,7 +103,8 @@ def _ensure_search_index(redis_client: redis.Redis) -> None:
     if _SEARCH_INDEX_READY:
         return
     try:
-        redis_client.execute_command(
+        _execute_redis_command(
+            redis_client,
             "FT.CREATE",
             CHAT_SEARCH_INDEX,
             "ON",
@@ -196,7 +202,8 @@ def fetch_chat_messages_for_compaction(
     try:
         _ensure_search_index(redis_client)
         query = f"@chat_id:{{{_escape_tag_value(chat_id)}}}"
-        raw = redis_client.execute_command(
+        raw = _execute_redis_command(
+            redis_client,
             "FT.SEARCH",
             CHAT_SEARCH_INDEX,
             query,
@@ -381,7 +388,8 @@ def search_chat_history(
     try:
         _ensure_search_index(redis_client)
         query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} {search_text}"
-        raw = redis_client.execute_command(
+        raw = _execute_redis_command(
+            redis_client,
             "FT.SEARCH",
             CHAT_SEARCH_INDEX,
             query,

@@ -13,7 +13,10 @@ from typing import Any, Callable, Dict, Mapping, Optional
 import redis
 
 from api.chat_config_defaults import CHAT_CONFIG_DEFAULTS
-from api.storage.chat_config_repository import build_chat_config_repository
+from api.storage.chat_config_repository import (
+    ChatConfigRepository,
+    build_chat_config_repository,
+)
 
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -59,7 +62,7 @@ def load_chat_config_from_redis(
 class ChatConfigService:
     def __init__(
         self,
-        repository,
+        repository: ChatConfigRepository,
         *,
         admin_reporter: AdminReporter,
         log_event: ConfigLogger,
@@ -155,20 +158,29 @@ class ChatConfigService:
 
 
 def build_chat_config_service(
-    repository=None, *, admin_reporter=None, log_event=None
+    repository: Optional[ChatConfigRepository] = None,
+    *,
+    admin_reporter: Optional[AdminReporter] = None,
+    log_event: Optional[ConfigLogger] = None,
 ) -> ChatConfigService:
     if repository is None:
         repository = build_chat_config_repository()
     if admin_reporter is None:
 
-        def _noop_admin_report(*args, **kwargs):
-            return None
+        def _noop_admin_report(
+            _message: str,
+            _error: Optional[Exception],
+            _extra: Optional[Dict[str, Any]],
+        ) -> None:
+            pass
 
         admin_reporter = _noop_admin_report
     if log_event is None:
 
-        def _noop_log_event(*args, **kwargs):
-            return None
+        def _noop_log_event(
+            _message: str, _extra: Optional[Mapping[str, Any]]
+        ) -> None:
+            pass
 
         log_event = _noop_log_event
 
