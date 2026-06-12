@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from html.parser import HTMLParser
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
@@ -20,6 +21,8 @@ EMBED_REQUEST_TIMEOUT = 10
 EEINSTAGRAM_PROBE_ATTEMPTS = 3
 EEINSTAGRAM_PROBE_BACKOFF_SECONDS = 0.25
 TELEGRAM_PREVIEW_USER_AGENT = "TelegramBot (like TwitterBot)"
+TELEGRAM_REMOTE_VIDEO_MAX_BYTES = 20_000_000
+TELEGRAM_MULTIPART_VIDEO_MAX_BYTES = 50_000_000
 
 ALTERNATIVE_FRONTENDS: Set[str] = {
     "fxtwitter.com",
@@ -61,6 +64,7 @@ __all__ = [
     "can_embed_url",
     "url_is_embedable",
     "replace_links",
+    "download_oversized_instagram_video",
     "extract_tweet_urls",
     "resolve_tweet_url",
     "fetch_tweet_via_oembed",
@@ -239,6 +243,9 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             "content_type": content_type,
             "title": None,
             "description": None,
+            "media_url": normalized_url,
+            "media_content_type": content_type,
+            "media_size": _response_content_length(response),
         }
     if "text/html" not in content_type:
         logger.info("embed: not embeddable url=%s content_type=%s", url, content_type)
@@ -304,6 +311,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     if (has_preview_text and (has_preview_media or has_card)) or (
         is_eeinstagram_host and has_eeinstagram_media
     ):
+        media_probe: Dict[str, Any] = {}
         if _is_instagram_frontend_host(parsed):
             media_reference = (
                 meta_tags.get("og:video")
@@ -311,9 +319,12 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
                 or meta_tags.get("og:image")
                 or meta_tags.get("twitter:image")
             )
-            if not media_reference or not _instagram_media_is_ready(
-                urljoin(normalized_url, media_reference)
-            ):
+            probed_media = (
+                _probe_instagram_media(urljoin(normalized_url, media_reference))
+                if media_reference
+                else None
+            )
+            if not probed_media:
                 logger.info(
                     "embed: instagram media not ready url=%s media=%s",
                     url,
@@ -328,6 +339,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
                     "description": description,
                     "canonical_url": canonical_url,
                 }
+            media_probe = probed_media
         detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags.items())
         logger.info("embed: metadata found url=%s metadata=%s", url, detail)
         return {
@@ -338,6 +350,7 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
             "title": title,
             "description": description,
             "canonical_url": canonical_url,
+            **media_probe,
         }
 
     missing_fields: List[str] = []
@@ -421,7 +434,7 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
         if not location:
             logger.info("embed: HEAD redirect missing location url=%s", url)
             return False
-        if not _instagram_media_is_ready(urljoin(url, location)):
+        if not _probe_instagram_media(urljoin(url, location)):
             logger.info("embed: HEAD redirect media not ready url=%s", url)
             return False
         logger.info(
@@ -451,7 +464,15 @@ def _is_instagram_frontend_host(parsed: ParseResult) -> bool:
     )
 
 
-def _instagram_media_is_ready(url: str) -> bool:
+def _response_content_length(response: Any) -> Optional[int]:
+    raw_length = str(response.headers.get("Content-Length", "")).strip()
+    try:
+        return int(raw_length) if raw_length else None
+    except ValueError:
+        return None
+
+
+def _probe_instagram_media(url: str) -> Optional[Dict[str, Any]]:
     headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     response = None
     try:
@@ -465,7 +486,7 @@ def _instagram_media_is_ready(url: str) -> bool:
         )
     except RequestException as exc:
         logger.warning("embed: media request failed url=%s error=%s", url, exc)
-        return False
+        return None
 
     try:
         content_type = str(response.headers.get("Content-Type", "")).lower()
@@ -479,7 +500,19 @@ def _instagram_media_is_ready(url: str) -> bool:
             content_type,
             is_ready,
         )
-        return is_ready
+        if not is_ready:
+            return None
+        response_url = getattr(response, "url", "")
+        normalized_url = (
+            response_url.strip()
+            if isinstance(response_url, str) and response_url.strip()
+            else url
+        )
+        return {
+            "media_url": normalized_url,
+            "media_content_type": content_type,
+            "media_size": _response_content_length(response),
+        }
     finally:
         response.close()
 
@@ -631,6 +664,66 @@ def replace_links(
     new_text = url_pattern.sub(strip_tracking, new_text)
 
     return new_text, changed, original_links
+
+
+def download_oversized_instagram_video(text: str) -> Optional[bytes]:
+    """Download a validated Instagram video that exceeds Telegram's URL limit."""
+
+    for match in re.finditer(r"https?://[^\s]+", text or ""):
+        raw_url = match.group(0).strip("()[]{}<>\"'.,;!?")
+        parsed = urlparse(raw_url)
+        if not _is_instagram_frontend_host(parsed):
+            continue
+
+        clean_url = urlunparse(parsed._replace(query="", fragment=""))
+        metadata = inspect_embed_url(clean_url)
+        media_url = str(metadata.get("media_url") or "").strip()
+        media_type = str(metadata.get("media_content_type") or "").lower()
+        media_size = metadata.get("media_size")
+        if (
+            not metadata.get("embeddable")
+            or not media_url
+            or not media_type.startswith("video/")
+            or not isinstance(media_size, int)
+            or media_size <= TELEGRAM_REMOTE_VIDEO_MAX_BYTES
+            or media_size > TELEGRAM_MULTIPART_VIDEO_MAX_BYTES
+        ):
+            return None
+
+        headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
+        response = None
+        try:
+            response = request_with_ssl_fallback(
+                media_url,
+                allow_redirects=True,
+                stream=True,
+                timeout=30,
+                headers=headers,
+            )
+            response.raise_for_status()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            if not content_type.startswith("video/"):
+                return None
+            buffer = BytesIO()
+            total = 0
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > TELEGRAM_MULTIPART_VIDEO_MAX_BYTES:
+                    return None
+                buffer.write(chunk)
+            if total <= TELEGRAM_REMOTE_VIDEO_MAX_BYTES:
+                return None
+            return buffer.getvalue()
+        except RequestException as exc:
+            logger.warning("embed: oversized video download failed url=%s error=%s", media_url, exc)
+            return None
+        finally:
+            if response is not None:
+                response.close()
+
+    return None
 
 
 TWITTER_STATUS_REGEX = re.compile(

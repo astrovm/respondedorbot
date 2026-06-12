@@ -255,6 +255,37 @@ def test_replace_links_instagram_skips_frontend_with_unready_media(_mock_time, m
     assert originals == ["https://www.instagram.com/reel/example"]
 
 
+def test_download_oversized_instagram_video_is_bounded(monkeypatch):
+    from api.utils.links import download_oversized_instagram_video
+
+    monkeypatch.setattr(
+        "api.utils.links.inspect_embed_url",
+        lambda _url: {
+            "embeddable": True,
+            "media_url": "https://cdn.example/video.mp4",
+            "media_content_type": "video/mp4",
+            "media_size": 30,
+        },
+    )
+    monkeypatch.setattr("api.utils.links.TELEGRAM_REMOTE_VIDEO_MAX_BYTES", 20)
+    monkeypatch.setattr("api.utils.links.TELEGRAM_MULTIPART_VIDEO_MAX_BYTES", 50)
+
+    response = MagicMock()
+    response.headers = {"Content-Type": "video/mp4"}
+    response.iter_content.return_value = [b"a" * 15, b"b" * 15]
+    monkeypatch.setattr(
+        "api.utils.links.request_with_ssl_fallback",
+        lambda *_args, **_kwargs: response,
+    )
+
+    result = download_oversized_instagram_video(
+        "https://eeinstagram.com/reel/example?tg=2"
+    )
+
+    assert result == b"a" * 15 + b"b" * 15
+    response.close.assert_called_once()
+
+
 def test_handle_msg_link_reply():
     message = {
         "message_id": 1,

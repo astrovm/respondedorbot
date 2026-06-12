@@ -100,6 +100,7 @@ class MessageRoutingDeps:
         [Mapping[str, CommandTuple], str, str, Mapping[str, Any]], bool
     ]
     replace_links: Callable[[str], Tuple[str, bool, List[str]]]
+    download_oversized_instagram_video: Callable[[str], Optional[bytes]]
     should_gordo_respond: Callable[
         [
             Mapping[str, CommandTuple],
@@ -119,6 +120,7 @@ class MessageIODeps:
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     send_photo: Callable[..., Optional[int]]
+    send_video: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -197,9 +199,11 @@ class MessageHandlerDeps:
         [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
     ]
     replace_links: Callable[[str], Tuple[str, bool, List[str]]]
+    download_oversized_instagram_video: Callable[[str], Optional[bytes]]
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     send_photo: Callable[..., Optional[int]]
+    send_video: Callable[..., Optional[int]]
     delete_msg: Callable[[str, str], None]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -282,9 +286,11 @@ def build_message_handler_deps(
         should_auto_process_media=routing.should_auto_process_media,
         extract_message_content=media.extract_message_content,
         replace_links=routing.replace_links,
+        download_oversized_instagram_video=routing.download_oversized_instagram_video,
         send_msg=io.send_msg,
         send_animation=io.send_animation,
         send_photo=io.send_photo,
+        send_video=io.send_video,
         delete_msg=io.delete_msg,
         edit_message=io.edit_message,
         admin_report=io.admin_report,

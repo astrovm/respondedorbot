@@ -244,6 +244,49 @@ class TelegramGateway:
 
         return None
 
+    def send_video(
+        self,
+        chat_id: str,
+        video: bytes,
+        *,
+        caption: str = "",
+        msg_id: str = "",
+        buttons: Optional[List[str]] = None,
+    ) -> Optional[int]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "supports_streaming": "true",
+        }
+        if msg_id:
+            payload["reply_to_message_id"] = msg_id
+        if caption:
+            payload["caption"] = caption[:1024]
+        if buttons:
+            payload["reply_markup"] = json.dumps(
+                {
+                    "inline_keyboard": [
+                        [{"text": "abrir en la app", "url": url}] for url in buttons
+                    ]
+                }
+            )
+
+        payload_response, error = self._telegram_request(
+            "sendVideo",
+            method="POST",
+            data_payload=payload,
+            files={"video": ("instagram.mp4", video, "video/mp4")},
+            timeout=60,
+        )
+        if error or not payload_response:
+            return None
+
+        result = payload_response.get("result")
+        if isinstance(result, dict):
+            message_id = result.get("message_id")
+            if isinstance(message_id, int):
+                return message_id
+        return None
+
     def edit_photo(
         self,
         chat_id: str,

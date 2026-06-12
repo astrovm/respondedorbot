@@ -254,6 +254,7 @@ from api.services import credits_db as credits_db_service
 from api.utils.http import request_with_ssl_fallback
 from api.utils.links import (
     can_embed_url as _links_can_embed_url,
+    download_oversized_instagram_video as _links_download_oversized_instagram_video,
     fetch_tweet_content as _links_fetch_tweet_content,
     is_social_frontend as _links_is_social_frontend,
     replace_links as _links_replace_links,
@@ -535,6 +536,10 @@ def replace_links(text: str) -> Tuple[str, bool, List[str]]:
     """Delegate to utils helper while keeping embed checker injectable in tests."""
 
     return _links_replace_links(text, embed_checker=can_embed_url)
+
+
+def download_oversized_instagram_video(text: str) -> Optional[bytes]:
+    return _links_download_oversized_instagram_video(text)
 
 
 def fetch_tweet_text(text: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -1226,6 +1231,23 @@ def send_photo(
         caption=caption,
         msg_id=msg_id,
         reply_markup=reply_markup,
+    )
+
+
+def send_video(
+    chat_id: str,
+    video: bytes,
+    *,
+    caption: str = "",
+    msg_id: str = "",
+    buttons: Optional[List[str]] = None,
+) -> Optional[int]:
+    return telegram_gateway.send_video(
+        chat_id,
+        video,
+        caption=caption,
+        msg_id=msg_id,
+        buttons=buttons,
     )
 
 
@@ -2831,6 +2853,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             parse_command=parse_command,
             should_auto_process_media=should_auto_process_media,
             replace_links=replace_links,
+            download_oversized_instagram_video=download_oversized_instagram_video,
             should_gordo_respond=should_gordo_respond,
             is_group_chat_type=is_group_chat_type,
         ),
@@ -2838,6 +2861,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             send_msg=send_msg,
             send_animation=send_animation,
             send_photo=send_photo,
+            send_video=send_video,
             delete_msg=delete_msg,
             edit_message=_edit_message_for_stream,
             admin_report=admin_report,
