@@ -407,6 +407,13 @@ def _is_eeinstagram_host(parsed: ParseResult) -> bool:
     return host == "eeinstagram.com" or host.endswith(".eeinstagram.com")
 
 
+def _is_instagram_frontend_host(parsed: ParseResult) -> bool:
+    host = _normalized_host(parsed)
+    return _is_eeinstagram_host(parsed) or host == "kkinstagram.com" or host.endswith(
+        ".kkinstagram.com"
+    )
+
+
 def _request_embed_url(url: str, *, retry: bool, **kwargs: Any) -> Any:
     attempts = EEINSTAGRAM_PROBE_ATTEMPTS if retry else 1
     last_exc: Optional[RequestException] = None
@@ -500,8 +507,7 @@ def replace_links(
             replaced_full = urlunparse(cleaned)
             candidates = [replaced_full]
             if _is_eeinstagram_host(cleaned):
-                candidates.insert(
-                    0,
+                candidates.append(
                     urlunparse(cleaned._replace(netloc="kkinstagram.com")),
                 )
 
@@ -516,6 +522,11 @@ def replace_links(
                         original,
                         candidate,
                     )
+                    if _is_instagram_frontend_host(urlparse(candidate)):
+                        cache_bucket = int(time.time() // 3600)
+                        return urlunparse(
+                            urlparse(candidate)._replace(query=f"tg={cache_bucket}")
+                        )
                     return candidate
                 logger.info("link: cannot embed replacement=%s", candidate)
 
@@ -536,6 +547,10 @@ def replace_links(
         url = match.group(0)
         parsed = urlparse(url)
         if is_social_frontend(parsed.netloc):
+            if _is_instagram_frontend_host(parsed) and re.fullmatch(
+                r"tg=\d+", parsed.query
+            ):
+                return urlunparse(parsed._replace(fragment=""))
             cleaned = parsed._replace(query="", fragment="")
             return urlunparse(cleaned)
         return url
