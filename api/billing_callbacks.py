@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from api.ai_billing import AIBillingPack
 from api.constants import BILLING_UNAVAILABLE_MESSAGE
 
 
@@ -10,7 +11,7 @@ def send_stars_invoice(
     *,
     chat_id: str,
     user_id: int,
-    pack: Mapping[str, int],
+    pack: AIBillingPack,
     format_credits: Callable[[int], str],
     telegram_request: Callable[..., tuple[Any, str | None]],
 ) -> bool:
@@ -47,7 +48,7 @@ def handle_topup_callback(
     *,
     guard_callback: Callable[..., bool],
     billing_available: Callable[[], bool],
-    get_pack: Callable[[str], Mapping[str, int] | None],
+    get_pack: Callable[[str], AIBillingPack | None],
     send_invoice: Callable[..., bool],
     answer_callback: Callable[..., None],
     unavailable_alert: Callable[[], str],
@@ -110,7 +111,7 @@ def handle_pre_checkout_query(
     answer_query: Callable[..., None],
     unavailable_alert: Callable[[], str],
     parse_payload: Callable[[str], tuple[str | None, int | None]],
-    get_pack: Callable[[str], Mapping[str, int] | None],
+    get_pack: Callable[[str], AIBillingPack | None],
 ) -> None:
     query_id = query.get("id")
     if not query_id:
@@ -163,7 +164,7 @@ def handle_successful_payment(
     send_message: Callable[[str, str], Any],
     extract_user_id: Callable[[Mapping[str, Any]], int | None],
     parse_payload: Callable[[str], tuple[str | None, int | None]],
-    get_pack: Callable[[str], Mapping[str, int] | None],
+    get_pack: Callable[[str], AIBillingPack | None],
     record_payment: Callable[..., dict[str, Any]],
     admin_report: Callable[..., None],
     format_credits: Callable[[int], str],

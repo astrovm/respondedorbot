@@ -122,6 +122,7 @@ from api.config import (
     load_bot_config as _config_load_bot_config,
 )
 from api.ai_billing import (
+    AIBillingPack,
     BalanceFormatter,
     build_insufficient_credits_message as _billing_build_insufficient_credits_message,
     build_topup_keyboard as _billing_build_topup_keyboard,
@@ -2095,7 +2096,7 @@ def _noop_param_command(_arg: str) -> str:
     return ""
 
 
-def initialize_commands() -> Dict[str, Tuple[Callable, bool, bool]]:
+def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
     """Initialize command handlers with a deduplicated command registry."""
 
     return _build_command_registry(
@@ -2218,10 +2219,10 @@ def search_chat_history(
 
 
 def should_gordo_respond(
-    commands: Dict[str, Tuple[Callable, bool, bool]],
+    commands: Mapping[str, Tuple[Callable[..., Any], bool, bool]],
     command: str,
     message_text: str,
-    message: dict,
+    message: Mapping[str, Any],
     chat_config: Mapping[str, Any],
     reply_metadata: Optional[Mapping[str, Any]],
 ) -> bool:
@@ -2329,7 +2330,7 @@ def _send_stars_invoice(
     *,
     chat_id: str,
     user_id: int,
-    pack: Mapping[str, int],
+    pack: AIBillingPack,
 ) -> bool:
     return billing_callbacks.send_stars_invoice(
         chat_id=chat_id,

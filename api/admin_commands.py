@@ -11,8 +11,11 @@ CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[
 
 
 class AdminCommandDeps(Protocol):
-    credits_db_service: Any
-    admin_report: Any
+    @property
+    def credits_db_service(self) -> Any: ...
+
+    @property
+    def admin_report(self) -> Any: ...
 
 
 def _get_admin_chat_id() -> str:
