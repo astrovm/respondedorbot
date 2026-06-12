@@ -29,8 +29,9 @@ def test_link_commands_extract_html_metadata_prefers_open_graph():
     assert truncate_link_metadata_text("a" * 285, limit=10) == "aaaaaaa..."
 
 
+@patch("api.utils.links.time.time", return_value=7_200)
 @patch("api.utils.links.request_with_ssl_fallback")
-def test_replace_links(mock_get):
+def test_replace_links(mock_get, _mock_time):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "text/html"}
@@ -49,14 +50,15 @@ def test_replace_links(mock_get):
     assert "https://twitter.com/foo" in fixed
     assert "http://x.com/bar" in fixed
     assert "https://fxbsky.app/baz" in fixed
-    assert "https://kkinstagram.com/qux" in fixed
+    assert "https://eeinstagram.com/qux?tg=2" in fixed
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.tiktok.com/@bar" in fixed
     assert "https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
     assert "fxtwitter.com" not in fixed
     assert "fixupx.com" not in fixed
-    assert "?" not in fixed
+    assert "utm_" not in fixed
+    assert "igsh=" not in fixed
     expected = {
         "https://bsky.app/baz",
         "https://www.instagram.com/qux",
@@ -111,12 +113,13 @@ def test_replace_links_skips_when_only_twitter_metadata(mock_get):
     assert originals == []
 
 
-def test_replace_links_instagram_uses_kkinstagram_first():
+@patch("api.utils.links.time.time", return_value=7_200)
+def test_replace_links_instagram_uses_eeinstagram_first(_mock_time):
     checks = []
 
     def checker(url):
         checks.append(url)
-        if "kkinstagram.com" in url:
+        if "eeinstagram.com" in url:
             return True
         return False
 
@@ -127,18 +130,19 @@ def test_replace_links_instagram_uses_kkinstagram_first():
         embed_checker=checker,
     )
 
-    assert fixed == "Check https://kkinstagram.com/qux"
+    assert fixed == "Check https://eeinstagram.com/qux?tg=2"
     assert changed is True
     assert originals == ["https://www.instagram.com/qux"]
-    assert checks == ["https://kkinstagram.com/qux"]
+    assert checks == ["https://eeinstagram.com/qux"]
 
 
-def test_replace_links_instagram_falls_back_to_eeinstagram():
+@patch("api.utils.links.time.time", return_value=7_200)
+def test_replace_links_instagram_falls_back_to_kkinstagram(_mock_time):
     checks = []
 
     def checker(url):
         checks.append(url)
-        return "eeinstagram.com" in url
+        return "kkinstagram.com" in url
 
     from api.utils.links import replace_links as links_replace_links
 
@@ -147,12 +151,12 @@ def test_replace_links_instagram_falls_back_to_eeinstagram():
         embed_checker=checker,
     )
 
-    assert fixed == "Check https://eeinstagram.com/p/example"
+    assert fixed == "Check https://kkinstagram.com/p/example?tg=2"
     assert changed is True
     assert originals == ["https://www.instagram.com/p/example"]
     assert checks == [
-        "https://kkinstagram.com/p/example",
         "https://eeinstagram.com/p/example",
+        "https://kkinstagram.com/p/example",
     ]
 
 
@@ -174,8 +178,8 @@ def test_replace_links_instagram_keeps_original_when_both_frontends_fail():
     assert changed is False
     assert originals == []
     assert checks == [
-        "https://kkinstagram.com/p/example",
         "https://eeinstagram.com/p/example",
+        "https://kkinstagram.com/p/example",
     ]
 
 
@@ -251,10 +255,11 @@ def test_handle_msg_link_reply_instagram():
         patch("api.index.initialize_commands", return_value={}),
         patch(
             "api.index.build_message_links_context",
-            return_value="LINKS DEL MENSAJE:\n1. https://kkinstagram.com/qux\ntitulo: foo",
+            return_value="LINKS DEL MENSAJE:\n1. https://eeinstagram.com/qux?tg=2\ntitulo: foo",
         ) as mock_links_context,
         patch("api.index.save_message_to_redis") as mock_save,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
+        patch("api.utils.links.time.time", return_value=7_200),
     ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -270,7 +275,7 @@ def test_handle_msg_link_reply_instagram():
         result = handle_msg(message)
 
         assert result == "ok"
-        expected = "mirá https://kkinstagram.com/qux\n\ncompartido por @lu"
+        expected = "mirá https://eeinstagram.com/qux?tg=2\n\ncompartido por @lu"
         mock_send.assert_called_once_with(
             "789", expected, "3", ["https://www.instagram.com/qux"]
         )
@@ -279,7 +284,7 @@ def test_handle_msg_link_reply_instagram():
         mock_save.assert_called_once_with(
             "789",
             "bot_903",
-            "mirá https://kkinstagram.com/qux\n\ncompartido por @lu\n\nLINKS DEL MENSAJE:\n1. https://kkinstagram.com/qux\ntitulo: foo",
+            "mirá https://eeinstagram.com/qux?tg=2\n\ncompartido por @lu\n\nLINKS DEL MENSAJE:\n1. https://eeinstagram.com/qux?tg=2\ntitulo: foo",
             redis_client,
         )
 
