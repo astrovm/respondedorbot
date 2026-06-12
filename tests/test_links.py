@@ -40,7 +40,12 @@ def test_replace_links(mock_get, _mock_time):
         "<meta property='og:title' content='foo'>"
         "<meta property='og:image' content='https://example.com/image.png'>"
     )
-    mock_get.return_value = mock_response
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/png"}
+    mock_get.side_effect = lambda _url, **kwargs: (
+        media_response if kwargs.get("stream") else mock_response
+    )
     text = (
         "Check https://twitter.com/foo?utm_source=share and http://x.com/bar?s=20 and https://bsky.app/baz?share=1 and "
         "https://www.instagram.com/qux?igsh=abc123 and https://www.reddit.com/r/foo?st=abc and https://old.reddit.com/r/bar?utm_name=bar and "
@@ -210,6 +215,46 @@ def test_replace_links_instagram_keeps_original_when_all_frontends_fail():
     ]
 
 
+@patch("api.utils.links.time.time", return_value=7_200)
+def test_replace_links_instagram_skips_frontend_with_unready_media(_mock_time, monkeypatch):
+    page_responses = {
+        "https://eeinstagram.com/reel/example": (
+            "<meta property='og:title' content='Instagram reel'>"
+            "<meta property='og:video' content='/videos/example/1'>"
+        ),
+        "https://vxinstagram.com/reel/example": (
+            "<meta property='og:title' content='vxinstagram'>"
+            "<meta property='og:image' content='/offload/example/0'>"
+        ),
+    }
+
+    def response(status, content_type, text=""):
+        result = MagicMock()
+        result.status_code = status
+        result.headers = {"Content-Type": content_type}
+        result.text = text
+        return result
+
+    def fake_request(url, **kwargs):
+        if kwargs.get("method") == "head":
+            return response(405, "application/json")
+        if url == "https://eeinstagram.com/videos/example/1":
+            return response(200, "text/html")
+        if url == "https://vxinstagram.com/offload/example/0":
+            return response(200, "video/mp4")
+        return response(200, "text/html", page_responses[url])
+
+    monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
+
+    fixed, changed, originals = replace_links(
+        "https://www.instagram.com/reel/example"
+    )
+
+    assert fixed == "https://vxinstagram.com/reel/example?tg=2"
+    assert changed is True
+    assert originals == ["https://www.instagram.com/reel/example"]
+
+
 def test_handle_msg_link_reply():
     message = {
         "message_id": 1,
@@ -244,7 +289,12 @@ def test_handle_msg_link_reply():
             "<meta property='og:title' content='foo'>"
             "<meta property='og:image' content='https://example.com/image.png'>"
         )
-        mock_get.return_value = mock_response
+        media_response = MagicMock()
+        media_response.status_code = 200
+        media_response.headers = {"Content-Type": "image/png"}
+        mock_get.side_effect = lambda _url, **kwargs: (
+            media_response if kwargs.get("stream") else mock_response
+        )
 
         result = handle_msg(message)
 
@@ -297,7 +347,12 @@ def test_handle_msg_link_reply_instagram():
             "<meta property='og:title' content='foo'>"
             "<meta property='og:image' content='https://example.com/image.png'>"
         )
-        mock_get.return_value = mock_response
+        media_response = MagicMock()
+        media_response.status_code = 200
+        media_response.headers = {"Content-Type": "image/png"}
+        mock_get.side_effect = lambda _url, **kwargs: (
+            media_response if kwargs.get("stream") else mock_response
+        )
 
         result = handle_msg(message)
 
@@ -581,10 +636,15 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monke
         "<meta property='og:title' content='Instagram post'>"
         "<meta property='og:image' content='https://example.com/preview.jpg'>"
     )
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/jpeg"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
+        if kwargs.get("stream"):
+            return media_response
         return get_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
@@ -605,10 +665,15 @@ def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
     get_response.text = (
         "<meta property='og:image' content='https://example.com/preview.jpg'>"
     )
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/jpeg"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
+        if kwargs.get("stream"):
+            return media_response
         return get_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
@@ -635,12 +700,17 @@ def test_can_embed_url_retries_eeinstagram_get_transient_status(monkeypatch):
     ok_response.text = (
         "<meta property='og:image' content='https://example.com/preview.jpg'>"
     )
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/jpeg"}
 
     get_responses = [transient_response, ok_response]
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
+        if kwargs.get("stream"):
+            return media_response
         return get_responses.pop(0)
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
@@ -659,6 +729,9 @@ def test_can_embed_url_retries_eeinstagram_head_exception(monkeypatch):
     redirect_response = MagicMock()
     redirect_response.status_code = 307
     redirect_response.headers = {"Location": "https://scontent.cdninstagram.com/video.mp4"}
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "video/mp4"}
     calls = {"head": 0}
 
     def fake_request(url, **kwargs):
@@ -667,7 +740,7 @@ def test_can_embed_url_retries_eeinstagram_head_exception(monkeypatch):
             if calls["head"] == 1:
                 raise Timeout("temporary")
             return redirect_response
-        raise AssertionError("GET should not be called")
+        return media_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
@@ -691,6 +764,9 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted
     get_response.text = (
         "<meta property='og:image' content='https://example.com/preview.jpg'>"
     )
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/jpeg"}
     calls = {"head": 0, "get": 0}
 
     def fake_request(url, **kwargs):
@@ -698,13 +774,15 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted
             calls["head"] += 1
             raise Timeout("temporary")
         calls["get"] += 1
+        if kwargs.get("stream"):
+            return media_response
         return get_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
     assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
-    assert calls == {"head": 3, "get": 1}
+    assert calls == {"head": 3, "get": 2}
     assert sleep_calls == [0.25, 0.5]
 
 
@@ -724,6 +802,9 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
     get_response.text = (
         "<meta property='og:image' content='https://example.com/preview.jpg'>"
     )
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "image/jpeg"}
     calls = {"head": 0, "get": 0}
 
     def fake_request(url, **kwargs):
@@ -731,13 +812,15 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
             calls["head"] += 1
             return head_response
         calls["get"] += 1
+        if kwargs.get("stream"):
+            return media_response
         return get_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
     assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
-    assert calls == {"head": 3, "get": 1}
+    assert calls == {"head": 3, "get": 2}
     assert sleep_calls == [0.25, 0.5]
 
 
@@ -747,11 +830,14 @@ def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
     head_response = MagicMock()
     head_response.status_code = 307
     head_response.headers = {"Location": "https://scontent.cdninstagram.com/video.mp4"}
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "video/mp4"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for eeinstagram")
+        return media_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
@@ -764,11 +850,14 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
     head_response = MagicMock()
     head_response.status_code = 307
     head_response.headers = {"Location": "https://scontent.cdninstagram.com/video.mp4"}
+    media_response = MagicMock()
+    media_response.status_code = 200
+    media_response.headers = {"Content-Type": "video/mp4"}
 
     def fake_request(url, **kwargs):
         if kwargs.get("method") == "head":
             return head_response
-        raise AssertionError("GET should not be called for eeinstagram")
+        return media_response
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 

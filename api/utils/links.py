@@ -6,7 +6,7 @@ import re
 import time
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
-from urllib.parse import ParseResult, urlparse, urlunparse
+from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 from requests.exceptions import RequestException
 
@@ -224,7 +224,12 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         }
 
     content_type = response.headers.get("Content-Type", "").lower()
-    normalized_url = str(getattr(response, "url", "") or url).strip() or url
+    response_url = getattr(response, "url", "")
+    normalized_url = (
+        response_url.strip()
+        if isinstance(response_url, str) and response_url.strip()
+        else url
+    )
     if content_type.startswith(("image/", "video/", "audio/")):
         logger.info("embed: direct media url=%s content_type=%s", url, content_type)
         return {
@@ -299,6 +304,30 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
     if (has_preview_text and (has_preview_media or has_card)) or (
         is_eeinstagram_host and has_eeinstagram_media
     ):
+        if _is_instagram_frontend_host(parsed):
+            media_reference = (
+                meta_tags.get("og:video")
+                or meta_tags.get("twitter:player:stream")
+                or meta_tags.get("og:image")
+                or meta_tags.get("twitter:image")
+            )
+            if not media_reference or not _instagram_media_is_ready(
+                urljoin(normalized_url, media_reference)
+            ):
+                logger.info(
+                    "embed: instagram media not ready url=%s media=%s",
+                    url,
+                    media_reference,
+                )
+                return {
+                    "embeddable": False,
+                    "url": normalized_url,
+                    "status": response.status_code,
+                    "content_type": content_type,
+                    "title": title,
+                    "description": description,
+                    "canonical_url": canonical_url,
+                }
         detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags.items())
         logger.info("embed: metadata found url=%s metadata=%s", url, detail)
         return {
@@ -392,6 +421,9 @@ def _eeinstagram_preview_check(parsed: ParseResult, url: str) -> Optional[bool]:
         if not location:
             logger.info("embed: HEAD redirect missing location url=%s", url)
             return False
+        if not _instagram_media_is_ready(urljoin(url, location)):
+            logger.info("embed: HEAD redirect media not ready url=%s", url)
+            return False
         logger.info(
             "embed: HEAD redirect url=%s status=%s location=%s",
             url,
@@ -417,6 +449,39 @@ def _is_instagram_frontend_host(parsed: ParseResult) -> bool:
         or host == "kkinstagram.com"
         or host.endswith(".kkinstagram.com")
     )
+
+
+def _instagram_media_is_ready(url: str) -> bool:
+    headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
+    response = None
+    try:
+        response = _request_embed_url(
+            url,
+            retry=True,
+            allow_redirects=True,
+            stream=True,
+            timeout=EMBED_REQUEST_TIMEOUT,
+            headers=headers,
+        )
+    except RequestException as exc:
+        logger.warning("embed: media request failed url=%s error=%s", url, exc)
+        return False
+
+    try:
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        is_ready = response.status_code < 400 and content_type.startswith(
+            ("image/", "video/", "audio/")
+        )
+        logger.info(
+            "embed: media probe url=%s status=%s content_type=%s ready=%s",
+            url,
+            response.status_code,
+            content_type,
+            is_ready,
+        )
+        return is_ready
+    finally:
+        response.close()
 
 
 def _request_embed_url(url: str, *, retry: bool, **kwargs: Any) -> Any:
