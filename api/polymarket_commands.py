@@ -13,6 +13,7 @@ from api.utils import fmt_num
 
 EVENTS_URL = "https://gamma-api.polymarket.com/events"
 MIDPOINT_URL = "https://clob.polymarket.com/midpoint"
+MIDPOINTS_URL = "https://clob.polymarket.com/midpoints"
 GLOBAL_ELECTIONS_TAG = "global-elections"
 GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
@@ -31,6 +32,7 @@ COUNTRY_NAME_ALIASES = {
 
 CachedRequest = Callable[..., dict[str, Any] | None]
 LivePriceFetcher = Callable[[str], tuple[float, int | None] | None]
+LivePricesFetcher = Callable[[Sequence[str]], dict[str, float]]
 EventFetcher = Callable[[str], tuple[dict[str, Any], int | None] | None]
 OutcomesGetter = Callable[..., list[tuple[str, float]]]
 CountryFormatter = Callable[[str], str]
@@ -64,6 +66,39 @@ def fetch_live_price(
     except (TypeError, ValueError):
         return None
     return price, None
+
+
+def fetch_live_prices(
+    token_ids: Sequence[str],
+    *,
+    http_post: Callable[..., Any],
+) -> dict[str, float]:
+    unique_token_ids = list(dict.fromkeys(token_id for token_id in token_ids if token_id))
+    if not unique_token_ids:
+        return {}
+
+    try:
+        response = http_post(
+            MIDPOINTS_URL,
+            json=[{"token_id": token_id} for token_id in unique_token_ids],
+            timeout=5,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    prices: dict[str, float] = {}
+    for token_id, raw_price in payload.items():
+        if not isinstance(raw_price, (str, int, float)):
+            continue
+        try:
+            prices[str(token_id)] = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+    return prices
 
 
 def fetch_event(
@@ -261,6 +296,7 @@ def get_global_elections(
     cached_request: CachedRequest,
     cache_ttl: int,
     get_top_outcomes: OutcomesGetter,
+    fetch_live_prices: LivePricesFetcher,
     get_event_flag: Callable[[dict[str, Any]], str],
     format_liquidity: Callable[[float], str],
 ) -> str:
@@ -282,6 +318,30 @@ def get_global_elections(
         return "No pude traer las elecciones desde Polymarket"
 
     events.sort(key=lambda event: float(event.get("liquidity") or 0), reverse=True)
+    token_ids: list[str] = []
+    for event in events[:GLOBAL_ELECTIONS_LIMIT]:
+        for market in event.get("markets") or []:
+            if market.get("active") is False or market.get("closed") is True:
+                continue
+            try:
+                outcomes = json.loads(market.get("outcomes") or "[]")
+                market_token_ids = json.loads(market.get("clobTokenIds") or "[]")
+                yes_index = outcomes.index("Yes")
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                continue
+            if yes_index < len(market_token_ids):
+                token_ids.append(str(market_token_ids[yes_index]))
+    live_prices = fetch_live_prices(token_ids)
+
+    def fetch_live(token_id: str) -> tuple[float, int | None] | None:
+        price = live_prices.get(token_id)
+        return (price, None) if price is not None else None
+
     lines = ["Polymarket - Global elections by liquidity"]
     for event in events[:GLOBAL_ELECTIONS_LIMIT]:
         title, slug = event.get("title"), event.get("slug")
@@ -292,7 +352,10 @@ def get_global_elections(
         except (TypeError, ValueError):
             liquidity = 0
         outcomes = []
-        for outcome_title, probability in get_top_outcomes(event):
+        for outcome_title, probability in get_top_outcomes(
+            event,
+            fetch_live=fetch_live,
+        ):
             decimals = 2 if probability < 10 else 1
             outcomes.append(
                 f"{escape(outcome_title)} {fmt_num(probability, decimals)}%"

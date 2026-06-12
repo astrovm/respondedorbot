@@ -375,6 +375,13 @@ def _fetch_polymarket_live_price(
     )
 
 
+def _fetch_polymarket_live_prices(token_ids: Sequence[str]) -> Dict[str, float]:
+    return polymarket_commands.fetch_live_prices(
+        token_ids,
+        http_post=http_client.post,
+    )
+
+
 def _fetch_criptoya_dollar_data(
     *, hourly_cache: bool = True, get_history: int = 0
 ) -> Optional[Dict[str, Any]]:
@@ -886,6 +893,7 @@ def get_polymarket_global_elections() -> str:
         cached_request=cached_requests,
         cache_ttl=TTL_POLYMARKET,
         get_top_outcomes=_polymarket_event_top_outcomes,
+        fetch_live_prices=_fetch_polymarket_live_prices,
         get_event_flag=_event_country_flag,
         format_liquidity=_format_usd_compact,
     )
