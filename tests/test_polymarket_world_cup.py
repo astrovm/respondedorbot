@@ -128,7 +128,8 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "World Cup Winner</a>" in result
     assert (
         "🇪🇸 Spain 18% | 🇫🇷 France 16% | 🇧🇷 Brazil 14% | "
-        "🇬🇧 England 12% | 🇦🇷 Argentina 10%"
+        "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
+        "\U000e0067\U000e007f England 12% | 🇦🇷 Argentina 10%"
     ) in result
     assert "Germany" not in result
     assert "Next 8 games" not in result
@@ -203,3 +204,16 @@ def test_country_flags_use_iso_data_with_sports_aliases():
     assert index._flagged_country_name("Bosnia-Herzegovina") == (
         "🇧🇦 Bosnia-Herzegovina"
     )
+    assert index._flagged_country_name("England") == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
+        "\U000e0067\U000e007f England"
+    )
+    assert index._flagged_country_name("Scotland") == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063"
+        "\U000e0074\U000e007f Scotland"
+    )
+    assert index._flagged_country_name("Wales") == (
+        "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c"
+        "\U000e0073\U000e007f Wales"
+    )
+    assert index._flagged_country_name("UK") == "🇬🇧 UK"
