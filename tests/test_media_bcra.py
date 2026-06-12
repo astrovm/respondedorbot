@@ -716,6 +716,7 @@ def test_format_bcra_variables_with_data():
     with (
         patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm,
         patch("api.index.get_currency_band_limits") as mock_bands,
+        patch("api.index.get_country_risk_summary", return_value=None),
     ):
         mock_itcrm.return_value = (123.45, "01/02/25")
         mock_bands.return_value = None
@@ -740,6 +741,7 @@ def test_format_bcra_variables_includes_currency_bands():
     with (
         patch("api.index.get_currency_band_limits") as mock_bands,
         patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm,
+        patch("api.index.get_country_risk_summary", return_value=None),
     ):
         mock_bands.return_value = {
             "lower": 950.12,
