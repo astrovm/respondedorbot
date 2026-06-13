@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Optional, Sequence
 
-from api.bot.command_registry import COMMAND_GROUPS
+from api.bot.command_registry import (
+    aliases_for,
+    COMMAND_DESCRIPTIONS,
+    COMMAND_GROUPS,
+)
 
 CommandGroup = tuple[tuple[str, ...], str, bool, bool]
 
@@ -24,73 +28,11 @@ class FeatureEntry:
     implicit: bool = False
 
 
-COMMAND_DESCRIPTIONS: Dict[str, str] = {
-    "ask": "te contesto cualquier gilada",
-    "pregunta": "te contesto cualquier gilada",
-    "che": "te contesto cualquier gilada",
-    "gordo": "te contesto cualquier gilada",
-    "config": "tocás la config del gordo y de los links",
-    "convertbase": "te paso números entre bases",
-    "random": "elijo por vos entre opciones o números",
-    "prices": "precios crypto [1h/24h/7d/30d]",
-    "price": "precios crypto [1h/24h/7d/30d]",
-    "precios": "precios crypto [1h/24h/7d/30d]",
-    "precio": "precios crypto [1h/24h/7d/30d]",
-    "presios": "precios crypto [1h/24h/7d/30d]",
-    "presio": "precios crypto [1h/24h/7d/30d]",
-    "bresio": "precios crypto [1h/24h/7d/30d]",
-    "bresios": "precios crypto [1h/24h/7d/30d]",
-    "brecio": "precios crypto [1h/24h/7d/30d]",
-    "brecios": "precios crypto [1h/24h/7d/30d]",
-    "crypto": "precios crypto [1h/24h/7d/30d]",
-    "criptos": "precios crypto [1h/24h/7d/30d]",
-    "dolar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-    "dollar": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-    "usd": "cotizaciones del dolar [1h/6h/12h/24h/48h]",
-    "petroleo": "te paso el precio del Brent y del WTI",
-    "oil": "te paso el precio del Brent y del WTI",
-    "acciones": "precios de acciones [aapl tsla googl]",
-    "stocks": "precios de acciones [aapl tsla googl]",
-    "eleccion": "top 10 de elecciones globales en Polymarket por liquidez",
-    "elecciones": "top 10 de elecciones globales en Polymarket por liquidez",
-    "election": "top 10 de elecciones globales en Polymarket por liquidez",
-    "elections": "top 10 de elecciones globales en Polymarket por liquidez",
-    "mundial": "próximos 10 partidos del Mundial en Polymarket",
-    "worldcup": "próximos 10 partidos del Mundial en Polymarket",
-    "rulo": "te armo los rulos desde el oficial",
-    "devo": "te calculo el arbitraje entre tarjeta y crypto",
-    "powerlaw": "te tiro el precio justo de btc según power law",
-    "rainbow": "te tiro el precio justo de btc según rainbow chart",
-    "satoshi": "te digo cuánto vale un satoshi",
-    "sat": "te digo cuánto vale un satoshi",
-    "sats": "te digo cuánto vale un satoshi",
-    "time": "timestamp unix actual",
-    "comando": "te lo convierto en comando de telegram",
-    "command": "te lo convierto en comando de telegram",
-    "instance": "nombre de esta instancia del bot",
-    "help": "te muestro todos los comandos",
-    "transcribe": "te transcribo audio o describo imagen",
-    "describe": "te transcribo audio o describo imagen",
-    "bcra": "te tiro las variables económicas del bcra",
-    "variables": "te tiro las variables económicas del bcra",
-    "topup": "cargás créditos IA con Telegram Stars por privado",
-    "balance": "te muestro tu saldo IA",
-    "transfer": "le pasás créditos tuyos al grupo",
-    "gm": "gif de buenos días",
-    "gn": "gif de buenas noches",
-    "tareas": "listado de tareas programadas",
-    "tasks": "listado de tareas programadas",
-    "resumen": "resumí la conversación [enfoque opcional]",
-    "summary": "resumí la conversación [enfoque opcional]",
-    "tldr": "resumí la conversación [enfoque opcional]",
-}
-
-
 FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "chat ia",
         "te contesto mensajes normales; en grupos respondo si me mencionan, me responden, usan trigger random o mandan comando ia",
-        ("/ask", "/pregunta", "/che", "/gordo"),
+        aliases_for("ask_ai"),
         ("/gordo explicame esto",),
         "ia",
         telegram_visible=True,
@@ -105,20 +47,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "crypto prices",
         "precios crypto por ranking, símbolo, moneda base y variación",
-        (
-            "/prices",
-            "/price",
-            "/precios",
-            "/precio",
-            "/presios",
-            "/presio",
-            "/bresio",
-            "/bresios",
-            "/brecio",
-            "/brecios",
-            "/crypto",
-            "/criptos",
-        ),
+        aliases_for("get_prices"),
         (
             "/prices btc eth xmr",
             "/prices 20",
@@ -139,7 +68,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "dólar",
         "cotizaciones del dólar y variaciones por ventana",
-        ("/dolar", "/dollar", "/usd"),
+        aliases_for("get_dollar_rates"),
         ("/usd 1h",),
         "mercado",
         telegram_visible=True,
@@ -147,7 +76,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "acciones",
         "precios de acciones desde Yahoo Finance",
-        ("/acciones", "/stocks"),
+        aliases_for("get_stock_prices"),
         ("/acciones aapl tsla googl",),
         "mercado",
         telegram_visible=True,
@@ -155,35 +84,35 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "petróleo",
         "precio Brent y WTI",
-        ("/petroleo", "/oil"),
+        aliases_for("get_oil_price"),
         category="mercado",
         telegram_visible=True,
     ),
     FeatureEntry(
         "bcra",
         "variables económicas del BCRA",
-        ("/bcra", "/variables"),
+        aliases_for("handle_bcra_variables"),
         category="mercado",
         telegram_visible=True,
     ),
     FeatureEntry(
         "elección",
         "top 10 de elecciones globales en Polymarket por liquidez",
-        ("/eleccion", "/elecciones", "/election", "/elections"),
+        aliases_for("get_polymarket_global_elections"),
         category="mercado",
         telegram_visible=True,
     ),
     FeatureEntry(
         "mundial",
         "próximos 10 partidos del Mundial en Polymarket",
-        ("/mundial", "/worldcup"),
+        aliases_for("get_polymarket_world_cup_games"),
         category="mercado",
         telegram_visible=True,
     ),
     FeatureEntry(
         "arbitrajes",
         "rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats",
-        ("/rulo", "/devo", "/powerlaw", "/rainbow", "/satoshi", "/sat", "/sats"),
+        aliases_for("get_rulo", "get_devo", "powerlaw", "rainbow", "satoshi"),
         ("/devo 0.5, 100",),
         "mercado",
         telegram_visible=True,
@@ -191,7 +120,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "media",
         "transcribo voice/audio/video/video_note y describo fotos o stickers respondiendo al mensaje; también puedo procesar media cuando me hablan",
-        ("/transcribe", "/describe"),
+        aliases_for("handle_transcribe"),
         category="media",
         telegram_visible=True,
     ),
@@ -204,7 +133,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "tareas",
         "agendo recordatorios y tareas recurrentes por lenguaje natural; /tareas lista y borra con botones",
-        ("/tareas", "/tasks"),
+        aliases_for("tasks_command"),
         examples=("mañana recordame pagar el alquiler", "/tareas"),
         category="productividad",
         telegram_visible=True,
@@ -212,7 +141,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "resúmenes y memoria",
         "resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto",
-        ("/resumen", "/summary", "/tldr"),
+        aliases_for("summary_command"),
         ("/resumen focus en crypto",),
         "memoria",
         telegram_visible=True,
@@ -220,7 +149,13 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "utilidades",
         "random, conversión de bases, comandos Telegram, timestamp e instancia",
-        ("/random", "/convertbase", "/comando", "/command", "/time", "/instance"),
+        aliases_for(
+            "select_random",
+            "convert_base",
+            "convert_to_command",
+            "get_timestamp",
+            "get_instance_name",
+        ),
         ("/random pizza, carne, sushi", "/convertbase 101, 2, 10"),
         "utilidades",
         telegram_visible=True,
@@ -228,21 +163,21 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "gifs",
         "gif random de buenos días o buenas noches",
-        ("/gm", "/gn"),
+        aliases_for("get_good_morning", "get_good_night"),
         category="utilidades",
         telegram_visible=True,
     ),
     FeatureEntry(
         "config",
         "config por chat: links, followups, replies a links arreglados, timezone, random replies y límite gratis por usuario/hora",
-        ("/config",),
+        aliases_for("config_command"),
         category="admin",
         telegram_visible=True,
     ),
     FeatureEntry(
         "créditos ia",
         "saldo, topup con Telegram Stars y transferencia de créditos personales al grupo",
-        ("/topup", "/balance", "/transfer"),
+        aliases_for("topup_command", "balance_command", "transfer_command"),
         ("/transfer 1.5",),
         "créditos",
         telegram_visible=True,
@@ -250,7 +185,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "admin créditos",
         "mint y log de créditos, solo admin",
-        ("/printcredits", "/creditlog"),
+        aliases_for("printcredits_command", "creditlog_command"),
         category="admin",
         help_visible=False,
         telegram_visible=False,
@@ -259,7 +194,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry(
         "help",
         "muestro comandos y features",
-        ("/help",),
+        aliases_for("get_help"),
         category="utilidades",
         telegram_visible=True,
     ),
