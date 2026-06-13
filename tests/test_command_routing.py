@@ -109,7 +109,7 @@ def test_check_provider_available_returns_true_when_no_accounts(monkeypatch):
 
 def test_check_provider_available_returns_true_by_default(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test_key")
-    from api.provider_backoff import clear_all_cooldowns
+    from api.providers.backoff import clear_all_cooldowns
 
     clear_all_cooldowns()
     assert check_provider_available("chat") is True
@@ -496,7 +496,7 @@ def test_select_random():
 
 
 def test_format_balance_command_private_includes_topup_hint():
-    from api.ai_billing import BalanceFormatter
+    from api.billing.ai import BalanceFormatter
 
     credits_db_service = MagicMock()
     credits_db_service.get_balance.return_value = 420
@@ -509,7 +509,7 @@ def test_format_balance_command_private_includes_topup_hint():
 
 
 def test_format_balance_command_group_includes_topup_and_transfer_hints():
-    from api.ai_billing import BalanceFormatter
+    from api.billing.ai import BalanceFormatter
 
     credits_db_service = MagicMock()
     credits_db_service.get_balance.side_effect = [300, 1200]
@@ -569,7 +569,7 @@ def test_extract_message_text_edge_cases():
 
 
 def test_groq_backoff_is_marked_and_cleared():
-    from api.provider_backoff import (
+    from api.providers.backoff import (
         mark_provider_cooldown,
         is_provider_cooled_down,
         clear_all_cooldowns,
@@ -587,7 +587,7 @@ def test_groq_backoff_is_marked_and_cleared():
 
 
 def test_groq_backoff_only_extends_not_shortens():
-    from api.provider_backoff import (
+    from api.providers.backoff import (
         mark_provider_cooldown,
         get_provider_cooldown_remaining,
         clear_all_cooldowns,
@@ -603,7 +603,7 @@ def test_groq_backoff_only_extends_not_shortens():
 
 
 def test_check_provider_available_returns_false_when_all_in_cooldown(monkeypatch):
-    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+    from api.providers.backoff import mark_provider_cooldown, clear_all_cooldowns
 
     clear_all_cooldowns()
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
@@ -615,7 +615,7 @@ def test_check_provider_available_returns_false_when_all_in_cooldown(monkeypatch
 
 
 def test_check_provider_available_returns_true_when_one_account_free(monkeypatch):
-    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+    from api.providers.backoff import mark_provider_cooldown, clear_all_cooldowns
 
     clear_all_cooldowns()
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_key")
@@ -626,7 +626,7 @@ def test_check_provider_available_returns_true_when_one_account_free(monkeypatch
 
 
 def test_check_provider_available_ignores_empty_key(monkeypatch):
-    from api.provider_backoff import clear_all_cooldowns
+    from api.providers.backoff import clear_all_cooldowns
 
     clear_all_cooldowns()
     monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
@@ -635,7 +635,7 @@ def test_check_provider_available_ignores_empty_key(monkeypatch):
 
 
 def test_clear_single_provider_cooldown():
-    from api.provider_backoff import (
+    from api.providers.backoff import (
         mark_provider_cooldown,
         is_provider_cooled_down,
         clear_provider_cooldown,
@@ -721,7 +721,7 @@ def test_initialize_commands():
 
 def test_price_alias_command_dispatches_to_get_prices():
     from api.index import initialize_commands
-    from api.command_registry import parse_command
+    from api.bot.command_registry import parse_command
 
     get_prices = index.app_runtime.prices.get_prices
 
@@ -781,7 +781,7 @@ def test_extract_message_text_complex_cases():
 
 
 def test_parse_command_complex_cases():
-    from api.command_registry import parse_command
+    from api.bot.command_registry import parse_command
 
     # Test command with different case
     assert parse_command("/StArT hello", "@bot") == ("/start", "hello")
@@ -947,7 +947,7 @@ def test_cached_requests_basic():
     cached_requests = index.app_runtime.cache.request
 
     with (
-        patch("api.cache_service.http_client.get") as mock_get,
+        patch("api.cache.service.http_client.get") as mock_get,
         patch("redis.Redis") as mock_redis,
         patch("time.time") as mock_time,
     ):
@@ -1000,9 +1000,9 @@ def test_cached_requests_sets_ttl_and_namespaced_keys(monkeypatch):
         return True
 
     monkeypatch.setattr("api.index.app_runtime.config.redis", lambda: FakeRedis())
-    monkeypatch.setattr("api.cache_service.redis_get_json", lambda client, key: None)
-    monkeypatch.setattr("api.cache_service.redis_set_json", fake_set_json)
-    monkeypatch.setattr("api.cache_service.http_client.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.cache.service.redis_get_json", lambda client, key: None)
+    monkeypatch.setattr("api.cache.service.redis_set_json", fake_set_json)
+    monkeypatch.setattr("api.cache.service.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
 
@@ -1104,7 +1104,7 @@ def test_cached_requests_retries_on_failure(monkeypatch):
             raise requests.RequestException("boom")
         return FakeResp(text=json.dumps({"ok": True}))
 
-    monkeypatch.setattr("api.cache_service.http_client.get", fake_get)
+    monkeypatch.setattr("api.cache.service.http_client.get", fake_get)
 
     with patch("api.index.app_runtime.config.redis") as mock_redis:
         # Fake Redis client that stores in dict
@@ -1171,9 +1171,9 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
             return None
 
     monkeypatch.setattr("api.index.app_runtime.config.redis", fake_config_redis)
-    monkeypatch.setattr("api.cache_service.redis_get_json", fake_redis_get_json)
-    monkeypatch.setattr("api.cache_service.redis_set_json", fake_redis_set_json)
-    monkeypatch.setattr("api.cache_service.http_client.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.cache.service.redis_get_json", fake_redis_get_json)
+    monkeypatch.setattr("api.cache.service.redis_set_json", fake_redis_set_json)
+    monkeypatch.setattr("api.cache.service.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
     first_count = len(

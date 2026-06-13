@@ -2,7 +2,7 @@ from tests.support import *
 
 
 def test_build_commands_list_sorts_deduplicates_and_skips_undocumented_aliases():
-    from api.telegram_bot_commands import build_commands_list
+    from api.bot.telegram_commands import build_commands_list
 
     command_groups = (
         (("/zeta", "/alpha", "/alpha"), "handler", False, False),
@@ -27,7 +27,7 @@ def test_build_commands_list_sorts_deduplicates_and_skips_undocumented_aliases()
 
 
 def test_update_bot_commands_posts_serialized_sorted_commands():
-    from api.telegram_bot_commands import update_bot_commands
+    from api.bot.telegram_commands import update_bot_commands
 
     request_fn = MagicMock(return_value=(None, None))
 
@@ -63,7 +63,7 @@ def test_update_bot_commands_posts_serialized_sorted_commands():
 
 
 def test_update_bot_commands_logs_error_and_returns_false():
-    from api.telegram_bot_commands import update_bot_commands
+    from api.bot.telegram_commands import update_bot_commands
 
     logger = MagicMock()
 
@@ -80,8 +80,8 @@ def test_update_bot_commands_logs_error_and_returns_false():
 
 
 def test_build_commands_list_includes_tldr_alias_when_documented():
-    from api.command_registry import COMMAND_GROUPS
-    from api.telegram_bot_commands import build_commands_list
+    from api.bot.command_registry import COMMAND_GROUPS
+    from api.bot.telegram_commands import build_commands_list
 
     commands = build_commands_list(COMMAND_GROUPS)
     names = {item["command"] for item in commands}
@@ -92,8 +92,8 @@ def test_build_commands_list_includes_tldr_alias_when_documented():
 
 
 def test_default_commands_list_excludes_removed_search_commands():
-    from api.command_registry import COMMAND_GROUPS
-    from api.telegram_bot_commands import COMMAND_DESCRIPTIONS, build_commands_list
+    from api.bot.command_registry import COMMAND_GROUPS
+    from api.bot.telegram_commands import COMMAND_DESCRIPTIONS, build_commands_list
 
     commands = build_commands_list(COMMAND_GROUPS)
     names = {item["command"] for item in commands}

@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from api.credit_units import CREDIT_SCALE, whole_credits_to_units
+from api.billing.credit_units import CREDIT_SCALE, whole_credits_to_units
 from api.services import credits_db
 
 

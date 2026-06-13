@@ -1,4 +1,4 @@
-from api.chat_context import (
+from api.bot.chat_context import (
     extract_numeric_chat_id,
     extract_user_id,
     format_user_identity,

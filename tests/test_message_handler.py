@@ -3,7 +3,7 @@ from tests.support import *
 
 
 def test_handle_msg_topup_private_returns_keyboard():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "10",
@@ -44,7 +44,7 @@ def test_handle_msg_topup_private_returns_keyboard():
 
 
 def test_handle_msg_topup_group_redirects_private(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "10",
@@ -72,7 +72,7 @@ def test_handle_msg_topup_group_redirects_private(monkeypatch):
 
 
 def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "11",
@@ -106,8 +106,8 @@ def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
 
 
 def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
-    from api.ai_billing import BalanceFormatter
-    from api.message_handler import handle_msg
+    from api.billing.ai import BalanceFormatter
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "11",
@@ -140,7 +140,7 @@ def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
 
 
 def test_handle_msg_balance_private_uses_balance_formatter_object(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "11",
@@ -176,7 +176,7 @@ def test_handle_msg_balance_private_uses_balance_formatter_object(monkeypatch):
 
 
 def test_handle_msg_transfer_group_moves_credits():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12",
@@ -208,7 +208,7 @@ def test_handle_msg_transfer_group_moves_credits():
 
 
 def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12",
@@ -238,7 +238,7 @@ def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
 
 
 def test_billing_commands_balance_and_transfer_preserve_responses():
-    billing_commands = __import__("api.billing_commands", fromlist=["billing_commands"])
+    billing_commands = __import__("api.billing.commands", fromlist=["billing_commands"])
     handle_balance_command = billing_commands.handle_balance_command
     handle_transfer_command = billing_commands.handle_transfer_command
 
@@ -294,7 +294,7 @@ def test_billing_commands_balance_and_transfer_preserve_responses():
 
 
 def test_handle_msg_streamed_response_saves_final_text_to_redis():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "10",
@@ -316,11 +316,11 @@ def test_handle_msg_streamed_response_saves_final_text_to_redis():
     )
 
     with patch(
-        "api.message_handler._run_ai_flow",
+        "api.bot.message_handler._run_ai_flow",
         return_value=("hola final", True),
     ):
         with patch(
-            "api.message_handler.extract_stream_metadata",
+            "api.bot.message_handler.extract_stream_metadata",
             return_value=("777", "hola final"),
         ):
             result = handle_msg(message, deps)
@@ -337,7 +337,7 @@ def test_handle_msg_streamed_response_saves_final_text_to_redis():
 
 
 def test_handle_msg_printcredits_requires_admin(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12b",
@@ -362,7 +362,7 @@ def test_handle_msg_printcredits_requires_admin(monkeypatch):
 
 
 def test_handle_msg_printcredits_admin_mints_credits(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12c",
@@ -395,7 +395,7 @@ def test_handle_msg_printcredits_admin_mints_credits(monkeypatch):
 
 
 def test_handle_msg_creditlog_requires_admin(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12d",
@@ -420,7 +420,7 @@ def test_handle_msg_creditlog_requires_admin(monkeypatch):
 
 
 def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12e",
@@ -505,7 +505,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
 
 
 def test_handle_msg_creditlog_marks_zero_usage_fallback(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12f",
@@ -558,7 +558,7 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback(monkeypatch):
 
 
 def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch):
-    admin_commands = __import__("api.admin_commands", fromlist=["admin_commands"])
+    admin_commands = __import__("api.admin.commands", fromlist=["admin_commands"])
     handle_admin_creditlog_command = admin_commands.handle_admin_creditlog_command
     handle_admin_printcredits_command = admin_commands.handle_admin_printcredits_command
 
@@ -618,7 +618,7 @@ def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch)
 
 
 def test_handle_msg_successful_payment_credits_user():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "13",
@@ -657,7 +657,7 @@ def test_handle_msg_successful_payment_credits_user():
 
 
 def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "14",
@@ -679,7 +679,7 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     def fake_handle_ai_response(*args, **kwargs):
-        from api.streaming import set_streamed_response_metadata
+        from api.bot.streaming import set_streamed_response_metadata
 
         response_meta = kwargs.get("response_meta")
         if isinstance(response_meta, dict):
@@ -711,7 +711,7 @@ def test_handle_msg_refunds_credits_on_internal_ai_fallback(monkeypatch):
 def test_handle_msg_refunds_all_charges_when_fallback_after_multiple_provider_requests(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "14b",
@@ -755,7 +755,7 @@ def test_handle_msg_refunds_all_charges_when_fallback_after_multiple_provider_re
 
 
 def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "15",
@@ -801,7 +801,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
 
 
 def test_handle_msg_returns_random_when_ai_billing_backend_is_down(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "15b",
@@ -872,7 +872,7 @@ def test_handle_rate_limit_uses_username_when_first_name_is_missing():
 
 
 def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "rl1",
@@ -905,7 +905,7 @@ def test_handle_msg_skips_billing_when_local_rate_limit_hits(monkeypatch):
 
 
 def test_handle_msg():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     mock_config_redis = MagicMock()
     mock_redis = MagicMock()
@@ -966,7 +966,7 @@ def test_handle_msg():
 
 
 def test_handle_msg_with_crypto_command():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     mock_config_redis = MagicMock()
     mock_redis = MagicMock()
@@ -1004,7 +1004,7 @@ def test_handle_msg_with_crypto_command():
 
 
 def test_handle_msg_with_image(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     mock_send_msg = MagicMock()
@@ -1041,7 +1041,7 @@ def test_handle_msg_with_image(monkeypatch):
 
 
 def test_handle_msg_with_audio(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     mock_send_msg = MagicMock()
@@ -1084,7 +1084,7 @@ def test_handle_msg_with_audio(monkeypatch):
 def test_handle_msg_group_audio_without_invocation_skips_auto_transcription(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.lrange.return_value = []
@@ -1123,7 +1123,7 @@ def test_handle_msg_group_audio_without_invocation_skips_auto_transcription(
 
 
 def test_handle_msg_with_transcribe_command(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     mock_send_msg = MagicMock()
@@ -1172,7 +1172,7 @@ def test_handle_msg_with_transcribe_command(monkeypatch):
 
 
 def test_handle_msg_with_transcribe_command_charges_media_credits(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1229,7 +1229,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits(monkeypatch):
 def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1275,7 +1275,7 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response(
 
 
 def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1311,7 +1311,7 @@ def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monke
 
 
 def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1355,7 +1355,7 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
 
 
 def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1385,7 +1385,7 @@ def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
 
 
 def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1435,7 +1435,7 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
 
 
 def test_handle_msg_auto_audio_skips_transcription_when_should_not_respond(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1471,7 +1471,7 @@ def test_handle_msg_auto_audio_skips_transcription_when_should_not_respond(monke
 
 
 def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1505,7 +1505,7 @@ def test_handle_msg_auto_audio_skips_image_download_when_should_not_respond(monk
 
 
 def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1571,7 +1571,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypat
 
 
 def test_handle_msg_image_conversation_charges_media_and_response_credits(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1610,7 +1610,7 @@ def test_handle_msg_image_conversation_charges_media_and_response_credits(monkey
 
 
 def test_handle_msg_token_signal_skips_ai_flow(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1620,7 +1620,7 @@ def test_handle_msg_token_signal_skips_ai_flow(monkeypatch):
     mock_ai_response = MagicMock(return_value="ai")
 
     monkeypatch.setattr(
-        "api.message_handler.handle_token_signal_message",
+        "api.bot.message_handler.handle_token_signal_message",
         lambda *_args, **_kwargs: True,
     )
 
@@ -1646,7 +1646,7 @@ def test_handle_msg_token_signal_skips_ai_flow(monkeypatch):
 def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_and_media(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1715,7 +1715,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
 
 
 def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -1749,11 +1749,11 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
 
     with (
         patch(
-            "api.message_handler.AIMessageBilling.settle_reserved_ai_credits_batch",
+            "api.bot.message_handler.AIMessageBilling.settle_reserved_ai_credits_batch",
             autospec=True,
         ) as mock_settle_batch,
         patch(
-            "api.message_handler.AIMessageBilling.settle_reserved_ai_credits",
+            "api.bot.message_handler.AIMessageBilling.settle_reserved_ai_credits",
             autospec=True,
         ) as mock_settle_single,
     ):
@@ -1791,8 +1791,8 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
 
 
 def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch):
-    from api import config as config_module
-    from api.message_handler import handle_msg
+    from api.core import config as config_module
+    from api.bot.message_handler import handle_msg
 
     config_module.reset_cache()
     chat_config = {
@@ -1847,7 +1847,7 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
 
 
 def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context():
-    message_links = __import__("api.message_links", fromlist=["message_links"])
+    message_links = __import__("api.bot.message_links", fromlist=["message_links"])
     handle_link_replacement = message_links.handle_link_replacement
 
     deps = MagicMock()
@@ -1892,7 +1892,7 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
 
 
 def test_message_links_uploads_oversized_instagram_video():
-    from api.message_links import handle_link_replacement
+    from api.bot.message_links import handle_link_replacement
 
     deps = MagicMock()
     deps.link_service.replace.return_value = (
@@ -1926,7 +1926,7 @@ def test_message_links_uploads_oversized_instagram_video():
 
 
 def test_message_links_falls_back_to_link_when_video_upload_fails():
-    from api.message_links import handle_link_replacement
+    from api.bot.message_links import handle_link_replacement
 
     deps = MagicMock()
     deps.link_service.replace.return_value = (
@@ -1961,7 +1961,7 @@ def test_message_links_falls_back_to_link_when_video_upload_fails():
 def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -2026,7 +2026,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
 def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_blocks(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -2069,7 +2069,7 @@ def test_handle_msg_ai_flow_allows_openrouter_fallback_when_groq_rate_limit_bloc
 
 
 def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -2143,7 +2143,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
 def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
     monkeypatch,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -2194,9 +2194,9 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
-    from api.ai_billing import AIMessageBilling
-    from api.ai_service import build_ai_service
-    from api.message_handler import PreparedMessage, _run_ai_flow
+    from api.billing.ai import AIMessageBilling
+    from api.ai.service import build_ai_service
+    from api.bot.message_handler import PreparedMessage, _run_ai_flow
 
     deps = MagicMock()
     handle_ai_response = MagicMock(return_value="respuesta ok")
@@ -2252,9 +2252,9 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcribe():
-    from api.ai_billing import AIMessageBilling
-    from api.ai_service import build_ai_service
-    from api.message_handler import PreparedMessage, _run_ai_flow
+    from api.billing.ai import AIMessageBilling
+    from api.ai.service import build_ai_service
+    from api.bot.message_handler import PreparedMessage, _run_ai_flow
 
     deps = MagicMock()
     handle_ai_response = MagicMock(return_value="🖼️ en la imagen veo: todo piola")
@@ -2361,12 +2361,12 @@ def _private_photo_message(*, message_id=1, chat_id=123, user_id=88, file_id="im
 
 
 def _build_message_handler_flat_defaults(redis_client, mock_credits):
-    from api.command_registry import (
+    from api.bot.command_registry import (
         parse_command as _parse_command,
         should_auto_process_media as _should_auto_process_media,
     )
     from api import index as _api_index
-    from api.streaming import set_streamed_response_metadata
+    from api.bot.streaming import set_streamed_response_metadata
 
     link_service = MagicMock()
     link_service.replace.side_effect = lambda text: (text, False, [])
@@ -2454,7 +2454,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
 
 
 def _build_test_ai_service(flat_defaults):
-    from api.ai_service import build_ai_service
+    from api.ai.service import build_ai_service
 
     return build_ai_service(
         credits_db_service=flat_defaults["credits_db_service"],
@@ -2475,7 +2475,7 @@ def _build_test_ai_service(flat_defaults):
 
 
 def _build_grouped_message_handler_deps(flat_defaults):
-    from api.message_handler import (
+    from api.bot.message_handler import (
         MessageAIDeps,
         MessageChatDeps,
         MessageHandlerDeps,
@@ -2593,7 +2593,7 @@ def _build_message_handler_deps():
 
 
 def _simulate_streamed_ai_response(mock_send_msg, response_text, billing_segments=None):
-    from api.streaming import set_streamed_response_metadata
+    from api.bot.streaming import set_streamed_response_metadata
 
     def _fake_handle_ai_response(*args, **kwargs):
         if args and isinstance(args[0], list):
@@ -2614,7 +2614,7 @@ def _simulate_streamed_ai_response(mock_send_msg, response_text, billing_segment
 
 
 def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
-    from api.message_handler import (
+    from api.bot.message_handler import (
         MessageAIDeps,
         MessageChatDeps,
         MessageHandlerDeps,
@@ -2704,7 +2704,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
 
 
 def test_build_message_context_extracts_chat_sender_and_ids():
-    from api.message_handler import _build_message_context
+    from api.bot.message_handler import _build_message_context
 
     deps = MagicMock()
     deps.extract_user_id.return_value = 77
@@ -2728,7 +2728,7 @@ def test_build_message_context_extracts_chat_sender_and_ids():
 
 
 def test_handle_prepared_message_early_response_sends_and_stops():
-    from api.message_handler import (
+    from api.bot.message_handler import (
         PreparedMessage,
         _handle_prepared_message_early_response,
     )
@@ -2752,8 +2752,8 @@ def test_handle_prepared_message_early_response_sends_and_stops():
 
 
 def test_resolve_message_intent_uses_reply_text_for_command_without_params():
-    from api.message_handler import MessageContext, MessageRuntime, PreparedMessage
-    from api.message_handler import _resolve_message_intent
+    from api.bot.message_handler import MessageContext, MessageRuntime, PreparedMessage
+    from api.bot.message_handler import _resolve_message_intent
 
     deps = MagicMock()
     deps.parse_command.return_value = ("/command", "")
@@ -2794,7 +2794,7 @@ def test_resolve_message_intent_uses_reply_text_for_command_without_params():
 
 
 def test_handle_non_ai_command_summary_uses_streaming():
-    from api.message_handler import _handle_non_ai_command
+    from api.bot.message_handler import _handle_non_ai_command
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (
@@ -2826,7 +2826,7 @@ def test_handle_non_ai_command_summary_uses_streaming():
 
 
 def test_handle_non_ai_command_summary_fallback_returns_text():
-    from api.message_handler import _handle_non_ai_command
+    from api.bot.message_handler import _handle_non_ai_command
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (
@@ -2854,24 +2854,24 @@ def test_handle_non_ai_command_summary_fallback_returns_text():
 
 
 def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
-    from api.message_handler import PreparedMessage, _handle_known_command
+    from api.bot.message_handler import PreparedMessage, _handle_known_command
 
     deps = MagicMock()
     commands = {"/resumen": (MagicMock(), False, True)}
 
     empty_response = (None, None, False, None)
-    with patch("api.message_handler._handle_config_command", return_value=empty_response), patch(
-        "api.message_handler._handle_topup_command", return_value=empty_response
-    ), patch("api.message_handler._handle_balance_command", return_value=empty_response), patch(
-        "api.message_handler._handle_transfer_command", return_value=empty_response
+    with patch("api.bot.message_handler._handle_config_command", return_value=empty_response), patch(
+        "api.bot.message_handler._handle_topup_command", return_value=empty_response
+    ), patch("api.bot.message_handler._handle_balance_command", return_value=empty_response), patch(
+        "api.bot.message_handler._handle_transfer_command", return_value=empty_response
     ), patch(
-        "api.message_handler._handle_admin_printcredits_command",
+        "api.bot.message_handler._handle_admin_printcredits_command",
         return_value=empty_response,
     ), patch(
-        "api.message_handler._handle_admin_creditlog_command",
+        "api.bot.message_handler._handle_admin_creditlog_command",
         return_value=empty_response,
     ), patch(
-        "api.message_handler._handle_non_ai_command",
+        "api.bot.message_handler._handle_non_ai_command",
         return_value=("resumen listo", None, True, "/resumen"),
     ):
         response = _handle_known_command(
@@ -2900,7 +2900,7 @@ def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
 
 
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
@@ -2944,9 +2944,9 @@ def test_message_handler_routes_ai_command_through_known_command_path(monkeypatc
 
 
 def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
-    from api.ai_service import AIConversationRequest
-    from api.message_handler import handle_msg
-    from api.streaming import set_streamed_response_metadata
+    from api.ai.service import AIConversationRequest
+    from api.bot.message_handler import handle_msg
+    from api.bot.streaming import set_streamed_response_metadata
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -2990,9 +2990,9 @@ def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
 
 
 def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypatch):
-    from api.ai_service import AIConversationRequest
-    from api.message_handler import handle_msg
-    from api.streaming import set_streamed_response_metadata
+    from api.ai.service import AIConversationRequest
+    from api.bot.message_handler import handle_msg
+    from api.bot.streaming import set_streamed_response_metadata
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -3037,7 +3037,7 @@ def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypa
 
 
 def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     make_deps, redis_client = _build_message_handler_deps()
     mock_send_msg = MagicMock()
@@ -3088,7 +3088,7 @@ def test_message_handler_suppresses_supported_link_when_not_replaced(
     text,
     expected_saved,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     make_deps, redis_client = _build_message_handler_deps()
     mock_send_msg = MagicMock()
@@ -3129,7 +3129,7 @@ def test_message_handler_suppresses_supported_link_when_not_replaced(
 
 
 def test_message_handler_private_text_without_supported_link_still_responds(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     make_deps, _ = _build_message_handler_deps()
     mock_should_respond = MagicMock(return_value=True)
@@ -3176,7 +3176,7 @@ def test_message_handler_explicit_intent_with_link_bypasses_replacement(
     monkeypatch,
     message,
 ):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     make_deps, _ = _build_message_handler_deps()
     mock_replace_links = MagicMock(return_value=(
@@ -3197,7 +3197,7 @@ def test_message_handler_explicit_intent_with_link_bypasses_replacement(
 
 
 def test_handle_msg_with_unknown_command():
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     mock_config_redis = MagicMock()
     mock_redis = MagicMock()
@@ -3248,7 +3248,7 @@ def test_handle_msg_with_exception():
 
 
 def test_handle_msg_edge_cases(monkeypatch):
-    from api.message_handler import handle_msg
+    from api.bot.message_handler import handle_msg
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 

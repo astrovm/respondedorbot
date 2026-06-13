@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import cancel_task
+from api.tasks.scheduler import cancel_task
 
 
 def _execute_task_cancel(

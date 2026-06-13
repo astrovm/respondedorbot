@@ -1,4 +1,4 @@
-from api.message_state import build_reply_context_text, format_user_message
+from api.memory.state import build_reply_context_text, format_user_message
 
 
 def test_build_reply_context_text_describes_non_text_media():

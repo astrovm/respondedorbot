@@ -1,5 +1,5 @@
-from api.command_registry import COMMAND_GROUPS
-from api.feature_catalog import (
+from api.bot.command_registry import COMMAND_GROUPS
+from api.bot.feature_catalog import (
     COMMAND_DESCRIPTIONS,
     catalog_command_aliases,
     command_aliases,

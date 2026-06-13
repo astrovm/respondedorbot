@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from api.tools.task_scheduler import (
+from api.tasks.scheduler import (
     TASK_REDIS_PREFIX,
     get_scheduler_runtime_status,
     get_scheduler,
@@ -68,7 +68,7 @@ def _build_executor_for_tests(
     billing_factory=None,
 ):
     """Build a TaskExecutor-like mock injected into the scheduler."""
-    from api.task_executor import TaskExecutor
+    from api.tasks.executor import TaskExecutor
 
     billing = MagicMock()
     billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
@@ -95,9 +95,9 @@ def _build_executor_for_tests(
 class TestFireTaskStripsMarker:
     """Verify _fire_task handles fallback responses correctly."""
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_one_shot_strips_fallback_marker(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -128,9 +128,9 @@ class TestFireTaskStripsMarker:
         sent_text = mock_send.call_args[0][1]
         assert "no boludo" in sent_text
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_recurring_fallback_response(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -161,9 +161,9 @@ class TestFireTaskStripsMarker:
         sent_text = mock_send.call_args[0][1]
         assert "fallback response" in sent_text
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_one_shot_normal_response_unchanged(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -188,9 +188,9 @@ class TestFireTaskStripsMarker:
         sent_text = mock_send.call_args[0][1]
         assert "aca tenes las noticias pedazo de bobi" in sent_text
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_sent_message_includes_tarea_programada_prefix(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -224,9 +224,9 @@ class TestFireTaskStripsMarker:
 class TestFireTaskCleanup:
     """Verify Redis key and job removal behavior for one-shot vs recurring tasks."""
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_one_shot_deletes_redis_key_on_success(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -252,9 +252,9 @@ class TestFireTaskCleanup:
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_recurring_does_not_delete_redis_key_on_success(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -280,11 +280,11 @@ class TestFireTaskCleanup:
 
         redis_client.delete.assert_not_called()
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_one_shot_refunds_reservation_and_deletes_task_on_fallback(
         self, mock_sched
     ):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         credits = _credits_ok_mock()
         billing = MagicMock()
@@ -334,9 +334,9 @@ class TestFireTaskBilling:
     credits or cannot be identified, the task is deleted automatically.
     """
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_no_credits_deletes_one_shot_task(self, mock_sched):
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -358,10 +358,10 @@ class TestFireTaskBilling:
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_no_credits_skips_but_keeps_recurring_task(self, mock_sched):
         """Even if credits fail, recurring tasks are skipped for this run but kept in Redis."""
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -383,10 +383,10 @@ class TestFireTaskBilling:
 
         redis_client.delete.assert_not_called()
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_no_user_id_deletes_task(self, mock_sched):
         """If user_id is missing from task data the task cannot be billed and is deleted."""
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -408,15 +408,15 @@ class TestFireTaskBilling:
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_billing_uses_private_chat_type_never_charges_group(self, mock_sched):
         """
         Even if the task was created in a group chat, billing is done as
         chat_type='private' with numeric_chat_id=None so only the user's
         balance is touched, never the group balance.
         """
-        from api.tools.task_scheduler import _fire_task
-        from api.ai_billing import AIMessageBilling
+        from api.tasks.scheduler import _fire_task
+        from api.billing.ai import AIMessageBilling
 
         redis_client = _make_redis_with_task(
             {
@@ -477,10 +477,10 @@ class TestFireTaskBilling:
 class TestFireTaskBillingUnavailable:
     """Characterization tests: what happens when billing is unavailable."""
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_billing_unavailable_skips_one_shot_task(self, mock_sched):
         """When billing is not configured, one-shot tasks are deleted without calling AI."""
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -503,10 +503,10 @@ class TestFireTaskBillingUnavailable:
 
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_billing_unavailable_skips_recurring_task(self, mock_sched):
         """Recurring tasks are kept (not deleted) when billing is unavailable."""
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -533,11 +533,11 @@ class TestFireTaskBillingUnavailable:
 class TestFireTaskAIFailure:
     """Characterization tests: what happens when ask_ai raises an exception."""
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_ask_ai_exception_reports_to_admin_and_does_not_send(self, mock_sched):
         """When ask_ai throws, admin is notified and no message is sent."""
-        from api.tools.task_scheduler import _fire_task
-        from api.task_executor import TaskExecutor
+        from api.tasks.scheduler import _fire_task
+        from api.tasks.executor import TaskExecutor
 
         redis_client = _make_redis_with_task(
             {
@@ -580,10 +580,10 @@ class TestFireTaskAIFailure:
         mock_send.assert_not_called()
         redis_client.delete.assert_called_once_with(f"{TASK_REDIS_PREFIX}x1")
 
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_ask_ai_exception_refunds_reserved_credits(self, mock_sched):
         """When ask_ai throws, reserved credits are refunded and never settled."""
-        from api.tools.task_scheduler import _fire_task
+        from api.tasks.scheduler import _fire_task
 
         redis_client = _make_redis_with_task(
             {
@@ -627,8 +627,8 @@ class TestFireTaskAIFailure:
 class TestListTasksResilience:
     """list_tasks should show tasks even when APScheduler is unavailable."""
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_lists_tasks_without_scheduler(self, mock_sched, mock_redis):
         mock_sched.return_value = None
 
@@ -653,8 +653,8 @@ class TestListTasksResilience:
         assert tasks[0]["text"] == "recordame algo"
         assert tasks[0]["next_run"] == "15/04 01:22"
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_lists_tasks_when_job_missing_from_scheduler(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         scheduler.get_job.return_value = None
@@ -679,8 +679,8 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["next_run"] == "15/04 02:00"
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_uses_scheduler_next_run_when_available(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         job = MagicMock()
@@ -707,8 +707,8 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["next_run"] == "15/04 03:00"
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_filters_by_chat_id(self, mock_sched, mock_redis):
         mock_sched.return_value = None
 
@@ -746,13 +746,13 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["id"] == "a"
 
-    @patch("api.tools.task_scheduler._get_redis")
+    @patch("api.tasks.scheduler._get_redis")
     def test_returns_empty_when_redis_unavailable(self, mock_redis):
         mock_redis.return_value = None
         assert list_tasks("123") == []
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_lists_multiple_tasks(self, mock_sched, mock_redis):
         mock_sched.return_value = None
 
@@ -792,8 +792,8 @@ class TestListTasksResilience:
         assert "buscar noticias de linux" in texts
         assert "bañarse" in texts
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_lists_tasks_with_stored_timezone_offset(self, mock_sched, mock_redis):
         mock_sched.return_value = None
 
@@ -817,8 +817,8 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["next_run"] == "15/04 00:00"
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_lists_trigger_config_for_cron_tasks(self, mock_sched, mock_redis):
         mock_sched.return_value = None
 
@@ -851,8 +851,8 @@ class TestListTasksResilience:
 class TestScheduleTaskStoresRunDate:
     """schedule_task should store run_date in Redis data."""
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_one_shot_stores_run_date(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         mock_sched.return_value = scheduler
@@ -868,8 +868,8 @@ class TestScheduleTaskStoresRunDate:
         assert stored_data["run_date"] is not None
         assert "T" in stored_data["run_date"]
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_recurring_stores_null_run_date(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         mock_sched.return_value = scheduler
@@ -884,8 +884,8 @@ class TestScheduleTaskStoresRunDate:
         stored_data = json.loads(stored_call[0][2])
         assert stored_data["run_date"] is None
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_stores_timezone_offset(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         mock_sched.return_value = scheduler
@@ -900,8 +900,8 @@ class TestScheduleTaskStoresRunDate:
         stored_data = json.loads(stored_call[0][2])
         assert stored_data["timezone_offset"] == -5
 
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_returns_none_when_redis_is_unavailable(self, mock_sched, mock_redis):
         scheduler = MagicMock()
         mock_sched.return_value = scheduler
@@ -914,9 +914,9 @@ class TestScheduleTaskStoresRunDate:
 
 
 class TestSchedulerRuntimeStatus:
-    @patch("api.tools.task_scheduler._get_task_executor")
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_task_executor")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_reports_storage_unavailable(self, mock_sched, mock_redis, mock_executor):
         mock_sched.return_value = MagicMock()
         mock_redis.return_value = None
@@ -932,9 +932,9 @@ class TestSchedulerRuntimeStatus:
             "executor": True,
         }
 
-    @patch("api.tools.task_scheduler._get_task_executor")
-    @patch("api.tools.task_scheduler._get_redis")
-    @patch("api.tools.task_scheduler.get_scheduler")
+    @patch("api.tasks.scheduler._get_task_executor")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
     def test_reports_ready(self, mock_sched, mock_redis, mock_executor):
         mock_sched.return_value = MagicMock()
         mock_redis.return_value = MagicMock()
@@ -1077,7 +1077,7 @@ class TestToolCallFiltering:
         assert result is None
 
     def test_executes_known_tool_call(self):
-        from api.tool_runtime import ToolRuntime
+        from api.tools.runtime import ToolRuntime
 
         tool_response = self._build_tool_call_response(
             "calculate",
@@ -1116,7 +1116,7 @@ class TestToolCallFiltering:
         assert client.chat.completions.create.call_count == 2
 
     def test_mixed_known_and_unknown_tool_calls(self):
-        from api.tool_runtime import ToolRuntime
+        from api.tools.runtime import ToolRuntime
 
         fn1 = MagicMock()
         fn1.name = "openrouter_web_search"

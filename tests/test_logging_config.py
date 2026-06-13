@@ -1,4 +1,4 @@
-from api.logging_config import format_log_context
+from api.core.logging import format_log_context
 
 
 def test_format_log_context_includes_stable_debug_fields():

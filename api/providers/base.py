@@ -7,7 +7,7 @@ with support for both completion and streaming modes.
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
-from api.ai_pricing import AIUsageResult
+from api.ai.pricing import AIUsageResult
 
 
 class AIProvider(Protocol):

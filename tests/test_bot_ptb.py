@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from api import bot_ptb
+from api.bot import ptb as bot_ptb
 
 
 class _FakeUpdate:
@@ -28,7 +28,7 @@ class BotPtbTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"BOT_HANDLER_WORKERS": "24"}),
-            patch("api.bot_ptb.concurrent.futures.ThreadPoolExecutor", DummyExecutor),
+            patch("api.bot.ptb.concurrent.futures.ThreadPoolExecutor", DummyExecutor),
             patch.object(bot_ptb, "_HANDLER_EXECUTOR", None),
         ):
             executor = bot_ptb._get_handler_executor()
@@ -58,7 +58,7 @@ class BotPtbTests(unittest.TestCase):
         telegram_ext.filters = MagicMock()
         telegram_ext.filters.ALL = object()
 
-        with patch("api.bot_ptb.importlib.import_module", return_value=telegram_ext):
+        with patch("api.bot.ptb.importlib.import_module", return_value=telegram_ext):
             redis_client = MagicMock()
             result = bot_ptb.create_application(
                 token="test-token",
@@ -87,7 +87,7 @@ class BotPtbTests(unittest.TestCase):
 
     def test_run_polling_passes_args_to_application(self):
         app = MagicMock()
-        with patch("api.bot_ptb.create_application", return_value=app):
+        with patch("api.bot.ptb.create_application", return_value=app):
             bot_ptb.run_polling(
                 token="test-token",
                 drop_pending_updates=False,
@@ -109,8 +109,8 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = MagicMock()
         with (
-            patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.app_runtime", runtime),
+            patch("api.bot.ptb._run_sync", side_effect=_run_sync_impl),
+            patch("api.bot.ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_message(update, MagicMock())
 
@@ -126,8 +126,8 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = MagicMock()
         with (
-            patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.app_runtime", runtime),
+            patch("api.bot.ptb._run_sync", side_effect=_run_sync_impl),
+            patch("api.bot.ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_callback_query(update, MagicMock())
 
@@ -145,8 +145,8 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = MagicMock()
         with (
-            patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.app_runtime", runtime),
+            patch("api.bot.ptb._run_sync", side_effect=_run_sync_impl),
+            patch("api.bot.ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_pre_checkout_query(update, MagicMock())
 
@@ -162,10 +162,10 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         context.error = NetworkError("httpx.ConnectError: All connection attempts failed")
 
         with (
-            patch("api.bot_ptb._run_sync") as run_sync,
-            patch("api.bot_ptb.time.monotonic", return_value=1000.0),
-            patch("api.bot_ptb._last_polling_network_report", 0.0),
-            self.assertLogs("api.bot_ptb", level="WARNING") as logs,
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch("api.bot.ptb.time.monotonic", return_value=1000.0),
+            patch("api.bot.ptb._last_polling_network_report", 0.0),
+            self.assertLogs("api.bot.ptb", level="WARNING") as logs,
         ):
             await bot_ptb._error_handler(object(), context)
 
@@ -180,9 +180,9 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         context.error = NetworkError("httpx.RemoteProtocolError: disconnected")
 
         with (
-            patch("api.bot_ptb._run_sync") as run_sync,
-            patch("api.bot_ptb.time.monotonic", return_value=1001.0),
-            patch("api.bot_ptb._last_polling_network_report", 900.0),
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch("api.bot.ptb.time.monotonic", return_value=1001.0),
+            patch("api.bot.ptb._last_polling_network_report", 900.0),
         ):
             await bot_ptb._error_handler(object(), context)
 
@@ -200,7 +200,7 @@ class PollingEntrypointTests(unittest.TestCase):
                 clear=True,
             ),
             patch("run_polling._load_dotenv"),
-            patch("api.bot_ptb.run_polling") as mock_run_polling,
+            patch("api.bot.ptb.run_polling") as mock_run_polling,
         ):
             import importlib
             import run_polling

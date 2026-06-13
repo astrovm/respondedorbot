@@ -1,6 +1,6 @@
 from api import index
-from api.polymarket_commands import flagged_country_name
-from api import polymarket_commands
+from api.markets.polymarket import flagged_country_name
+from api.markets import polymarket as polymarket_commands
 
 
 def test_fetch_live_price_uses_clob_midpoint():

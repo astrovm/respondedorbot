@@ -124,7 +124,7 @@ def test_get_chat_config_uses_defaults_when_postgres_is_unconfigured():
 
 
 def test_get_chat_config_respects_per_call_repository_override():
-    from api.chat_settings import get_chat_config as real_get_chat_config
+    from api.bot.chat_settings import get_chat_config as real_get_chat_config
 
     redis_client = MagicMock(spec=redis.Redis)
     repo_one = MagicMock()
@@ -359,7 +359,7 @@ def test_handle_callback_query_blocks_non_admin():
 
 
 def test_config_redis_with_env_vars():
-    from api.config import config_redis as _config_config_redis
+    from api.core.config import config_redis as _config_config_redis
 
     with (
         patch("redis.ConnectionPool") as mock_pool,
@@ -727,7 +727,7 @@ class TestHandleTaskCallback:
 
 class TestTimezoneConfig:
     def test_config_text_includes_timezone(self):
-        from api.chat_settings import build_config_text, CHAT_CONFIG_DEFAULTS
+        from api.bot.chat_settings import build_config_text, CHAT_CONFIG_DEFAULTS
 
         config = dict(CHAT_CONFIG_DEFAULTS)
         config["timezone_offset"] = -3
@@ -736,7 +736,7 @@ class TestTimezoneConfig:
         assert "UTC-3" in text
 
     def test_config_text_different_timezone(self):
-        from api.chat_settings import build_config_text
+        from api.bot.chat_settings import build_config_text
 
         config = {
             "link_mode": "reply",
@@ -749,7 +749,7 @@ class TestTimezoneConfig:
         assert "UTC" in text
 
     def test_config_keyboard_includes_timezone_buttons(self):
-        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+        from api.bot.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
 
         config = dict(CHAT_CONFIG_DEFAULTS)
         config["timezone_offset"] = -3
@@ -767,7 +767,7 @@ class TestTimezoneConfig:
         assert any("➕" in btn["text"] for btn in tz_row)
 
     def test_config_keyboard_current_timezone_checked(self):
-        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+        from api.bot.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
 
         config = dict(CHAT_CONFIG_DEFAULTS)
         config["timezone_offset"] = -3
@@ -781,7 +781,7 @@ class TestTimezoneConfig:
         assert "🌍" in utc3_btn["text"]
 
     def test_config_keyboard_creditless_stepper_uses_default_five(self):
-        from api.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
+        from api.bot.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
 
         keyboard = build_config_keyboard(dict(CHAT_CONFIG_DEFAULTS))
         creditless_row = keyboard["inline_keyboard"][5]

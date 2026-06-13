@@ -5,8 +5,8 @@ from tests.support import *
 
 def _build_policy(has_credits_fn):
     from api import index
-    from api.command_registry import should_gordo_respond as base_should_respond
-    from api.routing_policy import RoutingPolicy
+    from api.bot.command_registry import should_gordo_respond as base_should_respond
+    from api.bot.routing import RoutingPolicy
 
     return RoutingPolicy(
         base_policy=base_should_respond,
@@ -16,7 +16,7 @@ def _build_policy(has_credits_fn):
 
 
 def test_routing_policy_allows_private_chat_messages(monkeypatch):
-    from api import config as config_module
+    from api.core import config as config_module
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     config_module.set_cache(
@@ -51,7 +51,7 @@ def test_routing_policy_allows_private_chat_messages(monkeypatch):
 
 
 def test_routing_policy_blocks_random_group_reply_without_credits(monkeypatch):
-    from api import config as config_module
+    from api.core import config as config_module
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     config_module.set_cache(
@@ -88,7 +88,7 @@ def test_routing_policy_blocks_random_group_reply_without_credits(monkeypatch):
 
 
 def test_routing_policy_allows_reply_to_bot_message(monkeypatch):
-    from api import config as config_module
+    from api.core import config as config_module
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
     config_module.set_cache(

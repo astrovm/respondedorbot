@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict
 
-from api.message_state import get_chat_members
+from api.memory.state import get_chat_members
 from api.tools.registry import ToolResult, register_tool
 
 

@@ -1,4 +1,4 @@
-from api.random_replies import build_random_reply, resolve_random_reply_name
+from api.ai.random_replies import build_random_reply, resolve_random_reply_name
 
 
 def test_resolve_random_reply_name_prefers_first_name():

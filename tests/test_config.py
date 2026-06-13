@@ -4,7 +4,7 @@ from redis.exceptions import BusyLoadingError
 
 
 def test_config_redis_reuses_connection_pool(monkeypatch):
-    import api.config as config
+    import api.core.config as config
 
     created_pools = []
 
@@ -30,7 +30,7 @@ def test_config_redis_reuses_connection_pool(monkeypatch):
 
 
 def test_config_redis_retries_busy_loading_without_admin_report(monkeypatch):
-    import api.config as config
+    import api.core.config as config
 
     reports = []
     sleeps = []

@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import json
 
-from api.credit_units import CREDIT_SCALE
+from api.billing.credit_units import CREDIT_SCALE
 
 ScopeType = Literal["user", "chat"]
 

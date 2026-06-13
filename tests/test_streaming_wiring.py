@@ -38,12 +38,12 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
 
 
 def test_finalize_message_response_saves_streamed_text_to_redis():
-    from api.message_handler import (
+    from api.bot.message_handler import (
         MessageContext,
         PreparedMessage,
         _finalize_message_response,
     )
-    from api.streaming import set_streamed_response_metadata
+    from api.bot.streaming import set_streamed_response_metadata
 
     set_streamed_response_metadata("777", "hola final")
     deps = MagicMock()
@@ -84,13 +84,13 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
 
 
 def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
-    from api.message_handler import PreparedMessage, _handle_known_command
+    from api.bot.message_handler import PreparedMessage, _handle_known_command
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(handle_ai_stream=MagicMock(return_value="ignored"))
 
     with patch(
-        "api.message_handler._run_ai_flow",
+        "api.bot.message_handler._run_ai_flow",
         return_value=("hola final", True),
     ) as run_ai_flow:
         response = _handle_known_command(
@@ -146,8 +146,8 @@ def test_handle_ai_stream_response_passes_reply_to_message_id(monkeypatch):
 
 
 def test_run_ai_flow_uses_user_message_id_not_reply_to_message_id():
-    from api.message_handler import _run_ai_flow
-    from api.ai_service import AIConversationRequest
+    from api.bot.message_handler import _run_ai_flow
+    from api.ai.service import AIConversationRequest
 
     mock_service = MagicMock()
     mock_service.run_conversation.return_value = ("respuesta", True)
@@ -218,7 +218,7 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
 
 
 def test_ask_ai_stream_end_to_end_with_internal_tool():
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
@@ -282,7 +282,7 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
 
 
 def test_ask_ai_stream_end_to_end_with_web_search():
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
@@ -393,7 +393,7 @@ def test_stream_with_providers_forwards_extra_tools_and_tool_context():
 
 
 def test_provider_chain_stream_uses_complete_fallback_for_tool_requests():
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     from api.providers.base import ProviderChain
 
     class CompleteOnlyProvider:

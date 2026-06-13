@@ -9,7 +9,7 @@ from tests.support import *
     ],
 )
 def test_get_cached_media_success(prefix, file_id, cached_value):
-    from api.media_cache import get_cached_media
+    from api.media.cache import get_cached_media
 
     mock_redis = make_mock_config_redis()
     mock_redis.get.return_value = cached_value
@@ -30,7 +30,7 @@ def test_get_cached_media_success(prefix, file_id, cached_value):
     ["audio_transcription", "image_description"],
 )
 def test_get_cached_media_not_found(prefix):
-    from api.media_cache import get_cached_media
+    from api.media.cache import get_cached_media
 
     mock_redis = make_mock_config_redis()
     mock_redis.get.return_value = None
@@ -51,7 +51,7 @@ def test_get_cached_media_not_found(prefix):
     ["audio_transcription", "image_description"],
 )
 def test_get_cached_media_exception(prefix):
-    from api.media_cache import get_cached_media
+    from api.media.cache import get_cached_media
 
     def fail_redis():
         raise Exception("Redis error")
@@ -74,7 +74,7 @@ def test_get_cached_media_exception(prefix):
     ],
 )
 def test_cache_media_success(prefix, file_id, text, ttl):
-    from api.media_cache import cache_media
+    from api.media.cache import cache_media
 
     mock_redis = make_mock_config_redis()
 
@@ -95,7 +95,7 @@ def test_cache_media_success(prefix, file_id, text, ttl):
     ["audio_transcription", "image_description"],
 )
 def test_cache_media_exception(prefix):
-    from api.media_cache import cache_media
+    from api.media.cache import cache_media
 
     def fail_redis():
         raise Exception("Redis error")
@@ -184,7 +184,7 @@ def test_get_cache_history_success():
     from datetime import datetime, timedelta
     from api.services.maintenance import request_cache_history_key
 
-    with patch("api.cache_service.datetime") as mock_datetime:
+    with patch("api.cache.service.datetime") as mock_datetime:
         mock_redis = MagicMock()
         test_data = {"data": "test", "timestamp": "2024-01-01"}
         mock_redis.get.return_value = json.dumps(test_data)
@@ -1181,7 +1181,7 @@ def test_sort_dollar_rates_with_tcrm():
 
 
 def test_format_dollar_rates_includes_currency_band_limits():
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.5, "history": 0.5},
@@ -1206,7 +1206,7 @@ def test_format_dollar_rates_includes_currency_band_limits():
 def test_download_telegram_file_success():
     """Test download_telegram_file with successful download"""
     with (
-        patch("api.telegram_gateway.environ.get") as mock_env,
+        patch("api.bot.telegram.environ.get") as mock_env,
         patch("api.index.telegram_gateway._telegram_request") as mock_telegram_request,
         patch("api.services.http_client.get") as mock_get,
     ):
@@ -1242,7 +1242,7 @@ def test_download_telegram_file_success():
 def test_download_telegram_file_api_error():
     """Test download_telegram_file with API error"""
     with (
-        patch("api.telegram_gateway.environ.get") as mock_env,
+        patch("api.bot.telegram.environ.get") as mock_env,
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
@@ -1263,7 +1263,7 @@ def test_download_telegram_file_api_error():
 def test_download_telegram_file_network_error():
     """Test download_telegram_file with network error"""
     with (
-        patch("api.telegram_gateway.environ.get") as mock_env,
+        patch("api.bot.telegram.environ.get") as mock_env,
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
@@ -1514,7 +1514,7 @@ def test_transcribe_audio_groq_network_error():
 
 def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
     transcribe_audio_groq = index.app_runtime.media.transcribe_audio
-    from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
+    from api.providers.backoff import mark_provider_cooldown, clear_all_cooldowns
 
     clear_all_cooldowns()
     mark_provider_cooldown("groq:free:transcribe", 300)
@@ -1673,21 +1673,21 @@ def test_transcribe_file_by_id_video_extraction_fails():
 
 
 def test_extract_audio_duration_seconds_video():
-    from api.message_handler import _extract_audio_duration_seconds
+    from api.bot.message_handler import _extract_audio_duration_seconds
 
     message = {"video": {"duration": 42}}
     assert _extract_audio_duration_seconds(message) == 42.0
 
 
 def test_extract_audio_duration_seconds_video_note():
-    from api.message_handler import _extract_audio_duration_seconds
+    from api.bot.message_handler import _extract_audio_duration_seconds
 
     message = {"video_note": {"duration": 15}}
     assert _extract_audio_duration_seconds(message) == 15.0
 
 
 def test_extract_audio_duration_seconds_video_in_reply():
-    from api.message_handler import _extract_audio_duration_seconds
+    from api.bot.message_handler import _extract_audio_duration_seconds
 
     message = {"reply_to_message": {"video": {"duration": 30}}}
     assert _extract_audio_duration_seconds(message) == 30.0

@@ -21,7 +21,7 @@ def test_format_user_message_with_reply_context():
 
 def test_save_message_to_redis():
     save_message_to_redis = index.app_runtime.state.save_message
-    from api.message_state import CHAT_HISTORY_MAX_MESSAGES, CHAT_STATE_TTL
+    from api.memory.state import CHAT_HISTORY_MAX_MESSAGES, CHAT_STATE_TTL
 
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -52,7 +52,7 @@ def test_save_message_to_redis():
 
 
 def test_chat_history_limit_increased_for_busy_groups():
-    from api.message_state import CHAT_HISTORY_MAX_MESSAGES
+    from api.memory.state import CHAT_HISTORY_MAX_MESSAGES
 
     assert CHAT_HISTORY_MAX_MESSAGES == 200
 
@@ -175,7 +175,7 @@ def test_truncate_text_edge_cases():
 
 
 def test_save_and_get_chat_summary_round_trip():
-    from api.message_state import get_chat_summary, save_chat_summary
+    from api.memory.state import get_chat_summary, save_chat_summary
 
     redis_client = MagicMock()
     store = {}
@@ -189,7 +189,7 @@ def test_save_and_get_chat_summary_round_trip():
 
 
 def test_save_and_get_chat_compacted_until_round_trip():
-    from api.message_state import get_chat_compacted_until, save_chat_compacted_until
+    from api.memory.state import get_chat_compacted_until, save_chat_compacted_until
 
     redis_client = MagicMock()
     store = {}
@@ -203,7 +203,7 @@ def test_save_and_get_chat_compacted_until_round_trip():
 
 
 def test_save_message_to_redis_writes_search_document():
-    from api.message_state import save_message_to_redis
+    from api.memory.state import save_message_to_redis
 
     redis_client = MagicMock()
     pipe = MagicMock()
@@ -227,8 +227,8 @@ def test_save_message_to_redis_writes_search_document():
 
 
 def test_search_chat_history_prioritizes_reply_thread_matches():
-    import api.message_state as message_state
-    from api.message_state import search_chat_history
+    import api.memory.state as message_state
+    from api.memory.state import search_chat_history
 
     message_state._SEARCH_INDEX_READY = False
     redis_client = MagicMock()
@@ -273,8 +273,8 @@ def test_search_chat_history_prioritizes_reply_thread_matches():
 
 
 def test_search_chat_history_escapes_negative_group_chat_id():
-    import api.message_state as message_state
-    from api.message_state import search_chat_history
+    import api.memory.state as message_state
+    from api.memory.state import search_chat_history
 
     message_state._SEARCH_INDEX_READY = False
     redis_client = MagicMock()
@@ -296,7 +296,7 @@ def test_search_chat_history_escapes_negative_group_chat_id():
 
 
 def test_escape_search_text_escapes_at_sign():
-    from api.message_state import _escape_search_text
+    from api.memory.state import _escape_search_text
 
     assert _escape_search_text("@playtimbabot") == "\\@playtimbabot"
     assert _escape_search_text("hello @user world") == "hello \\@user world"
@@ -304,8 +304,8 @@ def test_escape_search_text_escapes_at_sign():
 
 
 def test_search_chat_history_escapes_at_sign_in_query():
-    import api.message_state as message_state
-    from api.message_state import search_chat_history
+    import api.memory.state as message_state
+    from api.memory.state import search_chat_history
 
     message_state._SEARCH_INDEX_READY = False
     redis_client = MagicMock()
@@ -351,7 +351,7 @@ def test_truncate_text_more_edge_cases():
 
 
 def test_save_chat_member_stores_member_info():
-    from api.message_state import save_chat_member
+    from api.memory.state import save_chat_member
 
     redis_client = MagicMock()
     store: dict[str, dict[str, str]] = {}
@@ -372,7 +372,7 @@ def test_save_chat_member_stores_member_info():
 
 
 def test_save_chat_member_skips_when_user_id_missing():
-    from api.message_state import save_chat_member
+    from api.memory.state import save_chat_member
 
     redis_client = MagicMock()
     save_chat_member(redis_client, "-100123", None, "Juan", "juan123")
@@ -380,7 +380,7 @@ def test_save_chat_member_skips_when_user_id_missing():
 
 
 def test_get_chat_members_returns_known_members():
-    from api.message_state import get_chat_members
+    from api.memory.state import get_chat_members
 
     redis_client = MagicMock()
     redis_client.hgetall.return_value = {
@@ -398,7 +398,7 @@ def test_get_chat_members_returns_known_members():
 
 
 def test_get_chat_members_returns_empty_when_no_members():
-    from api.message_state import get_chat_members
+    from api.memory.state import get_chat_members
 
     redis_client = MagicMock()
     redis_client.hgetall.return_value = {}
@@ -408,7 +408,7 @@ def test_get_chat_members_returns_empty_when_no_members():
 
 
 def test_get_chat_members_returns_empty_on_redis_error():
-    from api.message_state import get_chat_members
+    from api.memory.state import get_chat_members
 
     redis_client = MagicMock()
     redis_client.hgetall.side_effect = Exception("connection lost")

@@ -28,10 +28,10 @@ import requests
 from openpyxl import load_workbook
 from urllib3.exceptions import InsecureRequestWarning
 
-from api.admin_service import AdminService
-from api.cache_service import CacheService
-from api.config_runtime import ConfigRuntime
-from api.logging_config import get_logger
+from api.admin.service import AdminService
+from api.cache.service import CacheService
+from api.core.config_runtime import ConfigRuntime
+from api.core.logging import get_logger
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.utils import (
@@ -47,7 +47,7 @@ from api.utils import (
 logger = get_logger(__name__)
 
 format_bcra_variables_display = cast(
-    Callable[..., str], import_module("api.bcra_formatters").format_bcra_variables
+    Callable[..., str], import_module("api.markets.bcra_formatters").format_bcra_variables
 )
 
 CachedRequestFn = Callable[..., Optional[Dict[str, Any]]]

@@ -10,7 +10,7 @@ from typing import Dict, List, Any
 import os
 from datetime import datetime
 
-from api.config import load_bot_config as load_core_bot_config
+from api.core.config import load_bot_config as load_core_bot_config
 
 try:  # Optional dependency used in manual benchmarking CLI
     from dotenv import load_dotenv

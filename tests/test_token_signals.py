@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from api.token_signals import (
+from api.markets.token_signals import (
     TokenAddress,
     TokenSignal,
     choose_best_pair,
@@ -187,7 +187,7 @@ def test_has_usable_chart_rejects_missing_and_flat_candles():
 
 
 def test_render_or_fetch_signal_photo_uses_image_fallback(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     token = TokenAddress("solana", "solana", "SOL", SOL_MINT)
     signal = TokenSignal(token, _pair(), [], token_image_url="https://example.com/img.png")
@@ -199,7 +199,7 @@ def test_render_or_fetch_signal_photo_uses_image_fallback(monkeypatch):
 def test_download_token_image_normalizes_to_png(monkeypatch):
     import io
     from PIL import Image
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     source = io.BytesIO()
     Image.new("RGB", (4, 4), "#ff0000").save(source, format="JPEG")
@@ -226,7 +226,7 @@ def test_download_token_image_normalizes_to_png(monkeypatch):
 
 
 def test_fetch_pump_metadata_uses_api(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     redis_client = MagicMock()
     redis_client.get.return_value = None
@@ -252,7 +252,7 @@ def test_build_signal_keyboard_uses_native_copy_text_button():
 
 
 def test_fetch_signal_uses_first_pair_with_candles(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     pairs = [
         {"pairAddress": "bad", "liquidity": {"usd": 1000}, "volume": {"h24": 1}},
@@ -277,7 +277,7 @@ def test_fetch_signal_uses_first_pair_with_candles(monkeypatch):
 
 
 def test_fetch_signal_by_symbol_resolves_pair_token(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     pair = {
         "chainId": "solana",
@@ -301,7 +301,7 @@ def test_fetch_signal_by_symbol_resolves_pair_token(monkeypatch):
 
 
 def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     redis_client = MagicMock()
     send_photo = MagicMock(return_value=55)
@@ -332,7 +332,7 @@ def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
 
 
 def test_handle_token_signal_message_accepts_cashtag(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     redis_client = MagicMock()
     send_photo = MagicMock(return_value=55)
@@ -363,7 +363,7 @@ def test_handle_token_signal_message_accepts_cashtag(monkeypatch):
 
 
 def test_handle_token_signal_message_does_not_handle_failed_send(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     monkeypatch.setattr(
         token_signals,
@@ -418,7 +418,7 @@ def test_handle_token_signal_callback_deletes_for_requester():
 
 
 def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     redis_client = MagicMock()
     redis_client.get.return_value = (
@@ -458,7 +458,7 @@ def test_handle_token_signal_callback_refresh_keeps_source_reply(monkeypatch):
 
 
 def test_handle_token_signal_callback_refresh_uses_short_address(monkeypatch):
-    import api.token_signals as token_signals
+    import api.markets.token_signals as token_signals
 
     redis_client = MagicMock()
     redis_client.get.return_value = (
@@ -506,7 +506,7 @@ def test_handle_token_signal_callback_refresh_rate_limits(monkeypatch):
     )
     answer = MagicMock()
     edit_photo = MagicMock()
-    monkeypatch.setattr("api.token_signals.time.time", lambda: 1005)
+    monkeypatch.setattr("api.markets.token_signals.time.time", lambda: 1005)
 
     handled = handle_token_signal_callback(
         {

@@ -1,4 +1,4 @@
-from api.command_registry import build_command_registry, parse_command
+from api.bot.command_registry import build_command_registry, parse_command
 
 
 def test_build_command_registry_reuses_alias_metadata():

@@ -12,7 +12,7 @@ def _execute_web_fetch(
     context: Dict[str, Any],
 ) -> ToolResult:
     # Lazy import to avoid circular dependency: agent_tools imports from tools/.
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
     from api.utils.links import fetch_tweet_content
 
     url = params.get("url", "")

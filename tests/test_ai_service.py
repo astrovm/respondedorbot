@@ -2,8 +2,8 @@ from tests.support import *
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
-    from api.ai_service import AIConversationRequest, build_ai_service
-    from api.message_handler import PreparedMessage
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
 
     handle_ai_response = MagicMock(return_value="respuesta ok")
     ai_service = build_ai_service(
@@ -52,8 +52,8 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision(
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcribe():
-    from api.ai_service import AIConversationRequest, build_ai_service
-    from api.message_handler import PreparedMessage
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
 
     handle_ai_response = MagicMock(return_value="🖼️ en la imagen veo: todo piola")
     ai_service = build_ai_service(
@@ -102,8 +102,8 @@ def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_transcr
 
 
 def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
-    from api.ai_service import AIConversationRequest, build_ai_service
-    from api.message_handler import PreparedMessage
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
 
     build_ai_messages = MagicMock(return_value=[{"role": "user", "content": "hola"}])
     ai_service = build_ai_service(
@@ -151,8 +151,8 @@ def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
 
 
 def test_run_conversation_bills_summary_compaction_as_billing_segment():
-    from api.ai_service import AIConversationRequest, build_ai_service
-    from api.message_handler import PreparedMessage
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
 
     handle_ai_response = MagicMock(return_value="ok")
     ai_service = build_ai_service(
@@ -197,8 +197,8 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
 
 
 def test_run_conversation_uses_fallback_metadata_not_response_text():
-    from api.ai_service import AIConversationRequest, build_ai_service
-    from api.message_handler import PreparedMessage
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
 
     fallback_text = "me quedé reculando y no te pude responder, probá de nuevo"
     ai_service = build_ai_service(

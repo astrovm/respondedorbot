@@ -98,11 +98,11 @@ uv run --locked python run_polling.py
 
 - `ProviderChain` — tries providers in order until one succeeds
 - `OpenRouterProvider` — streaming + completion, primary chat model
-### Streaming (`api/streaming.py`)
+### Streaming (`api/bot/streaming.py`)
 
 `TelegramMessageStreamer` edits Telegram messages every 400ms or 15+ new chars. Token streaming from `OpenRouterProvider.stream()` when no tools active. Falls back to complete response for tool-enabled requests.
 
-### AI service (`api/ai_service.py`)
+### AI service (`api/ai/service.py`)
 
 `AIService` orchestrates credit reservation → model call → billing settlement:
 - **Reserve**: holds worst-case credits before AI call
@@ -125,7 +125,7 @@ uv run --locked python run_polling.py
 - **Hourly limit** — `creditless_user_hourly_limit` caps free messages per user per hour
 - **Credit packs** (Telegram Stars): 50→2500 credits with 50% bonus tiers
 
-### Response pipeline (`api/ai_pipeline.py`)
+### Response pipeline (`api/ai/pipeline.py`)
 
 Sequential cleanup:
 1. Remove "gordo:" prefix
@@ -144,16 +144,22 @@ Every system prompt includes:
 ## Project layout
 
 - `api/` - application code
+  - `api/admin/` - admin commands, reporting, authorization
+  - `api/ai/` - AI orchestration, prompting, pricing, response cleanup
+  - `api/billing/` - credits, settlement, billing commands, Stars callbacks
+  - `api/bot/` - Telegram adapter, handlers, routing, streaming, chat config
+  - `api/cache/` - HTTP and Redis caching
+  - `api/core/` - configuration, constants, logging
+  - `api/links/` - URL metadata, replacement, and enrichment
+  - `api/markets/` - crypto, dollar, stocks, Polymarket, weather
+  - `api/media/` - image, audio, video, transcription, media cache
+  - `api/memory/` - chat history, retrieval, compaction, summaries
   - `api/providers/` - AI provider abstraction (OpenRouter, ProviderChain)
-  - `api/streaming.py` - Telegram token streaming
-  - `api/ai_service.py` - AI conversation orchestration and billing
-  - `api/ai_pipeline.py` - response cleanup pipeline
-  - `api/ai_billing.py` - credit reservation/settlement/refund
-  - `api/message_handler.py` - message routing, command dispatch, billing integration
-  - `api/message_state.py` - Redis chat history, RediSearch indexing, compaction markers
-  - `api/command_registry.py` - command definitions and aliases
+  - `api/tasks/` - task execution and scheduling
   - `api/tools/` - agentic tool registry (crypto, calculator, web fetch, tasks)
-  - `api/index.py` - core bot logic, commands, provider integration
+  - `api/services/` - persistence and low-level external adapters
+  - `api/utils/` - reusable helpers
+  - `api/index.py` - application composition root and compatibility exports
 - `quadlets/` - Podman Quadlet container definitions
 - `systemd/` - systemd service and timer units
 - `run_polling.py` - bot entrypoint

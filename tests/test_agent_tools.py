@@ -42,7 +42,7 @@ class _FakeResponse:
 
 
 def test_fetch_url_content_extracts_main_text_from_html():
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
 
     html = b"""
     <html>
@@ -61,7 +61,7 @@ def test_fetch_url_content_extracts_main_text_from_html():
     """
 
     with patch(
-        "api.agent_tools.request_with_ssl_fallback",
+        "api.links.agent_tools.request_with_ssl_fallback",
         return_value=_FakeResponse(
             url="https://example.com/final",
             body=html,
@@ -80,7 +80,7 @@ def test_fetch_url_content_extracts_main_text_from_html():
 
 
 def test_fetch_url_content_rejects_private_network_urls():
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
 
     result = fetch_url_content("http://127.0.0.1:8000/secret")
 
@@ -91,7 +91,7 @@ def test_fetch_url_content_rejects_private_network_urls():
 
 
 def test_fetch_url_content_rejects_redirect_to_private_network_url():
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
 
     redirect = _FakeResponse(
         url="https://example.com/start",
@@ -101,7 +101,7 @@ def test_fetch_url_content_rejects_redirect_to_private_network_url():
     redirect.headers["Location"] = "http://127.0.0.1:8000/secret"
 
     with patch(
-        "api.agent_tools.request_with_ssl_fallback",
+        "api.links.agent_tools.request_with_ssl_fallback",
         return_value=redirect,
     ) as mock_request:
         result = fetch_url_content("https://example.com/start")
@@ -114,11 +114,11 @@ def test_fetch_url_content_rejects_redirect_to_private_network_url():
 
 
 def test_fetch_url_content_rejects_hostname_resolving_to_private_ip():
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
 
     with (
         patch(
-            "api.agent_tools.socket.getaddrinfo",
+            "api.links.agent_tools.socket.getaddrinfo",
             return_value=[
                 (
                     2,
@@ -129,7 +129,7 @@ def test_fetch_url_content_rejects_hostname_resolving_to_private_ip():
                 )
             ],
         ),
-        patch("api.agent_tools.request_with_ssl_fallback") as mock_request,
+        patch("api.links.agent_tools.request_with_ssl_fallback") as mock_request,
     ):
         result = fetch_url_content("https://internal.example.test/secret")
 
@@ -141,7 +141,7 @@ def test_fetch_url_content_rejects_hostname_resolving_to_private_ip():
 
 
 def test_fetch_url_content_truncates_large_pages():
-    from api.agent_tools import fetch_url_content
+    from api.links.agent_tools import fetch_url_content
 
     repeated = ("palabra " * 4000).encode()
     html = (
@@ -151,7 +151,7 @@ def test_fetch_url_content_truncates_large_pages():
     )
 
     with patch(
-        "api.agent_tools.request_with_ssl_fallback",
+        "api.links.agent_tools.request_with_ssl_fallback",
         return_value=_FakeResponse(
             url="https://example.com/large",
             body=html,
