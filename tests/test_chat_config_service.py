@@ -2,7 +2,7 @@ import json
 from unittest.mock import Mock
 
 
-from api.chat_config_service import build_chat_config_service
+from api.bot.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import ChatConfigRepository
 
 

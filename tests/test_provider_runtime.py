@@ -33,9 +33,9 @@ class _FakeClient:
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     tool_calls = [
         SimpleNamespace(
@@ -104,9 +104,9 @@ def test_provider_runtime_executes_tool_calls_until_stop():
 
 
 def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -168,9 +168,9 @@ def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
 
 
 def test_provider_runtime_returns_plain_text_when_tools_never_called():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -224,9 +224,9 @@ def test_provider_runtime_returns_plain_text_when_tools_never_called():
 
 
 def test_provider_runtime_executes_standalone_pseudo_web_fetch_call():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     first_response = _FakeResponse(
         [
@@ -298,9 +298,9 @@ def test_provider_runtime_executes_standalone_pseudo_web_fetch_call():
 
 
 def test_provider_runtime_executes_preamble_then_pseudo_web_fetch_call():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     first_response = _FakeResponse(
         [
@@ -368,9 +368,9 @@ def test_provider_runtime_executes_preamble_then_pseudo_web_fetch_call():
 
 
 def test_provider_runtime_executes_dsml_pseudo_web_fetch_call():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     first_response = _FakeResponse(
         [
@@ -445,9 +445,9 @@ def test_provider_runtime_executes_dsml_pseudo_web_fetch_call():
 
 
 def test_provider_runtime_does_not_execute_pseudo_tool_inside_prose():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -501,9 +501,9 @@ def test_provider_runtime_does_not_execute_pseudo_tool_inside_prose():
 
 
 def test_provider_runtime_does_not_execute_pseudo_tool_when_not_advertised():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -557,9 +557,9 @@ def test_provider_runtime_does_not_execute_pseudo_tool_when_not_advertised():
 
 
 def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call():
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     from api.providers.openrouter import OpenRouterProvider
-    from api.tool_runtime import ToolRuntime
+    from api.tools.runtime import ToolRuntime
 
     pseudo_call_response = _FakeResponse(
         [
@@ -625,9 +625,9 @@ def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call(
 
 
 def test_provider_runtime_shared_tool_loop_matches_complete():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     def _build_runtime(responses):
         client = _FakeClient(responses)
@@ -743,9 +743,9 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
 
 
 def test_provider_runtime_retries_json_decode_errors_then_returns_result():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -787,7 +787,7 @@ def test_provider_runtime_retries_json_decode_errors_then_returns_result():
         ToolRuntime(),
     )
 
-    with patch("api.provider_runtime.time.sleep") as sleep:
+    with patch("api.providers.runtime.time.sleep") as sleep:
         result = runtime.complete(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
@@ -803,8 +803,8 @@ def test_provider_runtime_retries_json_decode_errors_then_returns_result():
 
 
 def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     decode_errors = [
         json.JSONDecodeError("Expecting value", "\n         \n", 0)
@@ -835,7 +835,7 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
         ToolRuntime(),
     )
 
-    with patch("api.provider_runtime.time.sleep"):
+    with patch("api.providers.runtime.time.sleep"):
         result = runtime.complete(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
@@ -854,9 +854,9 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
 
 
 def test_provider_runtime_retries_server_status_errors_then_returns_result():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     response = _FakeResponse(
         [
@@ -902,7 +902,7 @@ def test_provider_runtime_retries_server_status_errors_then_returns_result():
         ToolRuntime(),
     )
 
-    with patch("api.provider_runtime.time.sleep") as sleep:
+    with patch("api.providers.runtime.time.sleep") as sleep:
         result = runtime.complete(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
@@ -917,9 +917,9 @@ def test_provider_runtime_retries_server_status_errors_then_returns_result():
 
 
 def test_provider_runtime_does_not_retry_bad_request_and_reports_one_based_round():
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     http_response = httpx.Response(
         400,
@@ -958,7 +958,7 @@ def test_provider_runtime_does_not_retry_bad_request_and_reports_one_based_round
         ToolRuntime(),
     )
 
-    with patch("api.provider_runtime.time.sleep") as sleep:
+    with patch("api.providers.runtime.time.sleep") as sleep:
         result = runtime.complete(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],

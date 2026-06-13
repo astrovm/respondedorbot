@@ -50,7 +50,7 @@ def test_get_rulo():
 
 
 def test_build_rulo_message_preserves_arbitrage_output():
-    from api.rulo_commands import build_rulo_message
+    from api.markets.rulo import build_rulo_message
 
     dolar_data = {
         "oficial": {"price": 1440},
@@ -78,7 +78,7 @@ def test_build_rulo_message_preserves_arbitrage_output():
 
 
 def test_sort_dollar_rates_uses_hourly_history_and_tcrm():
-    from api.dollar_commands import sort_dollar_rates
+    from api.markets.dollar_commands import sort_dollar_rates
 
     dollar_rates = {
         "data": {
@@ -1059,7 +1059,7 @@ def test_format_market_info():
 
 
 def test_market_commands_format_market_info_compact_summary():
-    from api.market_commands import format_market_info
+    from api.markets.context import format_market_info
 
     market_data = {
         "crypto": [
@@ -1236,7 +1236,7 @@ def test_sort_dollar_rates_non24h_no_history_gives_none_variations():
 
 
 def test_format_dollar_rates_shows_no_history_footer():
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     rates = [
         {"name": "Blue", "price": 1200.0, "history": None},
@@ -1249,7 +1249,7 @@ def test_format_dollar_rates_shows_no_history_footer():
 
 
 def test_format_dollar_rates_no_footer_for_24h():
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     rates = [{"name": "Blue", "price": 1200.0, "history": None}]
     result = format_dollar_rates(rates, hours_ago=24)
@@ -1295,7 +1295,7 @@ def test_get_prices_7d_uses_correct_cmc_field():
 
 def test_format_dollar_rates_with_positive_variations():
     """Test format_dollar_rates with positive variation values"""
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
@@ -1315,7 +1315,7 @@ def test_format_dollar_rates_with_positive_variations():
 
 def test_format_dollar_rates_with_negative_variations():
     """Test format_dollar_rates with negative variation values"""
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Tarjeta", "price": 1600.75, "history": -0.8},
@@ -1330,7 +1330,7 @@ def test_format_dollar_rates_with_negative_variations():
 
 def test_format_dollar_rates_with_none_variations():
     """Test format_dollar_rates with None variation values"""
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": None},
@@ -1345,7 +1345,7 @@ def test_format_dollar_rates_with_none_variations():
 
 def test_format_dollar_rates_mixed_variations():
     """Test format_dollar_rates with mixed variation values"""
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
@@ -1365,7 +1365,7 @@ def test_format_dollar_rates_mixed_variations():
 
 def test_format_dollar_rates_zero_decimal_formatting():
     """Test format_dollar_rates decimal formatting for whole numbers"""
-    from api.dollar_runtime import format_dollar_rates
+    from api.markets.dollar import format_dollar_rates
 
     dollar_rates = [
         {"name": "Test1", "price": 1000.00, "history": 0.00},

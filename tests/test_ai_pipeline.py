@@ -1,14 +1,14 @@
 from types import SimpleNamespace
 
 from tests.support import *
-from api.ai_pipeline import strip_markdown_formatting
+from api.ai.pipeline import strip_markdown_formatting
 from api.providers.base import ProviderResult
 
 
 def _build_provider_runtime(*, client, tool_runtime=None):
-    from api.ai_pricing import AIUsageResult
-    from api.provider_runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tool_runtime import ToolRuntime
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
 
     runtime_tool_runtime = tool_runtime or ToolRuntime(print_fn=lambda *_args: None)
     return ProviderRuntime(
@@ -350,7 +350,7 @@ def test_provider_runtime_includes_web_search_by_default():
 
 
 def test_check_provider_available_returns_true_by_default(monkeypatch):
-    from api.provider_backoff import clear_all_cooldowns
+    from api.providers.backoff import clear_all_cooldowns
 
     clear_all_cooldowns()
     monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
@@ -1121,7 +1121,7 @@ def test_handle_ai_response_reads_fallback_from_meta(monkeypatch):
 
 
 def test_handle_ai_response_does_not_sleep_before_provider_call(monkeypatch):
-    import api.ai_pipeline as ai_pipeline
+    import api.ai.pipeline as ai_pipeline
 
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
 
@@ -1147,7 +1147,7 @@ def test_handle_ai_response_returns_fallback_on_empty(monkeypatch, caplog):
 
     response_meta = {}
 
-    with caplog.at_level(logging.WARNING, logger="api.ai_pipeline"):
+    with caplog.at_level(logging.WARNING, logger="api.ai.pipeline"):
         result = handle_ai_response("123", fake_handler, [], response_meta=response_meta)
 
     assert result == "me quedé reculando y no te pude responder, probá de nuevo"
@@ -1193,7 +1193,7 @@ def test_handle_ai_response_strips_user_identity_prefix(monkeypatch):
 
 def test_complete_with_providers_openrouter_success():
     """Test complete_with_providers when OpenRouter succeeds."""
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
 
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
@@ -1236,7 +1236,7 @@ def test_complete_with_providers_returns_none_when_openrouter_fails():
 
 
 def test_complete_with_providers_records_openrouter_billing_on_success(monkeypatch):
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
 
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]

@@ -1,13 +1,13 @@
 from unittest.mock import MagicMock
 
-from api.ai_billing import (
+from api.billing.ai import (
     build_insufficient_credits_message,
     get_ai_billing_packs,
     parse_topup_payload,
 )
 from tests.support import make_ai_message_billing
-from api.credit_units import whole_credits_to_units
-from api.ai_pricing import (
+from api.billing.credit_units import whole_credits_to_units
+from api.ai.pricing import (
     calculate_billing_for_segments,
     estimate_vision_reserve_credits,
 )

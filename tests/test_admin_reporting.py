@@ -16,7 +16,7 @@ def test_admin_report_formats_error_traceback_from_exception():
 
     with (
         patch.dict(
-            "api.admin_reporting.environ",
+            "api.admin.reporting.environ",
             {"ADMIN_CHAT_ID": "1", "FRIENDLY_INSTANCE_NAME": "test"},
             clear=True,
         ),
@@ -42,7 +42,7 @@ def test_admin_report_redacts_telegram_token_from_error_message_and_traceback():
 
     with (
         patch.dict(
-            "api.admin_reporting.environ",
+            "api.admin.reporting.environ",
             {"ADMIN_CHAT_ID": "1", "FRIENDLY_INSTANCE_NAME": "test"},
             clear=True,
         ),

@@ -1,4 +1,4 @@
-from api.telegram_gateway import TelegramGateway
+from api.bot.telegram import TelegramGateway
 import json
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from api.tools.registry import ToolResult, register_tool
-from api.tools.task_scheduler import (
+from api.tasks.scheduler import (
     describe_trigger,
     format_interval,
     get_scheduler_runtime_status,

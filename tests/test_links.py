@@ -12,7 +12,7 @@ def test_is_social_frontend():
 
 
 def test_link_commands_extract_html_metadata_prefers_open_graph():
-    from api.link_commands import extract_html_metadata, truncate_link_metadata_text
+    from api.links.commands import extract_html_metadata, truncate_link_metadata_text
 
     html = """
     <html><head>

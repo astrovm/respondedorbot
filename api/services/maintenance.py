@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import redis
 
-from api.config import config_redis
+from api.core.config import config_redis
 from api.services import credits_db
 
 CHAT_STATE_TTL = 30 * 24 * 60 * 60

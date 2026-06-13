@@ -13,10 +13,10 @@ import redis
 import requests  # noqa: F401
 from unittest.mock import ANY, MagicMock, patch  # noqa: F401
 
-from api import config as config_module  # noqa: F401
+from api.core import config as config_module  # noqa: F401
 from api import index
-from api.ai_pipeline import remove_gordo_prefix  # noqa: F401
-from api.chat_settings import (  # noqa: F401
+from api.ai.pipeline import remove_gordo_prefix  # noqa: F401
+from api.bot.chat_settings import (  # noqa: F401
     CHAT_ADMIN_STATUS_TTL,
     CHAT_CONFIG_DEFAULTS,
     build_config_keyboard as _build_config_keyboard,
@@ -26,20 +26,20 @@ from api.chat_settings import (  # noqa: F401
     is_chat_admin as _is_chat_admin,
     set_chat_config as _set_chat_config,
 )
-from api.command_registry import (
+from api.bot.command_registry import (
     parse_command as _parse_command,
     should_auto_process_media as _should_auto_process_media,
     should_gordo_respond as _should_gordo_respond,
 )
-from api.message_state import (
+from api.memory.state import (
     build_reply_context_text as _build_reply_context_text,
     format_user_message as _format_user_message,
     get_bot_message_metadata as _get_bot_message_metadata,
     save_bot_message_metadata as _save_bot_message_metadata,
     truncate_text as _truncate_text,
 )
-from api.ai_billing import AIMessageBilling  # noqa: F401
-from api.link_service import LinkService
+from api.billing.ai import AIMessageBilling  # noqa: F401
+from api.links.service import LinkService
 from api.services import bcra as bcra_service  # noqa: F401
 
 

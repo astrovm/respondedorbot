@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from api.task_executor import TaskExecutor
+from api.tasks.executor import TaskExecutor
 
 
 def _build_executor(

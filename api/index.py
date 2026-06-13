@@ -34,7 +34,7 @@ import re
 import redis
 import requests
 import time
-from api.provider_backoff import (
+from api.providers.backoff import (
     mark_provider_cooldown,
     get_provider_cooldown_remaining as _get_cooldown_remaining,
     is_provider_cooled_down,
@@ -49,7 +49,7 @@ else:
 from api.utils import (
     fmt_num,
 )
-from api.general_commands import (
+from api.bot.general_commands import (
     convert_base,
     convert_to_command,
     gen_random,
@@ -59,56 +59,56 @@ from api.general_commands import (
     romanize_japanese,
     select_random,
 )
-from api import giphy_commands
-from api.giphy_commands import GiphyService
-from api import media_cache
-from api.media_cache import MediaCacheService
-from api import stock_commands
-from api.stock_commands import StockService
-from api.prompt_context import (
+from api.bot import giphy as giphy_commands
+from api.bot.giphy import GiphyService
+from api.media import cache as media_cache
+from api.media.cache import MediaCacheService
+from api.markets import stocks as stock_commands
+from api.markets.stocks import StockService
+from api.ai.prompt_context import (
     clean_crypto_data,
     format_hacker_news_info,
     format_weather_info,
     get_weather_description,
 )
-from api.prompt_context import build_ai_messages as _build_ai_messages
-from api.message_content import (
+from api.ai.prompt_context import build_ai_messages as _build_ai_messages
+from api.bot.message_content import (
     extract_message_content,
     extract_message_text,
     extract_poll_text as _extract_poll_text,
     sticker_vision_file_id as _sticker_vision_file_id,
 )
-from api.media_utils import extract_audio_from_video, measure_audio_duration_seconds
-from api import weather_context
-from api import hacker_news
-from api.admin_service import AdminService
+from api.media.utils import extract_audio_from_video, measure_audio_duration_seconds
+from api.markets import weather as weather_context
+from api.markets import hacker_news
+from api.admin.service import AdminService
 from api.application import ApplicationRuntime
-from api.cache_service import CacheService
-from api.system_prompt import build_system_message as _build_system_message
-from api import image_processing
-from api.image_processing import ImageService
-from api.provider_errors import (
+from api.cache.service import CacheService
+from api.ai.system_prompt import build_system_message as _build_system_message
+from api.media import images as image_processing
+from api.media.images import ImageService
+from api.providers.errors import (
     extract_error_headers as _extract_error_headers,
     extract_rate_limit_backoff_seconds as _extract_rate_limit_backoff_seconds,
     is_rate_limit_error as _is_rate_limit_error,
     parse_retry_window_seconds as _parse_retry_window_seconds,
     should_try_next_groq_account as _should_try_next_groq_account_after_error,
 )
-from api.provider_service import ProviderService
-from api import polymarket_commands
-from api.polymarket_commands import PolymarketService
-from api.price_service import PriceService
-from api import dollar_runtime
-from api.dollar_runtime import DollarService
-from api import provider_config
-from api import provider_support
-from api.billing_service import BillingService
-from api.summary_runtime import SummaryService, SummaryServiceDeps
-from api.ai_request_runtime import AIRequestService, AIRequestServiceDeps
-from api import callback_runtime
-from api.media_runtime import MediaService, MediaServiceDeps
-from api.response_runtime import ResponseService, ResponseServiceDeps
-from api import media_commands
+from api.providers.service import ProviderService
+from api.markets import polymarket as polymarket_commands
+from api.markets.polymarket import PolymarketService
+from api.markets.price import PriceService
+from api.markets import dollar as dollar_runtime
+from api.markets.dollar import DollarService
+from api.providers import config as provider_config
+from api.providers import support as provider_support
+from api.billing.service import BillingService
+from api.memory.summary import SummaryService, SummaryServiceDeps
+from api.ai.request_runtime import AIRequestService, AIRequestServiceDeps
+from api.bot import callbacks as callback_runtime
+from api.media.runtime import MediaService, MediaServiceDeps
+from api.bot.responses import ResponseService, ResponseServiceDeps
+from api.media import commands as media_commands
 from api.services.redis_helpers import (
     redis_get_json,
     redis_set_json,
@@ -116,14 +116,14 @@ from api.services.redis_helpers import (
 )
 from api.services import http_client
 from api.services.stale_cache import StaleCache, StaleCacheResult
-from api.ai_billing import (
+from api.billing.ai import (
     BalanceFormatter,
 )
-from api.chat_context import (
+from api.bot.chat_context import (
     extract_numeric_chat_id as _billing_extract_numeric_chat_id,
     extract_user_id as _billing_extract_user_id,
 )
-from api.ai_pricing import (
+from api.ai.pricing import (
     CHAT_OUTPUT_TOKEN_LIMIT,
     AIUsageResult,
     VISION_OUTPUT_TOKEN_LIMIT,
@@ -134,8 +134,8 @@ from api.ai_pricing import (
     ensure_mapping,
     MODEL_PRICING_USD_MICROS,
 )
-from api.agent_tools import fetch_url_content
-from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
+from api.links.agent_tools import fetch_url_content
+from api.core.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
 from api.providers import OpenRouterProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
@@ -144,22 +144,22 @@ import api.tools.web_fetch
 import api.tools.task_set
 import api.tools.get_chat_members
 from api.tools import get_all_tool_schemas
-from api.tool_runtime import ToolRuntime
-from api.tools.task_scheduler import (
+from api.tools.runtime import ToolRuntime
+from api.tasks.scheduler import (
     list_tasks as _task_list_tasks,
     cancel_task as _task_cancel_task,
     format_task_summary,
 )
-from api.ai_pipeline import (
+from api.ai.pipeline import (
     _extract_user_name,
     handle_ai_response as _ai_handle_response,
 )
-from api.streaming import (
+from api.bot.streaming import (
     consume_stream_to_telegram,
     set_streamed_response_metadata,
     stream_to_telegram,
 )
-from api.chat_settings import (
+from api.bot.chat_settings import (
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
     build_config_keyboard,
@@ -168,18 +168,18 @@ from api.chat_settings import (
     decode_redis_value,
     is_group_chat_type,
 )
-from api.chat_config_service import build_chat_config_service
+from api.bot.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import build_chat_config_repository
-from api.credit_units import format_credit_units
-from api.command_registry import (
+from api.billing.credit_units import format_credit_units
+from api.bot.command_registry import (
     COMMAND_GROUPS,
     build_command_registry as _build_command_registry,
     parse_command as _command_parse_command,
     should_auto_process_media as _command_should_auto_process_media,
     should_gordo_respond as _command_should_gordo_respond,
 )
-from api.feature_catalog import render_ai_capabilities_prompt, render_help_text
-from api.message_handler import (
+from api.bot.feature_catalog import render_ai_capabilities_prompt, render_help_text
+from api.bot.message_handler import (
     MessageAIDeps,
     MessageChatDeps,
     MessageHandlerDeps,
@@ -190,9 +190,9 @@ from api.message_handler import (
     build_message_handler_deps,
     handle_msg as _handle_msg_impl,
 )
-from api.ai_service import build_ai_service
-from api.token_signals import handle_token_signal_callback
-from api.price_commands import (
+from api.ai.service import build_ai_service
+from api.markets.token_signals import handle_token_signal_callback
+from api.markets.price_commands import (
     SUPPORTED_PRICE_SYMBOLS,
     expand_price_tokens,
     find_coin_by_symbol_or_name,
@@ -200,28 +200,28 @@ from api.price_commands import (
     parse_conversion_only,
     price_query_parameter,
 )
-from .dollar_commands import sort_dollar_rates
-from .rulo_commands import build_rulo_message
-from .market_commands import format_market_info
-from api.routing_policy import RoutingPolicy
-from api.telegram_gateway import (
+from api.markets.dollar_commands import sort_dollar_rates
+from api.markets.rulo import build_rulo_message
+from api.markets.context import format_market_info
+from api.bot.routing import RoutingPolicy
+from api.bot.telegram import (
     TelegramGateway,
     _redact_telegram_tokens,
     _truncate_telegram_text,
     send_typing,
     telegram_request as _telegram_request,
 )
-from api.telegram_bot_commands import update_bot_commands as _update_bot_commands
-from api.message_state import (
+from api.bot.telegram_commands import update_bot_commands as _update_bot_commands
+from api.memory.state import (
     BOT_MESSAGE_META_TTL,
     CHAT_HISTORY_MAX_MESSAGES,
     MessageStateService,
 )
-from api.logging_config import get_logger
-from api.logging_config import format_log_context
-from api.config_runtime import ConfigRuntime
-from api.link_service import LinkService
-from api.random_replies import build_random_reply
+from api.core.logging import get_logger
+from api.core.logging import format_log_context
+from api.core.config_runtime import ConfigRuntime
+from api.links.service import LinkService
+from api.ai.random_replies import build_random_reply
 from api.services import bcra as bcra_service
 from api.services.bcra import BCRAService
 from api.services import chat_config_db as chat_config_db_service

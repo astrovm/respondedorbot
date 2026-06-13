@@ -20,7 +20,7 @@ class FakeProvider:
         return self._available
 
     def complete(self, system_message, messages, **kwargs):
-        from api.ai_pricing import AIUsageResult
+        from api.ai.pricing import AIUsageResult
 
         return AIUsageResult(
             kind="chat",
@@ -121,7 +121,7 @@ def test_openrouter_provider_not_available_when_client_none():
 
 
 def test_groq_provider_not_available_when_cooled_down():
-    from api.provider_backoff import mark_provider_cooldown
+    from api.providers.backoff import mark_provider_cooldown
 
     mark_provider_cooldown("groq:test", 60)
 
@@ -138,7 +138,7 @@ def test_groq_provider_not_available_when_cooled_down():
 
 
 def test_groq_provider_available_when_not_cooled_down():
-    from api.provider_backoff import clear_provider_cooldown
+    from api.providers.backoff import clear_provider_cooldown
 
     clear_provider_cooldown("groq:test2")
 
@@ -155,7 +155,7 @@ def test_groq_provider_available_when_not_cooled_down():
 
 
 def test_provider_chain_stream_forwards_extra_tools_and_tool_context():
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
 
     extra_tools = [{"type": "function", "function": {"name": "echo"}}]
     tool_context = {"chat_id": "123"}

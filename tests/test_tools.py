@@ -79,7 +79,7 @@ class TestCryptoPricesTool:
 
 
 class TestWebFetchTool:
-    @patch("api.agent_tools.fetch_url_content")
+    @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch(self, mock_fetch):
         mock_fetch.return_value = {
             "url": "https://example.com",
@@ -89,12 +89,12 @@ class TestWebFetchTool:
         result = execute_tool("web_fetch", {"url": "https://example.com"}, {})
         assert "Hello world" in result.output
 
-    @patch("api.agent_tools.fetch_url_content")
+    @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch_no_url(self, mock_fetch):
         result = execute_tool("web_fetch", {}, {})
         assert "url" in result.output.lower()
 
-    @patch("api.agent_tools.fetch_url_content")
+    @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch_error(self, mock_fetch):
         mock_fetch.return_value = {"url": "https://example.com", "error": "timeout"}
         result = execute_tool("web_fetch", {"url": "https://example.com"}, {})
@@ -151,7 +151,7 @@ class TestWebFetchTool:
         assert "All clear" in result.output
         assert result.metadata["url"] == "https://x.com/sentdefender/status/2048202539770802483"
 
-    @patch("api.agent_tools.fetch_url_content")
+    @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch_rejects_x_error_page(self, mock_fetch):
         mock_fetch.return_value = {
             "url": "https://x.com/status/1",
@@ -163,7 +163,7 @@ class TestWebFetchTool:
         assert "pagina de error" in result.output
 
     @patch("api.utils.links.inspect_embed_url")
-    @patch("api.agent_tools.fetch_url_content")
+    @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch_does_not_treat_embedded_twitter_url_as_tweet(
         self, mock_fetch, mock_inspect
     ):

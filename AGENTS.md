@@ -14,7 +14,7 @@ To run a single test file: `uv run --locked python -m pytest tests/test_ai_pipel
 
 - Python 3.14, dependencies in `pyproject.toml`, locked by `uv.lock`
 - Lint: ruff (rules in `pyproject.toml`, not defaults - many ignores including `I001`, `E501`, `S101`)
-- Types: mypy with `ignore_missing_imports = true`, `disallow_untyped_defs = false`
+- Types: mypy strict across `api/`; only APScheduler's two untyped modules ignore missing imports
 - Tests: pytest, no coverage enforcement
 - Bot framework: python-telegram-bot v22
 - AI: OpenRouter (chat/vision), Groq (transcription, with OpenRouter fallback)
@@ -27,32 +27,36 @@ To run a single test file: `uv run --locked python -m pytest tests/test_ai_pipel
 - `run_polling.py` - bot main loop (loads `.env`, starts polling + price refresh + task scheduler)
 - `run_maintenance.py` - cron job (Redis cleanup, cache pruning)
 
-**`api/index.py` is the god module (~5700 lines):** handlers, commands, provider wiring, market data, billing helpers. It has an `F401` ruff exception because it re-exports symbols used by `bot_ptb.py` and other modules. Do not clean up "unused" imports in this file without checking callers.
+`api/index.py` is the composition root. It builds long-lived services and keeps
+public compatibility exports used by entrypoints and tests. Its `F401`
+exception is intentional; check callers before removing imports.
 
-**Key modules:**
-- `api/config.py` - env loading, Redis connection factory, bot config (reads `workspace/SOUL.md` + `workspace/RULES.md`)
-- `api/bot_ptb.py` - python-telegram-bot async adapter (calls sync handlers from `index.py`)
-- `api/message_handler.py` - message routing, command dispatch
-- `api/ai_service.py` - AI orchestration (credit reserve → model call → settle)
-- `api/ai_pipeline.py` - response cleanup (prefix stripping, dedup, identity leak prevention)
-- `api/ai_billing.py` - credit reservation/settlement/refund
-- `api/streaming.py` - token-by-token Telegram message editing
-- `api/providers/` - `ProviderChain` (tries providers in order), `OpenRouterProvider`, `GroqProvider`
-- `api/message_state.py` - Redis chat history, RediSearch indexing, compaction markers
-- `api/tools/` - agentic tool registry (crypto, calculator, web fetch, task scheduler)
-- `api/services/` - `bcra.py`, `credits_db.py` (Supabase), `maintenance.py`, `redis_helpers.py`
-- `api/utils/` - formatting, HTTP helpers, link enrichment, YouTube transcript
+**Domain packages:**
+- `api/core/` - environment loading, Redis configuration, constants, logging
+- `api/admin/` - admin commands, reporting, authorization service
+- `api/ai/` - request preparation, orchestration, pricing, prompt and response pipeline
+- `api/billing/` - credit reservation/settlement, commands, Stars callbacks
+- `api/bot/` - Telegram adapter, routing, handlers, streaming, chat configuration
+- `api/cache/` - shared HTTP and Redis cache mechanics
+- `api/links/` - URL extraction, metadata, replacement, and link services
+- `api/markets/` - crypto, dollar, stocks, Polymarket, weather, BCRA formatting
+- `api/media/` - image, audio, video, transcription, and media cache
+- `api/memory/` - chat history, RediSearch retrieval, compaction, summaries
+- `api/providers/` - provider clients, fallback chain, cooldowns, usage extraction
+- `api/tasks/` - task execution and APScheduler integration
+- `api/tools/` - agentic tool registry and tool implementations
+- `api/services/` - persistence and low-level external service adapters
+- `api/utils/` - reusable formatting, HTTP, caching, and transcript helpers
 
-**Bot personality** lives outside Git in `workspace/SOUL.md` (character) and `workspace/RULES.md` (response rules). In production, the VPS directory `~/respondedorbot/workspace` is mounted read-only at `/app/workspace`. These are loaded by `api/config.py` at startup. The env var `BOT_SYSTEM_PROMPT` overrides both.
+**Bot personality** lives outside Git in `workspace/SOUL.md` (character) and `workspace/RULES.md` (response rules). In production, the VPS directory `~/respondedorbot/workspace` is mounted read-only at `/app/workspace`. These are loaded by `api/core/config.py` at startup. The env var `BOT_SYSTEM_PROMPT` overrides both.
 
 **Tests** (`tests/`): `conftest.py` sets up a `_FastFailRedis` that raises on any Redis call, and monkeypatches `config_redis`, `complete_with_providers`, and `time.sleep`. Tests run fully offline with no external services.
 
 ## mypy exceptions
 
-These modules have `ignore_errors = true` in `pyproject.toml` - they are intentionally untyped:
-`api.index`, `api.message_handler`, `api.ai_billing`, `api.provider_runtime`, `api.services.bcra`, `api.services.maintenance`, `api.agent_tools`, `api.utils.youtube_transcript`
-
-Do not add type annotations that would require changes in these files without removing the ignore first.
+Application code is checked with `strict = true`. Missing imports are ignored
+only for `apscheduler.jobstores.redis` and
+`apscheduler.schedulers.background`, because APScheduler 3 has no type metadata.
 
 ## Gotchas
 

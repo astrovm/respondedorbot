@@ -48,7 +48,7 @@ def test_openrouter_stream_uses_native_incremental_streaming_without_tools():
 def test_openrouter_stream_uses_streaming_path_when_tools_present():
     from types import SimpleNamespace
 
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     from api.providers.openrouter import OpenRouterProvider
 
     create_calls: list[dict[str, Any]] = []
@@ -104,7 +104,7 @@ def test_openrouter_stream_uses_streaming_path_when_tools_present():
 def test_openrouter_stream_uses_web_search_branch_when_enabled():
     from types import SimpleNamespace
 
-    from api.ai_pricing import AIUsageResult
+    from api.ai.pricing import AIUsageResult
     from api.providers.openrouter import OpenRouterProvider
 
     create_calls: list[dict[str, Any]] = []
@@ -147,7 +147,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
 
 
 def test_stream_to_telegram_sends_first_token_without_placeholder():
-    from api.streaming import stream_to_telegram
+    from api.bot.streaming import stream_to_telegram
 
     sent_messages: list[tuple[str, str, Optional[str]]] = []
     edits: list[tuple[str, str, str]] = []
@@ -173,7 +173,7 @@ def test_stream_to_telegram_sends_first_token_without_placeholder():
 
 
 def test_stream_to_telegram_passes_reply_to_message_id():
-    from api.streaming import stream_to_telegram
+    from api.bot.streaming import stream_to_telegram
 
     sent_messages: list[tuple[str, str, Optional[str]]] = []
     edits: list[tuple[str, str, str]] = []

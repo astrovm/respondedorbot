@@ -11,7 +11,7 @@ from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 from requests.exceptions import RequestException
 
-from api.logging_config import get_logger
+from api.core.logging import get_logger
 from api.utils.http import request_with_ssl_fallback
 
 

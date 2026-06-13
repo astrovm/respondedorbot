@@ -226,7 +226,7 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
 
 
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
-    from api.message_state import fetch_chat_messages_for_compaction
+    from api.memory.state import fetch_chat_messages_for_compaction
 
     redis_client = MagicMock()
     redis_client.execute_command.side_effect = [[0], [0]]
@@ -239,7 +239,7 @@ def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
 
 
 def test_fetch_chat_messages_for_compaction_fetches_newest_window_then_sorts():
-    from api.message_state import fetch_chat_messages_for_compaction
+    from api.memory.state import fetch_chat_messages_for_compaction
 
     redis_client = MagicMock()
     redis_client.execute_command.return_value = [
