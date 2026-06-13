@@ -1,3 +1,5 @@
+"""Admin alerts and Telegram chat-admin checks."""
+
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Mapping, Optional, Union
@@ -14,6 +16,12 @@ from api.telegram_gateway import TelegramGateway
 
 
 class AdminService:
+    """Central place for operations that require administrator awareness.
+
+    Error reports are sent through Telegram with secrets redacted. Chat-admin
+    checks use a short Redis cache before asking Telegram again.
+    """
+
     def __init__(
         self,
         *,

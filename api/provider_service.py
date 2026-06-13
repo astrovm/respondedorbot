@@ -1,3 +1,5 @@
+"""AI provider clients, cooldowns, usage accounting, and provider selection."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
@@ -24,6 +26,18 @@ from api.tool_runtime import ToolRuntime
 
 
 class ProviderService:
+    """Own everything shared by calls to OpenRouter and Groq.
+
+    In simple terms:
+    1. Build authenticated clients from the environment.
+    2. Skip accounts that recently hit a rate limit.
+    3. Turn provider responses into the bot's common usage format.
+    4. Add successful usage to the billing metadata.
+
+    Keeping this state here prevents chat, media, and summary code from each
+    implementing a slightly different provider policy.
+    """
+
     def __init__(
         self,
         *,
@@ -50,6 +64,7 @@ class ProviderService:
         self.max_tool_rounds = max_tool_rounds
         self.openai_client_factory = OpenAI
         self.groq_client_factory = Groq
+        # ContextVar keeps concurrent messages from sharing request counts.
         self._request_count: ContextVar[int] = ContextVar(
             "ai_provider_request_count",
             default=0,
@@ -148,6 +163,8 @@ class ProviderService:
         label: str | None = None,
         backoff_key: str | None = None,
     ) -> Any | None:
+        """Run one provider attempt with the shared cooldown policy."""
+
         return provider_support.invoke_provider(
             provider_name,
             attempt=attempt,
@@ -225,6 +242,8 @@ class ProviderService:
         model: str | None = None,
         max_tool_rounds: int | None = None,
     ) -> ProviderChain:
+        """Build the ordered list of chat providers to try."""
+
         return ProviderChain(
             [
                 self.build_provider(
@@ -257,6 +276,7 @@ class ProviderService:
         )
 
     def get_chain(self) -> ProviderChain:
+        # Provider objects are stateless for a request, so one chain can be reused.
         if self._chain is None:
             self._chain = self.build_chain()
         return self._chain
@@ -271,6 +291,8 @@ class ProviderService:
         extra_tools: list[dict[str, Any]] | None = None,
         tool_context: dict[str, Any] | None = None,
     ) -> str | None:
+        """Return the first successful provider text and record its usage."""
+
         provider_result = self.get_chain().complete(
             system_message,
             messages,
@@ -305,6 +327,12 @@ class ProviderService:
         )
 
     def is_scope_available(self, scope: str) -> bool:
+        """Check whether media/chat work should be attempted right now.
+
+        No configured Groq account is treated as available because OpenRouter
+        may still handle the request.
+        """
+
         accounts = self.get_groq_accounts()
         return not accounts or any(
             not self.is_backoff_active(self.get_groq_backoff_key(account, scope))

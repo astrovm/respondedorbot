@@ -1,3 +1,5 @@
+"""Cryptocurrency price fetching and command formatting."""
+
 from __future__ import annotations
 
 from logging import Logger
@@ -15,6 +17,8 @@ _CHANGE_FIELDS = {
 
 
 class PriceService:
+    """Own the shared price cache and the user-facing ``/price`` behavior."""
+
     def __init__(
         self,
         *,

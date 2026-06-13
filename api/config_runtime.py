@@ -1,3 +1,5 @@
+"""Small runtime-facing wrapper around environment and Redis configuration."""
+
 from __future__ import annotations
 
 from logging import Logger
@@ -14,6 +16,13 @@ AdminReporter = Callable[
 
 
 class ConfigRuntime:
+    """Give services one consistent way to reach config and Redis.
+
+    The lower-level ``api.config`` module keeps some process-wide configuration.
+    This object makes sure the current admin reporter is installed before using
+    it, so callers do not need to remember that setup step.
+    """
+
     def __init__(self, logger: Logger) -> None:
         self._logger = logger
         self._admin_reporter: Optional[AdminReporter] = None
@@ -32,6 +41,8 @@ class ConfigRuntime:
         return config.config_redis(host=host, port=port, password=password)
 
     def optional_redis(self, **kwargs: Any) -> Optional[redis_module.Redis]:
+        """Return Redis when available, or ``None`` for optional features."""
+
         try:
             return self.redis(**kwargs)
         except Exception as error:

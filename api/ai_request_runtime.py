@@ -1,3 +1,5 @@
+"""Prepare AI requests, enrich their context, and call the provider layer."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
@@ -6,6 +8,8 @@ from typing import Any
 
 
 def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Normalize old assistant messages before sending them back to the model."""
+
     if message.get("role") != "assistant":
         return message
     content = message.get("content", "")
@@ -45,6 +49,12 @@ def get_stable_ai_context(
     get_time_context: Callable[[int], dict[str, Any]],
     get_hacker_news_context: Callable[[], list[dict[str, Any]]],
 ) -> dict[str, Any]:
+    """Reuse slow-changing prompt context for a short period.
+
+    Market, weather, time, and news data do not need to be fetched again for
+    every message that arrives in the same minute.
+    """
+
     timestamp = int(now())
     cached = cache.get(timezone_offset)
     if cached and timestamp - cached[0] <= ttl:
@@ -82,9 +92,13 @@ def build_ai_request(
     list[dict[str, Any]] | None,
     dict[str, Any],
 ]:
+    """Turn stored chat messages into one complete provider request."""
+
+    # Old bot replies are cleaned before they become model context again.
     messages = [sanitize_message(message) for message in messages or []]
     context_data = get_context(timezone_offset)
 
+    # Tool functions receive this dictionary when the model calls them.
     tool_context: dict[str, Any] = {
         "get_prices": get_prices,
         "config_redis": config_redis,
@@ -105,6 +119,7 @@ def build_ai_request(
         task_mode=task_mode,
     )
 
+    # URL contents are added as system context, not mixed into the user's words.
     fetched_contents = fetch_urls(messages) if enable_web_search else ""
     if fetched_contents:
         messages = [*messages, {"role": "system", "content": fetched_contents}]
@@ -122,6 +137,8 @@ def inject_image_context(
     append_billing_segment: Callable[[dict[str, Any] | None, Any], None],
     logger: Any,
 ) -> None:
+    """Describe an image once, then append that description to the prompt."""
+
     if image_data is None:
         return
 
@@ -134,6 +151,7 @@ def inject_image_context(
     image_description = image_result.text if image_result else None
 
     if image_description:
+        # Vision is a separate billable provider call.
         append_billing_segment(response_meta, image_result)
         image_context = f"[Imagen: {image_description}]"
         if messages:
@@ -169,7 +187,10 @@ def ask_ai(
     admin_report: Callable[..., None],
     logger: Any,
 ) -> str:
+    """Run the full non-streaming request and fall back to a local reply."""
+
     try:
+        # Build prompt -> optionally describe image -> ask provider.
         system_message, messages, extra_tools, tool_context = build_request(
             messages,
             chat_id=chat_id,
@@ -204,6 +225,7 @@ def ask_ai(
             response_meta["ai_fallback"] = True
         return fallback(messages)
     except Exception as error:
+        # A provider/config error should not make the Telegram handler crash.
         error_context = {
             "messages_count": len(messages),
             "messages_preview": [
@@ -252,6 +274,12 @@ def ask_ai_stream(
 
 @dataclass
 class AIRequestServiceDeps:
+    """Functions supplied by the composition root.
+
+    Listing dependencies explicitly makes this service easy to test without
+    network, Redis, or real provider clients.
+    """
+
     get_market_context: Callable[[], dict[str, Any]]
     get_weather_context: Callable[[], dict[str, Any] | None]
     get_time_context: Callable[[int], dict[str, Any]]
@@ -273,6 +301,8 @@ class AIRequestServiceDeps:
 
 
 class AIRequestService:
+    """Production-facing API for normal and streaming AI requests."""
+
     def __init__(self, deps: AIRequestServiceDeps) -> None:
         self._deps = deps
         self._stable_context_cache: dict[

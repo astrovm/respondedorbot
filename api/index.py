@@ -251,6 +251,9 @@ STABLE_AI_CONTEXT_TTL = 60
 _logger = get_logger(__name__)
 _config_runtime = ConfigRuntime(_logger)
 telegram_gateway = TelegramGateway(_telegram_request)
+
+# index.py is the composition root: it creates each long-lived service once,
+# wires its dependencies, and later exposes the finished graph as app_runtime.
 _media_cache_service = MediaCacheService(
     config=_config_runtime,
     logger=_logger,
@@ -936,7 +939,9 @@ def build_routing_policy() -> RoutingPolicy:
     )
 
 
-# Module-level composed instances (composition root surface)
+# Business services share the lower-level config, cache, provider, and state
+# objects created above. Handlers use these services instead of rebuilding
+# integrations for every Telegram update.
 _cache_service = CacheService(
     config=_config_runtime,
     admin=_admin_service,
@@ -1307,6 +1312,9 @@ def update_telegram_bot_commands() -> bool:
         return False
 
 
+# This is the single toolbox consumed by the Telegram adapter. Keeping the
+# assembled graph here makes dependencies visible without hiding global state
+# inside individual service modules.
 app_runtime = ApplicationRuntime(
     config=_config_runtime,
     telegram=telegram_gateway,

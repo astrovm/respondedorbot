@@ -1,3 +1,5 @@
+"""Telegram Stars and AI-credit billing integration."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -18,6 +20,12 @@ from api.credit_units import format_credit_units
 
 
 class BillingService:
+    """Join pure billing rules with Telegram and persistent credit storage.
+
+    Payment validation still lives in the focused billing modules. This service
+    supplies the real database and Telegram dependencies used in production.
+    """
+
     def __init__(
         self,
         *,

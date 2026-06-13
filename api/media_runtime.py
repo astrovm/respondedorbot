@@ -1,3 +1,9 @@
+"""Turn Telegram media into text that the rest of the bot can understand.
+
+The main flow is: check the cache, download the file, call a media provider,
+and return both the text and the information needed to bill that provider call.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -25,6 +31,12 @@ def execute_groq_request_with_fallback(
     is_backoff_active: Callable[[str], bool],
     default_backoff_seconds: int,
 ) -> AIUsageResult | None:
+    """Try each configured Groq account until one succeeds or must stop.
+
+    ProviderRuntime owns cooldowns and rate-limit handling. This helper only
+    decides whether a recoverable failure should move to the next account.
+    """
+
     configured_accounts = list(get_accounts())
     if not configured_accounts:
         print("Groq API key not configured")
@@ -97,6 +109,8 @@ def describe_image_result(
     max_tokens: int,
     no_markdown_prompt: str,
 ) -> AIUsageResult | None:
+    """Describe one image, reusing a cached description when possible."""
+
     if file_id and use_cache:
         cached = get_cached_description(file_id)
         if cached:
@@ -191,6 +205,8 @@ def transcribe_audio_openrouter_result(
     build_usage_result: Callable[..., AIUsageResult],
     model: str,
 ) -> AIUsageResult | None:
+    """Transcribe audio with OpenRouter when the preferred Groq path fails."""
+
     client = get_client()
     if client is None:
         print("OpenRouter transcription: no client available")
@@ -269,6 +285,8 @@ def transcribe_audio_result(
     cache_transcription: Callable[[str, str], None],
     model: str,
 ) -> AIUsageResult | None:
+    """Transcribe audio through cache -> Groq accounts -> OpenRouter fallback."""
+
     if file_id and use_cache:
         cached = get_cached_transcription(file_id)
         if cached:
@@ -342,6 +360,12 @@ def process_media_with_cache(
     failure_code: str,
     logger: Any,
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Run the common cache/download/process flow for Telegram media.
+
+    The tuple contains successful text, a short failure code, and an optional
+    billing segment. Exactly one of text or failure code is normally present.
+    """
+
     try:
         if use_cache and cache_lookup:
             cached_value = cache_lookup(file_id)
@@ -375,9 +399,13 @@ def transcribe_file_by_id(
     ]],
     logger: Any,
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Download and transcribe a Telegram audio or video file."""
+
     def processor(media_bytes: bytes) -> AIUsageResult | None:
         duration_seconds = measure_duration(media_bytes)
         if duration_seconds is None:
+            # Telegram videos need their audio track extracted before Whisper
+            # can measure and transcribe them.
             extracted = extract_audio(media_bytes)
             if extracted:
                 logger.info("Extracted audio from video for transcription")
@@ -426,6 +454,8 @@ def describe_media_by_id(
 
 @dataclass
 class MediaServiceDeps:
+    """External tools used by MediaService, collected in one explicit bundle."""
+
     cache: Any
     telegram: Any
     images: Any
@@ -452,6 +482,8 @@ class MediaServiceDeps:
 
 
 class MediaService:
+    """Public media API used by handlers and the application runtime."""
+
     def __init__(self, deps: MediaServiceDeps) -> None:
         self._deps = deps
 
