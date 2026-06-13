@@ -31,7 +31,7 @@ def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:
 def redis_setex_json(redis_client: redis.Redis, key: str, ttl: int, value: Any) -> bool:
     """Store JSON under ``key`` with a TTL, returning success boolean."""
     try:
-        return bool(redis_client.setex(key, ttl, json.dumps(value)))
+        return bool(redis_client.set(key, json.dumps(value), ex=int(ttl)))
     except Exception:
         return False
 
@@ -45,7 +45,7 @@ def redis_set_json(
     """Store JSON under ``key`` and optionally set a TTL."""
     try:
         if ttl is not None:
-            return bool(redis_client.setex(key, int(ttl), json.dumps(value)))
+            return bool(redis_client.set(key, json.dumps(value), ex=int(ttl)))
         return bool(redis_client.set(key, json.dumps(value)))
     except Exception:
         return False

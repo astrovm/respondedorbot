@@ -239,7 +239,7 @@ def test_fetch_pump_metadata_uses_api(monkeypatch):
 
     assert metadata is not None
     assert metadata["twitter"] == "https://x.com/token"
-    assert redis_client.setex.called
+    assert redis_client.set.called
 
 
 def test_build_signal_keyboard_uses_native_copy_text_button():
@@ -327,8 +327,8 @@ def test_handle_token_signal_message_sends_photo_and_skips_ai(monkeypatch):
     assert handled is True
     send_photo.assert_called_once()
     assert send_photo.call_args.kwargs["msg_id"] == "10"
-    assert redis_client.setex.called
-    assert "source_message_id" in redis_client.setex.call_args.args[2]
+    assert redis_client.set.called
+    assert "source_message_id" in redis_client.set.call_args.args[1]
 
 
 def test_handle_token_signal_message_accepts_cashtag(monkeypatch):

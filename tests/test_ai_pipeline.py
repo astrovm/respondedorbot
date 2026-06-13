@@ -1344,8 +1344,8 @@ def test_fetch_link_metadata_uses_ttl_constant():
         def get(self, _k):
             return None
 
-        def setex(self, k, ttl, _v):
-            self.calls.append((k, ttl))
+        def set(self, key, _value, *, ex=None):
+            self.calls.append((key, ex))
             return True
 
     redis_client = R()
@@ -1380,7 +1380,7 @@ def test_can_embed_url_primes_link_metadata_cache():
         def get(self, key):
             return self.data.get(key)
 
-        def setex(self, key, ttl, value):
+        def set(self, key, value, *, ex=None):
             self.data[key] = value
             return True
 
