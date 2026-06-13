@@ -171,6 +171,7 @@ class AIService:
         if summary_cost > 0:
             billing_segments.insert(0, _make_summary_billing_segment(summary_cost))
         if bool(ai_response_meta.get("ai_fallback")):
+            # The local fallback has no provider usage, so release every reserve.
             if media_charge_meta:
                 request.billing_helper.refund_reserved_ai_credits(
                     media_charge_meta, reason="ai_response_fallback"

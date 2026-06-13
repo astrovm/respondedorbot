@@ -39,8 +39,7 @@ def _append_sslmode_if_missing(url: str) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
 
-    # Remove any non-standard parameters that psycopg doesn't recognize
-    # Keep only known postgres connection parameters
+    # Supabase URLs may include pooler options that psycopg does not accept.
     allowed_params = {"sslmode", "connect_timeout", "options", "application_name"}
     query = {k: v for k, v in query.items() if k in allowed_params}
 
@@ -161,6 +160,7 @@ def ensure_schema() -> None:
 def _migrate_credit_amounts_to_units(cur: Any) -> bool:
     """Scale legacy whole-credit rows into tenth-credit units once."""
 
+    # Multiple bot instances may start together; the transaction lock elects one.
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s)",
         (CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY,),
@@ -201,6 +201,7 @@ def _ensure_account(cur: Any, scope_type: ScopeType, scope_id: int) -> None:
 
 def _get_balance_for_update(cur: Any, scope_type: ScopeType, scope_id: int) -> int:
     _ensure_account(cur, scope_type, scope_id)
+    # Serialize concurrent charges so two requests cannot spend one balance.
     cur.execute(
         """
         SELECT balance
@@ -917,6 +918,7 @@ def record_star_payment(
             )
             inserted = cur.fetchone() is not None
 
+            # A repeated Telegram delivery returns the balance without crediting twice.
             user_balance = _get_balance_for_update(cur, "user", user_id)
             if inserted:
                 user_balance += int(credits_awarded)

@@ -227,6 +227,7 @@ def handle_callback_query(
         return
 
     callback_data_text = str(callback_data)
+    # Route feature-owned payloads before treating the rest as config updates.
     if callback_data_text.startswith("topup:"):
         handle_topup(callback_query)
         return
@@ -302,5 +303,6 @@ def handle_callback_query(
             )
             send_msg(chat_id_str, text, reply_markup=keyboard)
     finally:
+        # Telegram keeps the button spinner active until the callback is answered.
         if callback_id:
             answer_callback(callback_id)

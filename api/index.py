@@ -652,7 +652,7 @@ def get_market_context() -> Dict[str, Any]:
     market_data = {}
 
     try:
-        # Get crypto prices (reuse unified helper and 5-minute cache)
+        # Reuse command caches so prompt enrichment adds no duplicate API calls.
         api_data = _price_service.get_api_prices("USD", limit=5)
         if api_data and "data" in api_data:
             market_data["crypto"] = clean_crypto_data(api_data["data"])
@@ -660,7 +660,6 @@ def get_market_context() -> Dict[str, Any]:
         _logger.exception("Error fetching crypto data")
 
     try:
-        # Get dollar rates (reuse 5-minute cache)
         dollar_response = _dollar_service.fetch_dollar_data(hourly_cache=False)
         if dollar_response and "data" in dollar_response:
             market_data["dollar"] = dollar_response["data"]

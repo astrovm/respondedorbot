@@ -346,6 +346,7 @@ def fetch_signal(redis_client: Any, token: TokenAddress) -> Optional[TokenSignal
         if candles:
             return _enrich_signal(redis_client, token, pair, candles)
 
+    # Price metadata is still useful when no pair has chart candles.
     return _enrich_signal(redis_client, token, fallback, [])
 
 
@@ -899,6 +900,7 @@ def handle_token_signal_callback(
     if len(parts) != 3 or parts[0] != "sig":
         return False
     action, signal_id = parts[1], parts[2]
+    # Callback state binds the short button payload to its original requester.
     state = redis_get_json(redis_client, signal_state_key(signal_id))
     callback_id = str(callback_query.get("id") or "")
     if not isinstance(state, Mapping):

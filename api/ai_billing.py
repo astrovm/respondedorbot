@@ -549,6 +549,7 @@ class AIMessageBilling:
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
         if billing_segments is None:
+            # Missing usage is ambiguous; keep the reserve rather than make the call free.
             breakdown = {
                 "pricing_version": None,
                 "markup_multiplier": None,
@@ -604,6 +605,7 @@ class AIMessageBilling:
         )
 
         if raw_usd_micros == 0 and not has_usage:
+            # Providers may omit usage entirely; zero must not imply a free call.
             actual_credit_units = reserved_credit_units
         if actual_credit_units < reserved_credit_units:
             refunded_credit_units = reserved_credit_units - actual_credit_units
@@ -684,6 +686,7 @@ class AIMessageBilling:
                     },
                 )
                 try:
+                    # Record unpaid overage so settlement remains auditable.
                     self.credits_db_service.apply_ai_debt(
                         user_id=self.user_id,
                         chat_id=chat_scope_id,
@@ -750,6 +753,7 @@ class AIMessageBilling:
         source_values = {str(item.get("source") or "user") for item in reservations}
         chat_scope_values = {item.get("chat_scope_id") for item in reservations}
         if len(source_values) > 1 or len(chat_scope_values) > 1:
+            # One batch adjustment cannot safely target different credit accounts.
             print(
                 f"settle_batch: mixed sources {source_values} or scopes {chat_scope_values}, "
                 f"falling back to individual settlement (count={len(reservations)})"
@@ -781,6 +785,7 @@ class AIMessageBilling:
         )
 
         if billing_segments is None:
+            # Match single-reservation behavior when provider usage is unavailable.
             breakdown = {
                 "pricing_version": None,
                 "markup_multiplier": None,

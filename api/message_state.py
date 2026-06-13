@@ -259,8 +259,8 @@ def save_message_to_redis(
 ) -> None:
     """Persist one message in both the recent list and searchable history.
 
-    The message-id set prevents Telegram retries from saving the same message
-    twice. A Redis pipeline updates all related keys as one network round trip.
+    The message-id set filters normal Telegram redeliveries. A Redis pipeline
+    keeps the list, search document, and TTL updates together.
     """
 
     try:
@@ -331,6 +331,7 @@ def save_message_to_redis(
             to_remove = []
 
         if to_remove:
+            # Keep deduplication state bounded to messages still in recent history.
             redis_client.srem(message_ids_key, *to_remove)
 
     except Exception as error:
