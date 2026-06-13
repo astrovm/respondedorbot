@@ -1,4 +1,9 @@
-"""Chat history, reply context, and bot metadata helpers."""
+"""Store and retrieve the pieces of a Telegram conversation.
+
+Redis holds a short ordered chat list for normal replies, a RediSearch copy for
+finding relevant older messages, summary markers for compaction, and small bits
+of metadata about messages sent by the bot.
+"""
 
 from __future__ import annotations
 
@@ -99,6 +104,8 @@ def _decode_redis_text(value: Any) -> Optional[str]:
 
 
 def _ensure_search_index(redis_client: redis.Redis) -> None:
+    """Create the shared RediSearch schema once per process."""
+
     global _SEARCH_INDEX_READY
     if _SEARCH_INDEX_READY:
         return
@@ -199,6 +206,8 @@ def fetch_chat_messages_for_compaction(
     limit: int = 500,
     admin_reporter: Optional[AdminReporter] = None,
 ) -> List[Dict[str, Any]]:
+    """Load a larger searchable history for conversation compaction."""
+
     try:
         _ensure_search_index(redis_client)
         query = f"@chat_id:{{{_escape_tag_value(chat_id)}}}"
@@ -248,7 +257,11 @@ def save_message_to_redis(
     reply_to_message_id: Optional[str] = None,
     mentions_bot: bool = False,
 ) -> None:
-    """Persist a chat message while deduplicating message ids."""
+    """Persist one message in both the recent list and searchable history.
+
+    The message-id set prevents Telegram retries from saving the same message
+    twice. A Redis pipeline updates all related keys as one network round trip.
+    """
 
     try:
         chat_history_key = f"chat_history:{chat_id}"
@@ -272,6 +285,8 @@ def save_message_to_redis(
             _ensure_search_index(redis_client)
         except Exception:
             pass
+        # The list is the fast path for normal replies; the hash is the
+        # RediSearch document used to recover relevant older context.
         pipe.lpush(chat_history_key, history_entry)
         pipe.sadd(message_ids_key, message_id)
         pipe.ltrim(chat_history_key, 0, max(0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1))
@@ -382,6 +397,12 @@ def search_chat_history(
     exclude_message_ids: Optional[Set[str]] = None,
     admin_reporter: Optional[AdminReporter] = None,
 ) -> List[Dict[str, Any]]:
+    """Find older messages related to the current text and rank useful ones.
+
+    RediSearch performs the broad text lookup. Python then gives extra weight
+    to direct replies and messages sharing more words with the query.
+    """
+
     search_text = _escape_search_text(query_text)
     if not search_text:
         return []
@@ -627,6 +648,8 @@ def format_user_message(
 
 
 class MessageStateService:
+    """Small object-oriented facade over the Redis message-state helpers."""
+
     def __init__(
         self,
         *,

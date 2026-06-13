@@ -1,3 +1,5 @@
+"""Turn AI output into Telegram messages, including streaming fallbacks."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -47,8 +49,12 @@ def handle_ai_response(
     restore_request_count: Callable[[Any], None],
     get_request_count: Callable[[], int],
 ) -> str:
+    """Adapt either a normal or streaming handler to the cleanup pipeline."""
+
     effective_handler = handler_func
     if handler_func is stream_handler:
+        # The generic response pipeline expects a simple ``handler(messages)``.
+        # This closure fills in Telegram-specific details for the stream path.
         user_name = extract_user_name(user_identity)
 
         def run_stream(
@@ -150,6 +156,8 @@ def handle_ai_stream_response(
     gen_random: Callable[[str], str],
     set_stream_metadata: Callable[[str | None, str], None],
 ) -> str:
+    """Stream tokens to Telegram and retry once without streaming if needed."""
+
     if not chat_id:
         return "me quedé reculando y no te pude responder, probá de nuevo"
 
@@ -172,6 +180,7 @@ def handle_ai_stream_response(
         timezone_offset=timezone_offset,
     )
     try:
+        # The consumer creates one Telegram message, then edits it as tokens arrive.
         final_text, message_id = consume_stream(
             chat_id,
             token_iterator,
@@ -180,6 +189,8 @@ def handle_ai_stream_response(
             reply_to_message_id=reply_to_message_id,
         )
     except RuntimeError:
+        # Telegram editing can fail. Generate the same answer normally and send it
+        # as one message so the user still receives a response.
         final_text = ask_ai(
             messages,
             chat_id=chat_id,
@@ -214,6 +225,8 @@ def handle_ai_stream_response(
 
 @dataclass
 class ResponseServiceDeps:
+    """External operations needed to deliver a response."""
+
     telegram: Any
     ai: Any
     providers: Any
@@ -232,6 +245,8 @@ class ResponseServiceDeps:
 
 
 class ResponseService:
+    """High-level response API used by the message handler."""
+
     def __init__(self, deps: ResponseServiceDeps) -> None:
         self._deps = deps
         self.stream_handler = self.handle_stream

@@ -1,3 +1,10 @@
+"""Objects that make up the running bot.
+
+Think of ``ApplicationRuntime`` as the bot's toolbox. ``api.index`` builds each
+tool once, puts it in this object, and entrypoints use the object instead of
+importing dozens of unrelated helpers from ``api.index``.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,6 +33,12 @@ from api.telegram_gateway import TelegramGateway
 
 @dataclass(frozen=True)
 class ApplicationRuntime:
+    """The fully wired application shared by Telegram and background jobs.
+
+    Fields are grouped by responsibility: infrastructure first, then business
+    services, then the few top-level handlers that receive external events.
+    """
+
     config: ConfigRuntime
     telegram: TelegramGateway
     admin: AdminService

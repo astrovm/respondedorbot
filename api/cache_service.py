@@ -1,3 +1,5 @@
+"""HTTP response caching used by market and external-data services."""
+
 from __future__ import annotations
 
 import json
@@ -16,6 +18,13 @@ from api.services.redis_helpers import redis_get_json, redis_set_json
 
 
 class CacheService:
+    """Combine HTTP fetching, Redis storage, and stale-history lookup.
+
+    Other services only describe the request and cache lifetime. This class
+    owns the mechanics of reading Redis, making the HTTP call, and reporting
+    failures.
+    """
+
     def __init__(
         self,
         *,
@@ -33,6 +42,8 @@ class CacheService:
         request_hash: str,
         redis_client: redis.Redis,
     ) -> Optional[Dict[str, Any]]:
+        """Load an hourly snapshot used for comparisons and stale fallback."""
+
         timestamp = (datetime.now() - timedelta(hours=hours_ago)).strftime(
             "%Y-%m-%d-%H"
         )
@@ -56,6 +67,8 @@ class CacheService:
         get_history: Union[int, bool] = False,
         verify_ssl: bool = True,
     ) -> Optional[Dict[str, Any]]:
+        """Fetch JSON-like data while reusing a valid Redis cache entry."""
+
         return cached_request(
             api_url,
             parameters,

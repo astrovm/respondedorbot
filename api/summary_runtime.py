@@ -1,3 +1,9 @@
+"""Keep long conversations useful without sending every old message to the AI.
+
+Old messages are compressed into a summary. Recent messages stay verbatim, and
+search can bring back older messages that are relevant to the current request.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
@@ -20,6 +26,8 @@ def call_summary_model(
     max_tokens: int,
     logger: Any,
 ) -> tuple[str | None, int]:
+    """Ask the summary model for text and return its measured credit cost."""
+
     client = get_client()
     if client is None:
         logger.warning("summary: no openrouter client available")
@@ -110,6 +118,12 @@ def compact_conversation(
     max_summary_messages: int,
     truncate_lines: int,
 ) -> tuple[str, int]:
+    """Merge new messages into the previous compact conversation summary.
+
+    If the model is unavailable, a small plain-text transcript is kept instead
+    so the bot loses less context and the request can still continue.
+    """
+
     if len(messages) > max_summary_messages:
         messages = messages[-max_summary_messages:]
     api_messages = build_chat_messages(
@@ -183,6 +197,12 @@ def stream_summary_command(
     max_tokens: int,
     logger: Any,
 ) -> tuple[Iterator[tuple[str, str]], str | None]:
+    """Build and stream the `/summary` response for one chat.
+
+    A chat with no new messages can return its cached summary immediately.
+    Otherwise the configured provider streams a fresh summary token by token.
+    """
+
     history = get_history(chat_id, redis_client)
 
     if not history:
@@ -273,6 +293,8 @@ def estimate_summary_cost_usd_micros(
 
 @dataclass
 class SummaryServiceDeps:
+    """Storage, provider, and tuning values required by SummaryService."""
+
     state: Any
     config: Any
     provider: Any
@@ -290,6 +312,8 @@ class SummaryServiceDeps:
 
 
 class SummaryService:
+    """Coordinates conversation compaction and user-requested summaries."""
+
     def __init__(self, deps: SummaryServiceDeps) -> None:
         self._deps = deps
 
@@ -404,6 +428,8 @@ class SummaryService:
         compaction_threshold: int | None = None,
         compaction_keep: int | None = None,
     ) -> tuple[str | None, list[dict[str, Any]], str | None, int]:
+        """Replace sufficiently old messages with one durable summary."""
+
         threshold, keep = self.resolve_compaction_params(
             compaction_threshold,
             compaction_keep,
@@ -432,6 +458,12 @@ class SummaryService:
         compaction_threshold: int | None = None,
         compaction_keep: int | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], int]:
+        """Prepare the smallest useful memory package for the next AI request.
+
+        The result separates recent visible history, the compact summary, and
+        older messages retrieved because they match the user's current query.
+        """
+
         threshold, keep = self.resolve_compaction_params(
             compaction_threshold,
             compaction_keep,

@@ -1,3 +1,5 @@
+"""Redis cache for expensive media transcription and image descriptions."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -17,6 +19,8 @@ def get_cached_media(
     redis_factory: RedisFactory,
     logger: Logger,
 ) -> str | None:
+    """Read one cached media result without making Redis failures fatal."""
+
     cache_key = f"{prefix}:{file_id}"
     try:
         cached_value = redis_factory().get(cache_key)
@@ -35,6 +39,8 @@ def cache_media(
     redis_factory: RedisFactory,
     logger: Logger,
 ) -> None:
+    """Store one media result; processing can continue if Redis is down."""
+
     cache_key = f"{prefix}:{file_id}"
     try:
         redis_factory().setex(cache_key, ttl, text)
@@ -43,6 +49,8 @@ def cache_media(
 
 
 class MediaCacheService:
+    """Name and cache transcription/description entries consistently."""
+
     def __init__(
         self,
         *,
