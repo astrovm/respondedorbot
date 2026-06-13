@@ -212,6 +212,7 @@ def format_task_summary(task: Dict[str, Any], *, prefix: str = "") -> str:
 
 
 def _no_mention(text: str) -> str:
+    # Preserve the visible username without triggering a Telegram mention.
     return text.replace("@", "@\u200b")
 
 

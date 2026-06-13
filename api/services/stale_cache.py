@@ -40,6 +40,7 @@ class StaleCache:
             if age <= ttl:
                 return StaleCacheResult(value=value, status="fresh")
             if age <= ttl + stale_grace:
+                # Serve stale immediately; one lock holder refreshes in background.
                 if self._acquire_lock(lock_key, ttl):
                     schedule_refresh(
                         lambda: self._refresh_and_store(

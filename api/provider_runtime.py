@@ -233,6 +233,7 @@ class ProviderRuntime:
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
     ) -> Optional[Any]:
+        # Some models print tool syntax as text instead of structured tool calls.
         dsml_match = _DSML_TOOL_CALL_PATTERN.search(str(text or ""))
         if dsml_match:
             tool_name = dsml_match.group("name")
@@ -345,6 +346,7 @@ class ProviderRuntime:
                     tool_calls, tool_context, round_idx
                 )
                 if not known_calls:
+                    # Unknown tools cannot run; retry once as a plain completion.
                     text = str(message.content or "").strip()
                     if text:
                         return current_messages
@@ -483,6 +485,7 @@ class ProviderRuntime:
                     except (TypeError, ValueError):
                         pass
                 if "web_search_requests" not in metadata:
+                    # Older responses expose citations but omit web-search usage.
                     annotations = getattr(message, "annotations", None) or []
                     has_url_citation = any(
                         getattr(annotation, "type", None) == "url_citation"

@@ -680,6 +680,7 @@ def download_oversized_instagram_video(text: str) -> Optional[bytes]:
         media_url = str(metadata.get("media_url") or "").strip()
         media_type = str(metadata.get("media_content_type") or "").lower()
         media_size = metadata.get("media_size")
+        # Download only videos too large for URL delivery but safe for multipart upload.
         if (
             not metadata.get("embeddable")
             or not media_url

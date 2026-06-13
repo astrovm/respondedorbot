@@ -254,6 +254,7 @@ def _load_cached_entry(
             }
 
         if allow_stale:
+            # last_success outlives the normal key and is only used during outages.
             last_success = redis_get_json(redis_client, f"{cache_key}:last_success")
             if isinstance(last_success, dict) and "data" in last_success:
                 fetched_at = cast(Optional[str], last_success.get("fetched_at"))
@@ -269,6 +270,7 @@ def _load_cached_entry(
                     "fetched_at": fetched_at,
                 }
 
+    # The process-local copy keeps reads working when Redis itself is unavailable.
     local_value, is_fresh, meta = local_cache_get(local_cache, allow_stale=allow_stale)
     if local_value is not None:
         return cast(Dict[str, Any], local_value), {
@@ -331,6 +333,7 @@ def _persist_cache_entry(
                 on_error(exc)
         else:
             try:
+                # Keep a longer-lived recovery copy separate from the fresh key.
                 redis_set_json(
                     redis_client,
                     f"{cache_key}:last_success",
@@ -396,6 +399,7 @@ def _refresh_with_backoff(
 
     now_ts = time.time()
     if now_ts < get_failure_until():
+        # Serve stale data during backoff instead of hammering the upstream API.
         return fallback
 
     fetched = fetcher()

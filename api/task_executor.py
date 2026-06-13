@@ -128,6 +128,7 @@ class TaskExecutor:
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
             messages=messages,
         )
+        # Reserve once for the task; retries must not create duplicate charges.
         charge_meta, charge_error = billing.reserve_ai_credits(
             "task_ai",
             reserve_credits,
@@ -140,6 +141,8 @@ class TaskExecutor:
         fallback_retries = 0
         empty_retries = 0
 
+        # Empty output and local fallback have separate retry budgets because
+        # they represent different provider failures.
         while True:
             try:
                 logger.info("task %s calling ask_ai", task_id)
