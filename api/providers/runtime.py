@@ -90,6 +90,13 @@ class ProviderRuntimeDeps:
     max_tool_rounds: int = 5
 
 
+@dataclass(frozen=True)
+class ToolRoundDecision:
+    messages: List[Dict[str, Any]]
+    result: Optional[AIUsageResult] = None
+    continue_rounds: bool = False
+
+
 class ProviderRuntime:
     def __init__(self, deps: ProviderRuntimeDeps, tool_runtime: ToolRuntime) -> None:
         self._deps = deps
@@ -227,6 +234,29 @@ class ProviderRuntime:
             known_calls.append(tool_call)
         return known_calls
 
+    def _run_round_choice(
+        self,
+        *,
+        client: Any,
+        system_message: Dict[str, Any],
+        current_messages: List[Dict[str, Any]],
+        enable_web_search: bool,
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> Optional[tuple[Any, Any]]:
+        response = self._run_chat_completion(
+            client=client,
+            system_message=system_message,
+            current_messages=current_messages,
+            enable_web_search=enable_web_search,
+            extra_tools=extra_tools,
+            tool_context=tool_context,
+            round_idx=round_idx,
+        )
+        choices = getattr(response, "choices", None) if response is not None else None
+        return (response, choices[0]) if choices else None
+
     def _parse_pseudo_tool_call(
         self,
         text: str,
@@ -314,7 +344,7 @@ class ProviderRuntime:
 
         self._deps.increment_request_count()
         for round_idx in range(self._deps.max_tool_rounds):
-            response = self._run_chat_completion(
+            round_response = self._run_round_choice(
                 client=client,
                 system_message=system_message,
                 current_messages=current_messages,
@@ -323,13 +353,9 @@ class ProviderRuntime:
                 tool_context=tool_context,
                 round_idx=round_idx,
             )
-            if response is None:
+            if round_response is None:
                 return None
-
-            if not hasattr(response, "choices") or not response.choices:
-                return None
-
-            choice = response.choices[0]
+            _response, choice = round_response
             finish_reason = choice.finish_reason
 
             message = choice.message
@@ -380,6 +406,147 @@ class ProviderRuntime:
 
         return current_messages
 
+    def _build_round_result(
+        self,
+        response: Any,
+        message: Any,
+        round_idx: int,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AIUsageResult:
+        result_metadata = {
+            "provider": "openrouter",
+            "tool_rounds": round_idx + 1,
+            **(metadata or {}),
+        }
+        return self._deps.build_usage_result(
+            kind="chat",
+            text=str(getattr(message, "content", "") or ""),
+            model=self._deps.primary_model,
+            response=response,
+            metadata=result_metadata,
+        )
+
+    def _handle_structured_tool_calls(
+        self,
+        *,
+        response: Any,
+        message: Any,
+        round_idx: int,
+        current_messages: List[Dict[str, Any]],
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+    ) -> ToolRoundDecision:
+        tool_calls = getattr(message, "tool_calls", None) or []
+        known_calls = (
+            self._filter_known_calls(tool_calls, tool_context, round_idx)
+            if extra_tools and tool_calls
+            else []
+        )
+        if not known_calls:
+            text = str(getattr(message, "content", "") or "").strip()
+            result = (
+                self._build_round_result(response, message, round_idx)
+                if text
+                else None
+            )
+            return ToolRoundDecision(current_messages, result=result)
+
+        updated_messages = self._tool_runtime.apply_tool_calls(
+            message,
+            known_calls,
+            current_messages,
+            tool_context or {},
+        )
+        self._deps.increment_request_count()
+        return ToolRoundDecision(updated_messages, continue_rounds=True)
+
+    def _web_search_metadata(self, response: Any, message: Any) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+        usage_map = self._deps.extract_usage_map(response) or {}
+        server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
+        web_search_requests = server_tool_use.get("web_search_requests")
+        if web_search_requests is not None:
+            try:
+                metadata["web_search_requests"] = int(web_search_requests)
+            except (TypeError, ValueError):
+                pass
+        if "web_search_requests" in metadata:
+            return metadata
+
+        annotations = getattr(message, "annotations", None) or []
+        has_url_citation = any(
+            getattr(annotation, "type", None) == "url_citation"
+            or (
+                isinstance(annotation, Mapping)
+                and str(annotation.get("type") or "") == "url_citation"
+            )
+            for annotation in annotations
+        )
+        if has_url_citation:
+            metadata["web_search_requests"] = 1
+        return metadata
+
+    def _handle_stop_response(
+        self,
+        *,
+        response: Any,
+        message: Any,
+        round_idx: int,
+        current_messages: List[Dict[str, Any]],
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+    ) -> ToolRoundDecision:
+        pseudo_call = self._parse_pseudo_tool_call(
+            str(getattr(message, "content", "") or ""),
+            round_idx,
+            extra_tools,
+        )
+        if pseudo_call is not None:
+            updated_messages = self._tool_runtime.apply_tool_calls(
+                SimpleNamespace(content=""),
+                [pseudo_call],
+                current_messages,
+                tool_context or {},
+            )
+            self._deps.increment_request_count()
+            return ToolRoundDecision(updated_messages, continue_rounds=True)
+
+        return ToolRoundDecision(
+            current_messages,
+            result=self._build_round_result(
+                response,
+                message,
+                round_idx,
+                metadata=self._web_search_metadata(response, message),
+            ),
+        )
+
+    def _report_unexpected_finish(
+        self,
+        finish_reason: Any,
+        round_idx: int,
+        *,
+        enable_web_search: bool,
+        tool_context: Optional[Dict[str, Any]],
+    ) -> None:
+        unexpected_context = dict(tool_context or {})
+        unexpected_context.update(
+            {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+        )
+        logger.warning(
+            "provider_runtime: unexpected finish_reason=%r%s",
+            finish_reason,
+            format_log_context(unexpected_context),
+        )
+        self._deps.admin_report(
+            f"OpenRouter unexpected finish_reason={finish_reason!r}",
+            extra_context={
+                "model": self._deps.primary_model,
+                "enable_web_search": enable_web_search,
+            },
+        )
+
     def _run_tool_rounds(
         self,
         *,
@@ -395,7 +562,7 @@ class ProviderRuntime:
 
         self._deps.increment_request_count()
         for round_idx in range(self._deps.max_tool_rounds):
-            response = self._run_chat_completion(
+            round_response = self._run_round_choice(
                 client=client,
                 system_message=system_message,
                 current_messages=current_messages,
@@ -404,137 +571,55 @@ class ProviderRuntime:
                 tool_context=tool_context,
                 round_idx=round_idx,
             )
-            if response is None:
+            if round_response is None:
                 return None
-
-            if not hasattr(response, "choices") or not response.choices:
-                return None
-
-            choice = response.choices[0]
+            response, choice = round_response
             finish_reason = choice.finish_reason
             message = choice.message
 
             if finish_reason == "tool_calls":
-                tool_calls = getattr(message, "tool_calls", None) or []
-                if not extra_tools or not tool_calls:
-                    text = str(message.content or "").strip()
-                    if text:
-                        tool_metadata: Dict[str, Any] = {
-                            "provider": "openrouter",
-                            "tool_rounds": round_idx + 1,
-                        }
-                        return self._deps.build_usage_result(
-                            kind="chat",
-                            text=text,
-                            model=self._deps.primary_model,
-                            response=response,
-                            metadata=tool_metadata,
-                        )
-                    break
-
-                known_calls = self._filter_known_calls(
-                    tool_calls, tool_context, round_idx
+                decision = self._handle_structured_tool_calls(
+                    response=response,
+                    message=message,
+                    round_idx=round_idx,
+                    current_messages=current_messages,
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
                 )
-                if not known_calls:
-                    text = str(message.content or "").strip()
-                    if text:
-                        tool_metadata = {
-                            "provider": "openrouter",
-                            "tool_rounds": round_idx + 1,
-                        }
-                        return self._deps.build_usage_result(
-                            kind="chat",
-                            text=text,
-                            model=self._deps.primary_model,
-                            response=response,
-                            metadata=tool_metadata,
-                        )
-                    break
-
-                current_messages = self._tool_runtime.apply_tool_calls(
-                    message,
-                    known_calls,
-                    current_messages,
-                    tool_context or {},
-                )
-
-                self._deps.increment_request_count()
-                continue
+                if decision.result is not None:
+                    return decision.result
+                if decision.continue_rounds:
+                    current_messages = decision.messages
+                    continue
+                break
 
             if finish_reason == "stop":
-                metadata: Dict[str, Any] = {"provider": "openrouter"}
-                pseudo_call = self._parse_pseudo_tool_call(
-                    str(getattr(message, "content", "") or ""), round_idx, extra_tools
-                )
-                if pseudo_call is not None:
-                    current_messages = self._tool_runtime.apply_tool_calls(
-                        SimpleNamespace(content=""),
-                        [pseudo_call],
-                        current_messages,
-                        tool_context or {},
-                    )
-                    self._deps.increment_request_count()
-                    continue
-
-                usage_map = self._deps.extract_usage_map(response) or {}
-                server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
-                web_search_requests = server_tool_use.get("web_search_requests")
-                if web_search_requests is not None:
-                    try:
-                        metadata["web_search_requests"] = int(web_search_requests)
-                    except (TypeError, ValueError):
-                        pass
-                if "web_search_requests" not in metadata:
-                    # Older responses expose citations but omit web-search usage.
-                    annotations = getattr(message, "annotations", None) or []
-                    has_url_citation = any(
-                        getattr(annotation, "type", None) == "url_citation"
-                        or (
-                            isinstance(annotation, Mapping)
-                            and str(annotation.get("type") or "") == "url_citation"
-                        )
-                        for annotation in annotations
-                    )
-                    if has_url_citation:
-                        metadata["web_search_requests"] = 1
-                metadata["tool_rounds"] = round_idx + 1
-                return self._deps.build_usage_result(
-                    kind="chat",
-                    text=str(message.content or ""),
-                    model=self._deps.primary_model,
+                decision = self._handle_stop_response(
                     response=response,
-                    metadata=metadata,
+                    message=message,
+                    round_idx=round_idx,
+                    current_messages=current_messages,
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
                 )
+                if decision.continue_rounds:
+                    current_messages = decision.messages
+                    continue
+                return decision.result
 
             if finish_reason == "length":
-                message = choice.message
-                return self._deps.build_usage_result(
-                    kind="chat",
-                    text=str(message.content or ""),
-                    model=self._deps.primary_model,
-                    response=response,
-                    metadata={
-                        "provider": "openrouter",
-                        "truncated": True,
-                        "tool_rounds": round_idx + 1,
-                    },
+                return self._build_round_result(
+                    response,
+                    message,
+                    round_idx,
+                    metadata={"truncated": True},
                 )
 
-            unexpected_context = dict(tool_context or {})
-            unexpected_context.update(
-                {"model": self._deps.primary_model, "tool_round": round_idx + 1}
-            )
-            logger.warning(
-                "provider_runtime: unexpected finish_reason=%r%s",
+            self._report_unexpected_finish(
                 finish_reason,
-                format_log_context(unexpected_context),
-            )
-            self._deps.admin_report(
-                f"OpenRouter unexpected finish_reason={finish_reason!r}",
-                extra_context={
-                    "model": self._deps.primary_model,
-                    "enable_web_search": enable_web_search,
-                },
+                round_idx,
+                enable_web_search=enable_web_search,
+                tool_context=tool_context,
             )
             break
 
