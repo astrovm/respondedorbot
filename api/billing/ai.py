@@ -31,6 +31,32 @@ from api.ai.random_replies import build_random_reply
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
 
+@dataclass(frozen=True, slots=True)
+class BatchReservation:
+    items: list[dict[str, Any]]
+    reserved_credit_units: int
+    usage_tags: list[str]
+    usage_tag: str
+    chat_scope_id: Optional[int]
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementAdjustment:
+    settled_credit_units: int
+    refunded_credit_units: int = 0
+    extra_charged_credit_units: int = 0
+    debt_applied_credit_units: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSettlementRecord:
+    reason: str
+    breakdown: Mapping[str, Any]
+    billing_segments: Sequence[Mapping[str, Any]]
+    missing_usage_billing: bool = False
+
+
 class AIBillingPack(TypedDict):
     id: str
     credits: int
@@ -739,6 +765,318 @@ class AIMessageBilling:
         )
         self.clear_persisted_reservation_fn(usage_tag)
 
+    @staticmethod
+    def _build_batch_reservation(
+        reservations: list[dict[str, Any]],
+    ) -> BatchReservation:
+        usage_tags = [
+            str(item.get("usage_tag") or "ai_usage") for item in reservations
+        ]
+        return BatchReservation(
+            items=reservations,
+            reserved_credit_units=sum(
+                int(item.get("reserved_credit_units", 0) or 0)
+                for item in reservations
+            ),
+            usage_tags=usage_tags,
+            usage_tag=(
+                usage_tags[0]
+                if len(set(usage_tags)) == 1
+                else "ai_usage_batch"
+            ),
+            chat_scope_id=reservations[0].get("chat_scope_id"),
+            source=(
+                "chat"
+                if str(reservations[0].get("source") or "user") == "chat"
+                else "user"
+            ),
+        )
+
+    @staticmethod
+    def _batch_has_mixed_accounts(reservations: Sequence[Mapping[str, Any]]) -> bool:
+        sources = {str(item.get("source") or "user") for item in reservations}
+        scopes = {item.get("chat_scope_id") for item in reservations}
+        return len(sources) > 1 or len(scopes) > 1
+
+    def _settle_reservations_individually(
+        self,
+        reservations: Sequence[Mapping[str, Any]],
+        billing_segments: Optional[List[Mapping[str, Any]]],
+        *,
+        reason: str,
+    ) -> None:
+        print(
+            "settle_batch: mixed credit accounts, falling back to individual "
+            f"settlement (count={len(reservations)})"
+        )
+        for index, reservation in enumerate(reservations):
+            self._settle_single_reservation(
+                reservation,
+                billing_segments if index == 0 else [],
+                reason=reason,
+            )
+
+    def _clear_batch_reservations(self, batch: BatchReservation) -> None:
+        for usage_tag in batch.usage_tags:
+            self.clear_persisted_reservation_fn(usage_tag)
+
+    @staticmethod
+    def _missing_usage_breakdown() -> dict[str, Any]:
+        return {
+            "pricing_version": None,
+            "markup_multiplier": None,
+            "raw_usd_micros": 0,
+            "model_breakdown": [],
+            "tool_breakdown": [],
+            "unsupported_notes": ["missing_billing_segments_reserve_retained"],
+        }
+
+    def _record_batch_settlement(
+        self,
+        batch: BatchReservation,
+        adjustment: SettlementAdjustment,
+        record: BatchSettlementRecord,
+    ) -> None:
+        metadata = self._build_settlement_metadata(
+            usage_tag=batch.usage_tag,
+            usage_tags=batch.usage_tags,
+            reserved_credit_units_total=batch.reserved_credit_units,
+            settled_credit_units=adjustment.settled_credit_units,
+            refunded_credit_units=adjustment.refunded_credit_units,
+            extra_charged_credit_units=adjustment.extra_charged_credit_units,
+            debt_applied_credit_units=adjustment.debt_applied_credit_units,
+            reason=record.reason,
+            breakdown=record.breakdown,
+            billing_segments=record.billing_segments,
+            missing_usage_billing=record.missing_usage_billing,
+            billing_zero_usage_fallback=(
+                not record.missing_usage_billing
+                and _billing_summary_int(record.breakdown, "raw_usd_micros") == 0
+            ),
+        )
+        self._record_ai_settlement_result(
+            chat_scope_id=batch.chat_scope_id,
+            settlement_metadata=metadata,
+        )
+        self._clear_batch_reservations(batch)
+
+    def _retain_batch_reserve(
+        self,
+        batch: BatchReservation,
+        *,
+        reason: str,
+    ) -> None:
+        self._record_batch_settlement(
+            batch,
+            SettlementAdjustment(batch.reserved_credit_units),
+            BatchSettlementRecord(
+                reason=reason,
+                breakdown=self._missing_usage_breakdown(),
+                billing_segments=[],
+                missing_usage_billing=True,
+            ),
+        )
+        self.admin_reporter(
+            "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
+            None,
+            {
+                "chat_id": self.chat_id,
+                "user_id": self.user_id,
+                "reason": reason,
+                "reserved_credit_units": batch.reserved_credit_units,
+            },
+        )
+
+    def _batch_adjustment_metadata(
+        self,
+        batch: BatchReservation,
+        *,
+        reason: str,
+        settled_credit_units: int,
+        amount_key: str,
+        amount: int,
+    ) -> dict[str, Any]:
+        return self._build_charge_metadata(
+            usage_tag=batch.usage_tag,
+            extra={
+                "reason": reason,
+                "reserved_credit_units_total": batch.reserved_credit_units,
+                "settled_credit_units": settled_credit_units,
+                amount_key: amount,
+                "usage_tags": list(batch.usage_tags),
+            },
+        )
+
+    def _refund_batch_overreserve(
+        self,
+        batch: BatchReservation,
+        *,
+        actual_credit_units: int,
+        reason: str,
+    ) -> int:
+        refund = batch.reserved_credit_units - actual_credit_units
+        try:
+            self.credits_db_service.refund_ai_charge(
+                user_id=self.user_id,
+                chat_id=batch.chat_scope_id,
+                amount=refund,
+                source=batch.source,
+                event_type="ai_refund",
+                metadata=self._batch_adjustment_metadata(
+                    batch,
+                    reason=reason,
+                    settled_credit_units=actual_credit_units,
+                    amount_key="refunded_credit_units",
+                    amount=refund,
+                ),
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló el reintegro batch de liquidación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                    "actual_credit_units": actual_credit_units,
+                    "reason": reason,
+                },
+            )
+            return 0
+        return refund
+
+    def _apply_batch_debt(
+        self,
+        batch: BatchReservation,
+        *,
+        actual_credit_units: int,
+        extra_amount: int,
+        reason: str,
+    ) -> int:
+        try:
+            self.credits_db_service.apply_ai_debt(
+                user_id=self.user_id,
+                chat_id=batch.chat_scope_id,
+                amount=extra_amount,
+                source=batch.source,
+                event_type="ai_settlement_debt",
+                metadata=self._batch_adjustment_metadata(
+                    batch,
+                    reason=reason,
+                    settled_credit_units=actual_credit_units,
+                    amount_key="debt_applied_credit_units",
+                    amount=extra_amount,
+                ),
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló registrar deuda batch de liquidación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                    "actual_credit_units": actual_credit_units,
+                    "reason": reason,
+                },
+            )
+            return 0
+        return extra_amount
+
+    def _charge_batch_overage(
+        self,
+        batch: BatchReservation,
+        billing_segments: Sequence[Mapping[str, Any]],
+        *,
+        actual_credit_units: int,
+        reason: str,
+    ) -> tuple[int, int]:
+        extra_amount = actual_credit_units - batch.reserved_credit_units
+        try:
+            charge = self.credits_db_service.charge_ai_credits(
+                user_id=self.user_id,
+                chat_id=batch.chat_scope_id,
+                amount=extra_amount,
+                event_type="ai_settlement_charge",
+                metadata=self._batch_adjustment_metadata(
+                    batch,
+                    reason=reason,
+                    settled_credit_units=actual_credit_units,
+                    amount_key="extra_charged_credit_units",
+                    amount=extra_amount,
+                ),
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló el ajuste batch de liquidación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                    "actual_credit_units": actual_credit_units,
+                    "reason": reason,
+                },
+            )
+            charge = {"ok": False}
+
+        if charge.get("ok"):
+            return extra_amount, 0
+        self.admin_reporter(
+            "la liquidación IA batch superó la reserva y no pudo cobrar ajuste",
+            None,
+            {
+                "chat_id": self.chat_id,
+                "user_id": self.user_id,
+                "reserved_credit_units": batch.reserved_credit_units,
+                "actual_credit_units": actual_credit_units,
+                "reason": reason,
+                "billing_segments": list(billing_segments),
+            },
+        )
+        debt = self._apply_batch_debt(
+            batch,
+            actual_credit_units=actual_credit_units,
+            extra_amount=extra_amount,
+            reason=reason,
+        )
+        return 0, debt
+
+    def _calculate_batch_adjustment(
+        self,
+        batch: BatchReservation,
+        billing_segments: Sequence[Mapping[str, Any]],
+        *,
+        reason: str,
+    ) -> tuple[Mapping[str, Any], SettlementAdjustment]:
+        breakdown = calculate_billing_for_segments(billing_segments)
+        actual = _billing_summary_int(breakdown, "charged_credit_units")
+        raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
+        has_usage = any(_segment_has_token_usage(item) for item in billing_segments)
+        if raw_usd_micros == 0 and not has_usage:
+            actual = batch.reserved_credit_units
+
+        if actual < batch.reserved_credit_units:
+            refund = self._refund_batch_overreserve(
+                batch,
+                actual_credit_units=actual,
+                reason=reason,
+            )
+            return breakdown, SettlementAdjustment(actual, refunded_credit_units=refund)
+        if actual > batch.reserved_credit_units:
+            extra, debt = self._charge_batch_overage(
+                batch,
+                billing_segments,
+                actual_credit_units=actual,
+                reason=reason,
+            )
+            return breakdown, SettlementAdjustment(
+                actual,
+                extra_charged_credit_units=extra,
+                debt_applied_credit_units=debt,
+            )
+        return breakdown, SettlementAdjustment(actual)
+
     def settle_reserved_ai_credits_batch(
         self,
         reservation_metas: Iterable[Optional[Mapping[str, Any]]],
@@ -750,20 +1088,12 @@ class AIMessageBilling:
         if not reservations or self.user_id is None:
             return
 
-        source_values = {str(item.get("source") or "user") for item in reservations}
-        chat_scope_values = {item.get("chat_scope_id") for item in reservations}
-        if len(source_values) > 1 or len(chat_scope_values) > 1:
-            # One batch adjustment cannot safely target different credit accounts.
-            print(
-                f"settle_batch: mixed sources {source_values} or scopes {chat_scope_values}, "
-                f"falling back to individual settlement (count={len(reservations)})"
+        if self._batch_has_mixed_accounts(reservations):
+            self._settle_reservations_individually(
+                reservations,
+                billing_segments,
+                reason=reason,
             )
-            for index, reservation in enumerate(reservations):
-                self._settle_single_reservation(
-                    reservation,
-                    billing_segments if index == 0 else [],
-                    reason=reason,
-                )
             return
 
         if len(reservations) == 1:
@@ -774,209 +1104,25 @@ class AIMessageBilling:
             )
             return
 
-        reserved_credit_units_total = sum(
-            int(item.get("reserved_credit_units", 0) or 0) for item in reservations
-        )
-        usage_tags = [str(item.get("usage_tag") or "ai_usage") for item in reservations]
-        usage_tag = usage_tags[0] if len(set(usage_tags)) == 1 else "ai_usage_batch"
-        chat_scope_id = reservations[0].get("chat_scope_id")
-        source = (
-            "chat" if str(reservations[0].get("source") or "user") == "chat" else "user"
-        )
-
+        batch = self._build_batch_reservation(reservations)
         if billing_segments is None:
-            # Match single-reservation behavior when provider usage is unavailable.
-            breakdown = {
-                "pricing_version": None,
-                "markup_multiplier": None,
-                "raw_usd_micros": 0,
-                "model_breakdown": [],
-                "tool_breakdown": [],
-                "unsupported_notes": ["missing_billing_segments_reserve_retained"],
-            }
-            settlement_metadata = self._build_settlement_metadata(
-                usage_tag=usage_tag,
-                usage_tags=usage_tags,
-                reserved_credit_units_total=reserved_credit_units_total,
-                settled_credit_units=reserved_credit_units_total,
-                refunded_credit_units=0,
-                extra_charged_credit_units=0,
-                debt_applied_credit_units=0,
-                reason=reason,
-                breakdown=breakdown,
-                billing_segments=list(billing_segments or []),
-                missing_usage_billing=True,
-                billing_zero_usage_fallback=False,
-            )
-            self._record_ai_settlement_result(
-                chat_scope_id=chat_scope_id,
-                settlement_metadata=settlement_metadata,
-            )
-            self.admin_reporter(
-                "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
-                None,
-                {
-                    "chat_id": self.chat_id,
-                    "user_id": self.user_id,
-                    "reason": reason,
-                    "reserved_credit_units": reserved_credit_units_total,
-                },
-            )
-            for item in reservations:
-                self.clear_persisted_reservation_fn(
-                    str(item.get("usage_tag") or "ai_usage")
-                )
+            self._retain_batch_reserve(batch, reason=reason)
             return
 
-        breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credit_units = _billing_summary_int(
-            breakdown, "charged_credit_units"
-        )
-        raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
-        refunded_credit_units = 0
-        extra_charged_credit_units = 0
-        debt_applied_credit_units = 0
-
-        has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
-
-        if raw_usd_micros == 0 and not has_usage:
-            actual_credit_units = reserved_credit_units_total
-        if actual_credit_units < reserved_credit_units_total:
-            refunded_credit_units = reserved_credit_units_total - actual_credit_units
-            try:
-                self.credits_db_service.refund_ai_charge(
-                    user_id=self.user_id,
-                    chat_id=chat_scope_id,
-                    amount=refunded_credit_units,
-                    source=source,
-                    event_type="ai_refund",
-                    metadata=self._build_charge_metadata(
-                        usage_tag=usage_tag,
-                        extra={
-                            "reason": reason,
-                            "reserved_credit_units_total": reserved_credit_units_total,
-                            "settled_credit_units": actual_credit_units,
-                            "refunded_credit_units": refunded_credit_units,
-                            "usage_tags": list(usage_tags),
-                        },
-                    ),
-                )
-            except Exception as error:
-                self.admin_reporter(
-                    "falló el reintegro batch de liquidación IA",
-                    error,
-                    {
-                        "chat_id": self.chat_id,
-                        "user_id": self.user_id,
-                        "reserved_credit_units": reserved_credit_units_total,
-                        "actual_credit_units": actual_credit_units,
-                        "reason": reason,
-                    },
-                )
-                refunded_credit_units = 0
-
-        elif actual_credit_units > reserved_credit_units_total:
-            extra_amount = actual_credit_units - reserved_credit_units_total
-            try:
-                extra_charge = self.credits_db_service.charge_ai_credits(
-                    user_id=self.user_id,
-                    chat_id=chat_scope_id,
-                    amount=extra_amount,
-                    event_type="ai_settlement_charge",
-                    metadata=self._build_charge_metadata(
-                        usage_tag=usage_tag,
-                        extra={
-                            "reason": reason,
-                            "reserved_credit_units_total": reserved_credit_units_total,
-                            "settled_credit_units": actual_credit_units,
-                            "extra_charged_credit_units": extra_amount,
-                            "usage_tags": list(usage_tags),
-                        },
-                    ),
-                )
-            except Exception as error:
-                self.admin_reporter(
-                    "falló el ajuste batch de liquidación IA",
-                    error,
-                    {
-                        "chat_id": self.chat_id,
-                        "user_id": self.user_id,
-                        "reserved_credit_units": reserved_credit_units_total,
-                        "actual_credit_units": actual_credit_units,
-                        "reason": reason,
-                    },
-                )
-                extra_charge = {"ok": False}
-
-            if not extra_charge.get("ok"):
-                self.admin_reporter(
-                    "la liquidación IA batch superó la reserva y no pudo cobrar ajuste",
-                    None,
-                    {
-                        "chat_id": self.chat_id,
-                        "user_id": self.user_id,
-                        "reserved_credit_units": reserved_credit_units_total,
-                        "actual_credit_units": actual_credit_units,
-                        "reason": reason,
-                        "billing_segments": list(billing_segments or []),
-                    },
-                )
-                try:
-                    self.credits_db_service.apply_ai_debt(
-                        user_id=self.user_id,
-                        chat_id=chat_scope_id,
-                        amount=extra_amount,
-                        source=source,
-                        event_type="ai_settlement_debt",
-                        metadata=self._build_charge_metadata(
-                            usage_tag=usage_tag,
-                            extra={
-                                "reason": reason,
-                                "reserved_credit_units_total": reserved_credit_units_total,
-                                "settled_credit_units": actual_credit_units,
-                                "debt_applied_credit_units": extra_amount,
-                                "usage_tags": list(usage_tags),
-                            },
-                        ),
-                    )
-                    debt_applied_credit_units = extra_amount
-                except Exception as error:
-                    self.admin_reporter(
-                        "falló registrar deuda batch de liquidación IA",
-                        error,
-                        {
-                            "chat_id": self.chat_id,
-                            "user_id": self.user_id,
-                            "reserved_credit_units": reserved_credit_units_total,
-                            "actual_credit_units": actual_credit_units,
-                            "reason": reason,
-                        },
-                    )
-            else:
-                extra_charged_credit_units = extra_amount
-
-        settlement_metadata = self._build_settlement_metadata(
-            usage_tag=usage_tag,
-            usage_tags=usage_tags,
-            reserved_credit_units_total=reserved_credit_units_total,
-            settled_credit_units=actual_credit_units,
-            refunded_credit_units=refunded_credit_units,
-            extra_charged_credit_units=extra_charged_credit_units,
-            debt_applied_credit_units=debt_applied_credit_units,
+        breakdown, adjustment = self._calculate_batch_adjustment(
+            batch,
+            billing_segments,
             reason=reason,
-            breakdown=breakdown,
-            billing_segments=list(billing_segments or []),
-            missing_usage_billing=False,
-            billing_zero_usage_fallback=raw_usd_micros == 0,
         )
-        self._record_ai_settlement_result(
-            chat_scope_id=chat_scope_id,
-            settlement_metadata=settlement_metadata,
+        self._record_batch_settlement(
+            batch,
+            adjustment,
+            BatchSettlementRecord(
+                reason=reason,
+                breakdown=breakdown,
+                billing_segments=billing_segments,
+            ),
         )
-        for item in reservations:
-            self.clear_persisted_reservation_fn(
-                str(item.get("usage_tag") or "ai_usage")
-            )
 
     def refund_reserved_ai_credits(
         self,
