@@ -450,5 +450,4 @@ class SummaryService:
             fetch_full_history=self._deps.state.fetch_for_compaction,
             compact_memory=self.compact_memory,
             search_history=self._deps.state.search_history,
-            admin_report=self._deps.admin_report,
         )
