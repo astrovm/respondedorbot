@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
@@ -83,6 +84,58 @@ _TWITTER_FRONTEND_HOSTS: Set[str] = _TWITTER_HOSTS | {
     "fixupx.com",
     "fxtwitter.com",
 }
+
+
+class _PreviewMetaParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags: Dict[str, str] = {}
+
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
+        if tag != "meta":
+            return
+        attrs_dict: Dict[str, Optional[str]] = dict(attrs)
+        key = attrs_dict.get("property") or attrs_dict.get("name")
+        if not key:
+            return
+        normalized_key = key.lower()
+        if normalized_key.startswith(("og:", "twitter:")):
+            content = (attrs_dict.get("content") or "").strip()
+            if content:
+                self.tags[normalized_key] = content
+
+
+@dataclass(frozen=True)
+class PreviewMetadata:
+    tags: Dict[str, str]
+    title: Optional[str]
+    description: Optional[str]
+    canonical_url: Optional[str]
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self.title or self.description)
+
+    @property
+    def has_image(self) -> bool:
+        return "og:image" in self.tags or "twitter:image" in self.tags
+
+    @property
+    def has_video(self) -> bool:
+        return any(
+            key in self.tags
+            for key in ("og:video", "twitter:player", "twitter:player:stream")
+        )
+
+    @property
+    def has_card(self) -> bool:
+        return "twitter:card" in self.tags
+
+    @property
+    def has_eeinstagram_media(self) -> bool:
+        return "og:image" in self.tags or "og:video" in self.tags
 
 
 def _normalized_host(parsed: ParseResult) -> str:
@@ -171,29 +224,193 @@ def has_replaceable_link(text: str) -> bool:
     return False
 
 
+def _embed_result(
+    url: str,
+    *,
+    embeddable: bool,
+    status: Optional[int] = None,
+    content_type: str = "",
+    metadata: Optional[PreviewMetadata] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "embeddable": embeddable,
+        "url": url,
+        "status": status,
+        "content_type": content_type,
+        "title": metadata.title if metadata else None,
+        "description": metadata.description if metadata else None,
+    }
+    if metadata is not None:
+        result["canonical_url"] = metadata.canonical_url
+    result.update(extra)
+    return result
+
+
+def _parse_preview_metadata(html: str) -> PreviewMetadata:
+    parser = _PreviewMetaParser()
+    parser.feed(html[:20000])
+    tags = parser.tags
+    return PreviewMetadata(
+        tags=tags,
+        title=tags.get("og:title") or tags.get("twitter:title"),
+        description=tags.get("og:description") or tags.get("twitter:description"),
+        canonical_url=tags.get("og:url"),
+    )
+
+
+def _metadata_is_embeddable(
+    metadata: PreviewMetadata,
+    *,
+    eeinstagram: bool,
+) -> bool:
+    has_media = metadata.has_image or metadata.has_video
+    return (
+        metadata.has_text and (has_media or metadata.has_card)
+    ) or (eeinstagram and metadata.has_eeinstagram_media)
+
+
+def _missing_preview_fields(
+    metadata: PreviewMetadata,
+    *,
+    eeinstagram: bool,
+) -> str:
+    missing: List[str] = []
+    if not metadata.has_text and not (
+        eeinstagram and metadata.has_eeinstagram_media
+    ):
+        missing.append(
+            "og:title/twitter:title or og:description/twitter:description"
+        )
+    if not (metadata.has_image or metadata.has_video or metadata.has_card) and not eeinstagram:
+        missing.append(
+            "og:image/twitter:image or og:video/twitter:player or twitter:card"
+        )
+    if eeinstagram and not metadata.has_eeinstagram_media:
+        missing.append("og:image or og:video")
+    return ", ".join(missing)
+
+
+def _probe_instagram_preview_media(
+    parsed: ParseResult,
+    normalized_url: str,
+    metadata: PreviewMetadata,
+) -> Optional[Dict[str, Any]]:
+    if not _is_instagram_frontend_host(parsed):
+        return {}
+    media_reference = (
+        metadata.tags.get("og:video")
+        or metadata.tags.get("twitter:player:stream")
+        or metadata.tags.get("og:image")
+        or metadata.tags.get("twitter:image")
+    )
+    return (
+        _probe_instagram_media(urljoin(normalized_url, media_reference))
+        if media_reference
+        else None
+    )
+
+
+def _inspect_html_preview(
+    url: str,
+    parsed: ParseResult,
+    response: Any,
+    normalized_url: str,
+    content_type: str,
+) -> Dict[str, Any]:
+    metadata = _parse_preview_metadata(response.text)
+    eeinstagram = _is_eeinstagram_host(parsed)
+    if not _metadata_is_embeddable(metadata, eeinstagram=eeinstagram):
+        missing = _missing_preview_fields(metadata, eeinstagram=eeinstagram)
+        logger.info("embed: missing metadata url=%s missing=%s", url, missing)
+        return _embed_result(
+            normalized_url,
+            embeddable=False,
+            status=response.status_code,
+            content_type=content_type,
+            metadata=metadata,
+        )
+
+    media_probe = _probe_instagram_preview_media(parsed, normalized_url, metadata)
+    if media_probe is None:
+        logger.info("embed: instagram media not ready url=%s", url)
+        return _embed_result(
+            normalized_url,
+            embeddable=False,
+            status=response.status_code,
+            content_type=content_type,
+            metadata=metadata,
+        )
+
+    detail = ", ".join(
+        f"{key}={value[:80]}" for key, value in metadata.tags.items()
+    )
+    logger.info("embed: metadata found url=%s metadata=%s", url, detail)
+    return _embed_result(
+        normalized_url,
+        embeddable=True,
+        status=response.status_code,
+        content_type=content_type,
+        metadata=metadata,
+        **media_probe,
+    )
+
+
+def _inspect_embed_response(
+    url: str,
+    parsed: ParseResult,
+    response: Any,
+) -> Dict[str, Any]:
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    response_url = getattr(response, "url", "")
+    normalized_url = (
+        response_url.strip()
+        if isinstance(response_url, str) and response_url.strip()
+        else url
+    )
+    if response.status_code >= 400:
+        logger.info("embed: returned status url=%s status=%s", url, response.status_code)
+        return _embed_result(
+            normalized_url,
+            embeddable=False,
+            status=response.status_code,
+            content_type=content_type,
+        )
+    if content_type.startswith(("image/", "video/", "audio/")):
+        logger.info("embed: direct media url=%s content_type=%s", url, content_type)
+        return _embed_result(
+            normalized_url,
+            embeddable=True,
+            status=response.status_code,
+            content_type=content_type,
+            media_url=normalized_url,
+            media_content_type=content_type,
+            media_size=_response_content_length(response),
+        )
+    if "text/html" not in content_type:
+        logger.info("embed: not embeddable url=%s content_type=%s", url, content_type)
+        return _embed_result(
+            normalized_url,
+            embeddable=False,
+            status=response.status_code,
+            content_type=content_type,
+        )
+    return _inspect_html_preview(
+        url,
+        parsed,
+        response,
+        normalized_url,
+        content_type,
+    )
+
+
 def inspect_embed_url(url: str) -> Dict[str, Any]:
     """Inspect whether the target page exposes Telegram-compatible preview metadata."""
 
     parsed = urlparse(url)
     eeinstagram_preview = _eeinstagram_preview_check(parsed, url)
-    if eeinstagram_preview is False:
-        return {
-            "embeddable": False,
-            "url": url,
-            "status": None,
-            "content_type": "",
-            "title": None,
-            "description": None,
-        }
-    if eeinstagram_preview is True:
-        return {
-            "embeddable": True,
-            "url": url,
-            "status": None,
-            "content_type": "",
-            "title": None,
-            "description": None,
-        }
+    if eeinstagram_preview is not None:
+        return _embed_result(url, embeddable=eeinstagram_preview)
     headers = {"User-Agent": TELEGRAM_PREVIEW_USER_AGENT}
     is_eeinstagram_host = _is_eeinstagram_host(parsed)
     try:
@@ -206,175 +423,12 @@ def inspect_embed_url(url: str) -> Dict[str, Any]:
         )
     except RequestException as exc:
         logger.warning("embed: request failed url=%s error=%s", url, exc)
-        return {
-            "embeddable": False,
-            "url": url,
-            "status": None,
-            "content_type": "",
-            "title": None,
-            "description": None,
-            "error": exc.__class__.__name__,
-        }
-
-    if response.status_code >= 400:
-        logger.info("embed: returned status url=%s status=%s", url, response.status_code)
-        return {
-            "embeddable": False,
-            "url": str(getattr(response, "url", "") or url),
-            "status": response.status_code,
-            "content_type": str(response.headers.get("Content-Type", "")).lower(),
-            "title": None,
-            "description": None,
-        }
-
-    content_type = response.headers.get("Content-Type", "").lower()
-    response_url = getattr(response, "url", "")
-    normalized_url = (
-        response_url.strip()
-        if isinstance(response_url, str) and response_url.strip()
-        else url
-    )
-    if content_type.startswith(("image/", "video/", "audio/")):
-        logger.info("embed: direct media url=%s content_type=%s", url, content_type)
-        return {
-            "embeddable": True,
-            "url": normalized_url,
-            "status": response.status_code,
-            "content_type": content_type,
-            "title": None,
-            "description": None,
-            "media_url": normalized_url,
-            "media_content_type": content_type,
-            "media_size": _response_content_length(response),
-        }
-    if "text/html" not in content_type:
-        logger.info("embed: not embeddable url=%s content_type=%s", url, content_type)
-        return {
-            "embeddable": False,
-            "url": normalized_url,
-            "status": response.status_code,
-            "content_type": content_type,
-            "title": None,
-            "description": None,
-        }
-
-    html = response.text[:20000]
-
-    class MetaParser(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__()
-            self.tags: Dict[str, str] = {}
-
-        def handle_starttag(
-            self, tag: str, attrs: List[Tuple[str, Optional[str]]]
-        ) -> None:
-            if tag != "meta":
-                return
-            attrs_dict: Dict[str, Optional[str]] = dict(attrs)
-            key_candidate = attrs_dict.get("property") or attrs_dict.get("name")
-            if not key_candidate:
-                return
-            key_lower = key_candidate.lower()
-            if key_lower.startswith("og:") or key_lower.startswith("twitter:"):
-                content = (attrs_dict.get("content") or "").strip()
-                if content:
-                    self.tags[key_lower] = content
-
-    parser = MetaParser()
-    parser.feed(html)
-    meta_tags = parser.tags
-    title = meta_tags.get("og:title") or meta_tags.get("twitter:title")
-    description = meta_tags.get("og:description") or meta_tags.get(
-        "twitter:description"
-    )
-    canonical_url = meta_tags.get("og:url")
-    is_eeinstagram_host = _is_eeinstagram_host(parsed)
-
-    has_title = "og:title" in meta_tags or "twitter:title" in meta_tags
-    has_description = (
-        "og:description" in meta_tags or "twitter:description" in meta_tags
-    )
-    has_og_image = "og:image" in meta_tags
-    has_og_video = "og:video" in meta_tags
-    has_twitter_image = "twitter:image" in meta_tags
-    has_twitter_video = any(
-        key in meta_tags for key in ("twitter:player", "twitter:player:stream")
-    )
-    has_image = has_og_image or has_twitter_image
-    has_video = has_og_video or has_twitter_video
-    has_card = "twitter:card" in meta_tags
-
-    has_preview_text = has_title or has_description
-    has_preview_media = has_image or has_video
-    has_eeinstagram_media = has_og_image or has_og_video
-
-    if (has_preview_text and (has_preview_media or has_card)) or (
-        is_eeinstagram_host and has_eeinstagram_media
-    ):
-        media_probe: Dict[str, Any] = {}
-        if _is_instagram_frontend_host(parsed):
-            media_reference = (
-                meta_tags.get("og:video")
-                or meta_tags.get("twitter:player:stream")
-                or meta_tags.get("og:image")
-                or meta_tags.get("twitter:image")
-            )
-            probed_media = (
-                _probe_instagram_media(urljoin(normalized_url, media_reference))
-                if media_reference
-                else None
-            )
-            if not probed_media:
-                logger.info(
-                    "embed: instagram media not ready url=%s media=%s",
-                    url,
-                    media_reference,
-                )
-                return {
-                    "embeddable": False,
-                    "url": normalized_url,
-                    "status": response.status_code,
-                    "content_type": content_type,
-                    "title": title,
-                    "description": description,
-                    "canonical_url": canonical_url,
-                }
-            media_probe = probed_media
-        detail = ", ".join(f"{key}={value[:80]}" for key, value in meta_tags.items())
-        logger.info("embed: metadata found url=%s metadata=%s", url, detail)
-        return {
-            "embeddable": True,
-            "url": normalized_url,
-            "status": response.status_code,
-            "content_type": content_type,
-            "title": title,
-            "description": description,
-            "canonical_url": canonical_url,
-            **media_probe,
-        }
-
-    missing_fields: List[str] = []
-    if not has_preview_text and not (is_eeinstagram_host and has_eeinstagram_media):
-        missing_fields.append(
-            "og:title/twitter:title or og:description/twitter:description"
+        return _embed_result(
+            url,
+            embeddable=False,
+            error=exc.__class__.__name__,
         )
-    if not (has_preview_media or has_card) and not is_eeinstagram_host:
-        missing_fields.append(
-            "og:image/twitter:image or og:video/twitter:player or twitter:card"
-        )
-    if not has_eeinstagram_media and is_eeinstagram_host:
-        missing_fields.append("og:image or og:video")
-    missing_detail = ", ".join(missing_fields)
-    logger.info("embed: missing metadata url=%s missing=%s", url, missing_detail)
-    return {
-        "embeddable": False,
-        "url": normalized_url,
-        "status": response.status_code,
-        "content_type": content_type,
-        "title": title,
-        "description": description,
-        "canonical_url": canonical_url,
-    }
+    return _inspect_embed_response(url, parsed, response)
 
 
 def can_embed_url(
