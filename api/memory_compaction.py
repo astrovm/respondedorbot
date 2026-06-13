@@ -117,7 +117,6 @@ def prepare_chat_memory(
         int,
     ]],
     search_history: Callable[..., list[dict[str, Any]]],
-    admin_report: Callable[..., None],
 ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], int]:
     summary = (
         get_summary(redis_client, chat_id)
@@ -128,7 +127,6 @@ def prepare_chat_memory(
         fetch_full_history(
             redis_client,
             chat_id,
-            admin_reporter=admin_report,
         )
         if redis_client is not None and chat_id
         else []
@@ -161,7 +159,6 @@ def prepare_chat_memory(
             reply_to_message_id=reply_to_message_id,
             limit=5,
             exclude_message_ids=recent_ids,
-            admin_reporter=admin_report,
         )
         if redis_client is not None and chat_id and query_text.strip()
         else []
