@@ -55,8 +55,16 @@ def reset_caches(monkeypatch):
         lambda: False,
     )
     monkeypatch.setattr("time.sleep", lambda *_, **__: None)
-    monkeypatch.setattr(index_module, "complete_with_providers", lambda *_, **__: "")
-    monkeypatch.setattr(index_module, "config_redis", lambda *_, **__: _FastFailRedis())
+    monkeypatch.setattr(
+        index_module.app_runtime.providers,
+        "complete",
+        lambda *_, **__: "",
+    )
+    monkeypatch.setattr(
+        index_module.app_runtime.config,
+        "redis",
+        lambda *_, **__: _FastFailRedis(),
+    )
     monkeypatch.setattr(index_module, "_BACKGROUND_REFRESH_EXECUTOR", _NoopExecutor())
     config_module.reset_cache()
     yield

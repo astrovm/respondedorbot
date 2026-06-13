@@ -4,6 +4,7 @@ import base64
 import io
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from api.ai_pricing import AIUsageResult
@@ -421,3 +422,203 @@ def describe_media_by_id(
         downloader=download_file,
         failure_code="describe",
     )
+
+
+@dataclass
+class MediaServiceDeps:
+    cache: Any
+    telegram: Any
+    images: Any
+    get_openrouter_client: Callable[[], Any]
+    get_groq_native_client: Callable[[str], Any]
+    get_groq_accounts: Callable[[], list[str]]
+    invoke_provider: Callable[..., Any]
+    get_backoff_key: Callable[[str, str], str]
+    log_result: Callable[..., None]
+    should_try_next_account: Callable[[Exception], bool]
+    is_backoff_active: Callable[[str], bool]
+    increment_request_count: Callable[[], None]
+    build_usage_result: Callable[..., AIUsageResult]
+    admin_report: Callable[..., None]
+    measure_duration: Callable[[bytes], float | None]
+    extract_audio: Callable[[bytes], bytes | None]
+    logger: Any
+    vision_model: str
+    vision_max_tokens: int
+    transcribe_model: str
+    openrouter_transcribe_model: str
+    no_markdown_prompt: str
+    default_backoff_seconds: int
+
+
+class MediaService:
+    def __init__(self, deps: MediaServiceDeps) -> None:
+        self._deps = deps
+
+    def execute_groq_request(
+        self,
+        scope: str,
+        *,
+        label: str,
+        token_count: int = 0,
+        audio_seconds: float = 0.0,
+        attempt: Callable[[str], AIUsageResult | None],
+    ) -> AIUsageResult | None:
+        return execute_groq_request_with_fallback(
+            scope,
+            label=label,
+            token_count=token_count,
+            audio_seconds=audio_seconds,
+            attempt=attempt,
+            get_accounts=self._deps.get_groq_accounts,
+            invoke_provider=self._deps.invoke_provider,
+            get_backoff_key=self._deps.get_backoff_key,
+            log_result=self._deps.log_result,
+            should_try_next_account=self._deps.should_try_next_account,
+            is_backoff_active=self._deps.is_backoff_active,
+            default_backoff_seconds=self._deps.default_backoff_seconds,
+        )
+
+    def describe_image_result(
+        self,
+        image_data: bytes,
+        user_text: str = "¿Qué ves en esta imagen?",
+        file_id: str | None = None,
+        *,
+        use_cache: bool = True,
+    ) -> AIUsageResult | None:
+        return describe_image_result(
+            image_data,
+            user_text,
+            file_id,
+            use_cache=use_cache,
+            get_cached_description=self._deps.cache.get_description,
+            get_client=self._deps.get_openrouter_client,
+            prepare_image=self._deps.images.prepare,
+            encode_image=self._deps.images.encode,
+            increment_request_count=self._deps.increment_request_count,
+            build_usage_result=self._deps.build_usage_result,
+            cache_description=self._deps.cache.cache_description,
+            admin_report=self._deps.admin_report,
+            logger=self._deps.logger,
+            model=self._deps.vision_model,
+            max_tokens=self._deps.vision_max_tokens,
+            no_markdown_prompt=self._deps.no_markdown_prompt,
+        )
+
+    def describe_image(
+        self,
+        image_data: bytes,
+        user_text: str = "¿Qué ves en esta imagen?",
+        file_id: str | None = None,
+        *,
+        use_cache: bool = True,
+    ) -> str | None:
+        result = self.describe_image_result(
+            image_data,
+            user_text,
+            file_id,
+            use_cache=use_cache,
+        )
+        return result.text if result else None
+
+    def transcribe_audio_openrouter_result(
+        self,
+        audio_data: bytes,
+        file_id: str | None = None,
+    ) -> AIUsageResult | None:
+        return transcribe_audio_openrouter_result(
+            audio_data,
+            file_id,
+            get_client=self._deps.get_openrouter_client,
+            increment_request_count=self._deps.increment_request_count,
+            build_usage_result=self._deps.build_usage_result,
+            model=self._deps.openrouter_transcribe_model,
+        )
+
+    def transcribe_audio_result(
+        self,
+        audio_data: bytes,
+        file_id: str | None = None,
+        *,
+        use_cache: bool = True,
+    ) -> AIUsageResult | None:
+        return transcribe_audio_result(
+            audio_data,
+            file_id,
+            use_cache=use_cache,
+            get_cached_transcription=self._deps.cache.get_transcription,
+            measure_duration=self._deps.measure_duration,
+            get_native_client=self._deps.get_groq_native_client,
+            build_usage_result=self._deps.build_usage_result,
+            execute_with_fallback=self.execute_groq_request,
+            openrouter_fallback=self.transcribe_audio_openrouter_result,
+            cache_transcription=self._deps.cache.cache_transcription,
+            model=self._deps.transcribe_model,
+        )
+
+    def transcribe_audio(
+        self,
+        audio_data: bytes,
+        file_id: str | None = None,
+        *,
+        use_cache: bool = True,
+    ) -> str | None:
+        result = self.transcribe_audio_result(
+            audio_data,
+            file_id,
+            use_cache=use_cache,
+        )
+        return result.text if result else None
+
+    def process_with_cache(
+        self,
+        *,
+        file_id: str,
+        use_cache: bool,
+        cache_lookup: Callable[[str], str | None] | None,
+        processor: Callable[[bytes], AIUsageResult | None],
+        downloader: Callable[[str], bytes | None] | None = None,
+        failure_code: str,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        return process_media_with_cache(
+            file_id=file_id,
+            use_cache=use_cache,
+            cache_lookup=cache_lookup,
+            processor=processor,
+            downloader=downloader or self._deps.telegram.download_file,
+            measure_duration=self._deps.measure_duration,
+            failure_code=failure_code,
+            logger=self._deps.logger,
+        )
+
+    def transcribe_file(
+        self,
+        file_id: str,
+        use_cache: bool = True,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        return transcribe_file_by_id(
+            file_id,
+            use_cache,
+            get_cached_transcription=self._deps.cache.get_transcription,
+            download_file=self._deps.telegram.download_file,
+            measure_duration=self._deps.measure_duration,
+            extract_audio=self._deps.extract_audio,
+            transcribe=self.transcribe_audio_result,
+            process_media=self.process_with_cache,
+            logger=self._deps.logger,
+        )
+
+    def describe_media(
+        self,
+        file_id: str,
+        prompt: str,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        return describe_media_by_id(
+            file_id,
+            prompt,
+            get_cached_description=self._deps.cache.get_description,
+            download_file=self._deps.telegram.download_file,
+            describe_image=self.describe_image_result,
+            process_media=self.process_with_cache,
+        )

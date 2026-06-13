@@ -63,21 +63,21 @@ def _ensure_runtime_deps() -> None:
         return
 
     try:
-        from api import index as _index
+        from api.index import app_runtime
 
         init_scheduler(
-            redis_factory=_index.config_redis,
+            redis_factory=app_runtime.config.redis,
             task_executor_deps={
-                "ask_ai": _index.ask_ai,
-                "send_msg": _index.send_msg,
-                "admin_report": _index.admin_report,
+                "ask_ai": app_runtime.ai.ask,
+                "send_msg": app_runtime.telegram.send_message,
+                "admin_report": app_runtime.admin.report,
                 "credits_db_service": credits_db_service,
                 "gen_random_fn": gen_random,
                 "build_insufficient_credits_message_fn": (
-                    _index.build_insufficient_credits_message
+                    app_runtime.billing.build_insufficient_message
                 ),
                 "estimate_ai_base_reserve_credits": (
-                    _index.estimate_ai_base_reserve_credits
+                    app_runtime.estimate_ai_base_reserve_credits
                 ),
             },
         )

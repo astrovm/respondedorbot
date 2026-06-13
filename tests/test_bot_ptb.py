@@ -107,13 +107,16 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         async def _run_sync_impl(func, *args):
             return func(*args)
 
+        runtime = MagicMock()
         with (
             patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.handle_msg") as handle_msg,
+            patch("api.bot_ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_message(update, MagicMock())
 
-        handle_msg.assert_called_once_with({"chat": {"id": 1}, "text": "test"})
+        runtime.handle_message.assert_called_once_with(
+            {"chat": {"id": 1}, "text": "test"}
+        )
 
     async def test_async_handle_callback_delegates_sync_handler(self):
         update = _FakeUpdate({"callback_query": {"id": "cbq1", "data": "cfg:foo"}})
@@ -121,13 +124,16 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         async def _run_sync_impl(func, *args):
             return func(*args)
 
+        runtime = MagicMock()
         with (
             patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.handle_callback_query") as handle_callback_query,
+            patch("api.bot_ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_callback_query(update, MagicMock())
 
-        handle_callback_query.assert_called_once_with({"id": "cbq1", "data": "cfg:foo"})
+        runtime.handle_callback_query.assert_called_once_with(
+            {"id": "cbq1", "data": "cfg:foo"}
+        )
 
     async def test_async_handle_pre_checkout_delegates_sync_handler(self):
         update = _FakeUpdate(
@@ -137,13 +143,14 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         async def _run_sync_impl(func, *args):
             return func(*args)
 
+        runtime = MagicMock()
         with (
             patch("api.bot_ptb._run_sync", side_effect=_run_sync_impl),
-            patch("api.bot_ptb.handle_pre_checkout_query") as handle_pre_checkout_query,
+            patch("api.bot_ptb.app_runtime", runtime),
         ):
             await bot_ptb._async_handle_pre_checkout_query(update, MagicMock())
 
-        handle_pre_checkout_query.assert_called_once_with(
+        runtime.billing.handle_pre_checkout.assert_called_once_with(
             {"id": "pcq1", "invoice_payload": "topup:p50"}
         )
 
@@ -155,7 +162,6 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         context.error = NetworkError("httpx.ConnectError: All connection attempts failed")
 
         with (
-            patch("api.bot_ptb.admin_report") as admin_report,
             patch("api.bot_ptb._run_sync") as run_sync,
             patch("api.bot_ptb.time.monotonic", return_value=1000.0),
             patch("api.bot_ptb._last_polling_network_report", 0.0),
@@ -163,7 +169,6 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot_ptb._error_handler(object(), context)
 
-        admin_report.assert_not_called()
         run_sync.assert_not_called()
         self.assertIn("PTB polling network error; polling will retry", logs.output[0])
 
@@ -175,14 +180,12 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
         context.error = NetworkError("httpx.RemoteProtocolError: disconnected")
 
         with (
-            patch("api.bot_ptb.admin_report") as admin_report,
             patch("api.bot_ptb._run_sync") as run_sync,
             patch("api.bot_ptb.time.monotonic", return_value=1001.0),
             patch("api.bot_ptb._last_polling_network_report", 900.0),
         ):
             await bot_ptb._error_handler(object(), context)
 
-        admin_report.assert_not_called()
         run_sync.assert_not_called()
 
 

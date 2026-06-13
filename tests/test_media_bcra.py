@@ -9,17 +9,20 @@ from tests.support import *
     ],
 )
 def test_get_cached_media_success(prefix, file_id, cached_value):
-    from api.index import _get_cached_media
+    from api.media_cache import get_cached_media
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = make_mock_config_redis()
-        mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = cached_value
+    mock_redis = make_mock_config_redis()
+    mock_redis.get.return_value = cached_value
 
-        result = _get_cached_media(prefix, file_id)
+    result = get_cached_media(
+        prefix,
+        file_id,
+        redis_factory=lambda: mock_redis,
+        logger=MagicMock(),
+    )
 
-        assert result == cached_value
-        mock_redis.get.assert_called_once_with(f"{prefix}:{file_id}")
+    assert result == cached_value
+    mock_redis.get.assert_called_once_with(f"{prefix}:{file_id}")
 
 
 @pytest.mark.parametrize(
@@ -27,17 +30,20 @@ def test_get_cached_media_success(prefix, file_id, cached_value):
     ["audio_transcription", "image_description"],
 )
 def test_get_cached_media_not_found(prefix):
-    from api.index import _get_cached_media
+    from api.media_cache import get_cached_media
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = make_mock_config_redis()
-        mock_config_redis.return_value = mock_redis
-        mock_redis.get.return_value = None
+    mock_redis = make_mock_config_redis()
+    mock_redis.get.return_value = None
 
-        result = _get_cached_media(prefix, "test_file_id")
+    result = get_cached_media(
+        prefix,
+        "test_file_id",
+        redis_factory=lambda: mock_redis,
+        logger=MagicMock(),
+    )
 
-        assert result is None
-        mock_redis.get.assert_called_once_with(f"{prefix}:test_file_id")
+    assert result is None
+    mock_redis.get.assert_called_once_with(f"{prefix}:test_file_id")
 
 
 @pytest.mark.parametrize(
@@ -45,14 +51,19 @@ def test_get_cached_media_not_found(prefix):
     ["audio_transcription", "image_description"],
 )
 def test_get_cached_media_exception(prefix):
-    from api.index import _get_cached_media
+    from api.media_cache import get_cached_media
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
+    def fail_redis():
+        raise Exception("Redis error")
 
-        result = _get_cached_media(prefix, "test_file_id")
+    result = get_cached_media(
+        prefix,
+        "test_file_id",
+        redis_factory=fail_redis,
+        logger=MagicMock(),
+    )
 
-        assert result is None
+    assert result is None
 
 
 @pytest.mark.parametrize(
@@ -63,15 +74,20 @@ def test_get_cached_media_exception(prefix):
     ],
 )
 def test_cache_media_success(prefix, file_id, text, ttl):
-    from api.index import _cache_media
+    from api.media_cache import cache_media
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_redis = make_mock_config_redis()
-        mock_config_redis.return_value = mock_redis
+    mock_redis = make_mock_config_redis()
 
-        _cache_media(prefix, file_id, text, ttl)
+    cache_media(
+        prefix,
+        file_id,
+        text,
+        ttl,
+        redis_factory=lambda: mock_redis,
+        logger=MagicMock(),
+    )
 
-        mock_redis.setex.assert_called_once_with(f"{prefix}:{file_id}", ttl, text)
+    mock_redis.setex.assert_called_once_with(f"{prefix}:{file_id}", ttl, text)
 
 
 @pytest.mark.parametrize(
@@ -79,18 +95,25 @@ def test_cache_media_success(prefix, file_id, text, ttl):
     ["audio_transcription", "image_description"],
 )
 def test_cache_media_exception(prefix):
-    from api.index import _cache_media
+    from api.media_cache import cache_media
 
-    with patch("api.index.config_redis") as mock_config_redis:
-        mock_config_redis.side_effect = Exception("Redis error")
+    def fail_redis():
+        raise Exception("Redis error")
 
-        _cache_media(prefix, "test_file_id", "payload", 3600)
+    cache_media(
+        prefix,
+        "test_file_id",
+        "payload",
+        3600,
+        redis_factory=fail_redis,
+        logger=MagicMock(),
+    )
 
 
 def test_get_cached_transcription_delegates_to_helper():
-    from api.index import get_cached_transcription
+    get_cached_transcription = index.app_runtime.media_cache.get_transcription
 
-    with patch("api.index._get_cached_media") as mock_get:
+    with patch("api.index.app_runtime.media_cache.get") as mock_get:
         mock_get.return_value = "cached transcription text"
 
         result = get_cached_transcription("test_file_id")
@@ -100,9 +123,9 @@ def test_get_cached_transcription_delegates_to_helper():
 
 
 def test_get_cached_description_delegates_to_helper():
-    from api.index import get_cached_description
+    get_cached_description = index.app_runtime.media_cache.get_description
 
-    with patch("api.index._get_cached_media") as mock_get:
+    with patch("api.index.app_runtime.media_cache.get") as mock_get:
         mock_get.return_value = "cached image description"
 
         result = get_cached_description("test_file_id")
@@ -112,9 +135,9 @@ def test_get_cached_description_delegates_to_helper():
 
 
 def test_cache_transcription_delegates_default_ttl():
-    from api.index import cache_transcription
+    cache_transcription = index.app_runtime.media_cache.cache_transcription
 
-    with patch("api.index._cache_media") as mock_cache:
+    with patch("api.index.app_runtime.media_cache.set") as mock_cache:
         cache_transcription("test_file_id", "transcription text")
 
         mock_cache.assert_called_once_with(
@@ -123,9 +146,9 @@ def test_cache_transcription_delegates_default_ttl():
 
 
 def test_cache_transcription_delegates_custom_ttl():
-    from api.index import cache_transcription
+    cache_transcription = index.app_runtime.media_cache.cache_transcription
 
-    with patch("api.index._cache_media") as mock_cache:
+    with patch("api.index.app_runtime.media_cache.set") as mock_cache:
         cache_transcription("test_file_id", "transcription text", 3600)
 
         mock_cache.assert_called_once_with(
@@ -134,9 +157,9 @@ def test_cache_transcription_delegates_custom_ttl():
 
 
 def test_cache_description_delegates_default_ttl():
-    from api.index import cache_description
+    cache_description = index.app_runtime.media_cache.cache_description
 
-    with patch("api.index._cache_media") as mock_cache:
+    with patch("api.index.app_runtime.media_cache.set") as mock_cache:
         cache_description("test_file_id", "image description")
 
         mock_cache.assert_called_once_with(
@@ -145,9 +168,9 @@ def test_cache_description_delegates_default_ttl():
 
 
 def test_cache_description_delegates_custom_ttl():
-    from api.index import cache_description
+    cache_description = index.app_runtime.media_cache.cache_description
 
-    with patch("api.index._cache_media") as mock_cache:
+    with patch("api.index.app_runtime.media_cache.set") as mock_cache:
         cache_description("test_file_id", "image description", 7200)
 
         mock_cache.assert_called_once_with(
@@ -156,12 +179,12 @@ def test_cache_description_delegates_custom_ttl():
 
 
 def test_get_cache_history_success():
-    from api.index import get_cache_history
+    get_cache_history = index.app_runtime.cache.get_history
     import json
     from datetime import datetime, timedelta
     from api.services.maintenance import request_cache_history_key
 
-    with patch("api.index.datetime") as mock_datetime:
+    with patch("api.cache_service.datetime") as mock_datetime:
         mock_redis = MagicMock()
         test_data = {"data": "test", "timestamp": "2024-01-01"}
         mock_redis.get.return_value = json.dumps(test_data)
@@ -181,7 +204,7 @@ def test_get_cache_history_success():
 
 
 def test_get_cache_history_not_found():
-    from api.index import get_cache_history
+    get_cache_history = index.app_runtime.cache.get_history
 
     mock_redis = MagicMock()
     mock_redis.get.return_value = None
@@ -192,7 +215,7 @@ def test_get_cache_history_not_found():
 
 
 def test_get_cache_history_invalid_data():
-    from api.index import get_cache_history
+    get_cache_history = index.app_runtime.cache.get_history
     import json
 
     mock_redis = MagicMock()
@@ -215,7 +238,7 @@ def _bcra_service_patches():
 
 
 def test_get_cached_bcra_variables_success():
-    from api.index import get_cached_bcra_variables
+    get_cached_bcra_variables = index.app_runtime.bcra.get_cached_variables
     import json
 
     p_req, p_red, mock_redis = _bcra_service_patches()
@@ -230,7 +253,7 @@ def test_get_cached_bcra_variables_success():
 
 
 def test_get_cached_bcra_variables_not_found():
-    from api.index import get_cached_bcra_variables
+    get_cached_bcra_variables = index.app_runtime.bcra.get_cached_variables
 
     p_req, p_red, mock_redis = _bcra_service_patches()
     with p_req, p_red:
@@ -242,7 +265,7 @@ def test_get_cached_bcra_variables_not_found():
 
 
 def test_get_cached_bcra_variables_exception():
-    from api.index import get_cached_bcra_variables
+    get_cached_bcra_variables = index.app_runtime.bcra.get_cached_variables
 
     p_req, p_red, mock_redis = _bcra_service_patches()
     with p_req, p_red:
@@ -254,7 +277,7 @@ def test_get_cached_bcra_variables_exception():
 
 
 def test_cache_bcra_variables_success():
-    from api.index import cache_bcra_variables
+    cache_bcra_variables = index.app_runtime.bcra.cache_variables
     import json
     from api.services.maintenance import last_success_ttl
 
@@ -281,7 +304,7 @@ def test_cache_bcra_variables_success():
 
 
 def test_cache_bcra_variables_default_ttl():
-    from api.index import cache_bcra_variables
+    cache_bcra_variables = index.app_runtime.bcra.cache_variables
     import json
 
     p_req, p_red, mock_redis = _bcra_service_patches()
@@ -299,7 +322,7 @@ def test_cache_bcra_variables_default_ttl():
 
 
 def test_cache_bcra_variables_exception():
-    from api.index import cache_bcra_variables
+    cache_bcra_variables = index.app_runtime.bcra.cache_variables
 
     p_req, p_red, mock_redis = _bcra_service_patches()
     with p_req, p_red:
@@ -310,7 +333,8 @@ def test_cache_bcra_variables_exception():
 
 
 def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
-    from api.index import cache_bcra_variables, get_or_refresh_bcra_variables
+    cache_bcra_variables = index.app_runtime.bcra.cache_variables
+    get_or_refresh_bcra_variables = index.app_runtime.bcra.get_or_refresh_variables
 
     test_data = {"Tipo de cambio mayorista": {"value": "1000", "date": "01/09/2025"}}
 
@@ -322,8 +346,8 @@ def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
     bcra_service._bcra_local_cache["stale_until"] = time.time() + 60
 
     with (
-        patch("api.index.bcra_fetch_latest_variables") as mock_fetch,
-        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.app_runtime.bcra.fetch_latest_variables") as mock_fetch,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
     ):
         mock_fetch.return_value = None
         mock_config_redis.side_effect = Exception("Redis down")
@@ -336,13 +360,13 @@ def test_get_or_refresh_bcra_variables_returns_stale_on_failure():
 
 
 def test_get_currency_band_limits_reuses_stale_after_failure():
-    from api.index import get_currency_band_limits
+    get_currency_band_limits = index.app_runtime.bcra.get_currency_band_limits
 
     band_data = {"lower": 950.0, "upper": 1200.0, "date": "22/09/2025"}
 
     with (
-        patch("api.index.fetch_currency_band_limits") as mock_fetch,
-        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.app_runtime.bcra.fetch_currency_band_limits") as mock_fetch,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
     ):
         mock_fetch.return_value = band_data
         mock_redis = MagicMock()
@@ -356,8 +380,8 @@ def test_get_currency_band_limits_reuses_stale_after_failure():
     bcra_service._currency_band_local_cache["stale_until"] = time.time() + 300
 
     with (
-        patch("api.index.fetch_currency_band_limits") as mock_fetch,
-        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.app_runtime.bcra.fetch_currency_band_limits") as mock_fetch,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
     ):
         mock_fetch.return_value = None
         mock_config_redis.side_effect = Exception("Redis offline")
@@ -368,8 +392,8 @@ def test_get_currency_band_limits_reuses_stale_after_failure():
     assert fallback_result == band_data
 
     with (
-        patch("api.index.fetch_currency_band_limits") as mock_fetch_again,
-        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.app_runtime.bcra.fetch_currency_band_limits") as mock_fetch_again,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
     ):
         mock_fetch_again.return_value = None
         mock_config_redis.side_effect = Exception("Redis offline")
@@ -381,7 +405,7 @@ def test_get_currency_band_limits_reuses_stale_after_failure():
 
 
 def test_get_currency_band_limits_discards_future_cache():
-    from api.index import get_currency_band_limits
+    get_currency_band_limits = index.app_runtime.bcra.get_currency_band_limits
     from api.services import bcra as bcra_service
     from datetime import datetime, timedelta
 
@@ -400,8 +424,8 @@ def test_get_currency_band_limits_discards_future_cache():
             "api.services.bcra._get_cached_currency_band_entry",
             return_value=(future_cache, {"is_fresh": True, "fetched_at": None}),
         ) as mock_cached,
-        patch("api.index.fetch_currency_band_limits") as mock_fetch,
-        patch("api.index.config_redis") as mock_config_redis,
+        patch("api.index.app_runtime.bcra.fetch_currency_band_limits") as mock_fetch,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
     ):
         mock_fetch.return_value = {
             "lower": 940.0,
@@ -433,7 +457,7 @@ def test_handle_transcribe_with_message_no_reply():
 def test_handle_transcribe_with_message_voice_cached():
     from api.index import handle_transcribe_with_message
 
-    with patch("api.index.get_cached_transcription") as mock_cached:
+    with patch("api.index.app_runtime.media_cache.get_transcription") as mock_cached:
         mock_cached.return_value = "cached voice transcription"
 
         message = {
@@ -452,12 +476,12 @@ def test_handle_transcribe_with_message_voice_download_success():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_transcription") as mock_cached,
-        patch("api.index.download_telegram_file") as mock_download,
+        patch("api.index.app_runtime.media_cache.get_transcription") as mock_cached,
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
         patch(
-            "api.index.measure_audio_duration_seconds", return_value=1.0
+            "api.index.app_runtime.media._deps.measure_duration", return_value=1.0
         ) as mock_measure,
-        patch("api.index._transcribe_audio_result") as mock_transcribe,
+        patch("api.index.app_runtime.media.transcribe_audio_result") as mock_transcribe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
@@ -488,8 +512,8 @@ def test_handle_transcribe_with_message_voice_download_fail():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_transcription") as mock_cached,
-        patch("api.index.download_telegram_file") as mock_download,
+        patch("api.index.app_runtime.media_cache.get_transcription") as mock_cached,
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
     ):
         mock_cached.return_value = None
         mock_download.return_value = None
@@ -509,12 +533,12 @@ def test_handle_transcribe_with_message_audio_success():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_transcription") as mock_cached,
-        patch("api.index.download_telegram_file") as mock_download,
+        patch("api.index.app_runtime.media_cache.get_transcription") as mock_cached,
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
         patch(
-            "api.index.measure_audio_duration_seconds", return_value=1.0
+            "api.index.app_runtime.media._deps.measure_duration", return_value=1.0
         ) as mock_measure,
-        patch("api.index._transcribe_audio_result") as mock_transcribe,
+        patch("api.index.app_runtime.media.transcribe_audio_result") as mock_transcribe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"audio data"
@@ -540,7 +564,7 @@ def test_handle_transcribe_with_message_audio_success():
 def test_handle_transcribe_with_message_photo_cached():
     from api.index import handle_transcribe_with_message
 
-    with patch("api.index.get_cached_description") as mock_cached:
+    with patch("api.index.app_runtime.media_cache.get_description") as mock_cached:
         mock_cached.return_value = "cached image description"
 
         message = {
@@ -559,9 +583,9 @@ def test_handle_transcribe_with_message_photo_success():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_description") as mock_cached,
-        patch("api.index.download_telegram_file") as mock_download,
-        patch("api.index._describe_image_result") as mock_describe,
+        patch("api.index.app_runtime.media_cache.get_description") as mock_cached,
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
+        patch("api.index.app_runtime.media.describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"image data"
@@ -592,9 +616,9 @@ def test_handle_transcribe_with_message_sticker_success():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_description") as mock_cached,
-        patch("api.index.download_telegram_file") as mock_download,
-        patch("api.index._describe_image_result") as mock_describe,
+        patch("api.index.app_runtime.media_cache.get_description") as mock_cached,
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
+        patch("api.index.app_runtime.media.describe_image_result") as mock_describe,
     ):
         mock_cached.return_value = None
         mock_download.return_value = b"sticker data"
@@ -619,10 +643,10 @@ def test_handle_transcribe_with_message_animated_sticker_uses_thumbnail():
     from api.index import handle_transcribe_with_message
 
     with (
-        patch("api.index.get_cached_description", return_value=None),
-        patch("api.index.download_telegram_file") as mock_download,
-        patch("api.index.resize_image_if_needed", return_value=b"thumb image"),
-        patch("api.index._describe_image_result") as mock_describe,
+        patch("api.index.app_runtime.media_cache.get_description", return_value=None),
+        patch("api.index.app_runtime.telegram.download_file") as mock_download,
+        patch("api.index.app_runtime.images.resize", return_value=b"thumb image"),
+        patch("api.index.app_runtime.media.describe_image_result") as mock_describe,
     ):
         mock_download.return_value = b"thumb image"
         mock_describe.return_value = MagicMock(
@@ -683,7 +707,7 @@ def test_handle_transcribe():
 
 
 def test_format_bcra_variables_empty():
-    from api.index import format_bcra_variables
+    format_bcra_variables = index.app_runtime.bcra.format_variables
 
     result = format_bcra_variables({})
     assert result == "No se pudieron obtener las variables del BCRA"
@@ -695,7 +719,7 @@ def test_format_bcra_variables_empty():
 
 
 def test_format_bcra_variables_with_data():
-    from api.index import format_bcra_variables
+    format_bcra_variables = index.app_runtime.bcra.format_variables
     from unittest.mock import patch
 
     variables = {
@@ -714,9 +738,9 @@ def test_format_bcra_variables_with_data():
     }
 
     with (
-        patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm,
-        patch("api.index.get_currency_band_limits") as mock_bands,
-        patch("api.index.get_country_risk_summary", return_value=None),
+        patch("api.index.app_runtime.bcra.get_latest_itcrm_value_and_date") as mock_itcrm,
+        patch("api.index.app_runtime.bcra.get_currency_band_limits") as mock_bands,
+        patch("api.index.app_runtime.bcra.get_country_risk_summary", return_value=None),
     ):
         mock_itcrm.return_value = (123.45, "01/02/25")
         mock_bands.return_value = None
@@ -728,7 +752,8 @@ def test_format_bcra_variables_with_data():
 
 
 def test_format_bcra_variables_includes_currency_bands():
-    from api.index import format_bcra_variables, fmt_num
+    from api.index import fmt_num
+    format_bcra_variables = index.app_runtime.bcra.format_variables
     from unittest.mock import patch
 
     variables = {
@@ -739,9 +764,9 @@ def test_format_bcra_variables_includes_currency_bands():
     }
 
     with (
-        patch("api.index.get_currency_band_limits") as mock_bands,
-        patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm,
-        patch("api.index.get_country_risk_summary", return_value=None),
+        patch("api.index.app_runtime.bcra.get_currency_band_limits") as mock_bands,
+        patch("api.index.app_runtime.bcra.get_latest_itcrm_value_and_date") as mock_itcrm,
+        patch("api.index.app_runtime.bcra.get_country_risk_summary", return_value=None),
     ):
         mock_bands.return_value = {
             "lower": 950.12,
@@ -835,7 +860,8 @@ def test_parse_currency_band_rows_skips_future_dates():
 
 
 def test_fetch_currency_band_limits_uses_principales_variables():
-    from api.index import fetch_currency_band_limits, BA_TZ
+    from api.index import BA_TZ
+    fetch_currency_band_limits = index.app_runtime.bcra.fetch_currency_band_limits
 
     today = datetime.now(BA_TZ).date()
     previous = today - timedelta(days=1)
@@ -868,8 +894,8 @@ def test_fetch_currency_band_limits_uses_principales_variables():
     }
 
     with (
-        patch("api.index.bcra_list_variables") as mock_list,
-        patch("api.index.bcra_api_get") as mock_api,
+        patch("api.index.app_runtime.bcra.list_variables") as mock_list,
+        patch("api.index.app_runtime.bcra.api_get") as mock_api,
     ):
         mock_list.return_value = [
             {
@@ -904,11 +930,11 @@ def test_fetch_currency_band_limits_uses_principales_variables():
 
 
 def test_handle_bcra_variables_cached():
-    from api.index import handle_bcra_variables
+    handle_bcra_variables = index.app_runtime.dollar.handle_bcra_variables
 
     with (
-        patch("api.index.get_or_refresh_bcra_variables") as mock_get,
-        patch("api.index.format_bcra_variables") as mock_format,
+        patch("api.index.app_runtime.dollar.get_bcra_variables") as mock_get,
+        patch("api.index.app_runtime.dollar.format_bcra_variables") as mock_format,
     ):
         mock_get.return_value = {"test": "data"}
         mock_format.return_value = "formatted variables"
@@ -920,11 +946,11 @@ def test_handle_bcra_variables_cached():
 
 
 def test_handle_bcra_variables_scrape_fresh():
-    from api.index import handle_bcra_variables
+    handle_bcra_variables = index.app_runtime.dollar.handle_bcra_variables
 
     with (
-        patch("api.index.get_or_refresh_bcra_variables") as mock_get,
-        patch("api.index.format_bcra_variables") as mock_format,
+        patch("api.index.app_runtime.dollar.get_bcra_variables") as mock_get,
+        patch("api.index.app_runtime.dollar.format_bcra_variables") as mock_format,
     ):
         mock_get.return_value = {"scraped": "data"}
         mock_format.return_value = "formatted scraped data"
@@ -936,9 +962,9 @@ def test_handle_bcra_variables_scrape_fresh():
 
 
 def test_handle_bcra_variables_no_data():
-    from api.index import handle_bcra_variables
+    handle_bcra_variables = index.app_runtime.dollar.handle_bcra_variables
 
-    with patch("api.index.get_or_refresh_bcra_variables") as mock_get:
+    with patch("api.index.app_runtime.dollar.get_bcra_variables") as mock_get:
         mock_get.return_value = None
 
         result = handle_bcra_variables()
@@ -949,9 +975,9 @@ def test_handle_bcra_variables_no_data():
 
 
 def test_handle_bcra_variables_exception():
-    from api.index import handle_bcra_variables
+    handle_bcra_variables = index.app_runtime.dollar.handle_bcra_variables
 
-    with patch("api.index.get_or_refresh_bcra_variables") as mock_get:
+    with patch("api.index.app_runtime.dollar.get_bcra_variables") as mock_get:
         mock_get.side_effect = Exception("Cache error")
 
         result = handle_bcra_variables()
@@ -959,13 +985,13 @@ def test_handle_bcra_variables_exception():
 
 
 def test_calculate_tcrm_100_success():
-    from api.index import calculate_tcrm_100
+    calculate_tcrm_100 = index.app_runtime.bcra.calculate_tcrm_100
     from unittest.mock import MagicMock
 
     with (
-        patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm_details,
-        patch("api.index.config_redis") as mock_cfg,
-        patch("api.index.redis_get_json") as mock_redis_get,
+        patch("api.index.app_runtime.bcra.get_latest_itcrm_value_and_date") as mock_itcrm_details,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch("api.services.bcra.redis_get_json") as mock_redis_get,
     ):
         mock_itcrm_details.return_value = (120.0, "01/01/24")
 
@@ -983,16 +1009,16 @@ def test_calculate_tcrm_100_success():
 
 
 def test_calculate_tcrm_100_caches_missing_mayorista():
-    from api.index import calculate_tcrm_100
+    calculate_tcrm_100 = index.app_runtime.bcra.calculate_tcrm_100
 
     cache = {}
 
     with (
-        patch("api.index.get_latest_itcrm_value_and_date") as mock_itcrm_details,
-        patch("api.index.config_redis") as mock_cfg,
-        patch("api.index.redis_get_json") as mock_get_json,
-        patch("api.index.redis_setex_json") as mock_setex_json,
-        patch("api.index.bcra_get_value_for_date") as mock_bcra,
+        patch("api.index.app_runtime.bcra.get_latest_itcrm_value_and_date") as mock_itcrm_details,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch("api.services.bcra.redis_get_json") as mock_get_json,
+        patch("api.services.bcra.redis_setex_json") as mock_setex_json,
+        patch("api.index.app_runtime.bcra.get_value_for_date") as mock_bcra,
     ):
         mock_itcrm_details.return_value = (120.0, "01/01/24")
         redis_client = MagicMock()
@@ -1026,16 +1052,16 @@ def test_calculate_tcrm_100_caches_missing_mayorista():
 
 def test_get_cached_tcrm_100_backfills_missing_history():
     import pytest
-    from api.index import get_cached_tcrm_100
+    get_cached_tcrm_100 = index.app_runtime.bcra.get_cached_tcrm_100
     from unittest.mock import MagicMock
     from typing import Any, List
 
     with (
-        patch("api.index.config_redis") as mock_cfg,
-        patch("api.index.redis_get_json") as mock_get_json,
-        patch("api.index.redis_set_json") as mock_set_json,
-        patch("api.index.calculate_tcrm_100") as mock_calc,
-        patch("api.index.get_latest_itcrm_value_and_date") as mock_latest,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch("api.services.bcra.redis_get_json") as mock_get_json,
+        patch("api.services.bcra.redis_set_json") as mock_set_json,
+        patch("api.index.app_runtime.bcra.calculate_tcrm_100") as mock_calc,
+        patch("api.index.app_runtime.bcra.get_latest_itcrm_value_and_date") as mock_latest,
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = None
@@ -1084,16 +1110,16 @@ def test_get_cached_tcrm_100_backfills_missing_history():
 
 
 def test_get_cached_tcrm_100_skips_fetch_when_mayorista_missing():
-    from api.index import get_cached_tcrm_100
+    get_cached_tcrm_100 = index.app_runtime.bcra.get_cached_tcrm_100
 
     cache = {"bcra_mayorista:2024-01-02": {"missing": True, "timestamp": 1234567890}}
 
     with (
-        patch("api.index.config_redis") as mock_cfg,
-        patch("api.index.redis_get_json") as mock_get_json,
-        patch("api.index.get_cache_history") as mock_history,
-        patch("api.index.bcra_get_value_for_date") as mock_bcra,
-        patch("api.index.calculate_tcrm_100") as mock_calc,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch("api.services.bcra.redis_get_json") as mock_get_json,
+        patch("api.index.app_runtime.cache.get_history") as mock_history,
+        patch("api.index.app_runtime.bcra.get_value_for_date") as mock_bcra,
+        patch("api.index.app_runtime.bcra.calculate_tcrm_100") as mock_calc,
     ):
         redis_client = MagicMock()
         redis_client.get.return_value = None
@@ -1155,7 +1181,7 @@ def test_sort_dollar_rates_with_tcrm():
 
 
 def test_format_dollar_rates_includes_currency_band_limits():
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.5, "history": 0.5},
@@ -1179,10 +1205,8 @@ def test_format_dollar_rates_includes_currency_band_limits():
 
 def test_download_telegram_file_success():
     """Test download_telegram_file with successful download"""
-    from api.index import download_telegram_file
-
     with (
-        patch("api.index.environ.get") as mock_env,
+        patch("api.telegram_gateway.environ.get") as mock_env,
         patch("api.index.telegram_gateway._telegram_request") as mock_telegram_request,
         patch("api.services.http_client.get") as mock_get,
     ):
@@ -1200,7 +1224,7 @@ def test_download_telegram_file_success():
         mock_file_download.raise_for_status.return_value = None
         mock_get.return_value = mock_file_download
 
-        result = download_telegram_file("test_file_id")
+        result = index.app_runtime.telegram.download_file("test_file_id")
 
         assert result == b"fake image data"
         mock_telegram_request.assert_called_once_with(
@@ -1217,10 +1241,8 @@ def test_download_telegram_file_success():
 
 def test_download_telegram_file_api_error():
     """Test download_telegram_file with API error"""
-    from api.index import download_telegram_file
-
     with (
-        patch("api.index.environ.get") as mock_env,
+        patch("api.telegram_gateway.environ.get") as mock_env,
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
@@ -1233,17 +1255,15 @@ def test_download_telegram_file_api_error():
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
 
-        result = download_telegram_file("invalid_file_id")
+        result = index.app_runtime.telegram.download_file("invalid_file_id")
 
         assert result is None
 
 
 def test_download_telegram_file_network_error():
     """Test download_telegram_file with network error"""
-    from api.index import download_telegram_file
-
     with (
-        patch("api.index.environ.get") as mock_env,
+        patch("api.telegram_gateway.environ.get") as mock_env,
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
@@ -1251,14 +1271,14 @@ def test_download_telegram_file_network_error():
         )
         mock_get.side_effect = requests.exceptions.RequestException("Network error")
 
-        result = download_telegram_file("test_file_id")
+        result = index.app_runtime.telegram.download_file("test_file_id")
 
         assert result is None
 
 
 def test_encode_image_to_base64_success():
     """Test encode_image_to_base64 with valid image data"""
-    from api.index import encode_image_to_base64
+    encode_image_to_base64 = index.app_runtime.images.encode
     import base64
 
     test_data = b"fake image bytes"
@@ -1272,7 +1292,7 @@ def test_encode_image_to_base64_success():
 
 def test_encode_image_to_base64_empty():
     """Test encode_image_to_base64 with empty data"""
-    from api.index import encode_image_to_base64
+    encode_image_to_base64 = index.app_runtime.images.encode
 
     result = encode_image_to_base64(b"")
 
@@ -1281,10 +1301,10 @@ def test_encode_image_to_base64_empty():
 
 def test_resize_image_if_needed_no_resize():
     """Test resize_image_if_needed always returns WEBP even when no resize needed"""
-    from api.index import resize_image_if_needed
+    resize_image_if_needed = index.app_runtime.images.resize
 
     with (
-        patch("api.index.Image") as mock_image_module,
+        patch("api.index.app_runtime.images.image_module") as mock_image_module,
         patch("api.index.io.BytesIO") as mock_bytesio,
     ):
         mock_image = MagicMock()
@@ -1305,10 +1325,10 @@ def test_resize_image_if_needed_no_resize():
 
 def test_resize_image_if_needed_with_resize():
     """Test resize_image_if_needed when image needs resizing"""
-    from api.index import resize_image_if_needed
+    resize_image_if_needed = index.app_runtime.images.resize
 
     with (
-        patch("api.index.Image") as mock_image_module,
+        patch("api.index.app_runtime.images.image_module") as mock_image_module,
         patch("api.index.io.BytesIO") as mock_bytesio,
     ):
         # Mock large image that needs resizing
@@ -1338,10 +1358,10 @@ def test_resize_image_if_needed_with_resize():
 
 def test_resize_image_if_needed_rgba_conversion():
     """Test resize_image_if_needed with RGBA image conversion"""
-    from api.index import resize_image_if_needed
+    resize_image_if_needed = index.app_runtime.images.resize
 
     with (
-        patch("api.index.Image") as mock_image_module,
+        patch("api.index.app_runtime.images.image_module") as mock_image_module,
         patch("api.index.io.BytesIO") as mock_bytesio,
     ):
         # Mock large RGBA image that needs conversion
@@ -1376,9 +1396,9 @@ def test_resize_image_if_needed_rgba_conversion():
 
 def test_resize_image_if_needed_import_error():
     """Test resize_image_if_needed when PIL is not available"""
-    from api.index import resize_image_if_needed
+    resize_image_if_needed = index.app_runtime.images.resize
 
-    with patch("api.index.Image") as mock_image_module:
+    with patch("api.index.app_runtime.images.image_module") as mock_image_module:
         mock_image_module.open.side_effect = ImportError("PIL not available")
 
         test_data = b"image data"
@@ -1389,9 +1409,9 @@ def test_resize_image_if_needed_import_error():
 
 def test_resize_image_if_needed_processing_error():
     """Test resize_image_if_needed with image processing error"""
-    from api.index import resize_image_if_needed
+    resize_image_if_needed = index.app_runtime.images.resize
 
-    with patch("api.index.Image") as mock_image_module:
+    with patch("api.index.app_runtime.images.image_module") as mock_image_module:
         mock_image_module.open.side_effect = Exception("Invalid image format")
 
         test_data = b"corrupted image data"
@@ -1402,7 +1422,7 @@ def test_resize_image_if_needed_processing_error():
 
 def test_describe_image_groq_success():
     """Test describe_image_groq with successful OpenRouter response"""
-    from api.index import describe_image_groq
+    describe_image_groq = index.app_runtime.media.describe_image
 
     choice = MagicMock()
     choice.message.content = "A beautiful landscape with mountains"
@@ -1414,8 +1434,8 @@ def test_describe_image_groq_success():
     client.chat.completions.create.return_value = response
 
     with (
-        patch("api.index._get_openrouter_client", return_value=client),
-        patch("api.index.prepare_vision_image", return_value=(b"image_data", "image/webp")),
+        patch("api.index.app_runtime.media._deps.get_openrouter_client", return_value=client),
+        patch("api.index.app_runtime.images.prepare", return_value=(b"image_data", "image/webp")),
     ):
         result = describe_image_groq(b"image_data")
 
@@ -1425,12 +1445,12 @@ def test_describe_image_groq_success():
 
 def test_describe_image_groq_api_error():
     """Test describe_image_groq with OpenRouter API error"""
-    from api.index import describe_image_groq
+    describe_image_groq = index.app_runtime.media.describe_image
 
     client = MagicMock()
     client.chat.completions.create.side_effect = Exception("API error")
 
-    with patch("api.index._get_openrouter_client", return_value=client):
+    with patch("api.index.app_runtime.media._deps.get_openrouter_client", return_value=client):
         result = describe_image_groq(b"image_data")
 
     assert result is None
@@ -1438,9 +1458,9 @@ def test_describe_image_groq_api_error():
 
 def test_describe_image_groq_no_client():
     """Test describe_image_groq when OpenRouter client is unavailable"""
-    from api.index import describe_image_groq
+    describe_image_groq = index.app_runtime.media.describe_image
 
-    with patch("api.index._get_openrouter_client", return_value=None):
+    with patch("api.index.app_runtime.media._deps.get_openrouter_client", return_value=None):
         result = describe_image_groq(b"image_data")
 
     assert result is None
@@ -1448,11 +1468,11 @@ def test_describe_image_groq_no_client():
 
 def test_transcribe_audio_groq_success():
     """Test transcribe_audio_groq with successful transcription"""
-    from api.index import transcribe_audio_groq
+    transcribe_audio_groq = index.app_runtime.media.transcribe_audio
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.GroqClient") as mock_groq,
+        patch("api.index.app_runtime.media._deps.get_groq_native_client") as mock_groq,
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1473,11 +1493,11 @@ def test_transcribe_audio_groq_success():
 
 def test_transcribe_audio_groq_network_error():
     """Test transcribe_audio_groq with network error"""
-    from api.index import transcribe_audio_groq
+    transcribe_audio_groq = index.app_runtime.media.transcribe_audio
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index.GroqClient") as mock_groq,
+        patch("api.index.app_runtime.media._deps.get_groq_native_client") as mock_groq,
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1493,7 +1513,7 @@ def test_transcribe_audio_groq_network_error():
 
 
 def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
-    from api.index import transcribe_audio_groq
+    transcribe_audio_groq = index.app_runtime.media.transcribe_audio
     from api.provider_backoff import mark_provider_cooldown, clear_all_cooldowns
 
     clear_all_cooldowns()
@@ -1502,7 +1522,7 @@ def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
 
     with (
         patch("api.index.environ.get") as mock_env,
-        patch("api.index._get_groq_native_client", return_value=None),
+        patch("api.index.app_runtime.media._deps.get_groq_native_client", return_value=None),
     ):
         mock_env.side_effect = lambda key, default=None: {
             "GROQ_FREE_API_KEY": "test_api_key",
@@ -1516,7 +1536,7 @@ def test_transcribe_audio_groq_skips_call_when_provider_in_cooldown():
 
 
 def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
-    from api.index import transcribe_audio_groq
+    transcribe_audio_groq = index.app_runtime.media.transcribe_audio
 
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free_api_key")
     monkeypatch.setenv("GROQ_API_KEY", "paid_api_key")
@@ -1533,14 +1553,14 @@ def test_transcribe_audio_groq_falls_back_to_paid_after_free_429(monkeypatch):
     paid_client.audio.transcriptions.create.return_value = paid_choice
 
     with patch(
-        "api.index.GroqClient", side_effect=[free_client, paid_client]
+        "api.index.app_runtime.media._deps.get_groq_native_client", side_effect=[free_client, paid_client]
     ) as mock_groq:
         result = transcribe_audio_groq(b"audio_data")
 
     assert result is not None
     assert mock_groq.call_count == 2
-    assert mock_groq.call_args_list[0].kwargs["api_key"] == "free_api_key"
-    assert mock_groq.call_args_list[1].kwargs["api_key"] == "paid_api_key"
+    assert mock_groq.call_args_list[0].args == ("free",)
+    assert mock_groq.call_args_list[1].args == ("paid",)
 
 
 # Tests for video transcription support
@@ -1614,14 +1634,14 @@ def test_extract_message_content_animated_sticker_uses_thumbnail():
 
 
 def test_transcribe_file_by_id_video_fallback():
-    from api.index import transcribe_file_by_id
+    transcribe_file_by_id = index.app_runtime.media.transcribe_file
 
     with (
-        patch("api.index.get_cached_transcription", return_value=None),
-        patch("api.index.download_telegram_file", return_value=b"video bytes"),
-        patch("api.index.measure_audio_duration_seconds") as mock_measure,
-        patch("api.index.extract_audio_from_video") as mock_extract,
-        patch("api.index._transcribe_audio_result") as mock_transcribe,
+        patch("api.index.app_runtime.media_cache.get_transcription", return_value=None),
+        patch("api.index.app_runtime.telegram.download_file", return_value=b"video bytes"),
+        patch("api.index.app_runtime.media._deps.measure_duration") as mock_measure,
+        patch("api.index.app_runtime.media._deps.extract_audio") as mock_extract,
+        patch("api.index.app_runtime.media.transcribe_audio_result") as mock_transcribe,
     ):
         # First call (video bytes) returns None, second call (extracted audio) returns 5.0
         mock_measure.side_effect = [None, 5.0]
@@ -1639,13 +1659,13 @@ def test_transcribe_file_by_id_video_fallback():
 
 
 def test_transcribe_file_by_id_video_extraction_fails():
-    from api.index import transcribe_file_by_id
+    transcribe_file_by_id = index.app_runtime.media.transcribe_file
 
     with (
-        patch("api.index.get_cached_transcription", return_value=None),
-        patch("api.index.download_telegram_file", return_value=b"bad data"),
-        patch("api.index.measure_audio_duration_seconds", return_value=None),
-        patch("api.index.extract_audio_from_video", return_value=None),
+        patch("api.index.app_runtime.media_cache.get_transcription", return_value=None),
+        patch("api.index.app_runtime.telegram.download_file", return_value=b"bad data"),
+        patch("api.index.app_runtime.media._deps.measure_duration", return_value=None),
+        patch("api.index.app_runtime.media._deps.extract_audio", return_value=None),
     ):
         text, error, billing = transcribe_file_by_id("file123", use_cache=False)
         assert text is None

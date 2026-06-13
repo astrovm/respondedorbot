@@ -9,13 +9,7 @@ import os
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from api.index import (
-    admin_report,
-    config_redis,
-    handle_callback_query,
-    handle_msg,
-    handle_pre_checkout_query,
-)
+from api.index import app_runtime
 
 logger = logging.getLogger(__name__)
 _HANDLER_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -68,11 +62,11 @@ async def _async_handle_message(update: Any, context: Any) -> None:
     update_dict = _update_to_dict(update)
 
     try:
-        await _run_sync(handle_msg, update_dict.get("message", {}))
+        await _run_sync(app_runtime.handle_message, update_dict.get("message", {}))
     except Exception as error:
         logger.exception("Error handling PTB message update")
         try:
-            await _run_sync(admin_report, "PTB message handler error", error)
+            await _run_sync(app_runtime.admin.report, "PTB message handler error", error)
         except Exception:
             logger.exception("Failed to report PTB message handler error")
 
@@ -85,11 +79,14 @@ async def _async_handle_callback_query(update: Any, context: Any) -> None:
     update_dict = _update_to_dict(update)
 
     try:
-        await _run_sync(handle_callback_query, update_dict.get("callback_query", {}))
+        await _run_sync(
+            app_runtime.handle_callback_query,
+            update_dict.get("callback_query", {}),
+        )
     except Exception as error:
         logger.exception("Error handling PTB callback query update")
         try:
-            await _run_sync(admin_report, "PTB callback handler error", error)
+            await _run_sync(app_runtime.admin.report, "PTB callback handler error", error)
         except Exception:
             logger.exception("Failed to report PTB callback handler error")
 
@@ -103,13 +100,17 @@ async def _async_handle_pre_checkout_query(update: Any, context: Any) -> None:
 
     try:
         await _run_sync(
-            handle_pre_checkout_query,
+            app_runtime.billing.handle_pre_checkout,
             update_dict.get("pre_checkout_query", {}),
         )
     except Exception as error:
         logger.exception("Error handling PTB pre-checkout update")
         try:
-            await _run_sync(admin_report, "PTB pre-checkout handler error", error)
+            await _run_sync(
+                app_runtime.admin.report,
+                "PTB pre-checkout handler error",
+                error,
+            )
         except Exception:
             logger.exception("Failed to report PTB pre-checkout handler error")
 
@@ -150,7 +151,7 @@ async def _error_handler(update: object, context: Any) -> None:
 
     try:
         await _run_sync(
-            admin_report,
+            app_runtime.admin.report,
             f"PTB unhandled exception (update_id={update_id})",
             error,
         )
@@ -166,7 +167,9 @@ def create_application(
     if not resolved_token:
         raise ValueError("TELEGRAM_TOKEN not provided")
 
-    resolved_redis = redis_client if redis_client is not None else config_redis()
+    resolved_redis = (
+        redis_client if redis_client is not None else app_runtime.config.redis()
+    )
 
     telegram_ext = importlib.import_module("telegram.ext")
     ApplicationBuilder = telegram_ext.ApplicationBuilder

@@ -626,9 +626,133 @@ def format_user_message(
     return f"{formatted_user}: {message_text}"
 
 
+class MessageStateService:
+    def __init__(
+        self,
+        *,
+        admin_reporter: AdminReporter,
+        decode_redis_value: DecodeRedisValue,
+        extract_message_text: ExtractMessageText,
+    ) -> None:
+        self.admin_reporter = admin_reporter
+        self.decode_redis_value = decode_redis_value
+        self.extract_message_text = extract_message_text
+
+    truncate_text = staticmethod(truncate_text)
+    format_user_message = staticmethod(format_user_message)
+    get_chat_summary = staticmethod(get_chat_summary)
+    save_chat_summary = staticmethod(save_chat_summary)
+    get_user_chat_summary = staticmethod(get_user_chat_summary)
+    save_user_chat_summary = staticmethod(save_user_chat_summary)
+    get_user_chat_compacted_until = staticmethod(get_user_chat_compacted_until)
+    save_user_chat_compacted_until = staticmethod(save_user_chat_compacted_until)
+    get_chat_compacted_until = staticmethod(get_chat_compacted_until)
+    save_chat_compacted_until = staticmethod(save_chat_compacted_until)
+    save_chat_member = staticmethod(save_chat_member)
+    get_chat_members = staticmethod(get_chat_members)
+
+    def save_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        redis_client: redis.Redis,
+        **kwargs: Any,
+    ) -> None:
+        save_message_to_redis(
+            chat_id,
+            message_id,
+            text,
+            redis_client,
+            admin_reporter=self.admin_reporter,
+            **kwargs,
+        )
+
+    def get_history(
+        self,
+        chat_id: str,
+        redis_client: redis.Redis,
+        max_messages: int = CHAT_HISTORY_MAX_MESSAGES,
+    ) -> List[Dict[str, Any]]:
+        return get_chat_history(
+            chat_id,
+            redis_client,
+            admin_reporter=self.admin_reporter,
+            max_messages=max_messages,
+        )
+
+    def search_history(
+        self,
+        redis_client: redis.Redis,
+        chat_id: str,
+        query_text: str,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        return search_chat_history(
+            redis_client,
+            chat_id,
+            query_text,
+            admin_reporter=self.admin_reporter,
+            **kwargs,
+        )
+
+    def fetch_for_compaction(
+        self,
+        redis_client: redis.Redis,
+        chat_id: str,
+        *,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        return fetch_chat_messages_for_compaction(
+            redis_client,
+            chat_id,
+            limit=limit,
+            admin_reporter=self.admin_reporter,
+        )
+
+    def save_bot_metadata(
+        self,
+        redis_client: redis.Redis,
+        chat_id: str,
+        message_id: Union[str, int],
+        metadata: Mapping[str, Any],
+        *,
+        ttl: int = BOT_MESSAGE_META_TTL,
+    ) -> None:
+        save_bot_message_metadata(
+            redis_client,
+            chat_id,
+            message_id,
+            metadata,
+            admin_reporter=self.admin_reporter,
+            ttl=ttl,
+        )
+
+    def get_bot_metadata(
+        self,
+        redis_client: redis.Redis,
+        chat_id: str,
+        message_id: Union[str, int],
+    ) -> Optional[Dict[str, Any]]:
+        return get_bot_message_metadata(
+            redis_client,
+            chat_id,
+            message_id,
+            admin_reporter=self.admin_reporter,
+            decode_redis_value=self.decode_redis_value,
+        )
+
+    def build_reply_context(self, message: Mapping[str, Any]) -> Optional[str]:
+        return build_reply_context_text(
+            message,
+            extract_message_text_fn=self.extract_message_text,
+        )
+
+
 __all__ = [
     "BOT_MESSAGE_META_TTL",
     "CHAT_HISTORY_MAX_MESSAGES",
+    "MessageStateService",
     "build_reply_context_text",
     "format_user_message",
     "fetch_chat_messages_for_compaction",

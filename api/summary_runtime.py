@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import redis
 
+from api import memory_compaction
 from api.memory_compaction import IncrementalSummarySource
 
 
@@ -267,3 +269,186 @@ def estimate_summary_cost_usd_micros(
     input_rate = pricing.get("input_per_million", 100_000)
     output_rate = pricing.get("output_per_million", 400_000)
     return (input_tokens * input_rate + output_tokens * output_rate) // 1_000_000
+
+
+@dataclass
+class SummaryServiceDeps:
+    state: Any
+    config: Any
+    provider: Any
+    admin_report: Callable[..., None]
+    estimate_tokens: Callable[[list[dict[str, Any]]], int]
+    sanitize_text: Callable[[str], str]
+    logger: Any
+    model: str
+    max_tokens: int
+    compaction_threshold: int
+    compaction_keep: int
+    max_summary_messages: int
+    truncate_lines: int
+    no_markdown_prompt: str
+    pricing_by_model: Mapping[str, Mapping[str, int]]
+
+
+class SummaryService:
+    def __init__(self, deps: SummaryServiceDeps) -> None:
+        self._deps = deps
+
+    def estimate_cost(self, input_tokens: int, output_tokens: int, model: str) -> int:
+        return estimate_summary_cost_usd_micros(
+            input_tokens,
+            output_tokens,
+            model,
+            pricing_by_model=self._deps.pricing_by_model,
+        )
+
+    def call_model(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[str | None, int]:
+        return call_summary_model(
+            messages,
+            get_client=self._deps.provider.get_openrouter_client,
+            estimate_tokens=self._deps.estimate_tokens,
+            estimate_cost=self.estimate_cost,
+            model=self._deps.model,
+            max_tokens=self._deps.max_tokens,
+            logger=self._deps.logger,
+        )
+
+    def load_personality(self) -> str:
+        try:
+            value = self._deps.config.load_bot_config().get("system_prompt", "")
+            return value if isinstance(value, str) else ""
+        except Exception:
+            return ""
+
+    def compact_conversation(
+        self,
+        messages: list[dict[str, Any]],
+        prior_summary: str | None = None,
+    ) -> tuple[str, int]:
+        return compact_conversation(
+            messages,
+            prior_summary,
+            load_personality=self.load_personality,
+            call_model=self.call_model,
+            sanitize_text=self._deps.sanitize_text,
+            no_markdown_prompt=self._deps.no_markdown_prompt,
+            max_summary_messages=self._deps.max_summary_messages,
+            truncate_lines=self._deps.truncate_lines,
+        )
+
+    def build_messages(
+        self,
+        source: IncrementalSummarySource,
+        prompt_text: str,
+    ) -> list[dict[str, Any]]:
+        return build_summary_messages(
+            source,
+            prompt_text,
+            load_personality=self.load_personality,
+        )
+
+    build_incremental_source = staticmethod(
+        memory_compaction.build_incremental_summary_source
+    )
+
+    def build_provider(self) -> Any:
+        return self._deps.provider.build_provider(
+            model=self._deps.model,
+            max_tool_rounds=0,
+        )
+
+    def stream_command(
+        self,
+        chat_id: str,
+        redis_client: redis.Redis,
+        prompt_text: str,
+    ) -> tuple[Iterator[tuple[str, str]], str | None]:
+        return stream_summary_command(
+            chat_id,
+            redis_client,
+            prompt_text,
+            get_history=self._deps.state.get_history,
+            prepare_memory=self.prepare_memory,
+            load_personality=self.load_personality,
+            build_provider=self.build_provider,
+            sanitize_text=self._deps.sanitize_text,
+            max_tokens=self._deps.max_tokens,
+            logger=self._deps.logger,
+        )
+
+    def resolve_compaction_params(
+        self,
+        threshold: int | None = None,
+        keep: int | None = None,
+    ) -> tuple[int, int]:
+        return memory_compaction.resolve_compaction_params(
+            threshold,
+            keep,
+            default_threshold=self._deps.compaction_threshold,
+            default_keep=self._deps.compaction_keep,
+        )
+
+    def compact_memory(
+        self,
+        redis_client: redis.Redis | None,
+        chat_id: str | None,
+        messages: list[dict[str, Any]],
+        existing_summary: str | None,
+        compacted_until: str | None,
+        compact_fn: Callable[
+            [list[dict[str, Any]], str | None],
+            tuple[str, int],
+        ] | None = None,
+        compaction_threshold: int | None = None,
+        compaction_keep: int | None = None,
+    ) -> tuple[str | None, list[dict[str, Any]], str | None, int]:
+        threshold, keep = self.resolve_compaction_params(
+            compaction_threshold,
+            compaction_keep,
+        )
+        return memory_compaction.compact_chat_memory(
+            redis_client,
+            chat_id,
+            messages,
+            existing_summary,
+            compacted_until,
+            compact_fn=compact_fn or self.compact_conversation,
+            compaction_threshold=threshold,
+            compaction_keep=keep,
+            build_source=memory_compaction.build_incremental_summary_source,
+            save_summary=self._deps.state.save_chat_summary,
+            save_marker=self._deps.state.save_chat_compacted_until,
+        )
+
+    def prepare_memory(
+        self,
+        redis_client: redis.Redis | None,
+        chat_id: str | None,
+        chat_history: list[dict[str, Any]],
+        query_text: str,
+        reply_to_message_id: str | None = None,
+        compaction_threshold: int | None = None,
+        compaction_keep: int | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], int]:
+        threshold, keep = self.resolve_compaction_params(
+            compaction_threshold,
+            compaction_keep,
+        )
+        return memory_compaction.prepare_chat_memory(
+            redis_client,
+            chat_id,
+            chat_history,
+            query_text,
+            reply_to_message_id=reply_to_message_id,
+            compaction_threshold=threshold,
+            compaction_keep=keep,
+            get_summary=self._deps.state.get_chat_summary,
+            get_marker=self._deps.state.get_chat_compacted_until,
+            fetch_full_history=self._deps.state.fetch_for_compaction,
+            compact_memory=self.compact_memory,
+            search_history=self._deps.state.search_history,
+            admin_report=self._deps.admin_report,
+        )

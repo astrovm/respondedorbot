@@ -1,4 +1,5 @@
 from api import index
+from api.polymarket_commands import event_country_flag
 from api import polymarket_commands
 
 
@@ -88,17 +89,17 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
         captured.update(parameters)
         return {"data": events}
 
-    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
     monkeypatch.setattr(
-        index,
-        "_fetch_polymarket_live_prices",
+        index.app_runtime.polymarket,
+        "fetch_live_prices",
         lambda token_ids: {
             "candidate-a": 0.72,
             "candidate-b": 0.55,
         },
     )
 
-    result = index.get_polymarket_global_elections()
+    result = index.app_runtime.polymarket.get_global_elections()
 
     assert captured == {
         "limit": 10,
@@ -125,29 +126,29 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
 
 
 def test_get_polymarket_global_elections_handles_empty_response(monkeypatch):
-    monkeypatch.setattr(index, "cached_requests", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(index.app_runtime.cache, "request", lambda *_args, **_kwargs: None)
 
     assert (
-        index.get_polymarket_global_elections()
+        index.app_runtime.polymarket.get_global_elections()
         == "No pude traer las elecciones desde Polymarket"
     )
 
 
 def test_event_country_flag_resolves_new_standard_country_tag():
-    assert index._event_country_flag({"tags": [{"slug": "armenia"}]}) == "🇦🇲"
+    assert event_country_flag({"tags": [{"slug": "armenia"}]}) == "🇦🇲"
 
 
 def test_event_country_flag_resolves_uk_regional_tags():
-    assert index._event_country_flag({"tags": [{"slug": "england"}]}) == (
+    assert event_country_flag({"tags": [{"slug": "england"}]}) == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
         "\U000e0067\U000e007f"
     )
-    assert index._event_country_flag({"tags": [{"slug": "scotland"}]}) == (
+    assert event_country_flag({"tags": [{"slug": "scotland"}]}) == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063"
         "\U000e0074\U000e007f"
     )
-    assert index._event_country_flag({"tags": [{"slug": "wales"}]}) == (
+    assert event_country_flag({"tags": [{"slug": "wales"}]}) == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c"
         "\U000e0073\U000e007f"
     )
-    assert index._event_country_flag({"tags": [{"slug": "uk"}]}) == "🇬🇧"
+    assert event_country_flag({"tags": [{"slug": "uk"}]}) == "🇬🇧"

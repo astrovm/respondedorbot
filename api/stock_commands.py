@@ -7,6 +7,10 @@ from typing import Any
 import redis
 from requests.exceptions import RequestException
 
+from api.cache_service import CacheService
+from api.config_runtime import ConfigRuntime
+from api.services import http_client
+from api.services.redis_helpers import redis_get_json, redis_set_json
 from api.utils import fmt_num
 
 CachedRequest = Callable[..., dict[str, Any] | None]
@@ -137,3 +141,47 @@ def get_stock_prices(
         else:
             lines.append(f"{normalized}: no se pudo obtener")
     return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+
+
+class StockService:
+    def __init__(
+        self,
+        *,
+        cache: CacheService,
+        config: ConfigRuntime,
+        price_cache_ttl: int,
+        screener_cache_ttl: int,
+    ) -> None:
+        self._cache = cache
+        self._config = config
+        self._price_cache_ttl = price_cache_ttl
+        self._screener_cache_ttl = screener_cache_ttl
+
+    def fetch_price(self, symbol: str) -> tuple[float, float] | None:
+        return fetch_yahoo_stock_price(
+            symbol,
+            cached_request=self._cache.request,
+            cache_ttl=self._price_cache_ttl,
+        )
+
+    def fetch_top_stocks(self) -> list[str]:
+        return fetch_top_stocks_by_market_cap(
+            redis_factory=self._config.optional_redis,
+            redis_get_json=redis_get_json,
+            redis_set_json=redis_set_json,
+            http_get=http_client.get,
+            cache_ttl=self._screener_cache_ttl,
+        )
+
+    def get_oil_price(self) -> str:
+        return get_oil_price(fetch_stock=self.fetch_price)
+
+    def get_stock_prices(self, msg_text: str) -> str:
+        return get_stock_prices(
+            msg_text,
+            fetch_stock=self.fetch_price,
+            fetch_top_stocks=self.fetch_top_stocks,
+        )
+
+
+__all__ = ["StockService"]

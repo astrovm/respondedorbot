@@ -44,25 +44,21 @@ def test_convert_to_command():
 
 
 def test_optional_redis_client_success():
-    from api.index import _optional_redis_client
-
-    with patch("api.index.config_redis") as mock_config:
+    with patch("api.index.app_runtime.config.redis") as mock_config:
         sentinel = make_mock_config_redis()
         mock_config.return_value = sentinel
 
-        result = _optional_redis_client(db=2)
+        result = index.app_runtime.config.optional_redis(db=2)
 
     mock_config.assert_called_once_with(db=2)
     assert result is sentinel
 
 
 def test_optional_redis_client_handles_failure():
-    from api.index import _optional_redis_client
-
-    with patch("api.index.config_redis") as mock_config:
+    with patch("api.index.app_runtime.config.redis") as mock_config:
         mock_config.side_effect = Exception("boom")
 
-        result = _optional_redis_client()
+        result = index.app_runtime.config.optional_redis()
 
     mock_config.assert_called_once()
     assert result is None
@@ -528,7 +524,7 @@ def test_format_balance_command_group_includes_topup_and_transfer_hints():
 
 
 def test_get_ai_onboarding_credits_is_30_units():
-    from api.index import get_ai_onboarding_credits
+    get_ai_onboarding_credits = index.app_runtime.billing.get_onboarding_credits
 
     assert get_ai_onboarding_credits() == 30
 
@@ -658,13 +654,9 @@ def test_clear_single_provider_cooldown():
 def test_initialize_commands():
     from api.index import (
         initialize_commands,
-        ask_ai,
         select_random,
-        get_prices,
-        get_dollar_rates as _get_dollar_rates,
     )
     from api.index import (
-        get_devo as _get_devo,  # noqa: F401
         powerlaw as _powerlaw,  # noqa: F401
         rainbow as _rainbow,  # noqa: F401
         get_timestamp as _get_timestamp,  # noqa: F401
@@ -672,6 +664,9 @@ def test_initialize_commands():
         get_instance_name as _get_instance_name,  # noqa: F401
         get_help,
     )
+    get_prices = index.app_runtime.prices.get_prices
+    _get_dollar_rates = index.app_runtime.dollar.get_rates
+    ask_ai = index.app_runtime.ai.ask
 
     commands = initialize_commands()
 
@@ -725,7 +720,10 @@ def test_initialize_commands():
 
 
 def test_price_alias_command_dispatches_to_get_prices():
-    from api.index import initialize_commands, parse_command, get_prices
+    from api.index import initialize_commands
+    from api.command_registry import parse_command
+
+    get_prices = index.app_runtime.prices.get_prices
 
     command, args = parse_command("/price 1 btc in usd", "@bot")
     commands = initialize_commands()
@@ -783,7 +781,7 @@ def test_extract_message_text_complex_cases():
 
 
 def test_parse_command_complex_cases():
-    from api.index import parse_command
+    from api.command_registry import parse_command
 
     # Test command with different case
     assert parse_command("/StArT hello", "@bot") == ("/start", "hello")
@@ -884,7 +882,7 @@ def test_should_gordo_respond_complex_cases():
         patch("os.environ.get") as mock_env,
         patch("random.random", return_value=0.05),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index._fetch_balance", return_value=10),
+        patch("api.index.app_runtime.billing.fetch_balance", return_value=10),
     ):
         mock_env.return_value = "testbot"
 
@@ -938,7 +936,7 @@ def test_index_should_gordo_respond_blocks_random_replies_without_credits():
         patch("os.environ.get", return_value="testbot"),
         patch("random.random", return_value=0.05),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index._fetch_balance", side_effect=[0, 0]),
+        patch("api.index.app_runtime.billing.fetch_balance", side_effect=[0, 0]),
     ):
         assert (
             should_gordo_respond({}, "", "che gordo", msg, chat_config, None) is False
@@ -946,10 +944,10 @@ def test_index_should_gordo_respond_blocks_random_replies_without_credits():
 
 
 def test_cached_requests_basic():
-    from api.index import cached_requests
+    cached_requests = index.app_runtime.cache.request
 
     with (
-        patch("api.index.http_client.get") as mock_get,
+        patch("api.cache_service.http_client.get") as mock_get,
         patch("redis.Redis") as mock_redis,
         patch("time.time") as mock_time,
     ):
@@ -982,7 +980,8 @@ def test_cached_requests_basic():
 
 
 def test_cached_requests_sets_ttl_and_namespaced_keys(monkeypatch):
-    from api.index import REQUEST_CACHE_HISTORY_TTL, cached_requests
+    from api.services.maintenance import REQUEST_CACHE_HISTORY_TTL
+    cached_requests = index.app_runtime.cache.request
 
     writes = []
 
@@ -1000,10 +999,10 @@ def test_cached_requests_sets_ttl_and_namespaced_keys(monkeypatch):
         writes.append((key, ttl, value))
         return True
 
-    monkeypatch.setattr("api.index.config_redis", lambda: FakeRedis())
-    monkeypatch.setattr("api.index.redis_get_json", lambda client, key: None)
-    monkeypatch.setattr("api.index.redis_set_json", fake_set_json)
-    monkeypatch.setattr("api.index.http_client.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.index.app_runtime.config.redis", lambda: FakeRedis())
+    monkeypatch.setattr("api.cache_service.redis_get_json", lambda client, key: None)
+    monkeypatch.setattr("api.cache_service.redis_set_json", fake_set_json)
+    monkeypatch.setattr("api.cache_service.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
 
@@ -1086,7 +1085,7 @@ def test_format_hacker_news_info_variants():
 
 
 def test_cached_requests_retries_on_failure(monkeypatch):
-    from api.index import cached_requests
+    cached_requests = index.app_runtime.cache.request
 
     calls = {"n": 0}
 
@@ -1105,9 +1104,9 @@ def test_cached_requests_retries_on_failure(monkeypatch):
             raise requests.RequestException("boom")
         return FakeResp(text=json.dumps({"ok": True}))
 
-    monkeypatch.setattr("api.index.http_client.get", fake_get)
+    monkeypatch.setattr("api.cache_service.http_client.get", fake_get)
 
-    with patch("api.index.config_redis") as mock_redis:
+    with patch("api.index.app_runtime.config.redis") as mock_redis:
         # Fake Redis client that stores in dict
         store = {}
 
@@ -1127,9 +1126,9 @@ def test_cached_requests_retries_on_failure(monkeypatch):
 
 
 def test_parse_timeframe_rejects_unknown_timeframe():
-    from api.index import _parse_timeframe, _CMC_CHANGE_FIELD, _DOLLAR_TIMEFRAME_HOURS
+    from api.index import _parse_timeframe, _DOLLAR_TIMEFRAME_HOURS
 
-    text, tf = _parse_timeframe("BTC 5h", _CMC_CHANGE_FIELD)
+    text, tf = _parse_timeframe("BTC 5h", {"1h": "change_1h"})
     assert tf is None
     assert text == "BTC 5h"
 
@@ -1139,7 +1138,7 @@ def test_parse_timeframe_rejects_unknown_timeframe():
 
 
 def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
-    from api.index import cached_requests
+    cached_requests = index.app_runtime.cache.request
 
     write_calls = []
     hourly_exists = {"value": False}
@@ -1171,10 +1170,10 @@ def test_cached_requests_hourly_snapshot_immutable(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr("api.index.config_redis", fake_config_redis)
-    monkeypatch.setattr("api.index.redis_get_json", fake_redis_get_json)
-    monkeypatch.setattr("api.index.redis_set_json", fake_redis_set_json)
-    monkeypatch.setattr("api.index.http_client.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr("api.index.app_runtime.config.redis", fake_config_redis)
+    monkeypatch.setattr("api.cache_service.redis_get_json", fake_redis_get_json)
+    monkeypatch.setattr("api.cache_service.redis_set_json", fake_redis_set_json)
+    monkeypatch.setattr("api.cache_service.http_client.get", lambda *args, **kwargs: FakeResponse())
 
     cached_requests("https://example.com", None, None, 300, hourly_cache=True)
     first_count = len(
@@ -1208,7 +1207,7 @@ def test_get_oil_price_success():
         }
     }
 
-    with patch("api.index.cached_requests") as mock_get:
+    with patch("api.index.app_runtime.cache.request") as mock_get:
         mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
 
         result = get_oil_price()
@@ -1237,7 +1236,7 @@ def test_get_oil_price_success_without_csv_header():
         }
     }
 
-    with patch("api.index.cached_requests") as mock_get:
+    with patch("api.index.app_runtime.cache.request") as mock_get:
         mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
 
         result = get_oil_price()
@@ -1249,7 +1248,7 @@ def test_get_oil_price_success_without_csv_header():
 
 
 def test_get_oil_price_failure():
-    with patch("api.index.cached_requests", side_effect=Exception("boom")):
+    with patch("api.index.app_runtime.cache.request", side_effect=Exception("boom")):
         result = get_oil_price()
 
     assert result == "no pude traer el precio del petróleo boludo"

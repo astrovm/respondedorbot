@@ -9,6 +9,8 @@ from typing import Any
 
 import pycountry
 
+from api.cache_service import CacheService
+from api.services import http_client
 from api.utils import fmt_num
 
 EVENTS_URL = "https://gamma-api.polymarket.com/events"
@@ -525,3 +527,86 @@ def _format_kickoff(
         if end_date:
             return end_date[:10], end_date[11:16].replace("T", " ")
         return "Unknown Date", ""
+
+
+class PolymarketService:
+    def __init__(
+        self,
+        *,
+        cache: CacheService,
+        cache_ttl: int,
+        stream_cache_ttl: int,
+        make_timezone: TimezoneFactory,
+    ) -> None:
+        self._cache = cache
+        self._cache_ttl = cache_ttl
+        self._stream_cache_ttl = stream_cache_ttl
+        self._make_timezone = make_timezone
+
+    def fetch_live_price(self, token_id: str) -> tuple[float, int | None] | None:
+        return fetch_live_price(
+            token_id,
+            cached_request=self._cache.request,
+            cache_ttl=self._stream_cache_ttl,
+        )
+
+    def fetch_live_prices(self, token_ids: Sequence[str]) -> dict[str, float]:
+        return fetch_live_prices(token_ids, http_post=http_client.post)
+
+    def fetch_event(self, slug: str) -> tuple[dict[str, Any], int | None] | None:
+        return fetch_event(
+            slug,
+            cached_request=self._cache.request,
+            cache_ttl=self._cache_ttl,
+        )
+
+    def format_event_section(
+        self,
+        event: dict[str, Any],
+        header: str,
+        filter_prefixes: Sequence[str],
+    ) -> tuple[list[str], int | None] | None:
+        return format_event_section(
+            event,
+            header,
+            filter_prefixes,
+            fetch_live=self.fetch_live_price,
+        )
+
+    def event_top_outcomes(
+        self,
+        event: dict[str, Any],
+        limit: int = 2,
+        *,
+        fetch_live: LivePriceFetcher | None = None,
+    ) -> list[tuple[str, float]]:
+        return event_top_outcomes(
+            event,
+            limit,
+            fetch_live=fetch_live,
+        )
+
+    def get_global_elections(self) -> str:
+        return get_global_elections(
+            cached_request=self._cache.request,
+            cache_ttl=self._cache_ttl,
+            get_top_outcomes=self.event_top_outcomes,
+            fetch_live_prices=self.fetch_live_prices,
+            get_event_flag=event_country_flag,
+            format_liquidity=format_usd_compact,
+        )
+
+    def get_world_cup_games(self, timezone_offset: int = -3) -> str:
+        return get_world_cup_games(
+            timezone_offset,
+            fetch_winner_event=self.fetch_event,
+            cached_request=self._cache.request,
+            cache_ttl=self._cache_ttl,
+            get_top_outcomes=self.event_top_outcomes,
+            fetch_live=self.fetch_live_price,
+            format_country=flagged_country_name,
+            make_timezone=self._make_timezone,
+        )
+
+
+__all__ = ["PolymarketService"]

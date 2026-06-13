@@ -35,7 +35,7 @@ def test_get_rulo():
             return {"data": usdt_ars_data}
         raise AssertionError(f"unexpected url {api_url}")
 
-    with patch("api.index.cached_requests", side_effect=fake_cached_requests):
+    with patch("api.index.app_runtime.cache.request", side_effect=fake_cached_requests):
         result = get_rulo()
 
     assert result.startswith("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
@@ -134,7 +134,7 @@ def test_get_weather():
 
     with (
         patch("api.index.datetime") as mock_datetime,
-        patch("api.index.cached_requests") as mock_cached_requests,
+        patch("api.index.app_runtime.cache.request") as mock_cached_requests,
     ):
         # Set up datetime mock to handle timezone
         class MockDatetime:
@@ -186,9 +186,9 @@ def test_get_weather():
 
 
 def test_get_prices_basic():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         # Mock the API response with some basic cryptocurrency data
         mock_get_prices.return_value = {
             "data": [
@@ -215,9 +215,9 @@ def test_get_prices_basic():
 
 
 def test_get_prices_amount_conversion():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.return_value = {
             "data": [
                 {
@@ -237,9 +237,9 @@ def test_get_prices_amount_conversion():
 
 
 def test_get_prices_amount_conversion_accepts_to_and_en():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.return_value = {
             "data": [
                 {
@@ -258,9 +258,9 @@ def test_get_prices_amount_conversion_accepts_to_and_en():
 
 
 def test_get_prices_amount_conversion_reverse_accepts_a():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.side_effect = [
             {"data": []},
             {
@@ -280,9 +280,9 @@ def test_get_prices_amount_conversion_reverse_accepts_a():
 
 
 def test_get_prices_amount_conversion_reverse():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.side_effect = [
             {"data": []},
             {
@@ -302,9 +302,9 @@ def test_get_prices_amount_conversion_reverse():
 
 
 def test_get_prices_amount_conversion_invalid_symbol():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.return_value = {
             "data": [
                 {
@@ -320,9 +320,9 @@ def test_get_prices_amount_conversion_invalid_symbol():
 
 
 def test_get_prices_amount_conversion_unsupported_pair_still_fails():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.side_effect = [
             {"data": []},
             {"data": []},
@@ -333,9 +333,9 @@ def test_get_prices_amount_conversion_unsupported_pair_still_fails():
 
 
 def test_get_prices_existing_paths_unchanged():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
 
         def mock_get_prices_side_effect(currency):
             return {
@@ -386,9 +386,9 @@ def test_get_prices_existing_paths_unchanged():
 
 
 def test_get_prices_stablecoins_expands_known_symbols():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.return_value = {
             "data": [
                 {
@@ -412,9 +412,9 @@ def test_get_prices_stablecoins_expands_known_symbols():
 
 
 def test_get_prices_rejects_unsupported_timeframe_without_api_call():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         result = get_prices("btc 2h")
 
     assert result == "timeframe '2h' no soportado, uso: 1h, 24h, 7d, 30d"
@@ -422,9 +422,9 @@ def test_get_prices_rejects_unsupported_timeframe_without_api_call():
 
 
 def test_get_prices_ignores_non_numeric_limit_tokens():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         mock_get_prices.return_value = {
             "data": [
                 {
@@ -463,12 +463,12 @@ def test_get_weather_description():
 
 
 def test_get_dollar_rates_basic():
-    from api.index import get_dollar_rates
+    get_dollar_rates = index.app_runtime.dollar.get_rates
 
     with (
-        patch("api.index.cached_requests") as mock_cached_requests,
-        patch("api.index.get_cached_tcrm_100") as mock_tcrm,
-        patch("api.index.get_currency_band_limits", return_value=None),
+        patch("api.index.app_runtime.cache.request") as mock_cached_requests,
+        patch("api.index.app_runtime.dollar.get_tcrm") as mock_tcrm,
+        patch("api.index.app_runtime.dollar.get_band_limits", return_value=None),
     ):
         # Mock the API response with dollar rate data
         mock_cached_requests.return_value = {
@@ -513,12 +513,12 @@ def test_get_dollar_rates_basic():
 
 
 def test_get_dollar_rates_api_failure():
-    from api.index import get_dollar_rates
+    get_dollar_rates = index.app_runtime.dollar.get_rates
     import pytest
 
     with (
-        patch("api.index.cached_requests") as mock_cached_requests,
-        patch("api.index.get_cached_tcrm_100") as mock_tcrm,
+        patch("api.index.app_runtime.cache.request") as mock_cached_requests,
+        patch("api.index.app_runtime.dollar.get_tcrm") as mock_tcrm,
     ):
         # Mock API failure
         mock_cached_requests.return_value = None
@@ -530,7 +530,7 @@ def test_get_dollar_rates_api_failure():
 
 
 def test_get_dollar_rates_unsupported_timeframe():
-    from api.index import get_dollar_rates
+    get_dollar_rates = index.app_runtime.dollar.get_rates
 
     result = get_dollar_rates("7d")
     assert result is not None
@@ -539,9 +539,9 @@ def test_get_dollar_rates_unsupported_timeframe():
 
 
 def test_get_devo_with_fee_only():
-    from api.index import get_devo
+    get_devo = index.app_runtime.dollar.get_devo
 
-    with patch("api.index.cached_requests") as mock_cached_requests:
+    with patch("api.index.app_runtime.cache.request") as mock_cached_requests:
         # Mock the API response
         mock_cached_requests.return_value = {
             "data": {
@@ -557,9 +557,9 @@ def test_get_devo_with_fee_only():
 
 
 def test_get_devo_with_fee_and_amount():
-    from api.index import get_devo
+    get_devo = index.app_runtime.dollar.get_devo
 
-    with patch("api.index.cached_requests") as mock_cached_requests:
+    with patch("api.index.app_runtime.cache.request") as mock_cached_requests:
         # Mock the API response
         mock_cached_requests.return_value = {
             "data": {
@@ -576,33 +576,25 @@ def test_get_devo_with_fee_and_amount():
 
 
 def test_get_devo_invalid_input():
-    from api.index import get_devo
+    get_devo = index.app_runtime.dollar.get_devo
 
     result = get_devo("invalid")
     assert "uso: /devo <fee_porcentaje>[, <monto_compra>]" in result
 
 
 def test_satoshi_basic():
-    from api.index import satoshi
+    satoshi = index.app_runtime.dollar.satoshi
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.dollar.get_btc_price") as mock_get_price:
         # Mock the API response for both USD and ARS
-        def mock_get_prices_side_effect(currency):
+        def mock_get_price_side_effect(currency):
             if currency == "USD":
-                return {
-                    "data": [
-                        {"quote": {"USD": {"price": 50000.0}}},
-                    ]
-                }
-            elif currency == "ARS":
-                return {
-                    "data": [
-                        {"quote": {"ARS": {"price": 10000000.0}}},
-                    ]
-                }
+                return 50000.0
+            if currency == "ARS":
+                return 10000000.0
             return None
 
-        mock_get_prices.side_effect = mock_get_prices_side_effect
+        mock_get_price.side_effect = mock_get_price_side_effect
 
         result = satoshi()
         assert result is not None
@@ -615,7 +607,7 @@ def test_satoshi_basic():
 def test_powerlaw_basic():
     from api.index import powerlaw
 
-    with patch("api.index.get_api_or_cache_prices") as mock_get_prices:
+    with patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices:
         # Mock the API response for BTC price
         mock_get_prices.return_value = {
             "data": [
@@ -632,7 +624,7 @@ def test_rainbow_basic():
     from api.index import rainbow
 
     with (
-        patch("api.index.get_api_or_cache_prices") as mock_get_prices,
+        patch("api.index.app_runtime.prices.get_api_prices") as mock_get_prices,
         patch("api.index.datetime") as mock_datetime,
     ):
         # Mock the API response for BTC price
@@ -654,7 +646,7 @@ def test_get_market_context_success():
     from api.index import get_market_context
 
     with (
-        patch("api.index.cached_requests") as mock_cached,
+        patch("api.index.app_runtime.cache.request") as mock_cached,
         patch("api.index.clean_crypto_data") as mock_clean,
         patch("os.environ.get") as mock_env,
     ):
@@ -691,7 +683,7 @@ def test_get_market_context_crypto_fail():
     from api.index import get_market_context
 
     with (
-        patch("api.index.cached_requests") as mock_cached,
+        patch("api.index.app_runtime.cache.request") as mock_cached,
         patch("os.environ.get") as mock_env,
     ):
         # Mock dollar response only
@@ -717,11 +709,11 @@ def test_get_market_context_all_fail():
     from api.index import get_market_context
 
     with (
-        patch("api.index.cached_requests") as mock_cached,
+        patch("api.index.app_runtime.cache.request") as mock_cached,
         patch("os.environ.get") as mock_env,
-        patch("api.index.get_cached_bcra_variables") as mock_get_bcra,
-        patch("api.index.bcra_fetch_latest_variables") as mock_fetch_bcra,
-        patch("api.index.cache_bcra_variables") as mock_cache_bcra,
+        patch("api.index.app_runtime.bcra.get_cached_variables") as mock_get_bcra,
+        patch("api.index.app_runtime.bcra.fetch_latest_variables") as mock_fetch_bcra,
+        patch("api.index.app_runtime.bcra.cache_variables") as mock_cache_bcra,
     ):
         mock_cached.return_value = None
         mock_env.return_value = "test_api_key"
@@ -831,7 +823,7 @@ def test_get_hacker_news_context_success():
             return None
 
     with (
-        patch("api.index.config_redis", side_effect=RuntimeError("no redis")),
+        patch("api.index.app_runtime.config.redis", side_effect=RuntimeError("no redis")),
         patch(
             "api.utils.http.requests.get", return_value=DummyResponse(sample_xml)
         ) as mock_get,
@@ -863,7 +855,7 @@ def test_get_hacker_news_context_uses_cache():
     ]
 
     with (
-        patch("api.index.config_redis", return_value=object()),
+        patch("api.index.app_runtime.config.redis", return_value=object()),
         patch("api.index.redis_get_json", return_value=cached_items) as mock_cache,
         patch("api.index.http_client.get") as mock_get,
     ):
@@ -1244,7 +1236,7 @@ def test_sort_dollar_rates_non24h_no_history_gives_none_variations():
 
 
 def test_format_dollar_rates_shows_no_history_footer():
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     rates = [
         {"name": "Blue", "price": 1200.0, "history": None},
@@ -1257,7 +1249,7 @@ def test_format_dollar_rates_shows_no_history_footer():
 
 
 def test_format_dollar_rates_no_footer_for_24h():
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     rates = [{"name": "Blue", "price": 1200.0, "history": None}]
     result = format_dollar_rates(rates, hours_ago=24)
@@ -1265,7 +1257,7 @@ def test_format_dollar_rates_no_footer_for_24h():
 
 
 def test_get_prices_unsupported_timeframe():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
     result = get_prices("BTC 6h")
     assert result is not None
@@ -1274,7 +1266,7 @@ def test_get_prices_unsupported_timeframe():
 
 
 def test_get_prices_7d_uses_correct_cmc_field():
-    from api.index import get_prices
+    get_prices = index.app_runtime.prices.get_prices
 
     mock_response = {
         "timestamp": 1000,
@@ -1294,7 +1286,7 @@ def test_get_prices_7d_uses_correct_cmc_field():
             ]
         },
     }
-    with patch("api.index.cached_requests", return_value=mock_response):
+    with patch("api.index.app_runtime.cache.request", return_value=mock_response):
         result = get_prices("BTC 7d")
     assert result is not None
     assert "5.5" in result or "+5.5" in result
@@ -1303,7 +1295,7 @@ def test_get_prices_7d_uses_correct_cmc_field():
 
 def test_format_dollar_rates_with_positive_variations():
     """Test format_dollar_rates with positive variation values"""
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
@@ -1323,7 +1315,7 @@ def test_format_dollar_rates_with_positive_variations():
 
 def test_format_dollar_rates_with_negative_variations():
     """Test format_dollar_rates with negative variation values"""
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Tarjeta", "price": 1600.75, "history": -0.8},
@@ -1338,7 +1330,7 @@ def test_format_dollar_rates_with_negative_variations():
 
 def test_format_dollar_rates_with_none_variations():
     """Test format_dollar_rates with None variation values"""
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": None},
@@ -1353,7 +1345,7 @@ def test_format_dollar_rates_with_none_variations():
 
 def test_format_dollar_rates_mixed_variations():
     """Test format_dollar_rates with mixed variation values"""
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Oficial", "price": 1000.50, "history": 1.2},
@@ -1373,7 +1365,7 @@ def test_format_dollar_rates_mixed_variations():
 
 def test_format_dollar_rates_zero_decimal_formatting():
     """Test format_dollar_rates decimal formatting for whole numbers"""
-    from api.index import format_dollar_rates
+    from api.dollar_runtime import format_dollar_rates
 
     dollar_rates = [
         {"name": "Test1", "price": 1000.00, "history": 0.00},
@@ -1604,7 +1596,7 @@ def test_get_oil_price_falls_back_to_stooq_quote_endpoint_when_daily_is_empty():
         }
     }
 
-    with patch("api.index.cached_requests") as mock_get:
+    with patch("api.index.app_runtime.cache.request") as mock_get:
         mock_get.side_effect = [{"data": brent_json}, {"data": wti_json}]
         result = get_oil_price()
 
@@ -1629,9 +1621,9 @@ def test_get_oil_price_uses_cached_requests(monkeypatch):
             }
         }
 
-    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
 
-    result = index.get_oil_price()
+    result = index.app_runtime.stocks.get_oil_price()
 
     assert "Brent" in result
     assert "WTI" in result
@@ -1639,7 +1631,7 @@ def test_get_oil_price_uses_cached_requests(monkeypatch):
 
 
 def test_get_oil_price_returns_error_when_all_sources_fail():
-    with patch("api.index.cached_requests", return_value=None):
+    with patch("api.index.app_runtime.cache.request", return_value=None):
         result = get_oil_price()
 
     assert result == "no pude traer el precio del petróleo boludo"
@@ -1666,14 +1658,14 @@ def test_cached_requests_uses_shared_http_get(monkeypatch):
             return None
 
     calls = []
-    monkeypatch.setattr(index, "config_redis", lambda: Redis())
+    monkeypatch.setattr(index.app_runtime.config, "redis", lambda: Redis())
     monkeypatch.setattr(
         index.http_client,
         "get",
         lambda *args, **kwargs: calls.append((args, kwargs)) or Response(),
     )
 
-    result = index.cached_requests("https://example.test", None, None, 10)
+    result = index.app_runtime.cache.request("https://example.test", None, None, 10)
 
     assert result["data"] == {"ok": True}
     assert calls
@@ -1686,15 +1678,18 @@ def test_get_dollar_rates_returns_formatted_snapshot(monkeypatch):
         def get(self, **kwargs):
             return index.StaleCacheResult(value="cached dolar", status="fresh")
 
-    monkeypatch.setattr(index, "_get_dollar_snapshot_cache", lambda: FakeCache())
     monkeypatch.setattr(
-        index,
-        "_build_dollar_rates_text",
+        index.app_runtime.dollar,
+        "get_snapshot_cache",
+        lambda: FakeCache(),
+    )
+    monkeypatch.setattr(
+        index.app_runtime.dollar,
+        "build_rates_text",
         lambda *_args, **_kwargs: "live dolar",
-        raising=False,
     )
 
-    assert index.get_dollar_rates("") == "cached dolar"
+    assert index.app_runtime.dollar.get_rates("") == "cached dolar"
 
 
 def test_get_dollar_rates_keeps_invalid_timeframe_without_cache(monkeypatch):
@@ -1707,9 +1702,13 @@ def test_get_dollar_rates_keeps_invalid_timeframe_without_cache(monkeypatch):
         called = True
         raise AssertionError("cache should not be used")
 
-    monkeypatch.setattr(index, "_get_dollar_snapshot_cache", fail_cache, raising=False)
+    monkeypatch.setattr(
+        index.app_runtime.dollar,
+        "get_snapshot_cache",
+        fail_cache,
+    )
 
-    result = index.get_dollar_rates("2h")
+    result = index.app_runtime.dollar.get_rates("2h")
 
     assert "no soportado" in result
     assert called is False
