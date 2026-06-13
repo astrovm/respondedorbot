@@ -94,7 +94,6 @@ from api.provider_errors import (
 from api import polymarket_commands
 from api import dollar_runtime
 from api import provider_config
-from api import link_context
 from api import provider_support
 from api.memory_compaction import IncrementalSummarySource
 from api import memory_compaction
@@ -147,7 +146,7 @@ from api.ai_pricing import (
     ensure_mapping,
     MODEL_PRICING_USD_MICROS,
 )
-from api.agent_tools import fetch_url_content, normalize_http_url
+from api.agent_tools import fetch_url_content
 from api.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
 from api.providers import OpenRouterProvider, ProviderChain
 # Side-effect imports: modules register tools at import time via register_tool()
@@ -247,25 +246,17 @@ from api.message_state import (
 )
 from api.logging_config import get_logger
 from api.logging_config import format_log_context
+from api.link_service import LinkService
 from api.random_replies import build_random_reply
 from api.services import bcra as bcra_service
 from api.services import chat_config_db as chat_config_db_service
 from api.services import credits_db as credits_db_service
 from api.utils.http import request_with_ssl_fallback
-from api.utils.links import (
-    can_embed_url as _links_can_embed_url,
-    download_oversized_instagram_video as _links_download_oversized_instagram_video,
-    fetch_tweet_content as _links_fetch_tweet_content,
-    is_social_frontend as _links_is_social_frontend,
-    replace_links as _links_replace_links,
-    fetch_tweet_text as _links_fetch_tweet_text,
-)
 from api.utils.text import sanitize_summary_text
 from api.utils.youtube_transcript import (
     extract_youtube_video_id,
     get_youtube_transcript_context,
 )
-from . import link_commands
 
 # TTL constants (seconds)
 TTL_PRICE = 300  # 5 minutes
@@ -346,15 +337,6 @@ OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 MESSAGE_BLOCK_PATTERN = re.compile(
     r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
 )
-MESSAGE_URL_PATTERN = re.compile(
-    r"(?i)\b("
-    r"(?:https?://|www\.)[^\s<>()]+"
-    r"|"
-    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()]*)?"
-    r")"
-)
-
-
 def _extract_message_block_from_prompt(text: str) -> str:
     """Extract the message block from the AI prompt wrapper."""
 
@@ -431,6 +413,22 @@ def _hash_cache_key(prefix: str, payload: Mapping[str, Any]) -> str:
     serialized = json.dumps(payload, sort_keys=True, default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
+
+
+_link_service = LinkService(
+    optional_redis_client=_optional_redis_client,
+    hash_cache_key=_hash_cache_key,
+    request_fn=request_with_ssl_fallback,
+    redis_get_json=redis_get_json,
+    redis_setex_json=redis_setex_json,
+    extract_video_id=extract_youtube_video_id,
+    fetch_transcript=get_youtube_transcript_context,
+    logger=_logger,
+    format_log_context=format_log_context,
+    metadata_ttl=TTL_LINK_METADATA,
+    metadata_max_bytes=LINK_METADATA_MAX_BYTES,
+    max_links=MAX_LINKS_IN_MESSAGE,
+)
 
 
 _T = TypeVar("_T")
@@ -517,36 +515,6 @@ def get_cached_tcrm_100(
     )
 
 
-def can_embed_url(url: str) -> bool:
-    """Wrapper to allow tests to monkeypatch embed detection."""
-
-    def _metadata_sink(metadata: Dict[str, Any]) -> None:
-        _cache_link_metadata(url, metadata)
-
-    return _links_can_embed_url(url, metadata_sink=_metadata_sink)
-
-
-def is_social_frontend(host: str) -> bool:
-    """Expose social frontend check while keeping implementation in utils."""
-
-    return _links_is_social_frontend(host)
-
-
-def replace_links(text: str) -> Tuple[str, bool, List[str]]:
-    """Delegate to utils helper while keeping embed checker injectable in tests."""
-
-    return _links_replace_links(text, embed_checker=can_embed_url)
-
-
-def download_oversized_instagram_video(text: str) -> Optional[bytes]:
-    return _links_download_oversized_instagram_video(text)
-
-
-def fetch_tweet_text(text: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """Fetch tweet content via oEmbed API and return formatted summary."""
-    return _links_fetch_tweet_text(text)
-
-
 # Provider backoff windows (seconds)
 GROQ_BACKOFF_DEFAULT_SECONDS = 60
 
@@ -557,9 +525,6 @@ GROQ_ACCOUNT_ORDER: Tuple[str, ...] = (GROQ_FREE_ACCOUNT, GROQ_PAID_ACCOUNT)
 _ai_provider_request_count: ContextVar[int] = ContextVar(
     "ai_provider_request_count", default=0
 )
-_link_metadata_local_cache: Dict[str, Dict[str, Any]] = {}
-
-
 def _reset_ai_provider_request_count() -> Token[int]:
     return _ai_provider_request_count.set(0)
 
@@ -668,8 +633,8 @@ def _fetch_urls_from_latest_message(
     max_fetches = MAX_LINKS_IN_MESSAGE
     urls: List[str] = []
     seen: Set[str] = set()
-    for match in MESSAGE_URL_PATTERN.finditer(latest_text):
-        normalized = _normalize_detected_message_url(match.group(1))
+    for match in _link_service.url_pattern.finditer(latest_text):
+        normalized = _link_service.normalize_detected_url(match.group(1))
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
@@ -1580,82 +1545,6 @@ def stream_with_providers(
     )
 
 
-def _truncate_link_metadata_text(
-    text: Optional[str], limit: int = 280
-) -> Optional[str]:
-    return link_commands.truncate_link_metadata_text(text, limit)
-
-
-def _utf16_slice(text: str, offset: int, length: int) -> str:
-    return link_context.utf16_slice(text, offset, length)
-
-
-def _normalize_detected_message_url(raw_url: str) -> Optional[str]:
-    return link_context.normalize_detected_url(
-        raw_url,
-        normalize_url=normalize_http_url,
-    )
-
-
-def _cache_link_metadata(raw_url: str, metadata: Mapping[str, Any]) -> None:
-    link_commands.cache_link_metadata(
-        raw_url,
-        metadata,
-        local_cache=_link_metadata_local_cache,
-        ttl=TTL_LINK_METADATA,
-    )
-
-
-def _extract_urls_from_entity_list(
-    source_text: str,
-    entities: Any,
-) -> List[str]:
-    return link_context.extract_urls_from_entities(
-        source_text,
-        entities,
-        normalize_url=_normalize_detected_message_url,
-    )
-
-
-def extract_message_urls(message: Mapping[str, Any]) -> List[str]:
-    return link_context.extract_message_urls(
-        message,
-        url_pattern=MESSAGE_URL_PATTERN,
-        max_links=MAX_LINKS_IN_MESSAGE,
-        normalize_url=_normalize_detected_message_url,
-        extract_entities=_extract_urls_from_entity_list,
-    )
-
-
-def fetch_link_metadata(raw_url: str) -> Dict[str, Any]:
-    """Fetch preview metadata for a URL and cache the result."""
-    return link_commands.fetch_link_metadata(
-        raw_url,
-        local_cache=_link_metadata_local_cache,
-        ttl=TTL_LINK_METADATA,
-        max_bytes=LINK_METADATA_MAX_BYTES,
-        optional_redis_client=_optional_redis_client,
-        hash_cache_key=_hash_cache_key,
-        request_fn=request_with_ssl_fallback,
-        redis_get_json_fn=redis_get_json,
-        redis_setex_json_fn=redis_setex_json,
-    )
-
-
-def build_message_links_context(message: Mapping[str, Any]) -> str:
-    return link_context.build_message_links_context(
-        message,
-        extract_urls=extract_message_urls,
-        fetch_metadata=fetch_link_metadata,
-        fetch_tweet=_links_fetch_tweet_content,
-        truncate_text=_truncate_link_metadata_text,
-        extract_video_id=extract_youtube_video_id,
-        fetch_transcript=get_youtube_transcript_context,
-        logger=_logger,
-        format_log_context=format_log_context,
-    )
-
-
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
     return hacker_news.get_hacker_news_context(
         limit,
@@ -2111,7 +2000,7 @@ def build_ai_messages(
         timezone_offset=timezone_offset,
         make_timezone=make_chat_tz,
         truncate_text=truncate_text,
-        build_links_context=build_message_links_context,
+        build_links_context=_link_service.build_context,
     )
 
 
@@ -2852,8 +2741,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             initialize_commands=initialize_commands,
             parse_command=parse_command,
             should_auto_process_media=should_auto_process_media,
-            replace_links=replace_links,
-            download_oversized_instagram_video=download_oversized_instagram_video,
+            link_service=_link_service,
             should_gordo_respond=should_gordo_respond,
             is_group_chat_type=is_group_chat_type,
         ),
@@ -2889,7 +2777,6 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
                 message,
                 extract_message_text_fn=extract_message_text,
             ),
-            build_message_links_context=build_message_links_context,
             format_user_message=_state_format_user_message,
             save_message_to_redis=save_message_to_redis,
             save_chat_member=save_chat_member,

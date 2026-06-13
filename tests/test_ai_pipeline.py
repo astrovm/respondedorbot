@@ -470,9 +470,10 @@ def test_build_ai_messages_includes_links_context():
     }
 
     with (
-        patch("api.index._links_fetch_tweet_content", return_value=None),
-        patch(
-            "api.index.fetch_link_metadata",
+        patch.object(index._link_service, "fetch_tweet_content", return_value=None),
+        patch.object(
+            index._link_service,
+            "fetch_metadata",
             return_value={
                 "url": "https://fixupx.com/status/2032173338240467235",
                 "title": "tweet",
@@ -927,11 +928,11 @@ def test_fetch_link_metadata_success():
     mock_response.url = "https://example.com/articulo"
     mock_response.close = MagicMock()
 
-    with (
-        patch("api.index.config_redis", side_effect=Exception("redis down")),
-        patch("api.index.request_with_ssl_fallback", return_value=mock_response),
-    ):
-        result = fetch_link_metadata("https://example.com/articulo")
+    service = make_link_service(
+        optional_redis_client=lambda: None,
+        request_fn=MagicMock(return_value=mock_response),
+    )
+    result = service.fetch_metadata("https://example.com/articulo")
 
     assert result["url"] == "https://example.com/articulo"
     assert result["title"] == "Example Site"
@@ -985,7 +986,7 @@ def test_get_hacker_news_context_uses_fallback_url():
 
 
 def test_fetch_link_metadata_invalid_url():
-    assert fetch_link_metadata("nota sin protocolo") == {
+    assert link_service.fetch_metadata("nota sin protocolo") == {
         "url": "nota sin protocolo",
         "error": "url inválida",
     }
@@ -1002,7 +1003,7 @@ def test_extract_message_urls_prefers_entities_and_limits_to_three():
         "caption_entities": [],
     }
 
-    assert extract_message_urls(message) == [
+    assert link_service.extract_message_urls(message) == [
         "https://uno.com",
         "https://dos.com",
         "https://tres.com",
@@ -1015,20 +1016,25 @@ def test_extract_message_urls_detects_bare_domains_without_scheme():
         "entities": [],
     }
 
-    assert extract_message_urls(message) == [
+    assert link_service.extract_message_urls(message) == [
         "https://fixupx.com/status/2032173338240467235"
     ]
 
 
 def test_build_message_links_context_includes_url_when_metadata_fails():
     with (
-        patch("api.index.extract_message_urls", return_value=["https://example.com"]),
-        patch(
-            "api.index.fetch_link_metadata",
+        patch.object(
+            link_service,
+            "extract_message_urls",
+            return_value=["https://example.com"],
+        ),
+        patch.object(
+            link_service,
+            "fetch_metadata",
             return_value={"url": "https://example.com", "error": "boom"},
         ),
     ):
-        context = build_message_links_context({"text": "https://example.com"})
+        context = link_service.build_context({"text": "https://example.com"})
 
     assert "LINKS DEL MENSAJE:" in context
     assert "https://example.com" in context
@@ -1041,17 +1047,19 @@ def test_build_message_links_context_keeps_full_youtube_transcript():
     )
 
     with (
-        patch(
-            "api.index.extract_message_urls",
+        patch.object(
+            link_service,
+            "extract_message_urls",
             return_value=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
         ),
-        patch(
-            "api.index.fetch_link_metadata",
+        patch.object(
+            link_service,
+            "fetch_metadata",
             return_value={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
         ),
-        patch("api.index.get_youtube_transcript_context", return_value=transcript),
+        patch.object(link_service, "fetch_transcript", return_value=transcript),
     ):
-        context = build_message_links_context(
+        context = link_service.build_context(
             {"text": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
         )
 
@@ -1320,34 +1328,29 @@ def test_fetch_link_metadata_uses_ttl_constant():
     mock_response.url = "https://example.com"
     mock_response.close = MagicMock()
 
-    with (
-        patch("api.index.request_with_ssl_fallback", return_value=mock_response),
-        patch("api.index.config_redis") as mock_redis,
-    ):
+    class R:
+        def __init__(self):
+            self.calls = []
 
-        class R:
-            def __init__(self):
-                self.calls = []
+        def get(self, _k):
+            return None
 
-            def get(self, _k):
-                return None
+        def setex(self, k, ttl, _v):
+            self.calls.append((k, ttl))
+            return True
 
-            def setex(self, k, ttl, _v):
-                self.calls.append((k, ttl))
-                return True
-
-        redis_client = R()
-        mock_redis.return_value = redis_client
-
-        result = fetch_link_metadata("https://example.com")
+    redis_client = R()
+    service = make_link_service(
+        optional_redis_client=lambda: redis_client,
+        request_fn=MagicMock(return_value=mock_response),
+    )
+    result = service.fetch_metadata("https://example.com")
 
     assert result["title"] == "A"
     assert any(ttl == index.TTL_LINK_METADATA for (_k, ttl) in redis_client.calls)
 
 
 def test_can_embed_url_primes_link_metadata_cache():
-    from api.index import can_embed_url, fetch_link_metadata
-
     html_body = (
         "<html><head>"
         '<meta property="og:title" content="Agustin Cortes (@agucortes)" />'
@@ -1374,29 +1377,32 @@ def test_can_embed_url_primes_link_metadata_cache():
 
     redis_client = R()
 
-    with (
-        patch("api.index.config_redis", return_value=redis_client),
-        patch("api.utils.links.request_with_ssl_fallback", return_value=embed_response),
+    service = make_link_service(
+        optional_redis_client=lambda: redis_client,
+        request_fn=MagicMock(),
+    )
+    with patch(
+        "api.utils.links.request_with_ssl_fallback",
+        return_value=embed_response,
     ):
-        assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
+        assert service.can_embed(
+            "https://fixupx.com/status/2032173338240467235"
+        ) is True
 
-    with (
-        patch("api.index.config_redis", return_value=redis_client),
-        patch("api.index.request_with_ssl_fallback") as mock_fetch_request,
-    ):
-        result = fetch_link_metadata("https://fixupx.com/status/2032173338240467235")
+    result = service.fetch_metadata(
+        "https://fixupx.com/status/2032173338240467235"
+    )
 
     assert result["title"] == "Agustin Cortes (@agucortes)"
     assert result["description"] == "Texto del post"
-    mock_fetch_request.assert_not_called()
+    service.request_fn.assert_not_called()
 
 
 def test_build_message_links_context_uses_tweet_content_before_generic_metadata():
-    from api.index import build_message_links_context
-
     with (
-        patch(
-            "api.index._links_fetch_tweet_content",
+        patch.object(
+            link_service,
+            "fetch_tweet_content",
             return_value={
                 "url": "https://x.com/sentdefender/status/2048202539770802483",
                 "author": "OSINTdefender",
@@ -1404,9 +1410,9 @@ def test_build_message_links_context_uses_tweet_content_before_generic_metadata(
                 "text": "Reports of shots fired were unfounded.",
             },
         ) as mock_tweet,
-        patch("api.index.fetch_link_metadata") as mock_metadata,
+        patch.object(link_service, "fetch_metadata") as mock_metadata,
     ):
-        context = build_message_links_context(
+        context = link_service.build_context(
             {"text": "https://fixupx.com/status/2048202539770802483"}
         )
 

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
+from typing import Any, Dict, Mapping, Optional, Protocol
+
+from api.link_service import LinkServiceProtocol
 
 
 class LinkReplacementDeps(Protocol):
-    def replace_links(self, text: str) -> Tuple[str, bool, List[str]]: ...
-
-    def download_oversized_instagram_video(self, text: str) -> Optional[bytes]: ...
-
-    def build_message_links_context(self, message: Mapping[str, Any]) -> str: ...
+    @property
+    def link_service(self) -> LinkServiceProtocol: ...
 
     def delete_msg(self, chat_id: str, message_id: str) -> None: ...
 
@@ -33,7 +32,7 @@ def handle_link_replacement(
     if link_mode == "off" or not message_text or message_text.startswith("/"):
         return False
 
-    fixed_text, changed, original_links = deps.replace_links(message_text)
+    fixed_text, changed, original_links = deps.link_service.replace(message_text)
     if not changed:
         return False
 
@@ -52,14 +51,14 @@ def handle_link_replacement(
     if shared_by:
         fixed_text += f"\n\ncompartido por {shared_by}"
 
-    link_context = deps.build_message_links_context({"text": fixed_text})
+    link_context = deps.link_service.build_context({"text": fixed_text})
     stored_bot_message = fixed_text
     if link_context:
         stored_bot_message = f"{stored_bot_message}\n\n{link_context}"
 
     reply_id = message.get("reply_to_message", {}).get("message_id")
     reply_id = str(reply_id) if reply_id is not None else None
-    oversized_video = deps.download_oversized_instagram_video(fixed_text)
+    oversized_video = deps.link_service.download_oversized_instagram_video(fixed_text)
 
     def send_replacement(target_reply_id: Optional[str]) -> Optional[int]:
         if oversized_video is not None:

@@ -39,20 +39,39 @@ from api.message_state import (
     truncate_text as _truncate_text,
 )
 from api.ai_billing import AIMessageBilling  # noqa: F401
+from api.link_service import LinkService
 from api.services import bcra as bcra_service  # noqa: F401
+
+
+def make_link_service(**overrides: Any) -> LinkService:
+    dependencies = {
+        "optional_redis_client": index._optional_redis_client,
+        "hash_cache_key": index._hash_cache_key,
+        "request_fn": index.request_with_ssl_fallback,
+        "redis_get_json": index.redis_get_json,
+        "redis_setex_json": index.redis_setex_json,
+        "extract_video_id": index.extract_youtube_video_id,
+        "fetch_transcript": index.get_youtube_transcript_context,
+        "logger": index._logger,
+        "format_log_context": index.format_log_context,
+        "metadata_ttl": index.TTL_LINK_METADATA,
+        "metadata_max_bytes": index.LINK_METADATA_MAX_BYTES,
+        "max_links": index.MAX_LINKS_IN_MESSAGE,
+    }
+    dependencies.update(overrides)
+    return LinkService(**dependencies)
+
+
+link_service = make_link_service()
 
 convert_to_command = index.convert_to_command
 config_redis = index.config_redis
 check_provider_available = index.check_provider_available
 extract_message_text = index.extract_message_text
-extract_message_urls = index.extract_message_urls
-fetch_link_metadata = index.fetch_link_metadata
-build_message_links_context = index.build_message_links_context
 complete_with_providers = index.complete_with_providers
 get_provider_backoff_remaining = index.get_provider_backoff_remaining
 handle_ai_response = index.handle_ai_response
 handle_msg = index.handle_msg
-replace_links = index.replace_links
 handle_config_command = index.handle_config_command
 handle_callback_query = index.handle_callback_query
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE

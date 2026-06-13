@@ -1851,13 +1851,13 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
     handle_link_replacement = message_links.handle_link_replacement
 
     deps = MagicMock()
-    deps.replace_links.return_value = (
+    deps.link_service.replace.return_value = (
         "mirá https://fixupx.com/user/status/1",
         True,
         ["https://x.com/user/status/1"],
     )
-    deps.build_message_links_context.return_value = "links: x original"
-    deps.download_oversized_instagram_video.return_value = None
+    deps.link_service.build_context.return_value = "links: x original"
+    deps.link_service.download_oversized_instagram_video.return_value = None
     deps.send_msg.return_value = 777
     redis_client = MagicMock()
     message = {
@@ -1895,14 +1895,14 @@ def test_message_links_uploads_oversized_instagram_video():
     from api.message_links import handle_link_replacement
 
     deps = MagicMock()
-    deps.replace_links.return_value = (
+    deps.link_service.replace.return_value = (
         "https://eeinstagram.com/reel/example?tg=2",
         True,
         ["https://www.instagram.com/reel/example"],
     )
-    deps.download_oversized_instagram_video.return_value = b"video"
+    deps.link_service.download_oversized_instagram_video.return_value = b"video"
     deps.send_video.return_value = 778
-    deps.build_message_links_context.return_value = ""
+    deps.link_service.build_context.return_value = ""
 
     handled = handle_link_replacement(
         deps,
@@ -1929,15 +1929,15 @@ def test_message_links_falls_back_to_link_when_video_upload_fails():
     from api.message_links import handle_link_replacement
 
     deps = MagicMock()
-    deps.replace_links.return_value = (
+    deps.link_service.replace.return_value = (
         "https://eeinstagram.com/reel/example?tg=2",
         True,
         ["https://www.instagram.com/reel/example"],
     )
-    deps.download_oversized_instagram_video.return_value = b"video"
+    deps.link_service.download_oversized_instagram_video.return_value = b"video"
     deps.send_video.return_value = None
     deps.send_msg.return_value = 779
-    deps.build_message_links_context.return_value = ""
+    deps.link_service.build_context.return_value = ""
 
     handled = handle_link_replacement(
         deps,
@@ -2365,6 +2365,11 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
     from api import index as _api_index
     from api.streaming import set_streamed_response_metadata
 
+    link_service = MagicMock()
+    link_service.replace.side_effect = lambda text: (text, False, [])
+    link_service.download_oversized_instagram_video.return_value = None
+    link_service.build_context.return_value = ""
+
     defaults = {
         "config_redis": lambda: redis_client,
         "get_chat_config": lambda _rc, _cid: dict(CHAT_CONFIG_DEFAULTS),
@@ -2372,8 +2377,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "parse_command": _parse_command,
         "should_auto_process_media": _api_index.should_auto_process_media,
         "extract_message_content": _api_index.extract_message_content,
-        "replace_links": lambda text: (text, False, []),
-        "download_oversized_instagram_video": MagicMock(return_value=None),
+        "link_service": link_service,
         "send_msg": MagicMock(return_value=999),
         "send_animation": MagicMock(return_value=999),
         "send_photo": MagicMock(return_value=999),
@@ -2384,7 +2388,6 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "get_bot_message_metadata": MagicMock(return_value=None),
         "save_bot_message_metadata": MagicMock(),
         "build_reply_context_text": MagicMock(return_value=None),
-        "build_message_links_context": MagicMock(return_value=""),
         "should_gordo_respond": MagicMock(),
         "format_user_message": lambda message, text, _reply_context: (
             f"{message['from']['first_name']}: {text}"
@@ -2494,10 +2497,7 @@ def _build_grouped_message_handler_deps(flat_defaults):
             initialize_commands=flat_defaults["initialize_commands"],
             parse_command=flat_defaults["parse_command"],
             should_auto_process_media=flat_defaults["should_auto_process_media"],
-            replace_links=flat_defaults["replace_links"],
-            download_oversized_instagram_video=flat_defaults[
-                "download_oversized_instagram_video"
-            ],
+            link_service=flat_defaults["link_service"],
             should_gordo_respond=flat_defaults["should_gordo_respond"],
             is_group_chat_type=flat_defaults["is_group_chat_type"],
         ),
@@ -2514,7 +2514,6 @@ def _build_grouped_message_handler_deps(flat_defaults):
             get_bot_message_metadata=flat_defaults["get_bot_message_metadata"],
             save_bot_message_metadata=flat_defaults["save_bot_message_metadata"],
             build_reply_context_text=flat_defaults["build_reply_context_text"],
-            build_message_links_context=flat_defaults["build_message_links_context"],
             format_user_message=flat_defaults["format_user_message"],
             save_message_to_redis=flat_defaults["save_message_to_redis"],
             save_chat_member=flat_defaults.get("save_chat_member", MagicMock()),
@@ -2637,8 +2636,7 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             initialize_commands=MagicMock(),
             parse_command=MagicMock(),
             should_auto_process_media=MagicMock(),
-            replace_links=MagicMock(),
-            download_oversized_instagram_video=MagicMock(),
+            link_service=MagicMock(),
             should_gordo_respond=MagicMock(),
             is_group_chat_type=MagicMock(),
         ),
@@ -2655,7 +2653,6 @@ def test_build_message_handler_deps_from_groups_exposes_flat_runtime_contract():
             get_bot_message_metadata=MagicMock(),
             save_bot_message_metadata=MagicMock(),
             build_reply_context_text=MagicMock(),
-            build_message_links_context=MagicMock(),
             format_user_message=MagicMock(),
             save_message_to_redis=MagicMock(),
             save_chat_member=MagicMock(),
@@ -3094,17 +3091,13 @@ def test_message_handler_suppresses_supported_link_when_not_replaced(
     mock_send_msg = MagicMock()
     mock_save_message = MagicMock()
     mock_should_respond = MagicMock(return_value=True)
+    link_service = MagicMock()
+    link_service.replace.return_value = (text, False, [])
     deps = make_deps(
         should_gordo_respond=mock_should_respond,
         send_msg=mock_send_msg,
         save_message_to_redis=mock_save_message,
-        replace_links=MagicMock(
-            return_value=(
-                text,
-                False,
-                [],
-            )
-        ),
+        link_service=link_service,
     )
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -3188,7 +3181,9 @@ def test_message_handler_explicit_intent_with_link_bypasses_replacement(
         True,
         ["https://x.com/user/status/1"],
     ))
-    deps = make_deps(replace_links=mock_replace_links)
+    link_service = MagicMock()
+    link_service.replace = mock_replace_links
+    deps = make_deps(link_service=link_service)
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     result = handle_msg(message, deps)
