@@ -7,6 +7,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from api.tasks.scheduler import (
+    TASK_CHAT_INDEX_PREFIX,
     TASK_REDIS_PREFIX,
     get_scheduler_runtime_status,
     get_scheduler,
@@ -17,6 +18,22 @@ from api.tasks.scheduler import (
     shutdown_scheduler,
     _get_task_executor,
 )
+
+
+def _configure_legacy_tasks(redis_client, *payloads):
+    redis_client.zrange.return_value = []
+    redis_client.get.side_effect = [None, *payloads]
+    redis_client.scan_iter.return_value = [
+        f"{TASK_REDIS_PREFIX}{json.loads(payload)['id']}" for payload in payloads
+    ]
+
+
+def _stored_task_payload(redis_client):
+    for call in redis_client.setex.call_args_list:
+        key, _ttl, payload = call.args
+        if str(key).startswith(TASK_REDIS_PREFIX):
+            return json.loads(payload)
+    raise AssertionError("task payload was not persisted")
 
 
 def _flush_task_pool():
@@ -643,8 +660,7 @@ class TestListTasksResilience:
             "interval_seconds": None,
             "run_date": "2026-04-15T04:22:00+00:00",
         }
-        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
-        redis_client.get.return_value = json.dumps(task_data)
+        _configure_legacy_tasks(redis_client, json.dumps(task_data))
 
         tasks = list_tasks("123")
 
@@ -671,8 +687,7 @@ class TestListTasksResilience:
             "interval_seconds": None,
             "run_date": "2026-04-15T05:00:00+00:00",
         }
-        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
-        redis_client.get.return_value = json.dumps(task_data)
+        _configure_legacy_tasks(redis_client, json.dumps(task_data))
 
         tasks = list_tasks("123")
 
@@ -699,8 +714,7 @@ class TestListTasksResilience:
             "interval_seconds": None,
             "run_date": "2026-04-15T05:00:00+00:00",
         }
-        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
-        redis_client.get.return_value = json.dumps(task_data)
+        _configure_legacy_tasks(redis_client, json.dumps(task_data))
 
         tasks = list_tasks("123")
 
@@ -735,11 +749,7 @@ class TestListTasksResilience:
                 "run_date": None,
             }
         )
-        redis_client.scan_iter.return_value = [
-            f"{TASK_REDIS_PREFIX}a",
-            f"{TASK_REDIS_PREFIX}b",
-        ]
-        redis_client.get.side_effect = [task1, task2]
+        _configure_legacy_tasks(redis_client, task1, task2)
 
         tasks = list_tasks("123")
 
@@ -779,11 +789,7 @@ class TestListTasksResilience:
                 "run_date": "2026-04-15T04:24:00+00:00",
             }
         )
-        redis_client.scan_iter.return_value = [
-            f"{TASK_REDIS_PREFIX}a",
-            f"{TASK_REDIS_PREFIX}b",
-        ]
-        redis_client.get.side_effect = [task1, task2]
+        _configure_legacy_tasks(redis_client, task1, task2)
 
         tasks = list_tasks("123")
 
@@ -809,8 +815,7 @@ class TestListTasksResilience:
             "run_date": "2026-04-15T05:00:00+00:00",
             "timezone_offset": -5,
         }
-        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
-        redis_client.get.return_value = json.dumps(task_data)
+        _configure_legacy_tasks(redis_client, json.dumps(task_data))
 
         tasks = list_tasks("123")
 
@@ -834,13 +839,49 @@ class TestListTasksResilience:
             "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
             "run_date": None,
         }
-        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}abc1"]
-        redis_client.get.return_value = json.dumps(task_data)
+        _configure_legacy_tasks(redis_client, json.dumps(task_data))
 
         tasks = list_tasks("123")
 
         assert len(tasks) == 1
         assert tasks[0]["trigger_config"] == {"type": "cron", "hour": 20, "minute": 30}
+
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_reads_indexed_tasks_with_one_batch(self, mock_sched, mock_redis):
+        mock_sched.return_value = None
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+        task_data = {
+            "id": "abc1",
+            "chat_id": "123",
+            "text": "recordame algo",
+            "user_name": "astro",
+            "run_date": None,
+        }
+        redis_client.zrange.return_value = [b"abc1"]
+        redis_client.mget.return_value = [json.dumps(task_data)]
+
+        tasks = list_tasks("123")
+
+        assert [task["id"] for task in tasks] == ["abc1"]
+        redis_client.mget.assert_called_once_with([f"{TASK_REDIS_PREFIX}abc1"])
+        redis_client.scan_iter.assert_not_called()
+
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_removes_missing_tasks_from_index(self, mock_sched, mock_redis):
+        mock_sched.return_value = None
+        redis_client = MagicMock()
+        mock_redis.return_value = redis_client
+        redis_client.zrange.return_value = ["missing"]
+        redis_client.mget.return_value = [None]
+
+        assert list_tasks("123") == []
+        redis_client.zrem.assert_called_once_with(
+            f"{TASK_CHAT_INDEX_PREFIX}123",
+            "missing",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -863,10 +904,11 @@ class TestScheduleTaskStoresRunDate:
         task_id = schedule_task("123", "test", delay_seconds=300)
 
         assert task_id is not None
-        stored_call = redis_client.setex.call_args
-        stored_data = json.loads(stored_call[0][2])
+        stored_data = _stored_task_payload(redis_client)
         assert stored_data["run_date"] is not None
         assert "T" in stored_data["run_date"]
+        redis_client.zadd.assert_called_once()
+        assert redis_client.zadd.call_args.args[0] == f"{TASK_CHAT_INDEX_PREFIX}123"
 
     @patch("api.tasks.scheduler._get_redis")
     @patch("api.tasks.scheduler.get_scheduler")
@@ -880,8 +922,7 @@ class TestScheduleTaskStoresRunDate:
         task_id = schedule_task("123", "test", interval_seconds=3600)
 
         assert task_id is not None
-        stored_call = redis_client.setex.call_args
-        stored_data = json.loads(stored_call[0][2])
+        stored_data = _stored_task_payload(redis_client)
         assert stored_data["run_date"] is None
 
     @patch("api.tasks.scheduler._get_redis")
@@ -896,8 +937,7 @@ class TestScheduleTaskStoresRunDate:
         task_id = schedule_task("123", "test", delay_seconds=300, timezone_offset=-5)
 
         assert task_id is not None
-        stored_call = redis_client.setex.call_args
-        stored_data = json.loads(stored_call[0][2])
+        stored_data = _stored_task_payload(redis_client)
         assert stored_data["timezone_offset"] == -5
 
     @patch("api.tasks.scheduler._get_redis")

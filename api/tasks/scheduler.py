@@ -26,6 +26,8 @@ _redis_client: Optional[Any] = None
 _task_executor: Optional[Any] = None
 
 TASK_REDIS_PREFIX = "task:data:"
+TASK_CHAT_INDEX_PREFIX = "task:chat:"
+TASK_INDEX_TTL = 86400 * 3650
 
 _MINUTE = 60
 _HOUR = 3600
@@ -292,11 +294,58 @@ def _get_redis() -> Any:
     return _redis_client
 
 
-def _delete_task(redis_key: str, task_id: str, redis_client: Any = None) -> None:
+def _task_index_key(chat_id: str) -> str:
+    return f"{TASK_CHAT_INDEX_PREFIX}{chat_id}"
+
+
+def _task_index_marker_key(chat_id: str) -> str:
+    return f"{_task_index_key(chat_id)}:indexed"
+
+
+def _task_score(data: Mapping[str, Any]) -> float:
+    raw_run_date = data.get("run_date")
+    if raw_run_date:
+        try:
+            return datetime.fromisoformat(str(raw_run_date).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _index_task(redis_client: Any, data: Mapping[str, Any]) -> None:
+    chat_id = str(data.get("chat_id") or "")
+    task_id = str(data.get("id") or "")
+    if not chat_id or not task_id:
+        return
+    index_key = _task_index_key(chat_id)
+    redis_client.zadd(index_key, {task_id: _task_score(data)})
+    redis_client.expire(index_key, TASK_INDEX_TTL)
+    redis_client.setex(_task_index_marker_key(chat_id), TASK_INDEX_TTL, "1")
+
+
+def _decode_task(raw: Any) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _delete_task(
+    redis_key: str,
+    task_id: str,
+    redis_client: Any = None,
+    *,
+    chat_id: str = "",
+) -> None:
     client = redis_client if redis_client is not None else _get_redis()
     if client is not None:
         try:
             client.delete(redis_key)
+            if chat_id:
+                client.zrem(_task_index_key(chat_id), task_id)
         except Exception:
             pass
     scheduler = get_scheduler()
@@ -321,9 +370,8 @@ def _fire_task(task_id: str) -> None:
         logger.warning("no data for %s in redis", task_id)
         return
 
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    data = _decode_task(raw)
+    if data is None:
         logger.warning("invalid JSON for %s", task_id)
         return
 
@@ -340,7 +388,12 @@ def _execute_and_cleanup(
     if executor.execute(data):
         redis_client = _get_redis()
         if redis_client is not None:
-            _delete_task(key, task_id, redis_client)
+            _delete_task(
+                key,
+                task_id,
+                redis_client,
+                chat_id=str(data.get("chat_id") or ""),
+            )
 
 
 def schedule_task(
@@ -387,11 +440,16 @@ def schedule_task(
         "trigger_config": trigger_config,
         "timezone_offset": _coerce_timezone_offset(timezone_offset),
     }
-    ttl = 86400 * 3650
     try:
-        redis_client.setex(redis_key, ttl, json.dumps(data))
+        redis_client.setex(redis_key, TASK_INDEX_TTL, json.dumps(data))
+        _index_task(redis_client, data)
     except Exception as e:
         logger.error("failed to persist task %s: %s", task_id, e)
+        try:
+            redis_client.delete(redis_key)
+            redis_client.zrem(_task_index_key(str(chat_id)), task_id)
+        except Exception:
+            pass
         return None
 
     try:
@@ -456,27 +514,57 @@ def schedule_task(
     return task_id
 
 
+def _migrate_chat_task_index(redis_client: Any, chat_id: str) -> List[Dict[str, Any]]:
+    tasks: List[Dict[str, Any]] = []
+    for key_bytes in redis_client.scan_iter(f"{TASK_REDIS_PREFIX}*"):
+        key = key_bytes if isinstance(key_bytes, str) else key_bytes.decode("utf-8")
+        data = _decode_task(redis_client.get(key))
+        if data is None or str(data.get("chat_id")) != chat_id:
+            continue
+        tasks.append(data)
+        _index_task(redis_client, data)
+    redis_client.setex(_task_index_marker_key(chat_id), TASK_INDEX_TTL, "1")
+    return tasks
+
+
+def _load_indexed_tasks(redis_client: Any, chat_id: str) -> List[Dict[str, Any]]:
+    index_key = _task_index_key(chat_id)
+    raw_ids = redis_client.zrange(index_key, 0, -1)
+    task_ids = [
+        item if isinstance(item, str) else item.decode("utf-8")
+        for item in raw_ids
+    ]
+    if not task_ids:
+        if redis_client.get(_task_index_marker_key(chat_id)):
+            return []
+        return _migrate_chat_task_index(redis_client, chat_id)
+
+    raw_tasks = redis_client.mget(
+        [f"{TASK_REDIS_PREFIX}{task_id}" for task_id in task_ids]
+    )
+    tasks: List[Dict[str, Any]] = []
+    missing_ids: List[str] = []
+    for task_id, raw in zip(task_ids, raw_tasks):
+        data = _decode_task(raw)
+        if data is None:
+            missing_ids.append(task_id)
+            continue
+        tasks.append(data)
+    if missing_ids:
+        redis_client.zrem(index_key, *missing_ids)
+    return tasks
+
+
 def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
     redis_client = _get_redis()
     if redis_client is None:
         return []
 
     scheduler = get_scheduler()
-
+    normalized_chat_id = str(chat_id)
     results = []
     try:
-        for key_bytes in redis_client.scan_iter(f"{TASK_REDIS_PREFIX}*"):
-            key = key_bytes if isinstance(key_bytes, str) else key_bytes.decode("utf-8")
-            raw = redis_client.get(key)
-            if not raw:
-                continue
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if str(data.get("chat_id")) != str(chat_id):
-                continue
-
+        for data in _load_indexed_tasks(redis_client, normalized_chat_id):
             task_id = data.get("id", "")
             interval = data.get("interval_seconds")
             timezone_offset = _coerce_timezone_offset(data.get("timezone_offset"), -3)
@@ -518,7 +606,14 @@ def cancel_task(task_id: str) -> bool:
     redis_client = _get_redis()
     if redis_client is not None:
         try:
-            redis_client.delete(f"{TASK_REDIS_PREFIX}{task_id}")
+            redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
+            data = _decode_task(redis_client.get(redis_key))
+            _delete_task(
+                redis_key,
+                task_id,
+                redis_client,
+                chat_id=str(data.get("chat_id") or "") if data else "",
+            )
         except Exception:
             pass
 
