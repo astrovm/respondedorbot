@@ -5,10 +5,12 @@ import re
 import time
 import unicodedata
 import warnings
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, UTC
 from decimal import Decimal
 from importlib import import_module
+from threading import Lock
 from typing import (
     Any,
     Callable,
@@ -71,6 +73,21 @@ _cache_history_fn: Optional[CacheHistoryFn] = None
 
 
 BA_TZ = timezone(timedelta(hours=-3))
+ITCRM_SERIES_URL = (
+    "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx"
+)
+ITCRM_SERIES_CACHE_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class ITCRMSeries:
+    dates: Tuple[date, ...]
+    values: Tuple[float, ...]
+
+
+_ITCRM_SERIES_CACHE: Optional[ITCRMSeries] = None
+_ITCRM_SERIES_CACHED_AT = 0.0
+_ITCRM_SERIES_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -917,79 +934,113 @@ def get_latest_itcrm_value() -> Optional[float]:
         return None
 
 
+def _normalize_itcrm_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        maybe_date = value.date()
+    except (AttributeError, TypeError, ValueError):
+        maybe_date = None
+    if isinstance(maybe_date, date):
+        return maybe_date
+    parsed = parse_date_string(str(value or ""))
+    return parsed.date() if parsed else None
+
+
+def _normalize_itcrm_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
+    try:
+        text = str(value).strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        try:
+            return float(text.replace(".", "").replace(",", "."))
+        except ValueError:
+            return None
+
+
+def _fetch_itcrm_series() -> Optional[ITCRMSeries]:
+    warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+    response = requests.get(
+        ITCRM_SERIES_URL,
+        timeout=10,
+        verify=False,
+    )
+    workbook = load_workbook(io.BytesIO(response.content), data_only=True)
+    sheet_like = getattr(workbook, "active", None) or (
+        workbook.worksheets[0] if getattr(workbook, "worksheets", None) else None
+    )
+    if sheet_like is None:
+        return None
+    sheet = cast(Any, sheet_like)
+
+    values_by_date: Dict[date, float] = {}
+    for row in range(1, sheet.max_row + 1):
+        row_date = _normalize_itcrm_date(sheet.cell(row=row, column=1).value)
+        row_value = _normalize_itcrm_value(sheet.cell(row=row, column=2).value)
+        if row_date is not None and row_value is not None:
+            values_by_date[row_date] = row_value
+    if not values_by_date:
+        return None
+
+    ordered = sorted(values_by_date.items())
+    return ITCRMSeries(
+        dates=tuple(item[0] for item in ordered),
+        values=tuple(item[1] for item in ordered),
+    )
+
+
+def _load_itcrm_series(*, force_refresh: bool = False) -> Optional[ITCRMSeries]:
+    global _ITCRM_SERIES_CACHE, _ITCRM_SERIES_CACHED_AT
+
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _ITCRM_SERIES_CACHE is not None
+        and now - _ITCRM_SERIES_CACHED_AT < ITCRM_SERIES_CACHE_SECONDS
+    ):
+        return _ITCRM_SERIES_CACHE
+
+    with _ITCRM_SERIES_LOCK:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _ITCRM_SERIES_CACHE is not None
+            and now - _ITCRM_SERIES_CACHED_AT < ITCRM_SERIES_CACHE_SECONDS
+        ):
+            return _ITCRM_SERIES_CACHE
+        series = _fetch_itcrm_series()
+        if series is not None:
+            _ITCRM_SERIES_CACHE = series
+            _ITCRM_SERIES_CACHED_AT = now
+        return series
+
+
 def _get_itcrm_value_for_date(target_dt: datetime) -> Optional[Tuple[float, datetime]]:
     """Return ITCRM value and sheet date for the closest entry on/before `target_dt`."""
 
     try:
-        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-        response = requests.get(
-            "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx",
-            timeout=10,
-            verify=False,
-        )
-        workbook = load_workbook(io.BytesIO(response.content), data_only=True)
-        sheet_like = getattr(workbook, "active", None) or (
-            workbook.worksheets[0] if getattr(workbook, "worksheets", None) else None
-        )
-        if sheet_like is None:
+        series = _load_itcrm_series()
+        if series is None:
             return None
-        sheet = cast(Any, sheet_like)
-
-        def normalize_date(value: Any) -> Optional[datetime]:
-            try:
-                if isinstance(value, datetime):
-                    return value
-                if isinstance(value, date):
-                    return datetime.combine(value, datetime.min.time())
-                if hasattr(value, "date"):
-                    maybe_date = value.date()
-                    if isinstance(maybe_date, date):
-                        return datetime.combine(maybe_date, datetime.min.time())
-            except Exception:
-                pass
-
-            parsed = parse_date_string(str(value or ""))
-            if parsed:
-                return parsed
+        index = bisect_right(series.dates, target_dt.date()) - 1
+        if index < 0:
             return None
-
-        def normalize_value(cell_value: Any) -> Optional[float]:
-            if cell_value is None:
-                return None
-            if isinstance(cell_value, (int, float, Decimal)):
-                return float(cell_value)
-            try:
-                text_val = str(cell_value).strip()
-            except Exception:
-                return None
-            if not text_val:
-                return None
-            try:
-                return float(text_val)
-            except ValueError:
-                try:
-                    normalized = text_val.replace(".", "").replace(",", ".")
-                    return float(normalized)
-                except Exception:
-                    return None
-
-        target_date = target_dt.date()
-        for row in range(sheet.max_row, 0, -1):
-            row_date_raw = sheet.cell(row=row, column=1).value
-            row_value_raw = sheet.cell(row=row, column=2).value
-            row_date_dt = normalize_date(row_date_raw)
-            if row_date_dt is None:
-                continue
-            row_date_only = row_date_dt.date()
-            if row_date_only > target_date:
-                continue
-            value = normalize_value(row_value_raw)
-            if value is None:
-                continue
-            normalized_dt = datetime.combine(row_date_only, datetime.min.time())
-            return value, normalized_dt
-
-        return None
+        matched_date = series.dates[index]
+        return (
+            series.values[index],
+            datetime.combine(matched_date, datetime.min.time()),
+        )
     except Exception as exc:
         logger.error("Error finding ITCRM value for %s: %s", target_dt.date(), exc)
         return None
@@ -1280,64 +1331,11 @@ def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
     """Return latest TCRM value and its date (DD/MM/YY) from the spreadsheet."""
 
     try:
-        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-        response = requests.get(
-            "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx",
-            timeout=10,
-            verify=False,
-        )
-        workbook = load_workbook(io.BytesIO(response.content), data_only=True)
-        sheet_like = getattr(workbook, "active", None) or (
-            workbook.worksheets[0] if getattr(workbook, "worksheets", None) else None
-        )
-        if sheet_like is None:
+        series = _load_itcrm_series()
+        if series is None:
             return None
-        sheet = cast(Any, sheet_like)
-
-        def parse_date_cell(value: Any) -> Optional[str]:
-            try:
-                if hasattr(value, "strftime"):
-                    try:
-                        d = value.date() if hasattr(value, "date") else value
-                        return f"{d.day:02d}/{d.month:02d}/{d.year % 100:02d}"
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                string_val = str(value).strip()
-                for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
-                    try:
-                        dt = datetime.strptime(string_val, fmt)
-                        return f"{dt.day:02d}/{dt.month:02d}/{dt.year % 100:02d}"
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-            return None
-
-        for row in range(sheet.max_row, 0, -1):
-            date_cell = sheet.cell(row=row, column=1).value
-            cell_value = sheet.cell(row=row, column=2).value
-            if cell_value is None:
-                continue
-            val: Optional[float] = None
-            if isinstance(cell_value, (int, float, Decimal)):
-                val = float(cell_value)
-            else:
-                text_val = str(cell_value)
-                try:
-                    val = float(text_val)
-                except ValueError:
-                    try:
-                        normalized = text_val.replace(".", "").replace(",", ".")
-                        val = float(normalized)
-                    except Exception:
-                        continue
-            date_str = parse_date_cell(date_cell) or ""
-            if val is not None:
-                return val, date_str
-        return None
+        latest_date = series.dates[-1]
+        return series.values[-1], latest_date.strftime("%d/%m/%y")
     except Exception as exc:
         logger.error("Error fetching ITCRM details: %s", exc)
         return None
