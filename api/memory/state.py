@@ -40,6 +40,46 @@ CHAT_SEARCH_INDEX = "idx:chat_messages"
 
 _SEARCH_INDEX_READY = False
 
+_SAVE_MESSAGE_SCRIPT = """
+local legacy_type = redis.call('TYPE', KEYS[3]).ok
+if legacy_type == 'set' and redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1 then
+    return 0
+end
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
+    return 0
+end
+
+local sequence = redis.call('INCR', KEYS[4])
+redis.call('ZADD', KEYS[2], sequence, ARGV[1])
+redis.call('LPUSH', KEYS[1], ARGV[2])
+redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[4]) - 1)
+
+local indexed_count = redis.call('ZCARD', KEYS[2])
+local max_messages = tonumber(ARGV[4])
+if indexed_count > max_messages then
+    redis.call('ZREMRANGEBYRANK', KEYS[2], 0, indexed_count - max_messages - 1)
+end
+
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+redis.call('EXPIRE', KEYS[4], ARGV[3])
+redis.call(
+    'HSET',
+    KEYS[5],
+    'chat_id', ARGV[5],
+    'message_id', ARGV[1],
+    'role', ARGV[6],
+    'user_id', ARGV[7],
+    'username', ARGV[8],
+    'text', ARGV[9],
+    'timestamp', ARGV[10],
+    'reply_to_message_id', ARGV[11],
+    'mentions_bot', ARGV[12]
+)
+redis.call('EXPIRE', KEYS[5], ARGV[3])
+return 1
+"""
+
 
 def _execute_redis_command(redis_client: redis.Redis, *args: Any) -> Any:
     execute: Callable[..., Any] = redis_client.execute_command
@@ -257,82 +297,51 @@ def save_message_to_redis(
     reply_to_message_id: Optional[str] = None,
     mentions_bot: bool = False,
 ) -> None:
-    """Persist one message in both the recent list and searchable history.
-
-    The message-id set filters normal Telegram redeliveries. A Redis pipeline
-    keeps the list, search document, and TTL updates together.
-    """
+    """Atomically persist one message in recent and searchable history."""
 
     try:
         chat_history_key = f"chat_history:{chat_id}"
-        message_ids_key = f"chat_message_ids:{chat_id}"
-
-        if redis_client.sismember(message_ids_key, message_id):
-            return
-
+        message_order_key = f"chat_message_order:{chat_id}"
+        legacy_message_ids_key = f"chat_message_ids:{chat_id}"
+        sequence_key = f"chat_message_sequence:{chat_id}"
+        search_doc_key = _search_doc_key(chat_id, message_id)
         effective_role = role or ("assistant" if str(message_id).startswith("bot_") else "user")
+        timestamp = int(time.time())
+        truncated_text = truncate_text(text)
         history_entry = json.dumps(
             {
                 "id": message_id,
-                "text": truncate_text(text),
-                "timestamp": int(time.time()),
+                "text": truncated_text,
+                "timestamp": timestamp,
                 "role": effective_role,
             }
         )
 
-        pipe = redis_client.pipeline()
         try:
             _ensure_search_index(redis_client)
         except Exception:
             pass
-        # The list is the fast path for normal replies; the hash is the
-        # RediSearch document used to recover relevant older context.
-        pipe.lpush(chat_history_key, history_entry)
-        pipe.sadd(message_ids_key, message_id)
-        pipe.ltrim(chat_history_key, 0, max(0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1))
-        pipe.expire(chat_history_key, CHAT_STATE_TTL)
-        pipe.expire(message_ids_key, CHAT_STATE_TTL)
-        pipe.hset(
-            _search_doc_key(chat_id, message_id),
-            mapping={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "role": effective_role,
-                "user_id": str(user_id or ""),
-                "username": str(username or ""),
-                "text": truncate_text(text),
-                "timestamp": int(time.time()),
-                "reply_to_message_id": str(reply_to_message_id or ""),
-                "mentions_bot": "1" if mentions_bot else "0",
-            },
+        redis_client.eval(
+            _SAVE_MESSAGE_SCRIPT,
+            5,
+            chat_history_key,
+            message_order_key,
+            legacy_message_ids_key,
+            sequence_key,
+            search_doc_key,
+            message_id,
+            history_entry,
+            CHAT_STATE_TTL,
+            CHAT_HISTORY_MAX_MESSAGES * 2,
+            chat_id,
+            effective_role,
+            str(user_id or ""),
+            str(username or ""),
+            truncated_text,
+            timestamp,
+            str(reply_to_message_id or ""),
+            "1" if mentions_bot else "0",
         )
-        pipe.expire(_search_doc_key(chat_id, message_id), CHAT_STATE_TTL)
-        pipe.lrange(chat_history_key, 0, -1)
-        results = pipe.execute()
-
-        message_entries = results[-1]
-        valid_ids = set()
-        for entry in message_entries:
-            try:
-                msg = json.loads(entry)
-                valid_ids.add(msg["id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-        try:
-            current_ids_set = redis_client.smembers(message_ids_key)
-            current_ids = (
-                list(cast(Set[str], current_ids_set)) if current_ids_set else []
-            )
-            to_remove = [
-                entry_id for entry_id in current_ids if entry_id not in valid_ids
-            ]
-        except Exception:
-            to_remove = []
-
-        if to_remove:
-            # Keep deduplication state bounded to messages still in recent history.
-            redis_client.srem(message_ids_key, *to_remove)
 
     except Exception as error:
         admin_reporter(

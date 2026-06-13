@@ -27,28 +27,24 @@ def test_save_message_to_redis():
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
 
-        # Mock sismember to return False (message doesn't exist)
-        mock_instance.sismember.return_value = False
-        pipeline = mock_instance.pipeline.return_value
-        pipeline.execute.return_value = [None, None, None, True, True, []]
-
-        # Test successful save
         chat_id = "123"
         message_id = "456"
         text = "test message"
 
         save_message_to_redis(chat_id, message_id, text, mock_instance)
 
-        # Verify pipeline calls
-        mock_instance.pipeline.assert_called_once()
-        pipeline.lpush.assert_called_once()
-        pipeline.ltrim.assert_called_once()
-        pipeline.ltrim.assert_called_once_with(
-            f"chat_history:{chat_id}", 0, CHAT_HISTORY_MAX_MESSAGES * 2 - 1
+        eval_args = mock_instance.eval.call_args.args
+        assert eval_args[1] == 5
+        assert eval_args[2:7] == (
+            f"chat_history:{chat_id}",
+            f"chat_message_order:{chat_id}",
+            f"chat_message_ids:{chat_id}",
+            f"chat_message_sequence:{chat_id}",
+            f"chatmsg:{chat_id}:{message_id}",
         )
-        pipeline.expire.assert_any_call(f"chat_history:{chat_id}", CHAT_STATE_TTL)
-        pipeline.expire.assert_any_call(f"chat_message_ids:{chat_id}", CHAT_STATE_TTL)
-        pipeline.execute.assert_called_once()
+        assert eval_args[9] == CHAT_STATE_TTL
+        assert eval_args[10] == CHAT_HISTORY_MAX_MESSAGES * 2
+        mock_instance.pipeline.assert_not_called()
 
 
 def test_chat_history_limit_increased_for_busy_groups():
@@ -206,11 +202,6 @@ def test_save_message_to_redis_writes_search_document():
     from api.memory.state import save_message_to_redis
 
     redis_client = MagicMock()
-    pipe = MagicMock()
-    pipe.execute.return_value = [None, None, None, None, None, None, []]
-    redis_client.pipeline.return_value = pipe
-    redis_client.sismember.return_value = False
-    redis_client.smembers.return_value = set()
     redis_client.execute_command.side_effect = Exception("Index already exists")
 
     save_message_to_redis(
@@ -222,8 +213,10 @@ def test_save_message_to_redis_writes_search_document():
         role="user",
     )
 
-    pipe.hset.assert_called()
-    pipe.expire.assert_any_call("chatmsg:chat1:42", ANY)
+    eval_args = redis_client.eval.call_args.args
+    assert "HSET" in eval_args[0]
+    assert eval_args[6] == "chatmsg:chat1:42"
+    assert eval_args[15] == "astro: hola mundo"
 
 
 def test_search_chat_history_prioritizes_reply_thread_matches():
