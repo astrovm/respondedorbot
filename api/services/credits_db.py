@@ -35,6 +35,12 @@ class CreditsDBError(RuntimeError):
     """Raised when credits persistence cannot be completed."""
 
 
+def _schema_is_ready() -> bool:
+    """Read schema state without assuming it is stable across threads."""
+
+    return _SCHEMA_READY
+
+
 def _append_sslmode_if_missing(url: str) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -97,11 +103,11 @@ def ensure_schema() -> None:
 
     global _SCHEMA_READY
 
-    if _SCHEMA_READY:
+    if _schema_is_ready():
         return
 
     with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
+        if _schema_is_ready():
             return
 
         with connect() as conn:

@@ -16,6 +16,12 @@ class ChatConfigDBError(RuntimeError):
     """Raised when chat configuration persistence cannot be completed."""
 
 
+def _schema_is_ready() -> bool:
+    """Read schema state without assuming it is stable across threads."""
+
+    return _SCHEMA_READY
+
+
 def is_configured() -> bool:
     """Return whether Postgres credentials are available."""
 
@@ -27,11 +33,11 @@ def ensure_schema() -> None:
 
     global _SCHEMA_READY
 
-    if _SCHEMA_READY:
+    if _schema_is_ready():
         return
 
     with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
+        if _schema_is_ready():
             return
 
         with credits_db_service.connect() as conn:
