@@ -1,9 +1,8 @@
 from tests.support import *
+from api.utils.links import can_embed_url, is_social_frontend, replace_links
 
 
 def test_is_social_frontend():
-    from api.index import is_social_frontend
-
     assert is_social_frontend("twitter.com")
     assert is_social_frontend("mobile.twitter.com")
     assert is_social_frontend("xcancel.com")
@@ -303,8 +302,9 @@ def test_handle_msg_link_reply():
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
-        patch(
-            "api.index.build_message_links_context",
+        patch.object(
+            index._link_service,
+            "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
         ) as mock_links_context,
         patch("api.index.save_message_to_redis") as mock_save,
@@ -361,8 +361,9 @@ def test_handle_msg_link_reply_instagram():
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
-        patch(
-            "api.index.build_message_links_context",
+        patch.object(
+            index._link_service,
+            "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://eeinstagram.com/qux?tg=2\ntitulo: foo",
         ) as mock_links_context,
         patch("api.index.save_message_to_redis") as mock_save,
@@ -419,8 +420,9 @@ def test_handle_msg_link_delete():
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
         ),
         patch("api.index.initialize_commands", return_value={}),
-        patch(
-            "api.index.build_message_links_context",
+        patch.object(
+            index._link_service,
+            "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
         ) as mock_links_context,
         patch("api.index.save_message_to_redis") as mock_save,
@@ -465,7 +467,7 @@ def test_handle_msg_link_without_preview(mock_redis):
     }
     with (
         patch("api.index.send_msg") as mock_send,
-        patch("api.index.replace_links") as mock_replace,
+        patch.object(index._link_service, "replace") as mock_replace,
         patch(
             "api.index.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
@@ -483,25 +485,27 @@ def test_handle_msg_link_without_preview(mock_redis):
         mock_send.assert_not_called()
 
 
-def test_replace_links_checks_preview(monkeypatch):
-    from api.index import replace_links
+def test_replace_links_checks_preview():
+    from api.utils.links import replace_links as links_replace_links
 
     mock_can = MagicMock(return_value=True)
-    monkeypatch.setattr("api.index.can_embed_url", mock_can)
-    text, changed, originals = replace_links("https://x.com/foo/status/123")
+    text, changed, originals = links_replace_links(
+        "https://x.com/foo/status/123",
+        embed_checker=mock_can,
+    )
     assert text == "https://fixupx.com/foo/status/123"
     assert changed is True
     assert originals == ["https://x.com/foo/status/123"]
     mock_can.assert_called_once_with("https://fixupx.com/foo/status/123")
 
 
-def test_replace_links_strips_xcom_i_status(monkeypatch):
-    from api.index import replace_links
+def test_replace_links_strips_xcom_i_status():
+    from api.utils.links import replace_links as links_replace_links
 
     mock_can = MagicMock(return_value=True)
-    monkeypatch.setattr("api.index.can_embed_url", mock_can)
-    text, changed, originals = replace_links(
-        "https://x.com/i/status/1848434048944783554"
+    text, changed, originals = links_replace_links(
+        "https://x.com/i/status/1848434048944783554",
+        embed_checker=mock_can,
     )
     assert text == "https://fixupx.com/status/1848434048944783554"
     assert changed is True
@@ -509,12 +513,14 @@ def test_replace_links_strips_xcom_i_status(monkeypatch):
     mock_can.assert_called_once_with("https://fixupx.com/status/1848434048944783554")
 
 
-def test_replace_links_skips_twitter_user_profiles(monkeypatch):
-    from api.index import replace_links
+def test_replace_links_skips_twitter_user_profiles():
+    from api.utils.links import replace_links as links_replace_links
 
     mock_can = MagicMock(return_value=True)
-    monkeypatch.setattr("api.index.can_embed_url", mock_can)
-    text, changed, originals = replace_links("https://twitter.com/foo")
+    text, changed, originals = links_replace_links(
+        "https://twitter.com/foo",
+        embed_checker=mock_can,
+    )
     assert text == "https://twitter.com/foo"
     assert changed is False
     assert originals == []
@@ -566,7 +572,6 @@ def test_xcancel_link_replacement(mock_get):
 
 
 def test_can_embed_url_logs_missing_meta(monkeypatch, caplog):
-    from api.index import can_embed_url
 
     caplog.set_level("INFO")
     mock_response = MagicMock()
@@ -588,7 +593,6 @@ def test_can_embed_url_logs_missing_meta(monkeypatch, caplog):
 
 
 def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
-    from api.index import can_embed_url
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -602,7 +606,6 @@ def test_can_embed_url_rejects_title_without_card_or_media(monkeypatch):
 
 
 def test_can_embed_url_allows_title_and_image(monkeypatch):
-    from api.index import can_embed_url
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -619,7 +622,6 @@ def test_can_embed_url_allows_title_and_image(monkeypatch):
 
 
 def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
-    from api.index import can_embed_url
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -637,7 +639,6 @@ def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
 
 
 def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
-    from api.index import can_embed_url
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -654,7 +655,6 @@ def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
 
 
 def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monkeypatch):
-    from api.index import can_embed_url
 
     head_response = MagicMock()
     head_response.status_code = 405
@@ -684,7 +684,6 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monke
 
 
 def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
-    from api.index import can_embed_url
 
     head_response = MagicMock()
     head_response.status_code = 405
@@ -713,7 +712,6 @@ def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
 
 
 def test_can_embed_url_retries_eeinstagram_get_transient_status(monkeypatch):
-    from api.index import can_embed_url
 
     sleep_calls = []
     head_response = MagicMock()
@@ -754,7 +752,6 @@ def test_can_embed_url_retries_eeinstagram_get_transient_status(monkeypatch):
 def test_can_embed_url_retries_eeinstagram_head_exception(monkeypatch):
     from requests.exceptions import Timeout
 
-    from api.index import can_embed_url
 
     sleep_calls = []
     redirect_response = MagicMock()
@@ -786,7 +783,6 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted
 ):
     from requests.exceptions import Timeout
 
-    from api.index import can_embed_url
 
     sleep_calls = []
     get_response = MagicMock()
@@ -820,7 +816,6 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted
 def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
     monkeypatch,
 ):
-    from api.index import can_embed_url
 
     sleep_calls = []
     head_response = MagicMock()
@@ -856,7 +851,6 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
 
 
 def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
-    from api.index import can_embed_url
 
     head_response = MagicMock()
     head_response.status_code = 307
@@ -876,7 +870,6 @@ def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
 
 
 def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
-    from api.index import can_embed_url
 
     head_response = MagicMock()
     head_response.status_code = 307
@@ -897,7 +890,6 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
 
 @patch("api.utils.links.request_with_ssl_fallback")
 def test_can_embed_url_allows_direct_media(mock_get):
-    from api.index import can_embed_url
     from api.utils.links import TELEGRAM_PREVIEW_USER_AGENT
 
     mock_response = MagicMock()
@@ -959,7 +951,7 @@ def test_handle_msg_original_link_no_check():
         ),
         patch("api.index.initialize_commands", return_value={}),
         patch("api.index.should_gordo_respond", return_value=False),
-        patch("api.index.replace_links") as mock_replace,
+        patch.object(index._link_service, "replace") as mock_replace,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
     ):
         redis_client = MagicMock()
@@ -1020,7 +1012,6 @@ def test_handle_msg_replaced_link_adds_button():
         patch("api.index.initialize_commands", return_value={}),
         patch("api.index.should_gordo_respond") as mock_should,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
-        patch("api.index.fetch_tweet_text") as mock_fetch_tweet,
     ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -1032,7 +1023,6 @@ def test_handle_msg_replaced_link_adds_button():
             "<meta property='og:image' content='https://example.com/image.png'>"
         )
         mock_get.return_value = mock_resp
-        mock_fetch_tweet.return_value = ("", [])
 
         result = handle_msg(message)
 
@@ -1065,7 +1055,6 @@ def test_handle_msg_replaced_link_replies_to_original_message():
         patch("api.index.initialize_commands", return_value={}),
         patch("api.index.should_gordo_respond") as mock_should,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
-        patch("api.index.fetch_tweet_text") as mock_fetch_tweet,
     ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -1077,7 +1066,6 @@ def test_handle_msg_replaced_link_replies_to_original_message():
             "<meta property='og:image' content='https://example.com/image.png'>"
         )
         mock_get.return_value = mock_resp
-        mock_fetch_tweet.return_value = ("", [])
 
         result = handle_msg(message)
 
@@ -1111,7 +1099,6 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
         patch("api.index.initialize_commands", return_value={}),
         patch("api.index.should_gordo_respond") as mock_should,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
-        patch("api.index.fetch_tweet_text") as mock_fetch_tweet,
     ):
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
@@ -1123,7 +1110,6 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
             "<meta property='og:image' content='https://example.com/image.png'>"
         )
         mock_get.return_value = mock_resp
-        mock_fetch_tweet.return_value = ("", [])
 
         result = handle_msg(message)
 

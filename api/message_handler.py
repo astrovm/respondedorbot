@@ -29,6 +29,7 @@ from .billing_commands import (
     handle_transfer_command,
 )
 from api.token_signals import handle_token_signal_message
+from api.link_service import LinkServiceProtocol
 from .message_links import handle_link_replacement
 from api.utils.links import has_replaceable_link
 from api.utils.text import sanitize_summary_text
@@ -99,8 +100,7 @@ class MessageRoutingDeps:
     should_auto_process_media: Callable[
         [Mapping[str, CommandTuple], str, str, Mapping[str, Any]], bool
     ]
-    replace_links: Callable[[str], Tuple[str, bool, List[str]]]
-    download_oversized_instagram_video: Callable[[str], Optional[bytes]]
+    link_service: LinkServiceProtocol
     should_gordo_respond: Callable[
         [
             Mapping[str, CommandTuple],
@@ -131,7 +131,6 @@ class MessageStateDeps:
     get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
     save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
     build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
-    build_message_links_context: Callable[[Mapping[str, Any]], str]
     format_user_message: Callable[[Dict[str, Any], str, Optional[str]], str]
     save_message_to_redis: Callable[..., None]
     save_chat_member: Callable[..., None]
@@ -198,8 +197,7 @@ class MessageHandlerDeps:
     extract_message_content: Callable[
         [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
     ]
-    replace_links: Callable[[str], Tuple[str, bool, List[str]]]
-    download_oversized_instagram_video: Callable[[str], Optional[bytes]]
+    link_service: LinkServiceProtocol
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
     send_photo: Callable[..., Optional[int]]
@@ -210,7 +208,6 @@ class MessageHandlerDeps:
     get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
     save_bot_message_metadata: Callable[[Any, str, Any, Mapping[str, Any]], None]
     build_reply_context_text: Callable[[Mapping[str, Any]], Optional[str]]
-    build_message_links_context: Callable[[Mapping[str, Any]], str]
     should_gordo_respond: Callable[
         [
             Mapping[str, CommandTuple],
@@ -285,8 +282,7 @@ def build_message_handler_deps(
         parse_command=routing.parse_command,
         should_auto_process_media=routing.should_auto_process_media,
         extract_message_content=media.extract_message_content,
-        replace_links=routing.replace_links,
-        download_oversized_instagram_video=routing.download_oversized_instagram_video,
+        link_service=routing.link_service,
         send_msg=io.send_msg,
         send_animation=io.send_animation,
         send_photo=io.send_photo,
@@ -297,7 +293,6 @@ def build_message_handler_deps(
         get_bot_message_metadata=state.get_bot_message_metadata,
         save_bot_message_metadata=state.save_bot_message_metadata,
         build_reply_context_text=state.build_reply_context_text,
-        build_message_links_context=state.build_message_links_context,
         should_gordo_respond=routing.should_gordo_respond,
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
