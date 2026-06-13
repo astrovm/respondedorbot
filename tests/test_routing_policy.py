@@ -11,7 +11,7 @@ def _build_policy(has_credits_fn):
     return RoutingPolicy(
         base_policy=base_should_respond,
         has_ai_credits_for_random_reply=has_credits_fn,
-        load_bot_config_fn=index.load_bot_config,
+        load_bot_config_fn=index.app_runtime.config.load_bot_config,
     )
 
 

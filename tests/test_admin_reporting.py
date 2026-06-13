@@ -16,13 +16,13 @@ def test_admin_report_formats_error_traceback_from_exception():
 
     with (
         patch.dict(
-            "api.index.environ",
+            "api.admin_reporting.environ",
             {"ADMIN_CHAT_ID": "1", "FRIENDLY_INSTANCE_NAME": "test"},
             clear=True,
         ),
-        patch("api.index.send_msg") as send_msg,
+        patch.object(index.app_runtime.telegram, "send_message") as send_msg,
     ):
-        index.admin_report("failed", captured_error)
+        index.app_runtime.admin.report("failed", captured_error)
 
     message = send_msg.call_args.args[1]
     assert "tipo de error: RuntimeError" in message
@@ -42,13 +42,13 @@ def test_admin_report_redacts_telegram_token_from_error_message_and_traceback():
 
     with (
         patch.dict(
-            "api.index.environ",
+            "api.admin_reporting.environ",
             {"ADMIN_CHAT_ID": "1", "FRIENDLY_INSTANCE_NAME": "test"},
             clear=True,
         ),
-        patch("api.index.send_msg") as send_msg,
+        patch.object(index.app_runtime.telegram, "send_message") as send_msg,
     ):
-        index.admin_report("failed", captured_error)
+        index.app_runtime.admin.report("failed", captured_error)
 
     message = send_msg.call_args.args[1]
     assert fake_bot_auth not in message

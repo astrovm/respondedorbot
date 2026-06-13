@@ -16,13 +16,17 @@ def test_index_handle_msg_balance_uses_real_wiring(monkeypatch):
     mock_credits.is_configured.return_value = True
     mock_credits.get_balance.return_value = 420
 
-    monkeypatch.setattr(_api_index, "config_redis", lambda: redis_client)
-    monkeypatch.setattr(_api_index, "send_msg", mock_send_msg)
+    monkeypatch.setattr(_api_index.app_runtime.config, "redis", lambda: redis_client)
+    monkeypatch.setattr(
+        _api_index.app_runtime.telegram,
+        "send_message",
+        mock_send_msg,
+    )
     monkeypatch.setattr(_api_index, "credits_db_service", mock_credits)
-    monkeypatch.setattr(_api_index, "admin_report", MagicMock())
+    monkeypatch.setattr(_api_index.app_runtime.admin, "report", MagicMock())
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
-    result = _api_index.handle_msg(message)
+    result = _api_index.app_runtime.handle_message(message)
 
     assert result == "ok"
     assert "42.0" in mock_send_msg.call_args[0][1]

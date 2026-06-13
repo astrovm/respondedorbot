@@ -170,6 +170,12 @@ class TelegramGateway:
             message_has_domain_link or _message_has_domain_link
         )
 
+    def request(self, endpoint: str, **kwargs: Any) -> Any:
+        return self._telegram_request(endpoint, **kwargs)
+
+    def redact_tokens(self, value: str) -> str:
+        return _redact_telegram_tokens(value)
+
     def send_message(
         self,
         chat_id: str,

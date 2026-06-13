@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 
@@ -209,3 +210,144 @@ def handle_ai_stream_response(
         response_meta["streamed_text"] = final_text
         response_meta["streamed_message_id"] = message_id
     return final_text
+
+
+@dataclass
+class ResponseServiceDeps:
+    telegram: Any
+    ai: Any
+    providers: Any
+    telegram_token: Callable[[], str | None]
+    send_typing: Callable[[str, str], None]
+    sleep: Callable[[float], None]
+    random_delay: Callable[[float, float], float]
+    build_random_reply: Callable[..., str]
+    gen_random: Callable[..., str]
+    extract_user_name: Callable[[str | None], str]
+    handle_response: Callable[..., str]
+    consume_stream: Callable[..., tuple[str, Any]]
+    set_stream_metadata: Callable[[str | None, str], None]
+    edit_message: Callable[..., Any]
+    logger: Any
+
+
+class ResponseService:
+    def __init__(self, deps: ResponseServiceDeps) -> None:
+        self._deps = deps
+        self.stream_handler = self.handle_stream
+
+    def handle_rate_limit(
+        self,
+        chat_id: str,
+        message: dict[str, Any],
+    ) -> str:
+        return handle_rate_limit(
+            chat_id,
+            message,
+            telegram_token=self._deps.telegram_token(),
+            send_typing=self._deps.send_typing,
+            sleep=self._deps.sleep,
+            random_delay=self._deps.random_delay,
+            build_random_reply=self._deps.build_random_reply,
+            gen_random=self._deps.gen_random,
+        )
+
+    def handle(
+        self,
+        chat_id: str,
+        handler_func: Callable[..., str],
+        messages: list[dict[str, Any]],
+        image_data: bytes | None = None,
+        image_file_id: str | None = None,
+        context_texts: Sequence[str | None] | None = None,
+        user_identity: str | None = None,
+        response_meta: dict[str, Any] | None = None,
+        user_id: int | None = None,
+        timezone_offset: int = -3,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        return handle_ai_response(
+            chat_id,
+            handler_func,
+            messages,
+            stream_handler=self.stream_handler,
+            extract_user_name=self._deps.extract_user_name,
+            handle_response=self._deps.handle_response,
+            send_typing=self._deps.send_typing,
+            telegram_token=self._deps.telegram_token(),
+            reset_request_count=self._deps.providers.reset_request_count,
+            restore_request_count=self._deps.providers.restore_request_count,
+            get_request_count=self._deps.providers.get_request_count,
+            image_data=image_data,
+            image_file_id=image_file_id,
+            context_texts=context_texts,
+            user_identity=user_identity,
+            response_meta=response_meta,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    def send_stream_message(
+        self,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: str | None,
+    ) -> int | None:
+        return send_message_for_stream(
+            chat_id,
+            text,
+            reply_to_message_id,
+            send_message=self._deps.telegram.send_message,
+            logger=self._deps.logger,
+        )
+
+    def edit_stream_message(
+        self,
+        chat_id: str,
+        text: str,
+        message_id: str,
+    ) -> None:
+        edit_message_for_stream(
+            chat_id,
+            text,
+            message_id,
+            edit_message=self._deps.edit_message,
+            logger=self._deps.logger,
+        )
+
+    def handle_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_meta: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+        user_id: int | None = None,
+        user_name: str | None = None,
+        timezone_offset: int = -3,
+        reply_to_message_id: str | None = None,
+        image_data: bytes | None = None,
+        image_file_id: str | None = None,
+        **_: Any,
+    ) -> str:
+        return handle_ai_stream_response(
+            messages,
+            response_meta=response_meta,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_name,
+            timezone_offset=timezone_offset,
+            reply_to_message_id=reply_to_message_id,
+            image_data=image_data,
+            image_file_id=image_file_id,
+            inject_image_context=self._deps.ai.inject_image_context,
+            telegram_token=self._deps.telegram_token(),
+            send_typing=self._deps.send_typing,
+            ask_ai_stream=self._deps.ai.stream,
+            consume_stream=self._deps.consume_stream,
+            send_stream_message=self.send_stream_message,
+            edit_stream_message=self.edit_stream_message,
+            ask_ai=self._deps.ai.ask,
+            gen_random=self._deps.gen_random,
+            set_stream_metadata=self._deps.set_stream_metadata,
+        )

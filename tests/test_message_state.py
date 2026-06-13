@@ -20,7 +20,7 @@ def test_format_user_message_with_reply_context():
 
 
 def test_save_message_to_redis():
-    from api.index import save_message_to_redis
+    save_message_to_redis = index.app_runtime.state.save_message
     from api.message_state import CHAT_HISTORY_MAX_MESSAGES, CHAT_STATE_TTL
 
     with patch("redis.Redis") as mock_redis:
@@ -58,7 +58,7 @@ def test_chat_history_limit_increased_for_busy_groups():
 
 
 def test_get_chat_history():
-    from api.index import get_chat_history
+    get_chat_history = index.app_runtime.state.get_history
 
     with patch("redis.Redis") as mock_redis:
         mock_instance = MagicMock()
@@ -113,7 +113,7 @@ def test_build_reply_context_text():
 
 
 def test_truncate_text():
-    from api.index import truncate_text
+    truncate_text = index.app_runtime.state.truncate_text
 
     # Test text within limit
     assert truncate_text("short text", 512) == "short text"
@@ -324,7 +324,7 @@ def test_search_chat_history_escapes_at_sign_in_query():
 
 
 def test_truncate_text_more_edge_cases():
-    from api.index import truncate_text
+    truncate_text = index.app_runtime.state.truncate_text
 
     # Test with zero max_length
     assert truncate_text("text", 0) == ""
@@ -418,7 +418,7 @@ def test_get_chat_members_returns_empty_on_redis_error():
 
 
 def test_format_user_message_complex_cases():
-    from api.index import format_user_message
+    format_user_message = index.app_runtime.state.format_user_message
 
     # Test with very long names and messages
     first_name = "A" * 50

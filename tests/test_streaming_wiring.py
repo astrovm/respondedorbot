@@ -4,14 +4,14 @@ from tests.test_message_handler import _build_message_handler_deps
 
 
 def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata(monkeypatch):
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     response_meta: dict[str, Any] = {}
     token_iterator = iter([("openrouter", "ho"), ("openrouter", "la")])
 
-    with patch("api.index.ask_ai_stream", return_value=token_iterator) as ask_stream:
+    with patch("api.index.app_runtime.ai.stream", return_value=token_iterator) as ask_stream:
         with patch(
-            "api.index.consume_stream_to_telegram",
+            "api.index.app_runtime.responses._deps.consume_stream",
             return_value=("hola", "777"),
         ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
@@ -121,14 +121,14 @@ def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
 
 
 def test_handle_ai_stream_response_passes_reply_to_message_id(monkeypatch):
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     response_meta: dict[str, Any] = {}
     token_iterator = iter([("openrouter", "ho"), ("openrouter", "la")])
 
-    with patch("api.index.ask_ai_stream", return_value=token_iterator):
+    with patch("api.index.app_runtime.ai.stream", return_value=token_iterator):
         with patch(
-            "api.index.consume_stream_to_telegram",
+            "api.index.app_runtime.responses._deps.consume_stream",
             return_value=("hola", "777"),
         ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
@@ -182,7 +182,7 @@ def test_run_ai_flow_uses_user_message_id_not_reply_to_message_id():
 
 
 def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
-    from api.index import ask_ai_stream
+    ask_ai_stream = index.app_runtime.ai.stream
 
     system_message = {"role": "system", "content": "sys"}
     rewritten_messages = [{"role": "user", "content": "hola"}]
@@ -191,10 +191,13 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
     stream_result = iter([("openrouter", "ok")])
 
     with patch(
-        "api.index._build_ai_request",
+        "api.index.app_runtime.ai.build_request",
         return_value=(system_message, rewritten_messages, extra_tools, tool_context),
     ):
-        with patch("api.index.stream_with_providers", return_value=stream_result) as stream_call:
+        with patch(
+            "api.index.app_runtime.ai._deps.stream",
+            return_value=stream_result,
+        ) as stream_call:
             result = ask_ai_stream(
                 [{"role": "user", "content": "hola"}],
                 enable_web_search=False,
@@ -216,7 +219,7 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
 
 def test_ask_ai_stream_end_to_end_with_internal_tool():
     from api.ai_pricing import AIUsageResult
-    from api.index import ask_ai_stream
+    ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
     class FakeToolProvider:
@@ -254,7 +257,7 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
     chain = ProviderChain([FakeToolProvider()])
 
     with patch(
-        "api.index._build_ai_request",
+        "api.index.app_runtime.ai.build_request",
         return_value=(
             {"role": "system", "content": "sys"},
             messages,
@@ -262,7 +265,7 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
             {"chat_id": "123"},
         ),
     ):
-        with patch("api.index.get_provider_chain", return_value=chain):
+        with patch("api.index.app_runtime.providers.get_chain", return_value=chain):
             tokens = list(
                 ask_ai_stream(
                     messages,
@@ -280,7 +283,7 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
 
 def test_ask_ai_stream_end_to_end_with_web_search():
     from api.ai_pricing import AIUsageResult
-    from api.index import ask_ai_stream
+    ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
     class FakeToolProvider:
@@ -312,7 +315,7 @@ def test_ask_ai_stream_end_to_end_with_web_search():
     chain = ProviderChain([FakeToolProvider()])
 
     with patch(
-        "api.index._build_ai_request",
+        "api.index.app_runtime.ai.build_request",
         return_value=(
             {"role": "system", "content": "sys"},
             messages,
@@ -320,7 +323,7 @@ def test_ask_ai_stream_end_to_end_with_web_search():
             {"chat_id": "123"},
         ),
     ):
-        with patch("api.index.get_provider_chain", return_value=chain):
+        with patch("api.index.app_runtime.providers.get_chain", return_value=chain):
             tokens = list(
                 ask_ai_stream(
                     messages,
@@ -338,14 +341,14 @@ def test_ask_ai_stream_end_to_end_with_web_search():
 
 
 def test_handle_ai_stream_response_end_to_end_no_tool_leak():
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     response_meta: dict[str, Any] = {}
     token_iterator = iter([("openrouter", "tool result: "), ("openrouter", "hola")])
 
-    with patch("api.index.ask_ai_stream", return_value=token_iterator):
+    with patch("api.index.app_runtime.ai.stream", return_value=token_iterator):
         with patch(
-            "api.index.consume_stream_to_telegram",
+            "api.index.app_runtime.responses._deps.consume_stream",
             return_value=("tool result: hola", "777"),
         ) as consume_stream_to_telegram:
             result = handle_ai_stream_response(
@@ -364,15 +367,13 @@ def test_handle_ai_stream_response_end_to_end_no_tool_leak():
 
 
 def test_stream_with_providers_forwards_extra_tools_and_tool_context():
-    from api.index import stream_with_providers
-
     chain = MagicMock()
     chain.stream.return_value = iter([("openrouter", "ok")])
     extra_tools = [{"type": "function", "function": {"name": "echo"}}]
     tool_context = {"chat_id": "123"}
 
-    with patch("api.index.get_provider_chain", return_value=chain):
-        result = stream_with_providers(
+    with patch("api.index.app_runtime.providers.get_chain", return_value=chain):
+        result = index.app_runtime.providers.stream(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
             enable_web_search=False,

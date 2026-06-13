@@ -5,6 +5,11 @@ from collections.abc import Callable, Mapping
 from logging import Logger
 from typing import Any
 
+from api.cache_service import CacheService
+from api.config_runtime import ConfigRuntime
+from api.rulo_commands import build_rulo_message
+from api.services.stale_cache import StaleCache
+from api.dollar_commands import sort_dollar_rates
 from api.utils import fmt_num, fmt_signed_pct
 
 DollarFetcher = Callable[..., dict[str, Any] | None]
@@ -259,3 +264,109 @@ def _parse_timeframe(
         timeframe = parts[-1].lower()
         return (parts[0].strip() if len(parts) > 1 else ""), timeframe
     return msg_text.strip(), None
+
+
+class DollarService:
+    def __init__(
+        self,
+        *,
+        cache: CacheService,
+        config: ConfigRuntime,
+        logger: Logger,
+        timeframes: Mapping[str, int],
+        cache_ttl: int,
+        stale_grace: int,
+        schedule_refresh: RefreshScheduler,
+        get_tcrm: TcrmGetter,
+        get_band_limits: BandGetter,
+        get_btc_price: PriceGetter,
+        get_bcra_variables: Callable[[], dict[str, Any] | None],
+        format_bcra_variables: Callable[[dict[str, Any]], str],
+    ) -> None:
+        self._cache = cache
+        self._config = config
+        self._logger = logger
+        self._timeframes = dict(timeframes)
+        self._cache_ttl = cache_ttl
+        self._stale_grace = stale_grace
+        self._schedule_refresh = schedule_refresh
+        self.get_tcrm = get_tcrm
+        self.get_band_limits = get_band_limits
+        self.get_btc_price = get_btc_price
+        self.get_bcra_variables = get_bcra_variables
+        self.format_bcra_variables = format_bcra_variables
+        self._snapshot_cache: StaleCache | None = None
+
+    def fetch_dollar_data(
+        self,
+        *,
+        hourly_cache: bool = True,
+        get_history: int = 0,
+    ) -> dict[str, Any] | None:
+        return self._cache.request(
+            "https://criptoya.com/api/dolar",
+            None,
+            None,
+            self._cache_ttl,
+            hourly_cache,
+            get_history,
+        )
+
+    def get_snapshot_cache(self) -> StaleCache:
+        if self._snapshot_cache is None:
+            self._snapshot_cache = StaleCache(redis_client=self._config.redis())
+        return self._snapshot_cache
+
+    def format_rates(
+        self,
+        dollar_rates: list[dict[str, Any]],
+        hours_ago: int,
+        band_limits: dict[str, Any] | None = None,
+    ) -> str:
+        return format_dollar_rates(dollar_rates, hours_ago, band_limits)
+
+    def build_rates_text(self, hours_ago: int) -> str | None:
+        return build_dollar_rates_text(
+            hours_ago,
+            fetch_dollars=self.fetch_dollar_data,
+            get_tcrm=self.get_tcrm,
+            sort_rates=sort_dollar_rates,
+            get_band_limits=self.get_band_limits,
+            format_rates=self.format_rates,
+        )
+
+    def get_rates(self, msg_text: str = "") -> str | None:
+        return get_dollar_rates(
+            msg_text,
+            timeframes=self._timeframes,
+            get_cache=self.get_snapshot_cache,
+            build_text=self.build_rates_text,
+            cache_ttl=self._cache_ttl,
+            stale_grace=self._stale_grace,
+            schedule_refresh=self._schedule_refresh,
+            logger=self._logger,
+        )
+
+    def get_devo(self, msg_text: str) -> str:
+        return get_devo(msg_text, fetch_dollars=self.fetch_dollar_data)
+
+    def get_rulo(self) -> str:
+        return get_rulo(
+            fetch_dollars=self.fetch_dollar_data,
+            cached_request=self._cache.request,
+            cache_ttl=self._cache_ttl,
+            build_message=build_rulo_message,
+        )
+
+    def satoshi(self) -> str:
+        return satoshi(get_btc_price=self.get_btc_price, logger=self._logger)
+
+    def handle_bcra_variables(self) -> str:
+        return handle_bcra_variables(
+            get_variables=self.get_bcra_variables,
+            format_variables=self.format_bcra_variables,
+            logger=self._logger,
+        )
+
+
+__all__ = ["DollarService"]

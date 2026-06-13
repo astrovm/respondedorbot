@@ -294,11 +294,11 @@ def test_handle_msg_link_reply():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg", return_value=901) as mock_send,
-        patch("api.index.delete_msg") as mock_delete,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message", return_value=901) as mock_send,
+        patch("api.index.app_runtime.telegram.delete_message") as mock_delete,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -307,7 +307,7 @@ def test_handle_msg_link_reply():
             "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://fxtwitter.com/foo/status/1\ntitulo: foo",
         ) as mock_links_context,
-        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.index.app_runtime.state.save_message") as mock_save,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
     ):
         redis_client = MagicMock()
@@ -353,11 +353,11 @@ def test_handle_msg_link_reply_instagram():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg", return_value=903) as mock_send,
-        patch("api.index.delete_msg") as mock_delete,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message", return_value=903) as mock_send,
+        patch("api.index.app_runtime.telegram.delete_message") as mock_delete,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -366,7 +366,7 @@ def test_handle_msg_link_reply_instagram():
             "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://eeinstagram.com/qux?tg=2\ntitulo: foo",
         ) as mock_links_context,
-        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.index.app_runtime.state.save_message") as mock_save,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
         patch("api.utils.links.time.time", return_value=7_200),
     ):
@@ -412,11 +412,11 @@ def test_handle_msg_link_delete():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg", return_value=902) as mock_send,
-        patch("api.index.delete_msg") as mock_delete,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message", return_value=902) as mock_send,
+        patch("api.index.app_runtime.telegram.delete_message") as mock_delete,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -425,7 +425,7 @@ def test_handle_msg_link_delete():
             "build_context",
             return_value="LINKS DEL MENSAJE:\n1. https://fixupx.com/bar/status/1\ntitulo: foo",
         ) as mock_links_context,
-        patch("api.index.save_message_to_redis") as mock_save,
+        patch("api.index.app_runtime.state.save_message") as mock_save,
         patch("api.utils.links.request_with_ssl_fallback") as mock_get,
     ):
         redis_client = MagicMock()
@@ -457,7 +457,7 @@ def test_handle_msg_link_delete():
         )
 
 
-@patch("api.index.config_redis")
+@patch("api.index.app_runtime.config.redis")
 def test_handle_msg_link_without_preview(mock_redis):
     message = {
         "message_id": 5,
@@ -466,10 +466,10 @@ def test_handle_msg_link_without_preview(mock_redis):
         "text": "https://example.com",
     }
     with (
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch.object(index._link_service, "replace") as mock_replace,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -914,10 +914,10 @@ def test_handle_msg_link_already_fixed():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -943,10 +943,10 @@ def test_handle_msg_original_link_no_check():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -974,10 +974,10 @@ def test_handle_msg_link_already_fixed_subdomain():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -1003,10 +1003,10 @@ def test_handle_msg_replaced_link_adds_button():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -1046,10 +1046,10 @@ def test_handle_msg_replaced_link_replies_to_original_message():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "reply"},
         ),
         patch("api.index.initialize_commands", return_value={}),
@@ -1089,11 +1089,11 @@ def test_handle_msg_replaced_link_delete_mode_replies_to_original_message():
     }
     with (
         patch.dict("api.index.environ", {"TELEGRAM_USERNAME": "bot"}),
-        patch("api.index.config_redis") as mock_redis,
-        patch("api.index.send_msg") as mock_send,
-        patch("api.index.delete_msg") as mock_delete,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send,
+        patch("api.index.app_runtime.telegram.delete_message") as mock_delete,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**CHAT_CONFIG_DEFAULTS, "link_mode": "delete"},
         ),
         patch("api.index.initialize_commands", return_value={}),

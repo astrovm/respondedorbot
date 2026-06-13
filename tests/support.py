@@ -45,7 +45,7 @@ from api.services import bcra as bcra_service  # noqa: F401
 
 def make_link_service(**overrides: Any) -> LinkService:
     dependencies = {
-        "optional_redis_client": index._optional_redis_client,
+        "optional_redis_client": index.app_runtime.config.optional_redis,
         "hash_cache_key": index._hash_cache_key,
         "request_fn": index.request_with_ssl_fallback,
         "redis_get_json": index.redis_get_json,
@@ -65,18 +65,18 @@ def make_link_service(**overrides: Any) -> LinkService:
 link_service = make_link_service()
 
 convert_to_command = index.convert_to_command
-config_redis = index.config_redis
-check_provider_available = index.check_provider_available
+config_redis = index.app_runtime.config.redis
+check_provider_available = index.app_runtime.providers.is_scope_available
 extract_message_text = index.extract_message_text
-complete_with_providers = index.complete_with_providers
-get_provider_backoff_remaining = index.get_provider_backoff_remaining
-handle_ai_response = index.handle_ai_response
-handle_msg = index.handle_msg
+complete_with_providers = index.app_runtime.providers.complete
+get_provider_backoff_remaining = index.app_runtime.providers.get_backoff_remaining
+handle_ai_response = index.app_runtime.responses.handle
+handle_msg = index.app_runtime.handle_message
 handle_config_command = index.handle_config_command
-handle_callback_query = index.handle_callback_query
+handle_callback_query = index.app_runtime.handle_callback_query
 TTL_MEDIA_CACHE = index.TTL_MEDIA_CACHE
-get_rulo = index.get_rulo
-get_oil_price = index.get_oil_price
+get_rulo = index.app_runtime.dollar.get_rulo
+get_oil_price = index.app_runtime.stocks.get_oil_price
 
 
 parse_command = _parse_command
@@ -112,7 +112,7 @@ def should_gordo_respond(
         message,
         chat_config,
         reply_metadata,
-        load_bot_config_fn=index.load_bot_config,
+        load_bot_config_fn=index.app_runtime.config.load_bot_config,
     )
 
 
@@ -128,7 +128,7 @@ def get_chat_config(redis_client: redis.Redis, chat_id: str):
         redis_client,
         chat_id,
         chat_config_db_service=index.chat_config_db_service,
-        admin_reporter=index.admin_report,
+        admin_reporter=index.app_runtime.admin.report,
         log_event=index._log_config_event,
     )
 
@@ -138,7 +138,7 @@ def set_chat_config(redis_client: redis.Redis, chat_id: str, **updates: Any):
         redis_client,
         chat_id,
         chat_config_db_service=index.chat_config_db_service,
-        admin_reporter=index.admin_report,
+        admin_reporter=index.app_runtime.admin.report,
         log_event=index._log_config_event,
         **updates,
     )
@@ -162,7 +162,7 @@ def is_chat_admin(
         chat_id,
         user_id,
         redis_client=redis_client,
-        optional_redis_client=index._optional_redis_client,
+        optional_redis_client=index.app_runtime.config.optional_redis,
         telegram_request=index._telegram_request,
         log_event=index._log_config_event,
         redis_get_json_fn=index.redis_get_json,
@@ -183,7 +183,7 @@ def save_bot_message_metadata(
         chat_id,
         message_id,
         metadata,
-        admin_reporter=index.admin_report,
+        admin_reporter=index.app_runtime.admin.report,
         ttl=ttl,
     )
 
@@ -193,7 +193,7 @@ def get_bot_message_metadata(redis_client: redis.Redis, chat_id: str, message_id
         redis_client,
         chat_id,
         message_id,
-        admin_reporter=index.admin_report,
+        admin_reporter=index.app_runtime.admin.report,
         decode_redis_value=_decode_redis_value,
     )
 

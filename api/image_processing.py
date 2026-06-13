@@ -64,3 +64,41 @@ def prepare_vision_image(
 
 def encode_image_to_base64(image_data: bytes) -> str:
     return base64.b64encode(image_data).decode("utf-8")
+
+
+class ImageService:
+    def __init__(
+        self,
+        *,
+        image_module: Any,
+        logger: Logger,
+        max_size: int = 512,
+    ) -> None:
+        self.image_module = image_module
+        self._logger = logger
+        self._max_size = max_size
+
+    def resize(self, image_data: bytes, max_size: int | None = None) -> bytes:
+        return resize_image_if_needed(
+            image_data,
+            max_size or self._max_size,
+            image_module=self.image_module,
+        )
+
+    def prepare(
+        self,
+        image_data: bytes,
+        max_size: int | None = None,
+    ) -> tuple[bytes, str] | None:
+        return prepare_vision_image(
+            image_data,
+            max_size or self._max_size,
+            image_module=self.image_module,
+            logger=self._logger,
+        )
+
+    def encode(self, image_data: bytes) -> str:
+        return encode_image_to_base64(image_data)
+
+
+__all__ = ["ImageService"]

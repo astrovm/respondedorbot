@@ -7,6 +7,7 @@ from logging import Logger
 from os import environ
 import redis
 
+from api.config_runtime import ConfigRuntime
 from api.services import http_client
 from api.services.maintenance import GIPHY_STALE_TTL
 from api.services.redis_helpers import redis_get_json
@@ -118,3 +119,32 @@ def get_good_morning(*, get_gif: GifGetter) -> str:
 
 def get_good_night(*, get_gif: GifGetter) -> str:
     return get_gif("gn") or "buenas noches boludo"
+
+
+class GiphyService:
+    def __init__(self, *, config: ConfigRuntime, logger: Logger) -> None:
+        self._config = config
+        self._logger = logger
+
+    def fetch_pool(self, category: str) -> list[str]:
+        return fetch_giphy_pool(category, logger=self._logger)
+
+    def get_pool(self, category: str) -> list[str]:
+        return get_giphy_pool(
+            category,
+            redis_factory=self._config.optional_redis,
+            fetch_pool=self.fetch_pool,
+            logger=self._logger,
+        )
+
+    def get_random_gif(self, category: str) -> str | None:
+        return get_random_gif(category, get_pool=self.get_pool)
+
+    def get_good_morning(self) -> str:
+        return get_good_morning(get_gif=self.get_random_gif)
+
+    def get_good_night(self) -> str:
+        return get_good_night(get_gif=self.get_random_gif)
+
+
+__all__ = ["GiphyService"]

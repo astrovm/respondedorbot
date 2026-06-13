@@ -28,6 +28,9 @@ import requests
 from openpyxl import load_workbook
 from urllib3.exceptions import InsecureRequestWarning
 
+from api.admin_service import AdminService
+from api.cache_service import CacheService
+from api.config_runtime import ConfigRuntime
 from api.logging_config import get_logger
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
@@ -1514,3 +1517,152 @@ def format_bcra_variables(
         itcrm_details=itcrm_details,
         country_risk=country_risk,
     )
+
+
+class BCRAService:
+    def __init__(
+        self,
+        *,
+        cache: CacheService,
+        config: ConfigRuntime,
+        admin: AdminService,
+    ) -> None:
+        self._cache = cache
+        self._config = config
+        self._admin = admin
+        self._configure()
+
+    def _configure(self) -> None:
+        configure(
+            cached_requests=self._cache.request,
+            redis_factory=self._config.redis,
+            admin_reporter=self._admin.report,
+            cache_history=self._cache.get_history,
+        )
+
+    def api_get(self, *args: Any, **kwargs: Any) -> Any:
+        self._configure()
+        return bcra_api_get(*args, **kwargs)
+
+    def list_variables(self, *args: Any, **kwargs: Any) -> Any:
+        self._configure()
+        return bcra_list_variables(*args, **kwargs)
+
+    def fetch_latest_variables(self) -> Optional[Dict[str, Dict[str, str]]]:
+        self._configure()
+        return bcra_fetch_latest_variables()
+
+    def get_value_for_date(self, desc_substr: str, date_iso: str) -> Optional[float]:
+        self._configure()
+        return bcra_get_value_for_date(desc_substr, date_iso)
+
+    def cache_variables(self, variables: Dict[str, Any], ttl: int = TTL_BCRA) -> None:
+        self._configure()
+        cache_bcra_variables(variables, ttl)
+
+    def cache_currency_bands(
+        self,
+        data: Dict[str, Any],
+        ttl: int = TTL_BCRA,
+    ) -> None:
+        self._configure()
+        cache_currency_band_limits(data, ttl)
+
+    def cache_mayorista_missing(
+        self,
+        date_key: str,
+        redis_client: Optional[redis.Redis] = None,
+        *,
+        redis_setex_json_fn: Optional[
+            Callable[[redis.Redis, str, int, Any], Any]
+        ] = None,
+    ) -> None:
+        self._configure()
+        cache_mayorista_missing(
+            date_key,
+            redis_client,
+            redis_setex_json_fn=redis_setex_json_fn,
+        )
+
+    def get_cached_variables(self, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
+        self._configure()
+        return get_cached_bcra_variables(allow_stale)
+
+    def get_or_refresh_variables(self) -> Optional[Dict[str, Any]]:
+        self._configure()
+        return get_or_refresh_bcra_variables()
+
+    def get_latest_itcrm_details(self) -> Optional[Tuple[float, str]]:
+        self._configure()
+        return get_latest_itcrm_details()
+
+    def get_latest_itcrm_value(self) -> Optional[float]:
+        self._configure()
+        return get_latest_itcrm_value()
+
+    def get_latest_itcrm_value_and_date(self) -> Optional[Tuple[float, str]]:
+        self._configure()
+        return get_latest_itcrm_value_and_date()
+
+    def get_country_risk_summary(self) -> Optional[Dict[str, Any]]:
+        self._configure()
+        return get_country_risk_summary()
+
+    def fetch_currency_band_limits(self) -> Optional[Dict[str, Any]]:
+        self._configure()
+        return fetch_currency_band_limits(
+            list_variables_fn=self.list_variables,
+            api_get_fn=self.api_get,
+        )
+
+    def get_currency_band_limits(self) -> Optional[Dict[str, Any]]:
+        self._configure()
+        return get_currency_band_limits(fetcher=self.fetch_currency_band_limits)
+
+    def format_variables(self, variables: Dict[str, Any]) -> str:
+        self._configure()
+        return format_bcra_variables(
+            variables,
+            band_fetcher=self.get_currency_band_limits,
+            itcrm_getter=self.get_latest_itcrm_value_and_date,
+            country_risk_getter=self.get_country_risk_summary,
+        )
+
+    def calculate_tcrm_100(
+        self,
+        target_date: Optional[Union[str, datetime, date]] = None,
+    ) -> Optional[float]:
+        self._configure()
+        return calculate_tcrm_100(
+            target_date,
+            config_redis_fn=self._config.redis,
+            redis_get_json_fn=redis_get_json,
+            redis_set_json_fn=redis_set_json,
+            redis_setex_json_fn=redis_setex_json,
+            bcra_get_value_for_date_fn=self.get_value_for_date,
+            cache_mayorista_missing_fn=self.cache_mayorista_missing,
+            itcrm_getter_fn=self.get_latest_itcrm_value_and_date,
+        )
+
+    def get_cached_tcrm_100(
+        self,
+        hours_ago: int = 24,
+        expiration_time: int = 300,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        self._configure()
+        return get_cached_tcrm_100(
+            hours_ago,
+            expiration_time,
+            config_redis_fn=self._config.redis,
+            redis_get_json_fn=redis_get_json,
+            redis_set_json_fn=redis_set_json,
+            redis_setex_json_fn=redis_setex_json,
+            calculate_tcrm_fn=self.calculate_tcrm_100,
+            get_latest_itcrm_fn=self.get_latest_itcrm_value_and_date,
+            bcra_get_value_for_date_fn=self.get_value_for_date,
+            cache_mayorista_missing_fn=self.cache_mayorista_missing,
+            get_cache_history_fn=self._cache.get_history,
+        )
+
+
+__all__ = ["BCRAService"]

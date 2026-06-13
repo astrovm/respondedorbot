@@ -2,7 +2,7 @@ from tests.support import *
 
 
 def test_incremental_summary_helper_uses_only_messages_after_marker():
-    from api.index import _build_incremental_summary_source
+    _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
     history = [
         {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
@@ -17,7 +17,7 @@ def test_incremental_summary_helper_uses_only_messages_after_marker():
 
 
 def test_incremental_summary_helper_reports_zero_delta_without_history_fallback():
-    from api.index import _build_incremental_summary_source
+    _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
     history = [
         {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
@@ -32,7 +32,7 @@ def test_incremental_summary_helper_reports_zero_delta_without_history_fallback(
 
 
 def test_incremental_summary_helper_falls_back_to_all_history_when_marker_missing():
-    from api.index import _build_incremental_summary_source
+    _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
     history = [
         {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
@@ -47,7 +47,7 @@ def test_incremental_summary_helper_falls_back_to_all_history_when_marker_missin
 
 
 def test_compact_chat_memory_absorbs_only_uncompacted_messages_once():
-    from api.index import compact_chat_memory
+    compact_chat_memory = index.app_runtime.summary.compact_memory
 
     redis_client = MagicMock()
     messages = [
@@ -98,7 +98,7 @@ def test_build_ai_messages_uses_summary_and_retrieved_messages():
 
 
 def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypatch):
-    from api.index import prepare_chat_memory
+    prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     recent_history = [
         {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
@@ -109,18 +109,18 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
         for i in range(1, 101)
     ]
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: None)
-    monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: None)
+    monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
+    monkeypatch.setattr("api.index.app_runtime.state.get_chat_compacted_until", lambda *_: None)
     monkeypatch.setattr(
-        "api.index._state_fetch_chat_messages_for_compaction",
+        "api.index.app_runtime.state.fetch_for_compaction",
         lambda *_args, **_kwargs: full_history,
     )
     monkeypatch.setattr(
-        "api.index._state_search_chat_history",
+        "api.index.app_runtime.state.search_history",
         lambda *_args, **_kwargs: [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}],
     )
     monkeypatch.setattr(
-        "api.index.compact_chat_memory",
+        "api.index.app_runtime.summary.compact_memory",
         lambda *_args, **_kwargs: (
             "summary from full history",
             full_history[-5:],
@@ -143,7 +143,7 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
 
 
 def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch):
-    from api.index import prepare_chat_memory
+    prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     chat_history = [
         {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
@@ -163,14 +163,14 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
         captured["compacted_until"] = compacted_until
         return existing_summary, messages, compacted_until, 0
 
-    monkeypatch.setattr("api.index._state_get_chat_summary", lambda *_: None)
-    monkeypatch.setattr("api.index._state_get_chat_compacted_until", lambda *_: "m80")
+    monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
+    monkeypatch.setattr("api.index.app_runtime.state.get_chat_compacted_until", lambda *_: "m80")
     monkeypatch.setattr(
-        "api.index._state_fetch_chat_messages_for_compaction",
+        "api.index.app_runtime.state.fetch_for_compaction",
         lambda *_args, **_kwargs: chat_history,
     )
-    monkeypatch.setattr("api.index._state_search_chat_history", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("api.index.compact_chat_memory", fake_compact_chat_memory)
+    monkeypatch.setattr("api.index.app_runtime.state.search_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("api.index.app_runtime.summary.compact_memory", fake_compact_chat_memory)
 
     prepare_chat_memory(MagicMock(), "123", chat_history, "que paso")
 
@@ -179,7 +179,7 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
 
 
 def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
-    from api.index import stream_summary_command
+    stream_summary_command = index.app_runtime.summary.stream_command
 
     redis_client = MagicMock()
     history = [
@@ -188,9 +188,9 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     ]
     captured = {}
 
-    monkeypatch.setattr("api.index.get_chat_history", lambda *_: history)
+    monkeypatch.setattr("api.index.app_runtime.state.get_history", lambda *_: history)
     monkeypatch.setattr(
-        "api.index.prepare_chat_memory",
+        "api.index.app_runtime.summary.prepare_memory",
         lambda *_args, **_kwargs: (
             [{"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2}],
             "[contexto anterior: msg 1]",
@@ -198,7 +198,7 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
             0,
         ),
     )
-    monkeypatch.setattr("api.index._load_bot_personality", lambda: "bot")
+    monkeypatch.setattr("api.index.app_runtime.summary.load_personality", lambda: "bot")
 
     class FakeProvider:
         name = "openrouter"
@@ -211,7 +211,7 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
             captured["messages"] = messages
             yield "resumen"
 
-    monkeypatch.setattr("api.index._build_summary_provider", lambda: FakeProvider())
+    monkeypatch.setattr("api.index.app_runtime.summary.build_provider", lambda: FakeProvider())
 
     iterator, pending_marker = stream_summary_command("123", redis_client, "resumen")
 
@@ -262,7 +262,7 @@ def test_fetch_chat_messages_for_compaction_fetches_newest_window_then_sorts():
 
 
 def test_build_incremental_summary_source_with_text_field():
-    from api.index import _build_incremental_summary_source
+    _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
     history = [
         {"id": "m1", "role": "user", "text": "hola"},

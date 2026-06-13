@@ -70,7 +70,7 @@ def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
             "api.index.chat_config_db_service.get_chat_config",
             side_effect=RuntimeError("pg down"),
         ),
-        patch("api.index.admin_report") as mock_admin,
+        patch("api.index.app_runtime.admin.report") as mock_admin,
     ):
         config = get_chat_config(redis_client, "chat-5")
 
@@ -106,7 +106,7 @@ def test_get_chat_config_migration_error_returns_redis_config_and_reports():
             "api.index.chat_config_db_service.set_chat_config",
             side_effect=RuntimeError("pg write failed"),
         ),
-        patch("api.index.admin_report") as mock_admin,
+        patch("api.index.app_runtime.admin.report") as mock_admin,
     ):
         config = get_chat_config(redis_client, "chat-6")
 
@@ -152,7 +152,7 @@ def test_is_chat_admin_uses_cache():
     redis_client = MagicMock(spec=redis.Redis)
 
     with (
-        patch("api.index._optional_redis_client", return_value=redis_client),
+        patch("api.index.app_runtime.config.optional_redis", return_value=redis_client),
         patch("api.index.redis_get_json", return_value={"is_admin": True}),
         patch("api.index._telegram_request") as mock_request,
     ):
@@ -165,7 +165,7 @@ def test_is_chat_admin_fetches_and_caches():
     redis_client = MagicMock(spec=redis.Redis)
 
     with (
-        patch("api.index._optional_redis_client", return_value=redis_client),
+        patch("api.index.app_runtime.config.optional_redis", return_value=redis_client),
         patch("api.index.redis_get_json", return_value=None),
         patch("api.index._telegram_request") as mock_request,
         patch("api.index.redis_setex_json") as mock_set,
@@ -241,7 +241,7 @@ def test_load_bot_config_returns_hardcoded_prompt(monkeypatch):
 
     config_module.reset_cache()
 
-    cfg = index.load_bot_config()
+    cfg = index.app_runtime.config.load_bot_config()
     assert cfg["trigger_words"] == [
         "gordo",
         "respondedor",
@@ -259,8 +259,8 @@ def test_load_bot_config_caches_result(monkeypatch):
 
     config_module.reset_cache()
 
-    cfg_first = index.load_bot_config()
-    cfg_second = index.load_bot_config()
+    cfg_first = index.app_runtime.config.load_bot_config()
+    cfg_second = index.app_runtime.config.load_bot_config()
     assert cfg_second is cfg_first
 
 
@@ -274,13 +274,13 @@ def test_handle_callback_query_topup_sends_invoice():
 
     with (
         patch(
-            "api.index.get_ai_billing_pack",
+            "api.index.app_runtime.billing.get_pack",
             return_value={"id": "p100", "credits": 1000, "xtr": 50},
         ),
         patch("api.index.credits_db_service.is_configured", return_value=True),
-        patch("api.index._send_stars_invoice", return_value=True) as mock_send_invoice,
-        patch("api.index._answer_callback_query") as mock_answer,
-        patch("api.index.config_redis") as mock_cfg,
+        patch("api.index.app_runtime.billing.send_invoice", return_value=True) as mock_send_invoice,
+        patch("api.index.app_runtime.billing.answer_callback") as mock_answer,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
     ):
         handle_callback_query(callback)
 
@@ -297,12 +297,12 @@ def test_handle_msg_blocks_config_for_non_admin_group():
     from api.index import handle_msg
 
     with (
-        patch("api.index.config_redis") as mock_config_redis,
-        patch("api.index.send_msg") as mock_send_msg,
-        patch("api.index.is_chat_admin", return_value=False),
-        patch("api.index._report_unauthorized_config_attempt") as mock_report,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send_msg,
+        patch("api.index.app_runtime.admin.is_chat_admin", return_value=False),
+        patch("api.index.app_runtime.admin.report_unauthorized_config_attempt") as mock_report,
         patch("api.index.handle_config_command") as mock_handle_config,
-        patch("api.index.get_chat_config", return_value=CHAT_CONFIG_DEFAULTS),
+        patch("api.index._chat_config_service.get_chat_config", return_value=CHAT_CONFIG_DEFAULTS),
         patch("api.index.should_gordo_respond", return_value=True),
         patch("os.environ.get") as mock_env,
     ):
@@ -327,13 +327,13 @@ def test_handle_msg_blocks_config_for_non_admin_group():
 
 def test_handle_callback_query_blocks_non_admin():
     with (
-        patch("api.index.config_redis") as mock_config_redis,
-        patch("api.index.is_chat_admin", return_value=False) as mock_is_admin,
-        patch("api.index._report_unauthorized_config_attempt") as mock_report,
-        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
+        patch("api.index.app_runtime.admin.is_chat_admin", return_value=False) as mock_is_admin,
+        patch("api.index.app_runtime.admin.report_unauthorized_config_attempt") as mock_report,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send_msg,
         patch("api.index._answer_callback_query") as mock_answer,
-        patch("api.index.get_chat_config") as mock_get_chat_config,
-        patch("api.index.set_chat_config") as mock_set_chat_config,
+        patch("api.index._chat_config_service.get_chat_config") as mock_get_chat_config,
+        patch("api.index._chat_config_service.set_chat_config") as mock_set_chat_config,
     ):
         redis_instance = MagicMock()
         mock_config_redis.return_value = redis_instance
@@ -488,7 +488,7 @@ def test_build_config_text_and_keyboard_reflect_values():
 
 def test_handle_config_command_loads_config():
     redis_client = MagicMock()
-    with patch("api.index.config_redis", return_value=redis_client):
+    with patch("api.index.app_runtime.config.redis", return_value=redis_client):
         text, keyboard = handle_config_command("123")
     assert "config del gordo" in text
     assert "inline_keyboard" in keyboard
@@ -503,9 +503,9 @@ def test_handle_callback_query_updates_random_toggle():
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
-        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.app_runtime.config.redis", return_value=redis_client),
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={
                 "link_mode": "off",
                 "ai_random_replies": True,
@@ -514,7 +514,7 @@ def test_handle_callback_query_updates_random_toggle():
             },
         ) as mock_get,
         patch(
-            "api.index.set_chat_config",
+            "api.index._chat_config_service.set_chat_config",
             return_value={
                 "link_mode": "off",
                 "ai_random_replies": False,
@@ -527,7 +527,7 @@ def test_handle_callback_query_updates_random_toggle():
             "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
         ) as mock_keyboard,
         patch("api.index.edit_message", return_value=True) as mock_edit,
-        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send_msg,
         patch("api.index._answer_callback_query") as mock_answer,
     ):
         handle_callback_query(callback)
@@ -556,18 +556,18 @@ def test_handle_callback_query_falls_back_when_edit_fails():
     }
 
     with (
-        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.app_runtime.config.redis", return_value=redis_client),
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={**updated_config, "link_mode": "off"},
         ) as mock_get,
-        patch("api.index.set_chat_config", return_value=updated_config) as mock_set,
+        patch("api.index._chat_config_service.set_chat_config", return_value=updated_config) as mock_set,
         patch("api.index.build_config_text", return_value="new text") as mock_text,
         patch(
             "api.index.build_config_keyboard", return_value={"inline_keyboard": ["btn"]}
         ) as mock_keyboard,
         patch("api.index.edit_message", return_value=False) as mock_edit,
-        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send_msg,
         patch("api.index._answer_callback_query") as mock_answer,
         patch("api.index._log_config_event") as mock_log,
     ):
@@ -595,9 +595,9 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
-        patch("api.index.config_redis", return_value=redis_client),
+        patch("api.index.app_runtime.config.redis", return_value=redis_client),
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={
                 "link_mode": "off",
                 "ai_random_replies": True,
@@ -606,7 +606,7 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
             },
         ) as mock_get,
         patch(
-            "api.index.set_chat_config",
+            "api.index._chat_config_service.set_chat_config",
             return_value={
                 "link_mode": "off",
                 "ai_random_replies": True,
@@ -619,7 +619,7 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
             "api.index.build_config_keyboard", return_value={"inline_keyboard": []}
         ) as mock_keyboard,
         patch("api.index.edit_message", return_value=True) as mock_edit,
-        patch("api.index.send_msg") as mock_send_msg,
+        patch("api.index.app_runtime.telegram.send_message") as mock_send_msg,
         patch("api.index._answer_callback_query") as mock_answer,
     ):
         handle_callback_query(callback)
@@ -710,8 +710,8 @@ class TestHandleTaskCallback:
                 "api.index._task_list_tasks",
                 return_value=[{"id": "abc123", "user_id": 42, "text": "tarea test"}],
             ),
-            patch("api.index.config_redis"),
-            patch("api.index.is_chat_admin", return_value=False),
+            patch("api.index.app_runtime.config.redis"),
+            patch("api.index.app_runtime.admin.is_chat_admin", return_value=False),
             patch("api.index._task_cancel_task") as mock_cancel,
             patch("api.index._answer_callback_query") as mock_answer,
         ):
@@ -810,9 +810,9 @@ class TestTimezoneConfig:
             "message": {"chat": {"id": 1}, "message_id": 99},
         }
         with (
-            patch("api.index.config_redis") as mock_redis,
+            patch("api.index.app_runtime.config.redis") as mock_redis,
             patch(
-                "api.index.get_chat_config",
+                "api.index._chat_config_service.get_chat_config",
                 return_value={
                     "link_mode": "reply",
                     "ai_random_replies": True,
@@ -822,7 +822,7 @@ class TestTimezoneConfig:
                 },
             ) as mock_get,
             patch(
-                "api.index.set_chat_config",
+                "api.index._chat_config_service.set_chat_config",
                 return_value={
                     "link_mode": "reply",
                     "ai_random_replies": True,
@@ -854,9 +854,9 @@ def test_handle_callback_query_sets_creditless_unlimited():
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
-        patch("api.index.config_redis") as mock_redis,
+        patch("api.index.app_runtime.config.redis") as mock_redis,
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,
@@ -866,7 +866,7 @@ def test_handle_callback_query_sets_creditless_unlimited():
             },
         ),
         patch(
-            "api.index.set_chat_config",
+            "api.index._chat_config_service.set_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,
@@ -896,9 +896,9 @@ def test_handle_callback_query_increases_creditless_limit():
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
-        patch("api.index.config_redis"),
+        patch("api.index.app_runtime.config.redis"),
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,
@@ -908,7 +908,7 @@ def test_handle_callback_query_increases_creditless_limit():
             },
         ),
         patch(
-            "api.index.set_chat_config",
+            "api.index._chat_config_service.set_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,
@@ -936,9 +936,9 @@ def test_handle_callback_query_decrease_clamps_creditless_limit_at_zero():
         "message": {"chat": {"id": 1}, "message_id": 99},
     }
     with (
-        patch("api.index.config_redis"),
+        patch("api.index.app_runtime.config.redis"),
         patch(
-            "api.index.get_chat_config",
+            "api.index._chat_config_service.get_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,
@@ -948,7 +948,7 @@ def test_handle_callback_query_decrease_clamps_creditless_limit_at_zero():
             },
         ),
         patch(
-            "api.index.set_chat_config",
+            "api.index._chat_config_service.set_chat_config",
             return_value={
                 "link_mode": "reply",
                 "ai_random_replies": True,

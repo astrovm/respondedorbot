@@ -64,11 +64,11 @@ def test_openrouter_client_uses_explicit_timeout(monkeypatch):
         def __init__(self, **kwargs):
             captured_kwargs.update(kwargs)
 
-    monkeypatch.setattr(index, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(index.app_runtime.providers, "openai_client_factory", FakeOpenAI)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
 
-    client = index._get_openrouter_client()
+    client = index.app_runtime.providers.get_openrouter_client()
 
     assert client is not None
     assert captured_kwargs["timeout"] == 60.0
@@ -138,33 +138,27 @@ def test_strip_markdown_formatting_returns_empty_string_for_empty_input():
 
 
 def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch):
-    from api.index import _get_groq_accounts_for_scope
-
     monkeypatch.setenv("GROQ_FREE_API_KEY", "free-key")
     monkeypatch.setenv("GROQ_API_KEY", "paid-key")
 
-    assert _get_groq_accounts_for_scope() == ["free", "paid"]
+    assert index.app_runtime.providers.get_groq_accounts() == ["free", "paid"]
 
 
 def test_openrouter_config_helpers(monkeypatch):
-    from api.index import (
-        _get_openrouter_api_key,
-        _get_openrouter_base_url,
-        _get_openrouter_client,
-    )
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
     )
     monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
 
-    with patch("api.index.OpenAI") as mock_openai:
-        client = _get_openrouter_client(default_headers={"x-test": "1"})
+    with patch("api.index.app_runtime.providers.openai_client_factory") as mock_openai:
+        client = index.app_runtime.providers.get_openrouter_client(
+            default_headers={"x-test": "1"}
+        )
 
-    assert _get_openrouter_api_key() == "openrouter_key"
+    assert index.app_runtime.providers.get_openrouter_api_key() == "openrouter_key"
     assert (
-        _get_openrouter_base_url()
+        index.app_runtime.providers.get_openrouter_base_url()
         == "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
     )
     assert client is mock_openai.return_value
@@ -356,28 +350,25 @@ def test_provider_runtime_includes_web_search_by_default():
 
 
 def test_check_provider_available_returns_true_by_default(monkeypatch):
-    from api.index import check_provider_available
     from api.provider_backoff import clear_all_cooldowns
 
     clear_all_cooldowns()
     monkeypatch.delenv("GROQ_FREE_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    assert check_provider_available("chat") is True
+    assert index.app_runtime.providers.is_scope_available("chat") is True
 
 
 def test_has_openrouter_fallback_requires_openrouter_key(monkeypatch):
-    from api.index import has_openrouter_fallback
-
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
-    assert has_openrouter_fallback() is False
+    assert index.app_runtime.providers.has_openrouter_fallback() is False
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
     )
     monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
-    assert has_openrouter_fallback() is True
+    assert index.app_runtime.providers.has_openrouter_fallback() is True
 
 
 def test_build_ai_messages():
@@ -491,7 +482,7 @@ def test_build_ai_messages_includes_links_context():
 
 
 def test_log_groq_request_result_logs_local_billing_details():
-    from api.index import AIUsageResult, _log_groq_request_result
+    from api.index import AIUsageResult
 
     result = AIUsageResult(
         kind="chat",
@@ -502,7 +493,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     )
 
     with patch("api.index._logger.info") as mock_log:
-        _log_groq_request_result(
+        index.app_runtime.providers.log_groq_request_result(
             label="OpenRouter Chat",
             scope="chat",
             account="primary",
@@ -523,10 +514,8 @@ def test_log_groq_request_result_logs_local_billing_details():
 
 
 def test_log_groq_request_result_logs_empty_requests():
-    from api.index import _log_groq_request_result
-
     with patch("api.index._logger.info") as mock_log:
-        _log_groq_request_result(
+        index.app_runtime.providers.log_groq_request_result(
             label="OpenRouter Chat",
             scope="chat",
             account="primary",
@@ -549,7 +538,7 @@ def test_log_groq_request_result_logs_empty_requests():
 
 
 def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_large():
-    from api.index import AIUsageResult, _execute_groq_request_with_fallback
+    from api.index import AIUsageResult
 
     class Fake413Error(Exception):
         def __init__(self) -> None:
@@ -568,18 +557,17 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
         )
 
     with (
-        patch("api.index._get_configured_groq_accounts", return_value=["free", "paid"]),
         patch(
-            "api.index._get_groq_client",
-            side_effect=lambda account, default_headers=None: object(),
+            "api.index.app_runtime.media._deps.get_groq_accounts",
+            return_value=["free", "paid"],
         ),
-        patch("api.index._log_groq_request_result"),
+        patch("api.index.app_runtime.media._deps.log_result"),
         patch(
-            "api.index.is_provider_backoff_active",
+            "api.index.app_runtime.media._deps.is_backoff_active",
             return_value=False,
         ),
     ):
-        result = _execute_groq_request_with_fallback(
+        result = index.app_runtime.media.execute_groq_request(
             scope="vision",
             label="Groq Vision",
             token_count=123,
@@ -614,14 +602,14 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
 
 
 def test_ask_ai_fetches_url_unconditionally(monkeypatch):
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
-        "api.index.build_system_message",
+        "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
@@ -636,7 +624,7 @@ def test_ask_ai_fetches_url_unconditionally(monkeypatch):
         return "respuesta"
 
     monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
-    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.complete", fake_complete)
 
     result = ask_ai(
         [{"role": "user", "content": "mira esto https://example.com/post"}],
@@ -651,14 +639,14 @@ def test_ask_ai_fetches_url_unconditionally(monkeypatch):
 
 
 def test_ask_ai_fetches_multiple_urls(monkeypatch):
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
-        "api.index.build_system_message",
+        "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
@@ -675,7 +663,7 @@ def test_ask_ai_fetches_multiple_urls(monkeypatch):
         return "ok"
 
     monkeypatch.setattr("api.index.fetch_url_content", fake_fetch)
-    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.complete", fake_complete)
 
     ask_ai(
         [{"role": "user", "content": "https://example.com/a y https://example.com/b"}],
@@ -690,14 +678,14 @@ def test_ask_ai_fetches_multiple_urls(monkeypatch):
 
 
 def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
-        "api.index.build_system_message",
+        "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
     monkeypatch.setattr(
@@ -711,7 +699,7 @@ def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
         captured["messages"] = messages
         return "ok"
 
-    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.complete", fake_complete)
 
     ask_ai(
         [{"role": "user", "content": "mira https://example.com/post"}],
@@ -725,14 +713,14 @@ def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
 
 
 def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
-        "api.index.build_system_message",
+        "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
     monkeypatch.setattr(
@@ -750,7 +738,7 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
         calls.append((system_message, messages, kwargs))
         return "ok"
 
-    monkeypatch.setattr("api.index.complete_with_providers", fake_complete)
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.complete", fake_complete)
 
     result = ask_ai(
         [{"role": "user", "content": "https://example.com/post"}],
@@ -762,14 +750,14 @@ def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
 
 
 def test_ask_ai_with_provider_success():
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
     # Simplified test - just verify the function runs without crashing
     with (
-        patch("api.index.get_market_context") as mock_get_market_context,
-        patch("api.index.get_weather_context") as mock_get_weather_context,
-        patch("api.index.get_hacker_news_context") as mock_get_hn_context,
-        patch("api.index.get_time_context") as mock_get_time_context,
+        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
+        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
+        patch("api.index.app_runtime.ai._deps.get_hacker_news_context") as mock_get_hn_context,
+        patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
@@ -788,14 +776,14 @@ def test_ask_ai_with_provider_success():
 
 
 def test_ask_ai_with_all_failures():
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
     # Simplified test - just verify the function runs without crashing
     with (
-        patch("api.index.get_market_context") as mock_get_market_context,
-        patch("api.index.get_weather_context") as mock_get_weather_context,
-        patch("api.index.get_hacker_news_context") as mock_get_hn_context,
-        patch("api.index.get_time_context") as mock_get_time_context,
+        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
+        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
+        patch("api.index.app_runtime.ai._deps.get_hacker_news_context") as mock_get_hn_context,
+        patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
@@ -814,14 +802,14 @@ def test_ask_ai_with_all_failures():
 
 
 def test_ask_ai_with_image():
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
     # Simplified test - just verify the function runs without crashing when given an image
     with (
-        patch("api.index.get_market_context") as mock_get_market_context,
-        patch("api.index.get_weather_context") as mock_get_weather_context,
-        patch("api.index.get_time_context") as mock_get_time_context,
-        patch("api.index.describe_image_groq") as mock_describe_image,
+        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
+        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
+        patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
+        patch("api.index.app_runtime.media.describe_image") as mock_describe_image,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
@@ -841,14 +829,14 @@ def test_ask_ai_with_image():
 
 
 def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
+    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
-        "api.index.build_system_message",
+        "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
@@ -857,9 +845,9 @@ def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
     def fake_inject_image_context(messages, image_data, image_file_id, response_meta):
         inject_calls.append((messages, image_data, image_file_id, response_meta))
 
-    monkeypatch.setattr("api.index._inject_image_context", fake_inject_image_context)
+    monkeypatch.setattr("api.index.app_runtime.ai.inject_image_context", fake_inject_image_context)
     monkeypatch.setattr(
-        "api.index.complete_with_providers",
+        "api.index.app_runtime.ai._deps.complete",
         lambda *_args, **_kwargs: "ok",
     )
 
@@ -870,7 +858,7 @@ def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
 
 
 def test_ask_ai_does_not_force_search_for_news_queries():
-    from api.index import ask_ai
+    ask_ai = index.app_runtime.ai.ask
 
     message_block = "\n".join(
         [
@@ -888,15 +876,15 @@ def test_ask_ai_does_not_force_search_for_news_queries():
     )
 
     with (
-        patch("api.index.get_market_context", return_value={}),
-        patch("api.index.get_weather_context", return_value={}),
-        patch("api.index.get_hacker_news_context", return_value=[]),
-        patch("api.index.get_time_context", return_value={}),
+        patch("api.index.app_runtime.ai._deps.get_market_context", return_value={}),
+        patch("api.index.app_runtime.ai._deps.get_weather_context", return_value={}),
+        patch("api.index.app_runtime.ai._deps.get_hacker_news_context", return_value=[]),
+        patch("api.index.app_runtime.ai._deps.get_time_context", return_value={}),
         patch(
-            "api.index.build_system_message",
+            "api.index.app_runtime.ai._deps.build_system_message",
             return_value={"role": "system", "content": "sys"},
         ),
-        patch("api.index.complete_with_providers", return_value="ok") as mock_complete,
+        patch("api.index.app_runtime.ai._deps.complete", return_value="ok") as mock_complete,
         patch("api.index.environ.get") as mock_env,
     ):
         mock_env.side_effect = lambda key, default=None: {
@@ -970,7 +958,7 @@ def test_get_hacker_news_context_uses_fallback_url():
             requests.RequestException("primary timeout"),
             DummyResponse(sample_xml),
         ],
-    ) as mock_get, patch("api.index.config_redis", side_effect=RuntimeError("no redis")):
+    ) as mock_get, patch("api.index.app_runtime.config.redis", side_effect=RuntimeError("no redis")):
         items = get_hacker_news_context(limit=1)
 
     assert items == [
@@ -1084,17 +1072,33 @@ def test_build_ai_request_reuses_stable_context(monkeypatch):
         calls["hn"] += 1
         return []
 
-    monkeypatch.setattr(index, "get_market_context", market_context)
-    monkeypatch.setattr(index, "get_weather_context", weather_context)
-    monkeypatch.setattr(index, "get_hacker_news_context", hacker_news_context)
-    monkeypatch.setattr(index, "get_time_context", lambda _offset=-3: {"formatted": "Monday 12:00"})
-    monkeypatch.setattr(index, "_fetch_urls_from_latest_message", lambda *_args, **_kwargs: "")
-    monkeypatch.setattr(index, "get_all_tool_schemas", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(index.app_runtime.ai._deps, "get_market_context", market_context)
+    monkeypatch.setattr(index.app_runtime.ai._deps, "get_weather_context", weather_context)
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps,
+        "get_hacker_news_context",
+        hacker_news_context,
+    )
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps,
+        "get_time_context",
+        lambda _offset=-3: {"formatted": "Monday 12:00"},
+    )
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps,
+        "fetch_urls",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps,
+        "get_tool_schemas",
+        lambda *_args, **_kwargs: [],
+    )
 
-    index._STABLE_AI_CONTEXT_CACHE.clear()
+    index.app_runtime.ai._stable_context_cache.clear()
 
-    index._build_ai_request([{"role": "user", "content": "hola"}], enable_web_search=False)
-    index._build_ai_request([{"role": "user", "content": "chau"}], enable_web_search=False)
+    index.app_runtime.ai.build_request([{"role": "user", "content": "hola"}], enable_web_search=False)
+    index.app_runtime.ai.build_request([{"role": "user", "content": "chau"}], enable_web_search=False)
 
     assert calls == {"market": 1, "weather": 1, "hn": 1}
 
@@ -1202,7 +1206,7 @@ def test_complete_with_providers_openrouter_success():
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index.get_provider_chain") as mock_chain:
+    with patch("api.index.app_runtime.providers.get_chain") as mock_chain:
         mock_chain.return_value.complete.return_value = ProviderResult(
             result=openrouter_result,
             provider_name="openrouter",
@@ -1219,7 +1223,7 @@ def test_complete_with_providers_returns_none_when_openrouter_fails():
     system_message = {"role": "system", "content": "test"}
     messages = [{"role": "user", "content": "hello"}]
 
-    with patch("api.index.get_provider_chain") as mock_chain:
+    with patch("api.index.app_runtime.providers.get_chain") as mock_chain:
         mock_chain.return_value.complete.return_value = ProviderResult(
             result=None,
             provider_name="openrouter",
@@ -1251,7 +1255,7 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
         metadata={"provider": "openrouter"},
     )
 
-    with patch("api.index.get_provider_chain") as mock_chain:
+    with patch("api.index.app_runtime.providers.get_chain") as mock_chain:
         mock_chain.return_value.complete.return_value = ProviderResult(
             result=openrouter_result,
             provider_name="openrouter",
@@ -1281,8 +1285,6 @@ def test_provider_runtime_returns_none_when_primary_model_fails():
 def test_describe_image_result_returns_none_when_provider_raises(
     monkeypatch,
 ):
-    from api.index import _describe_image_result
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
@@ -1291,8 +1293,11 @@ def test_describe_image_result_returns_none_when_provider_raises(
     failing_client = MagicMock()
     failing_client.chat.completions.create.side_effect = Exception("boom")
 
-    with patch("api.index.OpenAI", return_value=failing_client):
-        result = _describe_image_result(b"image-bytes")
+    with patch(
+        "api.index.app_runtime.media._deps.get_openrouter_client",
+        return_value=failing_client,
+    ):
+        result = index.app_runtime.media.describe_image_result(b"image-bytes")
 
     assert result is None
 
@@ -1300,8 +1305,6 @@ def test_describe_image_result_returns_none_when_provider_raises(
 def test_describe_image_result_skips_provider_when_image_is_invalid(
     monkeypatch,
 ):
-    from api.index import _describe_image_result
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
     monkeypatch.setenv(
         "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
@@ -1309,8 +1312,14 @@ def test_describe_image_result_skips_provider_when_image_is_invalid(
 
     client = MagicMock()
 
-    with patch("api.index.OpenAI", return_value=client):
-        result = _describe_image_result(b"not-an-image", file_id="sticker-file")
+    with patch(
+        "api.index.app_runtime.media._deps.get_openrouter_client",
+        return_value=client,
+    ):
+        result = index.app_runtime.media.describe_image_result(
+            b"not-an-image",
+            file_id="sticker-file",
+        )
 
     assert result is None
     client.chat.completions.create.assert_not_called()
@@ -1453,12 +1462,12 @@ def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
         return "streamed response"
 
     monkeypatch.setattr(
-        "api.index.handle_ai_stream_response", mock_stream_response
+        "api.index.app_runtime.responses.stream_handler", mock_stream_response
     )
 
-    result = api.index.handle_ai_response(
+    result = api.index.app_runtime.responses.handle(
         "123",
-        api.index.handle_ai_stream_response,
+        api.index.app_runtime.responses.stream_handler,
         [{"role": "user", "content": "hello"}],
         image_data=b"fake_image_bytes",
         image_file_id="photo123",
@@ -1472,7 +1481,7 @@ def test_handle_ai_response_passes_image_data_to_stream_handler(monkeypatch):
 
 def test_handle_ai_stream_response_injects_image_context(monkeypatch):
     """handle_ai_stream_response must call _inject_image_context when image_data is present."""
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
 
@@ -1488,15 +1497,15 @@ def test_handle_ai_stream_response_injects_image_context(monkeypatch):
             }
         )
 
-    monkeypatch.setattr("api.index._inject_image_context", mock_inject_image_context)
+    monkeypatch.setattr("api.index.app_runtime.ai.inject_image_context", mock_inject_image_context)
 
     def mock_ask_ai_stream(*args, **kwargs):
         return iter([("openrouter", "test")])
 
-    monkeypatch.setattr("api.index.ask_ai_stream", mock_ask_ai_stream)
+    monkeypatch.setattr("api.index.app_runtime.ai.stream", mock_ask_ai_stream)
 
     monkeypatch.setattr(
-        "api.index.consume_stream_to_telegram",
+        "api.index.app_runtime.responses._deps.consume_stream",
         lambda *args, **kwargs: ("final text", "msg_id"),
     )
 
@@ -1519,7 +1528,7 @@ def test_handle_ai_stream_response_injects_image_context(monkeypatch):
 
 def test_handle_ai_stream_response_skips_image_injection_when_no_image_data(monkeypatch):
     """handle_ai_stream_response must not call _inject_image_context when image_data is None."""
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
 
@@ -1528,15 +1537,15 @@ def test_handle_ai_stream_response_skips_image_injection_when_no_image_data(monk
     def mock_inject_image_context(messages, image_data, image_file_id, response_meta):
         injected_calls.append(True)
 
-    monkeypatch.setattr("api.index._inject_image_context", mock_inject_image_context)
+    monkeypatch.setattr("api.index.app_runtime.ai.inject_image_context", mock_inject_image_context)
 
     def mock_ask_ai_stream(*args, **kwargs):
         return iter([("openrouter", "test")])
 
-    monkeypatch.setattr("api.index.ask_ai_stream", mock_ask_ai_stream)
+    monkeypatch.setattr("api.index.app_runtime.ai.stream", mock_ask_ai_stream)
 
     monkeypatch.setattr(
-        "api.index.consume_stream_to_telegram",
+        "api.index.app_runtime.responses._deps.consume_stream",
         lambda *args, **kwargs: ("final text", "msg_id"),
     )
 
@@ -1550,16 +1559,16 @@ def test_handle_ai_stream_response_skips_image_injection_when_no_image_data(monk
 
 
 def test_handle_ai_stream_response_uses_gen_random_when_non_stream_fallback_is_empty(monkeypatch):
-    from api.index import handle_ai_stream_response
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
 
     monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
-    monkeypatch.setattr("api.index.ask_ai_stream", lambda *_, **__: iter([]))
+    monkeypatch.setattr("api.index.app_runtime.ai.stream", lambda *_, **__: iter([]))
     monkeypatch.setattr(
-        "api.index.consume_stream_to_telegram",
+        "api.index.app_runtime.responses._deps.consume_stream",
         MagicMock(side_effect=RuntimeError("Failed to send message to Telegram")),
     )
-    monkeypatch.setattr("api.index.ask_ai", lambda *_, **__: "")
-    monkeypatch.setattr("api.index.gen_random", lambda name: f"random:{name}")
+    monkeypatch.setattr("api.index.app_runtime.ai.ask", lambda *_, **__: "")
+    monkeypatch.setattr("api.index.app_runtime.responses._deps.gen_random", lambda name: f"random:{name}")
 
     sent_messages = []
 
@@ -1573,7 +1582,7 @@ def test_handle_ai_stream_response_uses_gen_random_when_non_stream_fallback_is_e
         )
         return 42
 
-    monkeypatch.setattr("api.index._send_message_for_stream", fake_send_message)
+    monkeypatch.setattr("api.index.app_runtime.responses.send_stream_message", fake_send_message)
 
     result = handle_ai_stream_response(
         [{"role": "user", "content": "hello"}],

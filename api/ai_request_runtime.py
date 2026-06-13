@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -247,3 +248,149 @@ def ask_ai_stream(
         extra_tools=extra_tools,
         tool_context=tool_context,
     )
+
+
+@dataclass
+class AIRequestServiceDeps:
+    get_market_context: Callable[[], dict[str, Any]]
+    get_weather_context: Callable[[], dict[str, Any] | None]
+    get_time_context: Callable[[int], dict[str, Any]]
+    get_hacker_news_context: Callable[[], list[dict[str, Any]]]
+    get_prices: Callable[..., Any]
+    config_redis: Callable[..., Any]
+    get_tool_schemas: Callable[..., list[dict[str, Any]]]
+    build_system_message: Callable[..., dict[str, Any]]
+    fetch_urls: Callable[[list[dict[str, Any]]], str]
+    describe_image: Callable[[bytes, str, str | None], Any]
+    append_billing_segment: Callable[[dict[str, Any] | None, Any], None]
+    complete: Callable[..., str | None]
+    stream: Callable[..., Iterator[tuple[str, str]]]
+    fallback: Callable[[list[dict[str, Any]]], str]
+    admin_report: Callable[..., None]
+    logger: Any
+    stable_context_ttl: int
+    now: Callable[[], float]
+
+
+class AIRequestService:
+    def __init__(self, deps: AIRequestServiceDeps) -> None:
+        self._deps = deps
+        self._stable_context_cache: dict[
+            int,
+            tuple[int, dict[str, Any]],
+        ] = {}
+
+    def get_stable_context(self, timezone_offset: int = -3) -> dict[str, Any]:
+        return get_stable_ai_context(
+            timezone_offset,
+            cache=self._stable_context_cache,
+            ttl=self._deps.stable_context_ttl,
+            now=self._deps.now,
+            get_market_context=self._deps.get_market_context,
+            get_weather_context=self._deps.get_weather_context,
+            get_time_context=self._deps.get_time_context,
+            get_hacker_news_context=self._deps.get_hacker_news_context,
+        )
+
+    def build_request(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        chat_id: str | None = None,
+        user_name: str | None = None,
+        user_id: int | None = None,
+        timezone_offset: int = -3,
+        task_mode: bool = False,
+        enable_web_search: bool = True,
+    ) -> tuple[
+        dict[str, Any],
+        list[dict[str, Any]],
+        list[dict[str, Any]] | None,
+        dict[str, Any],
+    ]:
+        return build_ai_request(
+            messages,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+            task_mode=task_mode,
+            enable_web_search=enable_web_search,
+            sanitize_message=sanitize_bot_message,
+            get_context=self.get_stable_context,
+            get_prices=self._deps.get_prices,
+            config_redis=self._deps.config_redis,
+            get_tool_schemas=self._deps.get_tool_schemas,
+            build_system_message=self._deps.build_system_message,
+            fetch_urls=self._deps.fetch_urls,
+        )
+
+    def inject_image_context(
+        self,
+        messages: list[dict[str, Any]],
+        image_data: bytes | None,
+        image_file_id: str | None,
+        response_meta: dict[str, Any] | None,
+    ) -> None:
+        inject_image_context(
+            messages,
+            image_data,
+            image_file_id,
+            response_meta,
+            describe_image=self._deps.describe_image,
+            append_billing_segment=self._deps.append_billing_segment,
+            logger=self._deps.logger,
+        )
+
+    def ask(
+        self,
+        messages: list[dict[str, Any]],
+        image_data: bytes | None = None,
+        image_file_id: str | None = None,
+        response_meta: dict[str, Any] | None = None,
+        enable_web_search: bool = True,
+        chat_id: str | None = None,
+        user_name: str | None = None,
+        user_id: int | None = None,
+        timezone_offset: int = -3,
+        task_mode: bool = False,
+    ) -> str:
+        return ask_ai(
+            messages,
+            image_data=image_data,
+            image_file_id=image_file_id,
+            response_meta=response_meta,
+            enable_web_search=enable_web_search,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+            task_mode=task_mode,
+            build_request=self.build_request,
+            inject_image=self.inject_image_context,
+            complete=self._deps.complete,
+            fallback=self._deps.fallback,
+            admin_report=self._deps.admin_report,
+            logger=self._deps.logger,
+        )
+
+    def stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        enable_web_search: bool = True,
+        chat_id: str | None = None,
+        user_name: str | None = None,
+        user_id: int | None = None,
+        timezone_offset: int = -3,
+    ) -> Iterator[tuple[str, str]]:
+        return ask_ai_stream(
+            messages,
+            enable_web_search=enable_web_search,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+            build_request=self.build_request,
+            stream=self._deps.stream,
+        )

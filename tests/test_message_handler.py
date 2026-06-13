@@ -781,7 +781,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     monkeypatch.setattr("api.index.time.sleep", lambda *_, **__: None)
 
     make_deps, _ = _build_message_handler_deps()
-    from api.index import build_insufficient_credits_message as real_build_insuff
+    real_build_insuff = index.app_runtime.billing.build_insufficient_message
 
     deps = make_deps(
         config_redis=lambda: redis_client,
@@ -836,12 +836,12 @@ def test_handle_msg_returns_random_when_ai_billing_backend_is_down(monkeypatch):
 
 
 def test_handle_rate_limit():
-    from api.index import handle_rate_limit
+    handle_rate_limit = index.app_runtime.responses.handle_rate_limit
 
     with (
-        patch("api.index.send_typing") as mock_send_typing,
-        patch("time.sleep") as mock_sleep,
-        patch("api.index.gen_random") as mock_gen_random,
+        patch("api.index.app_runtime.responses._deps.send_typing") as mock_send_typing,
+        patch("api.index.app_runtime.responses._deps.sleep") as mock_sleep,
+        patch("api.index.app_runtime.responses._deps.gen_random") as mock_gen_random,
         patch("os.environ.get") as mock_env,
     ):
         chat_id = "123"
@@ -857,12 +857,12 @@ def test_handle_rate_limit():
 
 
 def test_handle_rate_limit_uses_username_when_first_name_is_missing():
-    from api.index import handle_rate_limit
+    handle_rate_limit = index.app_runtime.responses.handle_rate_limit
 
     with (
-        patch("api.index.send_typing"),
-        patch("time.sleep"),
-        patch("api.index.gen_random", return_value="no ana_user") as mock_gen_random,
+        patch("api.index.app_runtime.responses._deps.send_typing"),
+        patch("api.index.app_runtime.responses._deps.sleep"),
+        patch("api.index.app_runtime.responses._deps.gen_random", return_value="no ana_user") as mock_gen_random,
         patch("os.environ.get", return_value="fake_token"),
     ):
         response = handle_rate_limit("123", {"from": {"username": "ana_user"}})
@@ -996,7 +996,7 @@ def test_handle_msg_with_crypto_command():
         "text": "/prices btc",
     }
 
-    with patch("api.index.get_prices", mock_get_prices):
+    with patch("api.index.app_runtime.prices.get_prices", mock_get_prices):
         result = handle_msg(message, deps)
     assert result == "ok"
     mock_get_prices.assert_called_once()
@@ -2361,7 +2361,10 @@ def _private_photo_message(*, message_id=1, chat_id=123, user_id=88, file_id="im
 
 
 def _build_message_handler_flat_defaults(redis_client, mock_credits):
-    from api.command_registry import parse_command as _parse_command
+    from api.command_registry import (
+        parse_command as _parse_command,
+        should_auto_process_media as _should_auto_process_media,
+    )
     from api import index as _api_index
     from api.streaming import set_streamed_response_metadata
 
@@ -2375,7 +2378,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "get_chat_config": lambda _rc, _cid: dict(CHAT_CONFIG_DEFAULTS),
         "initialize_commands": _api_index.initialize_commands,
         "parse_command": _parse_command,
-        "should_auto_process_media": _api_index.should_auto_process_media,
+        "should_auto_process_media": _should_auto_process_media,
         "extract_message_content": _api_index.extract_message_content,
         "link_service": link_service,
         "send_msg": MagicMock(return_value=999),
@@ -2398,7 +2401,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
         "build_ai_messages": MagicMock(
             return_value=[{"role": "user", "content": "hola"}]
         ),
-        "handle_ai_response": _api_index.handle_ai_response,
+        "handle_ai_response": _api_index.app_runtime.responses.handle,
         "gen_random": MagicMock(return_value="random"),
         "build_insufficient_credits_message": MagicMock(
             return_value="insufficient credits"
@@ -3225,8 +3228,8 @@ def test_handle_msg_with_exception():
     from api.index import handle_msg
 
     with (
-        patch("api.index.config_redis") as mock_config_redis,
-        patch("api.index.admin_report") as mock_admin_report,
+        patch("api.index.app_runtime.config.redis") as mock_config_redis,
+        patch("api.index.app_runtime.admin.report") as mock_admin_report,
         patch("os.environ.get") as mock_env,
     ):
         mock_env.side_effect = lambda key: {"TELEGRAM_USERNAME": "testbot"}.get(key)

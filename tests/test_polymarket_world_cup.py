@@ -1,4 +1,5 @@
 from api import index
+from api.polymarket_commands import flagged_country_name
 from api import polymarket_commands
 
 
@@ -101,10 +102,10 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
             return {"data": [winner], "timestamp": 1}
         return {"data": events}
 
-    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
     monkeypatch.setattr(
-        index,
-        "_fetch_polymarket_live_price",
+        index.app_runtime.polymarket,
+        "fetch_live_price",
         lambda token_id: {
             "mex-yes": (0.72, 1),
             "draw-yes": (0.18, 1),
@@ -112,7 +113,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         }.get(token_id),
     )
 
-    result = index.get_polymarket_world_cup_games(timezone_offset=-3)
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
     assert captured == [
         {"slug": "world-cup-winner"},
@@ -150,10 +151,10 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
 
 
 def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
-    monkeypatch.setattr(index, "cached_requests", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(index.app_runtime.cache, "request", lambda *_args, **_kwargs: None)
 
     assert (
-        index.get_polymarket_world_cup_games(timezone_offset=-3)
+        index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
         == "Could not fetch World Cup games from Polymarket"
     )
 
@@ -189,31 +190,31 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
             return None
         return {"data": [event]}
 
-    monkeypatch.setattr(index, "cached_requests", fake_cached_requests)
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
 
-    result = index.get_polymarket_world_cup_games(timezone_offset=-3)
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
     assert ">Team A 35% vs. Team B 25%</a>" in result
     assert "[Draw]" not in result
 
 
 def test_country_flags_use_iso_data_with_sports_aliases():
-    assert index._flagged_country_name("Romania") == "🇷🇴 Romania"
-    assert index._flagged_country_name("Türkiye") == "🇹🇷 Türkiye"
-    assert index._flagged_country_name("Korea Republic") == "🇰🇷 Korea Republic"
-    assert index._flagged_country_name("Bosnia-Herzegovina") == (
+    assert flagged_country_name("Romania") == "🇷🇴 Romania"
+    assert flagged_country_name("Türkiye") == "🇹🇷 Türkiye"
+    assert flagged_country_name("Korea Republic") == "🇰🇷 Korea Republic"
+    assert flagged_country_name("Bosnia-Herzegovina") == (
         "🇧🇦 Bosnia-Herzegovina"
     )
-    assert index._flagged_country_name("England") == (
+    assert flagged_country_name("England") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
         "\U000e0067\U000e007f England"
     )
-    assert index._flagged_country_name("Scotland") == (
+    assert flagged_country_name("Scotland") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063"
         "\U000e0074\U000e007f Scotland"
     )
-    assert index._flagged_country_name("Wales") == (
+    assert flagged_country_name("Wales") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c"
         "\U000e0073\U000e007f Wales"
     )
-    assert index._flagged_country_name("UK") == "🇬🇧 UK"
+    assert flagged_country_name("UK") == "🇬🇧 UK"
