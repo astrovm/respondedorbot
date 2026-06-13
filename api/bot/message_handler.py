@@ -371,6 +371,24 @@ class MessageIntent:
     should_respond: bool
 
 
+@dataclass(frozen=True)
+class CommandDispatchContext:
+    commands: Mapping[str, CommandTuple]
+    command: str
+    sanitized_message_text: str
+    message: Dict[str, Any]
+    chat_id: str
+    chat_type: str
+    user_id: Optional[int]
+    numeric_chat_id: Optional[int]
+    prepared_message: PreparedMessage
+    billing_helper: AIMessageBilling
+    reply_context_text: Optional[str]
+    user_identity: str
+    redis_client: Any
+    timezone_offset: int = -3
+
+
 def _billing_is_available(deps: MessageHandlerDeps) -> bool:
     return bool(deps.credits_db_service.is_configured())
 
@@ -1380,22 +1398,13 @@ _SPECIAL_COMMAND_HANDLERS: Dict[
 
 def _handle_non_ai_command(
     deps: MessageHandlerDeps,
-    *,
-    command: str,
-    commands: Mapping[str, CommandTuple],
-    sanitized_message_text: str,
-    message: Dict[str, Any],
-    chat_id: str,
-    redis_client: Any,
-    billing_helper: AIMessageBilling,
-    user_id: Optional[int] = None,
-    user_identity: str = "",
-    timezone_offset: int = -3,
+    context: CommandDispatchContext,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command not in commands:
+    command = context.command
+    if command not in context.commands:
         return None, None, False, None
 
-    handler_func, uses_ai, takes_params = commands[command]
+    handler_func, uses_ai, takes_params = context.commands[command]
     if uses_ai:
         return None, None, False, None
 
@@ -1404,137 +1413,156 @@ def _handle_non_ai_command(
         return special_handler(
             deps,
             command=command,
-            chat_id=chat_id,
-            message=message,
-            billing_helper=billing_helper,
-            redis_client=redis_client,
-            sanitized_message_text=sanitized_message_text,
+            chat_id=context.chat_id,
+            message=context.message,
+            billing_helper=context.billing_helper,
+            redis_client=context.redis_client,
+            sanitized_message_text=context.sanitized_message_text,
             handler_func=handler_func,
         )
 
     if command in ("/mundial", "/worldcup"):
-        response_msg = handler_func(timezone_offset=timezone_offset)
+        response_msg = handler_func(timezone_offset=context.timezone_offset)
     elif takes_params:
-        response_msg = handler_func(sanitized_message_text)
+        response_msg = handler_func(context.sanitized_message_text)
     else:
         response_msg = handler_func()
     return response_msg, None, False, command
 
 
+def _dispatch_config(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_config_command(
+        deps,
+        command=context.command,
+        chat_id=context.chat_id,
+        chat_type=context.chat_type,
+        message=context.message,
+        redis_client=context.redis_client,
+    )
+
+
+def _dispatch_topup(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_topup_command(
+        deps,
+        command=context.command,
+        chat_type=context.chat_type,
+    )
+
+
+def _dispatch_balance(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_balance_command(
+        deps,
+        command=context.command,
+        chat_type=context.chat_type,
+        chat_id=context.chat_id,
+        user_id=context.user_id,
+        numeric_chat_id=context.numeric_chat_id,
+    )
+
+
+def _dispatch_transfer(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_transfer_command(
+        deps,
+        command=context.command,
+        sanitized_message_text=context.sanitized_message_text,
+        chat_id=context.chat_id,
+        chat_type=context.chat_type,
+        user_id=context.user_id,
+        numeric_chat_id=context.numeric_chat_id,
+    )
+
+
+def _dispatch_printcredits(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_admin_printcredits_command(
+        deps,
+        command=context.command,
+        sanitized_message_text=context.sanitized_message_text,
+        chat_id=context.chat_id,
+        user_id=context.user_id,
+    )
+
+
+def _dispatch_creditlog(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_admin_creditlog_command(
+        deps,
+        command=context.command,
+        sanitized_message_text=context.sanitized_message_text,
+        chat_id=context.chat_id,
+        user_id=context.user_id,
+    )
+
+
+_DIRECT_COMMAND_HANDLERS: Dict[
+    str,
+    Callable[[MessageHandlerDeps, CommandDispatchContext], CommandResponse],
+] = {
+    "/config": _dispatch_config,
+    "/topup": _dispatch_topup,
+    "/balance": _dispatch_balance,
+    "/transfer": _dispatch_transfer,
+    "/printcredits": _dispatch_printcredits,
+    "/creditlog": _dispatch_creditlog,
+}
+
+
 def _handle_known_command(
     deps: MessageHandlerDeps,
-    *,
-    commands: Mapping[str, CommandTuple],
-    command: str,
-    sanitized_message_text: str,
-    message: Dict[str, Any],
-    chat_id: str,
-    chat_type: str,
-    user_id: Optional[int],
-    numeric_chat_id: Optional[int],
-    prepared_message: PreparedMessage,
-    billing_helper: AIMessageBilling,
-    reply_context_text: Optional[str],
-    user_identity: str,
-    redis_client: Any,
-    timezone_offset: int = -3,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    response_msg: Optional[str]
+    context: CommandDispatchContext,
+) -> CommandResponse:
+    direct_handler = _DIRECT_COMMAND_HANDLERS.get(context.command)
+    if direct_handler is not None:
+        return direct_handler(deps, context)
+
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
-
-    def _dispatch(
-        cmd_handlers: Sequence[Callable[[], CommandResponse]],
-    ) -> Optional[CommandResponse]:
-        for handler in cmd_handlers:
-            resp = handler()
-            if resp[0] is not None or resp[3] is not None:
-                return resp
-        return None
-
-    dispatch_result = _dispatch([
-        lambda: _handle_config_command(
-            deps, command=command, chat_id=chat_id,
-            chat_type=chat_type, message=message,
-            redis_client=redis_client,
-        ),
-        lambda: _handle_topup_command(
-            deps, command=command, chat_type=chat_type,
-        ),
-        lambda: _handle_balance_command(
-            deps, command=command, chat_type=chat_type,
-            chat_id=chat_id, user_id=user_id,
-            numeric_chat_id=numeric_chat_id,
-        ),
-        lambda: _handle_transfer_command(
-            deps, command=command,
-            sanitized_message_text=sanitized_message_text,
-            chat_id=chat_id, chat_type=chat_type,
-            user_id=user_id, numeric_chat_id=numeric_chat_id,
-        ),
-        lambda: _handle_admin_printcredits_command(
-            deps, command=command,
-            sanitized_message_text=sanitized_message_text,
-            chat_id=chat_id, user_id=user_id,
-        ),
-        lambda: _handle_admin_creditlog_command(
-            deps, command=command,
-            sanitized_message_text=sanitized_message_text,
-            chat_id=chat_id, user_id=user_id,
-        ),
-    ])
-    if dispatch_result is not None:
-        return dispatch_result
-
-    if command in commands:
-        _handler_func, uses_ai, _ = commands[command]
-        response_command = command
+    if context.command in context.commands:
+        _handler_func, uses_ai, _ = context.commands[context.command]
+        response_command = context.command
 
         if uses_ai:
             response_msg, response_uses_ai = _run_ai_flow(
                 deps,
-                chat_id=chat_id,
-                message=message,
-                user_id=user_id,
-                prepared_message=prepared_message,
-                billing_helper=billing_helper,
-                prompt_text=sanitized_message_text,
-                reply_context_text=reply_context_text,
-                user_identity=user_identity,
+                chat_id=context.chat_id,
+                message=context.message,
+                user_id=context.user_id,
+                prepared_message=context.prepared_message,
+                billing_helper=context.billing_helper,
+                prompt_text=context.sanitized_message_text,
+                reply_context_text=context.reply_context_text,
+                user_identity=context.user_identity,
                 handler_func=deps.handle_ai_stream,
-                redis_client=redis_client,
-                timezone_offset=timezone_offset,
+                redis_client=context.redis_client,
+                timezone_offset=context.timezone_offset,
             )
             return response_msg, response_markup, response_uses_ai, response_command
 
-        response_msg, response_markup, response_uses_ai, response_command = _handle_non_ai_command(
-            deps,
-            command=command,
-            commands=commands,
-            sanitized_message_text=sanitized_message_text,
-            message=message,
-            chat_id=chat_id,
-            redis_client=redis_client,
-            billing_helper=billing_helper,
-            user_id=user_id,
-            user_identity=user_identity,
-            timezone_offset=timezone_offset,
-        )
-        return response_msg, response_markup, response_uses_ai, response_command
+        return _handle_non_ai_command(deps, context)
 
     response_msg, response_uses_ai = _run_ai_flow(
         deps,
-        chat_id=chat_id,
-        message=message,
-        user_id=user_id,
-        prepared_message=prepared_message,
-        billing_helper=billing_helper,
-        prompt_text=prepared_message.message_text,
-        reply_context_text=reply_context_text,
-        user_identity=user_identity,
+        chat_id=context.chat_id,
+        message=context.message,
+        user_id=context.user_id,
+        prepared_message=context.prepared_message,
+        billing_helper=context.billing_helper,
+        prompt_text=context.prepared_message.message_text,
+        reply_context_text=context.reply_context_text,
+        user_identity=context.user_identity,
         handler_func=deps.handle_ai_stream,
-        redis_client=redis_client,
-        timezone_offset=timezone_offset,
+        redis_client=context.redis_client,
+        timezone_offset=context.timezone_offset,
         is_spontaneous=True,
     )
     return response_msg, response_markup, response_uses_ai, response_command
@@ -1648,20 +1676,24 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
         response_msg, response_markup, response_uses_ai, response_command = (
             _handle_known_command(
                 deps,
-                commands=runtime.commands,
-                command=intent.command,
-                sanitized_message_text=intent.sanitized_message_text,
-                message=message,
-                chat_id=context.chat_id,
-                chat_type=context.chat_type,
-                user_id=context.user_id,
-                numeric_chat_id=context.numeric_chat_id,
-                prepared_message=prepared_message,
-                billing_helper=runtime.billing_helper,
-                reply_context_text=intent.reply_context_text,
-                user_identity=context.user_identity,
-                redis_client=runtime.redis_client,
-                timezone_offset=int(runtime.chat_config.get("timezone_offset", -3)),
+                CommandDispatchContext(
+                    commands=runtime.commands,
+                    command=intent.command,
+                    sanitized_message_text=intent.sanitized_message_text,
+                    message=message,
+                    chat_id=context.chat_id,
+                    chat_type=context.chat_type,
+                    user_id=context.user_id,
+                    numeric_chat_id=context.numeric_chat_id,
+                    prepared_message=prepared_message,
+                    billing_helper=runtime.billing_helper,
+                    reply_context_text=intent.reply_context_text,
+                    user_identity=context.user_identity,
+                    redis_client=runtime.redis_client,
+                    timezone_offset=int(
+                        runtime.chat_config.get("timezone_offset", -3)
+                    ),
+                ),
             )
         )
 
