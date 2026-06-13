@@ -287,18 +287,18 @@ def test_cache_bcra_variables_success():
 
         cache_bcra_variables(test_data, 600)
 
-        assert mock_redis.setex.call_count == 2
-        first_args, _ = mock_redis.setex.call_args_list[0]
+        assert mock_redis.set.call_count == 2
+        first_args, first_kwargs = mock_redis.set.call_args_list[0]
         assert first_args[0] == "bcra_variables"
-        assert first_args[1] == 600
-        payload = json.loads(first_args[2])
+        assert first_kwargs["ex"] == 600
+        payload = json.loads(first_args[1])
         assert payload["data"] == test_data
         assert "fetched_at" in payload
 
-        last_success_args, _ = mock_redis.setex.call_args_list[1]
+        last_success_args, last_success_kwargs = mock_redis.set.call_args_list[1]
         assert last_success_args[0] == "bcra_variables:last_success"
-        assert last_success_args[1] == last_success_ttl(600, 6 * 3600)
-        last_success_payload = json.loads(last_success_args[2])
+        assert last_success_kwargs["ex"] == last_success_ttl(600, 6 * 3600)
+        last_success_payload = json.loads(last_success_args[1])
         assert last_success_payload["data"] == test_data
         assert "fetched_at" in last_success_payload
 
@@ -313,10 +313,10 @@ def test_cache_bcra_variables_default_ttl():
 
         cache_bcra_variables(test_data)
 
-        first_args, _ = mock_redis.setex.call_args_list[0]
+        first_args, first_kwargs = mock_redis.set.call_args_list[0]
         assert first_args[0] == "bcra_variables"
-        assert first_args[1] == 300
-        payload = json.loads(first_args[2])
+        assert first_kwargs["ex"] == 300
+        payload = json.loads(first_args[1])
         assert payload["data"] == test_data
         assert "fetched_at" in payload
 
@@ -326,7 +326,7 @@ def test_cache_bcra_variables_exception():
 
     p_req, p_red, mock_redis = _bcra_service_patches()
     with p_req, p_red:
-        mock_redis.setex.side_effect = Exception("Redis error")
+        mock_redis.set.side_effect = Exception("Redis error")
         test_data = {"base_monetaria": "1000000"}
 
         cache_bcra_variables(test_data)
