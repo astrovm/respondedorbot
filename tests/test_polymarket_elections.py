@@ -1,5 +1,9 @@
 from api import index
-from api.markets.polymarket import event_country_flag
+from api.markets.polymarket import (
+    MarketQuote,
+    event_country_flag,
+    normalize_event_quotes,
+)
 from api.markets import polymarket as polymarket_commands
 
 
@@ -28,6 +32,34 @@ def test_fetch_live_prices_uses_clob_midpoints():
         "json": [{"token_id": "token-a"}, {"token_id": "token-b"}],
         "timeout": 5,
     }
+
+
+def test_normalize_event_quotes_decodes_and_validates_once():
+    event = {
+        "markets": [
+            {
+                "groupItemTitle": "Candidate A",
+                "outcomes": ["Yes", "No"],
+                "outcomePrices": ["0.42", "0.58"],
+                "clobTokenIds": ["candidate-a", "candidate-a-no"],
+            },
+            {
+                "groupItemTitle": "Closed",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.99", "0.01"]',
+                "closed": True,
+            },
+            {
+                "groupItemTitle": "Invalid",
+                "outcomes": "not-json",
+                "outcomePrices": '["0.50"]',
+            },
+        ]
+    }
+
+    assert normalize_event_quotes(event) == (
+        MarketQuote("Candidate A", 0.42, "candidate-a"),
+    )
 
 
 def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
