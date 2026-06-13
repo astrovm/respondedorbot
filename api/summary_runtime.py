@@ -276,7 +276,6 @@ class SummaryServiceDeps:
     state: Any
     config: Any
     provider: Any
-    admin_report: Callable[..., None]
     estimate_tokens: Callable[[list[dict[str, Any]]], int]
     sanitize_text: Callable[[str], str]
     logger: Any

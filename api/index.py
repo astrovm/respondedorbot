@@ -993,7 +993,6 @@ _summary_service = SummaryService(
         state=_message_state_service,
         config=_config_runtime,
         provider=_provider_service,
-        admin_report=_admin_service.report,
         estimate_tokens=estimate_message_tokens,
         sanitize_text=sanitize_summary_text,
         logger=_summary_logger,
