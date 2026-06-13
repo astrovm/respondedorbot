@@ -364,6 +364,12 @@ class MessageRuntime:
 
 
 @dataclass(frozen=True)
+class InitializedMessage:
+    context: MessageContext
+    runtime: MessageRuntime
+
+
+@dataclass(frozen=True)
 class MessageIntent:
     command: str
     sanitized_message_text: str
@@ -1568,148 +1574,203 @@ def _handle_known_command(
     return response_msg, response_markup, response_uses_ai, response_command
 
 
+def _initialize_incoming_message(
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> InitializedMessage | str:
+    context = _build_message_context(message, deps)
+    if context is None:
+        return "ok"
+    if isinstance(message.get("successful_payment"), Mapping):
+        return deps.handle_successful_payment_message(message)
+    return InitializedMessage(
+        context=context,
+        runtime=_initialize_message_runtime(
+            deps,
+            context=context,
+            message=message,
+        ),
+    )
+
+
+def _handle_message_links(
+    initialized: InitializedMessage,
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> bool:
+    context = initialized.context
+    runtime = initialized.runtime
+    if _should_bypass_link_replacement(
+        runtime.commands,
+        runtime.bot_name,
+        runtime.prepared_message.message_text,
+        message,
+        deps,
+    ):
+        return False
+    if _handle_link_replacement(
+        deps,
+        chat_config=runtime.chat_config,
+        message=message,
+        message_text=runtime.prepared_message.message_text,
+        chat_id=context.chat_id,
+        message_id=context.message_id,
+        redis_client=runtime.redis_client,
+    ):
+        return True
+    if not _should_suppress_unreplaced_supported_link(
+        runtime.chat_config,
+        runtime.prepared_message.message_text,
+    ):
+        return False
+    _store_user_message_if_present(
+        deps,
+        chat_id=context.chat_id,
+        message_id=context.message_id,
+        message=message,
+        message_text=runtime.prepared_message.message_text,
+        reply_context_text=None,
+        redis_client=runtime.redis_client,
+    )
+    return True
+
+
+def _store_ignored_message(
+    initialized: InitializedMessage,
+    intent: MessageIntent,
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> None:
+    context = initialized.context
+    runtime = initialized.runtime
+    _store_user_message_if_present(
+        deps,
+        chat_id=context.chat_id,
+        message_id=context.message_id,
+        message=message,
+        message_text=runtime.prepared_message.message_text,
+        reply_context_text=intent.reply_context_text,
+        redis_client=runtime.redis_client,
+    )
+
+
+def _dispatch_message_response(
+    initialized: InitializedMessage,
+    intent: MessageIntent,
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> str:
+    context = initialized.context
+    runtime = initialized.runtime
+    prepared_message = _process_message_media(
+        runtime.prepared_message,
+        message=message,
+        auto_process_media=runtime.auto_process_media,
+        deps=deps,
+        billing_helper=runtime.billing_helper,
+    )
+    if prepared_message.early_response:
+        deps.send_msg(
+            context.chat_id,
+            prepared_message.early_response,
+            context.message_id,
+        )
+        return "ok"
+
+    _save_replied_message_context(
+        deps,
+        message=message,
+        chat_id=context.chat_id,
+        redis_client=runtime.redis_client,
+    )
+    response_msg, response_markup, response_uses_ai, response_command = (
+        _handle_known_command(
+            deps,
+            CommandDispatchContext(
+                commands=runtime.commands,
+                command=intent.command,
+                sanitized_message_text=intent.sanitized_message_text,
+                message=message,
+                chat_id=context.chat_id,
+                chat_type=context.chat_type,
+                user_id=context.user_id,
+                numeric_chat_id=context.numeric_chat_id,
+                prepared_message=prepared_message,
+                billing_helper=runtime.billing_helper,
+                reply_context_text=intent.reply_context_text,
+                user_identity=context.user_identity,
+                redis_client=runtime.redis_client,
+                timezone_offset=int(
+                    runtime.chat_config.get("timezone_offset", -3)
+                ),
+            ),
+        )
+    )
+    return _finalize_message_response(
+        deps,
+        context=context,
+        message=message,
+        prepared_message=prepared_message,
+        reply_context_text=intent.reply_context_text,
+        redis_client=runtime.redis_client,
+        response_msg=response_msg or "",
+        response_markup=response_markup,
+        response_uses_ai=response_uses_ai,
+        response_command=response_command,
+    )
+
+
+def _handle_initialized_message(
+    initialized: InitializedMessage,
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> str:
+    context = initialized.context
+    runtime = initialized.runtime
+    if handle_token_signal_message(
+        message,
+        redis_client=runtime.redis_client,
+        send_photo=deps.send_photo,
+        admin_report=deps.admin_report,
+    ):
+        return "ok"
+    if _handle_prepared_message_early_response(
+        deps,
+        chat_id=context.chat_id,
+        message_id=context.message_id,
+        prepared_message=runtime.prepared_message,
+    ):
+        return "ok"
+    if _handle_message_links(initialized, message, deps):
+        return "ok"
+
+    intent = _resolve_message_intent(
+        deps,
+        context=context,
+        runtime=runtime,
+        message=message,
+    )
+    if not intent.should_respond:
+        _store_ignored_message(initialized, intent, message, deps)
+        return "ok"
+    return _dispatch_message_response(initialized, intent, message, deps)
+
+
+def _handle_incoming_message(
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+) -> str:
+    initialized = _initialize_incoming_message(message, deps)
+    if isinstance(initialized, str):
+        return initialized
+    return _handle_initialized_message(initialized, message, deps)
+
+
 def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
     """Handle an incoming Telegram message."""
 
     try:
-        context = _build_message_context(message, deps)
-        if context is None:
-            return "ok"
-
-        if isinstance(message.get("successful_payment"), Mapping):
-            return deps.handle_successful_payment_message(message)
-
-        runtime = _initialize_message_runtime(
-            deps,
-            context=context,
-            message=message,
-        )
-        if handle_token_signal_message(
-            message,
-            redis_client=runtime.redis_client,
-            send_photo=deps.send_photo,
-            admin_report=deps.admin_report,
-        ):
-            return "ok"
-
-        if _handle_prepared_message_early_response(
-            deps,
-            chat_id=context.chat_id,
-            message_id=context.message_id,
-            prepared_message=runtime.prepared_message,
-        ):
-            return "ok"
-
-        if not _should_bypass_link_replacement(
-            runtime.commands,
-            runtime.bot_name,
-            runtime.prepared_message.message_text,
-            message,
-            deps,
-        ):
-            if _handle_link_replacement(
-                deps,
-                chat_config=runtime.chat_config,
-                message=message,
-                message_text=runtime.prepared_message.message_text,
-                chat_id=context.chat_id,
-                message_id=context.message_id,
-                redis_client=runtime.redis_client,
-            ):
-                return "ok"
-
-            if _should_suppress_unreplaced_supported_link(
-                runtime.chat_config,
-                runtime.prepared_message.message_text,
-            ):
-                _store_user_message_if_present(
-                    deps,
-                    chat_id=context.chat_id,
-                    message_id=context.message_id,
-                    message=message,
-                    message_text=runtime.prepared_message.message_text,
-                    reply_context_text=None,
-                    redis_client=runtime.redis_client,
-                )
-                return "ok"
-
-        intent = _resolve_message_intent(
-            deps,
-            context=context,
-            runtime=runtime,
-            message=message,
-        )
-        if not intent.should_respond:
-            _store_user_message_if_present(
-                deps,
-                chat_id=context.chat_id,
-                message_id=context.message_id,
-                message=message,
-                message_text=runtime.prepared_message.message_text,
-                reply_context_text=intent.reply_context_text,
-                redis_client=runtime.redis_client,
-            )
-            return "ok"
-
-        prepared_message = _process_message_media(
-            runtime.prepared_message,
-            message=message,
-            auto_process_media=runtime.auto_process_media,
-            deps=deps,
-            billing_helper=runtime.billing_helper,
-        )
-        if prepared_message.early_response:
-            deps.send_msg(
-                context.chat_id,
-                prepared_message.early_response,
-                context.message_id,
-            )
-            return "ok"
-
-        _save_replied_message_context(
-            deps,
-            message=message,
-            chat_id=context.chat_id,
-            redis_client=runtime.redis_client,
-        )
-
-        response_msg, response_markup, response_uses_ai, response_command = (
-            _handle_known_command(
-                deps,
-                CommandDispatchContext(
-                    commands=runtime.commands,
-                    command=intent.command,
-                    sanitized_message_text=intent.sanitized_message_text,
-                    message=message,
-                    chat_id=context.chat_id,
-                    chat_type=context.chat_type,
-                    user_id=context.user_id,
-                    numeric_chat_id=context.numeric_chat_id,
-                    prepared_message=prepared_message,
-                    billing_helper=runtime.billing_helper,
-                    reply_context_text=intent.reply_context_text,
-                    user_identity=context.user_identity,
-                    redis_client=runtime.redis_client,
-                    timezone_offset=int(
-                        runtime.chat_config.get("timezone_offset", -3)
-                    ),
-                ),
-            )
-        )
-
-        return _finalize_message_response(
-            deps,
-            context=context,
-            message=message,
-            prepared_message=prepared_message,
-            reply_context_text=intent.reply_context_text,
-            redis_client=runtime.redis_client,
-            response_msg=response_msg or "",
-            response_markup=response_markup,
-            response_uses_ai=response_uses_ai,
-            response_command=response_command,
-        )
-
+        return _handle_incoming_message(message, deps)
     except Exception as error:
         deps.admin_report(
             f"Message handling error: {error}",
