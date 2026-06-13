@@ -17,6 +17,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     TypeVar,
     Union,
@@ -638,7 +639,7 @@ def cache_currency_band_limits(data: Dict[str, Any], ttl: int = TTL_BCRA) -> Non
 def fetch_currency_band_limits(
     *,
     list_variables_fn: Optional[
-        Callable[[Optional[str]], Optional[List[Dict[str, Any]]]]
+        Callable[[Optional[str]], Optional[Sequence[object]]]
     ] = None,
     api_get_fn: Optional[
         Callable[[str, Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]
@@ -1050,8 +1051,8 @@ def calculate_tcrm_100(
             if normalized_target is None:
                 return None
 
-        itcrm_value: Optional[float]
-        itcrm_dt: Optional[datetime]
+        itcrm_value: float
+        itcrm_dt: datetime
 
         if normalized_target is None:
             details = itcrm_getter()
@@ -1076,9 +1077,6 @@ def calculate_tcrm_100(
             except Exception:
                 return None
             itcrm_dt = matched_dt
-
-        if itcrm_dt is None:
-            return None
 
         date_key = itcrm_dt.date().isoformat()
 

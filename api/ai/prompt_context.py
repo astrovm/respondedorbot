@@ -77,7 +77,7 @@ def get_weather_description(code: int) -> str:
 
 
 def format_hacker_news_info(
-    news: Iterable[dict[str, Any]] | None,
+    news: Iterable[object] | None,
     include_discussion: bool = True,
 ) -> str:
     if not news:

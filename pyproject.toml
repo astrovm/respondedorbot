@@ -86,6 +86,7 @@ ignore = [
 python_version = "3.14"
 strict = true
 ignore_missing_imports = false
+warn_unreachable = true
 
 [[tool.mypy.overrides]]
 module = [

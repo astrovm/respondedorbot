@@ -89,7 +89,7 @@ def handle_admin_printcredits_command(
 
 
 def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    def _summarize_models(items: Sequence[Mapping[str, Any]]) -> str:
+    def _summarize_models(items: Sequence[object]) -> str:
         totals: Dict[str, int] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -106,7 +106,7 @@ def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             summary += f", +{hidden_count} más"
         return summary
 
-    def _summarize_tools(items: Sequence[Mapping[str, Any]]) -> str:
+    def _summarize_tools(items: Sequence[object]) -> str:
         totals: Dict[str, Dict[str, int]] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -131,7 +131,7 @@ def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             summary += f", +{hidden_count} más"
         return summary
 
-    def _summarize_segments(items: Sequence[Mapping[str, Any]]) -> str:
+    def _summarize_segments(items: Sequence[object]) -> str:
         totals: Dict[str, int] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -145,7 +145,7 @@ def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         ordered = sorted(totals.items(), key=lambda entry: entry[0])
         return ", ".join(f"{kind}={count}" for kind, count in ordered)
 
-    def _summarize_cache_hits(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    def _summarize_cache_hits(items: Sequence[object]) -> Optional[str]:
         totals: Dict[str, int] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -159,7 +159,7 @@ def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         ordered = sorted(totals.items(), key=lambda entry: entry[0])
         return ", ".join(f"{kind}={count}" for kind, count in ordered)
 
-    def _summarize_cache(items: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    def _summarize_cache(items: Sequence[object]) -> Optional[str]:
         total_cached_tokens = 0
         total_cached_savings_usd_micros = 0
         for item in items:

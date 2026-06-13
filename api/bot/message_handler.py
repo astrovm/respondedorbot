@@ -1345,7 +1345,7 @@ def _handle_tasks_command(
     *,
     command: str,
     chat_id: str,
-    handler_func: Callable[..., str],
+    handler_func: Callable[..., str | Tuple[str, Optional[Dict[str, Any]]]],
     deps: Any = None,
     message: Any = None,
     billing_helper: Any = None,
