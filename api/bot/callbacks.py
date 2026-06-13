@@ -1,22 +1,79 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class CallbackConfigDeps:
+    set_chat_config: Callable[..., dict[str, Any]]
+    coerce_bool: Callable[..., bool]
+    guard_callback: Callable[..., bool]
+    log_event: Callable[[str, Mapping[str, Any] | None], None]
+    timezone_offset_min: int
+    timezone_offset_max: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCallbackDeps:
+    guard_callback: Callable[..., bool]
+    list_tasks: Callable[[str], list[dict[str, Any]]]
+    cancel_task: Callable[[str], Any]
+    is_group_chat_type: Callable[[str], bool]
+    config_redis: Callable[..., Any]
+    is_chat_admin: Callable[..., bool]
+    answer_callback: Callable[..., None]
+    build_tasks_message: Callable[..., tuple[str, dict[str, Any] | None]]
+    edit_message: Callable[..., Any]
+    logger: Any
+
+
+@dataclass(frozen=True, slots=True)
+class CallbackQueryDeps:
+    guard_callback: Callable[..., bool]
+    handle_topup: Callable[[dict[str, Any]], None]
+    handle_task: Callable[[dict[str, Any]], None]
+    handle_signal: Callable[..., bool]
+    config_redis: Callable[..., Any]
+    delete_msg: Callable[..., Any]
+    edit_photo: Callable[..., Any]
+    is_chat_admin: Callable[..., bool]
+    answer_callback: Callable[..., None]
+    admin_report: Callable[..., None]
+    is_group_chat_type: Callable[[str], bool]
+    send_msg: Callable[..., Any]
+    report_unauthorized: Callable[..., None]
+    denial_message: str
+    get_chat_config: Callable[..., dict[str, Any]]
+    config: CallbackConfigDeps
+    build_config_text: Callable[..., str]
+    build_config_keyboard: Callable[..., dict[str, Any]]
+    edit_message: Callable[..., bool]
+
+
+@dataclass(frozen=True, slots=True)
+class CallbackContext:
+    callback_id: str | None
+    data: str
+    chat_id: str
+    chat_type: str
+    message_id: int
+    user: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigUpdateContext:
+    redis_client: Any
+    chat_id: str
+    callback_id: str | None
+    deps: CallbackConfigDeps
 
 
 def handle_task_callback(
     callback_query: dict[str, Any],
     *,
-    guard_callback: Callable[..., bool],
-    list_tasks: Callable[[str], list[dict[str, Any]]],
-    cancel_task: Callable[[str], Any],
-    is_group_chat_type: Callable[[str], bool],
-    config_redis: Callable[..., Any],
-    is_chat_admin: Callable[..., bool],
-    answer_callback: Callable[..., None],
-    build_tasks_message: Callable[..., tuple[str, dict[str, Any] | None]],
-    edit_message: Callable[..., Any],
-    logger: Any,
+    deps: TaskCallbackDeps,
 ) -> None:
     callback_data = callback_query.get("data")
     callback_id = callback_query.get("id")
@@ -26,20 +83,20 @@ def handle_task_callback(
     message_id = message.get("message_id")
     user = callback_query.get("from") or {}
 
-    if guard_callback(callback_id, not callback_data or chat_id is None):
+    if deps.guard_callback(callback_id, not callback_data or chat_id is None):
         return
 
     parts = str(callback_data).split(":", 2)
-    if guard_callback(callback_id, len(parts) != 3 or parts[0] != "task"):
+    if deps.guard_callback(callback_id, len(parts) != 3 or parts[0] != "task"):
         return
 
     task_id = parts[2]
-    tasks = list_tasks(str(chat_id))
+    tasks = deps.list_tasks(str(chat_id))
     target_task = next(
         (task for task in tasks if str(task.get("id")) == str(task_id)),
         None,
     )
-    if guard_callback(
+    if deps.guard_callback(
         callback_id,
         not target_task,
         text="esa tarea no existe",
@@ -55,9 +112,9 @@ def handle_task_callback(
     )
 
     chat_type = str(chat.get("type", ""))
-    if is_group_chat_type(chat_type):
-        redis_client = config_redis()
-        is_admin = is_chat_admin(
+    if deps.is_group_chat_type(chat_type):
+        redis_client = deps.config_redis()
+        is_admin = deps.is_chat_admin(
             str(chat_id),
             request_user_id,
             redis_client=redis_client,
@@ -65,7 +122,7 @@ def handle_task_callback(
     else:
         is_admin = True
 
-    if guard_callback(
+    if deps.guard_callback(
         callback_id,
         not is_owner and not is_admin,
         text="solo el creador o un admin pueden borrar esta tarea",
@@ -73,17 +130,17 @@ def handle_task_callback(
     ):
         return
 
-    cancel_task(task_id)
+    deps.cancel_task(task_id)
     if callback_id:
-        answer_callback(callback_id, text=f"tarea {task_id} borrada")
+        deps.answer_callback(callback_id, text=f"tarea {task_id} borrada")
 
     if message_id:
-        tasks = list_tasks(str(chat_id))
-        new_text, new_keyboard = build_tasks_message(tasks)
+        tasks = deps.list_tasks(str(chat_id))
+        new_text, new_keyboard = deps.build_tasks_message(tasks)
         try:
-            edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
+            deps.edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
         except Exception as error:
-            logger.exception(
+            deps.logger.exception(
                 "handle_task_callback: failed to edit task message "
                 "chat_id=%s message_id=%s: %s",
                 chat_id,
@@ -92,126 +149,126 @@ def handle_task_callback(
             )
 
 
+def _update_timezone(
+    config: dict[str, Any],
+    value: str,
+    *,
+    context: ConfigUpdateContext,
+) -> tuple[dict[str, Any], bool]:
+    if context.deps.guard_callback(context.callback_id, value == "current"):
+        return config, True
+    try:
+        offset = max(
+            context.deps.timezone_offset_min,
+            min(int(value), context.deps.timezone_offset_max),
+        )
+    except ValueError:
+        context.deps.log_event(
+            "Invalid timezone callback value",
+            {"chat_id": context.chat_id, "value": value},
+        )
+        return config, False
+    return (
+        context.deps.set_chat_config(
+            context.redis_client,
+            context.chat_id,
+            timezone_offset=offset,
+        ),
+        False,
+    )
+
+
+def _creditless_limit(config: Mapping[str, Any], value: str) -> int:
+    current = int(
+        config.get(
+            "creditless_user_hourly_limit",
+            config.get("creditless_user_daily_limit", 5),
+        )
+    )
+    if value == "none":
+        return 0
+    if value == "decrease":
+        return current if current < 0 else max(0, current - 1)
+    if value == "increase":
+        return current if current < 0 else current + 1
+    if value == "unlimited":
+        return -1
+    limit = int(value)
+    if limit < -1:
+        raise ValueError
+    return limit
+
+
+def _update_creditless_limit(
+    config: dict[str, Any],
+    value: str,
+    *,
+    context: ConfigUpdateContext,
+) -> tuple[dict[str, Any], bool]:
+    if context.deps.guard_callback(context.callback_id, value == "current"):
+        return config, True
+    try:
+        limit = _creditless_limit(config, value)
+    except (TypeError, ValueError):
+        context.deps.log_event(
+            "Invalid creditless callback value",
+            {"chat_id": context.chat_id, "value": value},
+        )
+        return config, False
+    return (
+        context.deps.set_chat_config(
+            context.redis_client,
+            context.chat_id,
+            creditless_user_hourly_limit=limit,
+        ),
+        False,
+    )
+
+
 def update_callback_config(
     config: dict[str, Any],
     action: str,
     value: str,
     *,
-    redis_client: Any,
-    chat_id: str,
-    callback_id: str | None,
-    set_chat_config: Callable[..., dict[str, Any]],
-    coerce_bool: Callable[..., bool],
-    guard_callback: Callable[..., bool],
-    log_config_event: Callable[[str, Mapping[str, Any] | None], None],
-    timezone_offset_min: int,
-    timezone_offset_max: int,
+    context: ConfigUpdateContext,
 ) -> tuple[dict[str, Any], bool]:
+    toggle_fields = {
+        "random": "ai_random_replies",
+        "followups": "ai_command_followups",
+        "linkfixfollowups": "ignore_link_fix_followups",
+    }
     if action == "link" and value in {"reply", "delete", "off"}:
-        config = set_chat_config(redis_client, chat_id, link_mode=value)
-    elif action == "random":
-        current = coerce_bool(config.get("ai_random_replies"), default=True)
-        config = set_chat_config(
-            redis_client, chat_id, ai_random_replies=not current
+        config = context.deps.set_chat_config(
+            context.redis_client,
+            context.chat_id,
+            link_mode=value,
         )
-    elif action == "followups":
-        current = coerce_bool(
-            config.get("ai_command_followups"), default=True
-        )
-        config = set_chat_config(
-            redis_client, chat_id, ai_command_followups=not current
-        )
-    elif action == "linkfixfollowups":
-        current = coerce_bool(
-            config.get("ignore_link_fix_followups"), default=True
-        )
-        config = set_chat_config(
-            redis_client,
-            chat_id,
-            ignore_link_fix_followups=not current,
+    elif field := toggle_fields.get(action):
+        current = context.deps.coerce_bool(config.get(field), default=True)
+        config = context.deps.set_chat_config(
+            context.redis_client,
+            context.chat_id,
+            **{field: not current},
         )
     elif action == "timezone":
-        if guard_callback(callback_id, value == "current"):
-            return config, True
-        try:
-            offset = max(
-                timezone_offset_min,
-                min(int(value), timezone_offset_max),
-            )
-            config = set_chat_config(
-                redis_client, chat_id, timezone_offset=offset
-            )
-        except ValueError:
-            log_config_event(
-                "Invalid timezone callback value",
-                {"chat_id": chat_id, "value": value},
-            )
+        return _update_timezone(
+            config,
+            value,
+            context=context,
+        )
     elif action == "creditless":
-        try:
-            current_limit = int(
-                config.get(
-                    "creditless_user_hourly_limit",
-                    config.get("creditless_user_daily_limit", 5),
-                )
-            )
-            if value == "none":
-                limit = 0
-            elif value == "decrease":
-                limit = (
-                    current_limit
-                    if current_limit < 0
-                    else max(0, current_limit - 1)
-                )
-            elif guard_callback(callback_id, value == "current"):
-                return config, True
-            elif value == "increase":
-                limit = current_limit if current_limit < 0 else current_limit + 1
-            elif value == "unlimited":
-                limit = -1
-            else:
-                limit = int(value)
-                if limit < -1:
-                    raise ValueError
-            config = set_chat_config(
-                redis_client,
-                chat_id,
-                creditless_user_hourly_limit=limit,
-            )
-        except ValueError:
-            log_config_event(
-                "Invalid creditless callback value",
-                {"chat_id": chat_id, "value": value},
-            )
+        return _update_creditless_limit(
+            config,
+            value,
+            context=context,
+        )
     return config, False
 
 
-def handle_callback_query(
+def _callback_context(
     callback_query: dict[str, Any],
-    *,
-    guard_callback: Callable[..., bool],
-    handle_topup: Callable[[dict[str, Any]], None],
-    handle_task: Callable[[dict[str, Any]], None],
-    handle_signal: Callable[..., bool],
-    config_redis: Callable[..., Any],
-    delete_msg: Callable[..., Any],
-    edit_photo: Callable[..., Any],
-    is_chat_admin: Callable[..., bool],
-    answer_callback: Callable[..., None],
-    admin_report: Callable[..., None],
-    is_group_chat_type: Callable[[str], bool],
-    send_msg: Callable[..., Any],
-    report_unauthorized: Callable[..., None],
-    denial_message: str,
-    get_chat_config: Callable[..., dict[str, Any]],
-    set_chat_config: Callable[..., dict[str, Any]],
-    coerce_bool: Callable[..., bool],
-    log_config_event: Callable[[str, Mapping[str, Any] | None], None],
-    timezone_offset_min: int,
-    timezone_offset_max: int,
-    build_config_text: Callable[..., str],
-    build_config_keyboard: Callable[..., dict[str, Any]],
-    edit_message: Callable[..., bool],
-) -> None:
+    deps: CallbackQueryDeps,
+) -> CallbackContext | None:
     callback_data = callback_query.get("data")
     callback_id = callback_query.get("id")
     message = callback_query.get("message") or {}
@@ -220,89 +277,138 @@ def handle_callback_query(
     chat_id = chat.get("id")
     message_id = message.get("message_id")
 
-    if guard_callback(
+    if deps.guard_callback(
         callback_id,
         not callback_data or chat_id is None or message_id is None,
     ):
-        return
+        return None
+    return CallbackContext(
+        callback_id=str(callback_id) if callback_id else None,
+        data=str(callback_data),
+        chat_id=str(chat_id),
+        chat_type=str(chat.get("type", "")),
+        message_id=int(str(message_id)),
+        user=user,
+    )
 
-    callback_data_text = str(callback_data)
-    # Route feature-owned payloads before treating the rest as config updates.
-    if callback_data_text.startswith("topup:"):
-        handle_topup(callback_query)
-        return
-    if callback_data_text.startswith("task:"):
-        handle_task(callback_query)
-        return
-    if callback_data_text.startswith("sig:"):
-        redis_client = config_redis()
-        handle_signal(
-            callback_query,
-            redis_client=redis_client,
-            delete_msg=delete_msg,
-            edit_photo=edit_photo,
-            is_chat_admin=is_chat_admin,
-            answer_callback_query=answer_callback,
-            admin_report=admin_report,
-        )
-        return
 
-    redis_client = config_redis()
-    chat_id_str = str(chat_id)
-    chat_type = str(chat.get("type", ""))
+def _route_feature_callback(
+    callback_query: dict[str, Any],
+    context: CallbackContext,
+    deps: CallbackQueryDeps,
+) -> bool:
+    if context.data.startswith("topup:"):
+        deps.handle_topup(callback_query)
+        return True
+    if context.data.startswith("task:"):
+        deps.handle_task(callback_query)
+        return True
+    if not context.data.startswith("sig:"):
+        return False
+    deps.handle_signal(
+        callback_query,
+        redis_client=deps.config_redis(),
+        delete_msg=deps.delete_msg,
+        edit_photo=deps.edit_photo,
+        is_chat_admin=deps.is_chat_admin,
+        answer_callback_query=deps.answer_callback,
+        admin_report=deps.admin_report,
+    )
+    return True
 
-    if callback_data_text.startswith("cfg:") and is_group_chat_type(chat_type):
-        if not is_chat_admin(
-            chat_id_str, user.get("id"), redis_client=redis_client
-        ):
-            guard_callback(callback_id, True)
-            send_msg(chat_id_str, denial_message, str(message_id))
-            report_unauthorized(
-                chat_id_str,
-                user,
-                chat_type=chat_type,
-                action="callback:config",
-                callback_data=callback_data_text,
-            )
-            return
 
-    config = get_chat_config(redis_client, chat_id_str)
+def _authorize_config_callback(
+    context: CallbackContext,
+    redis_client: Any,
+    deps: CallbackQueryDeps,
+) -> bool:
+    if not (
+        context.data.startswith("cfg:")
+        and deps.is_group_chat_type(context.chat_type)
+    ):
+        return True
+    if deps.is_chat_admin(
+        context.chat_id,
+        context.user.get("id"),
+        redis_client=redis_client,
+    ):
+        return True
+    deps.guard_callback(context.callback_id, True)
+    deps.send_msg(
+        context.chat_id,
+        deps.denial_message,
+        str(context.message_id),
+    )
+    deps.report_unauthorized(
+        context.chat_id,
+        context.user,
+        chat_type=context.chat_type,
+        action="callback:config",
+        callback_data=context.data,
+    )
+    return False
+
+
+def _render_config_callback(
+    config: dict[str, Any],
+    context: CallbackContext,
+    deps: CallbackQueryDeps,
+) -> None:
+    text = deps.build_config_text(config, context.chat_type)
+    keyboard = deps.build_config_keyboard(config, context.chat_type)
     try:
-        _, action, value = callback_data_text.split(":", 2)
+        edit_succeeded = deps.edit_message(
+            context.chat_id,
+            context.message_id,
+            text,
+            keyboard,
+        )
+        if not edit_succeeded:
+            deps.config.log_event(
+                "Falling back to new config message",
+                {
+                    "chat_id": context.chat_id,
+                    "message_id": context.message_id,
+                },
+            )
+            deps.send_msg(context.chat_id, text, reply_markup=keyboard)
+    finally:
+        # Telegram keeps the button spinner active until the callback is answered.
+        if context.callback_id:
+            deps.answer_callback(context.callback_id)
+
+
+def handle_callback_query(
+    callback_query: dict[str, Any],
+    *,
+    deps: CallbackQueryDeps,
+) -> None:
+    context = _callback_context(callback_query, deps)
+    if context is None or _route_feature_callback(callback_query, context, deps):
+        return
+
+    redis_client = deps.config_redis()
+    if not _authorize_config_callback(context, redis_client, deps):
+        return
+
+    config = deps.get_chat_config(redis_client, context.chat_id)
+    try:
+        _, action, value = context.data.split(":", 2)
     except ValueError:
-        guard_callback(callback_id, True)
+        deps.guard_callback(context.callback_id, True)
         return
 
     config, handled = update_callback_config(
         config,
         action,
         value,
-        redis_client=redis_client,
-        chat_id=chat_id_str,
-        callback_id=callback_id,
-        set_chat_config=set_chat_config,
-        coerce_bool=coerce_bool,
-        guard_callback=guard_callback,
-        log_config_event=log_config_event,
-        timezone_offset_min=timezone_offset_min,
-        timezone_offset_max=timezone_offset_max,
+        context=ConfigUpdateContext(
+            redis_client=redis_client,
+            chat_id=context.chat_id,
+            callback_id=context.callback_id,
+            deps=deps.config,
+        ),
     )
     if handled:
         return
-
-    text = build_config_text(config, chat_type)
-    keyboard = build_config_keyboard(config, chat_type)
-    try:
-        edit_succeeded = edit_message(
-            chat_id_str, int(str(message_id)), text, keyboard
-        )
-        if not edit_succeeded:
-            log_config_event(
-                "Falling back to new config message",
-                {"chat_id": chat_id_str, "message_id": message_id},
-            )
-            send_msg(chat_id_str, text, reply_markup=keyboard)
-    finally:
-        # Telegram keeps the button spinner active until the callback is answered.
-        if callback_id:
-            answer_callback(callback_id)
+    _render_config_callback(config, context, deps)
