@@ -98,47 +98,27 @@ def get_prices(
                 continue
 
     if msg_text.upper().isupper():
-        new_prices = []
-        coins = expand_price_tokens(msg_text.split(","))
         if not prices or "data" not in prices:
             return "no pude traer precios de crypto boludo"
-
-        for coin in prices["data"]:
-            symbol = coin["symbol"].upper().replace(" ", "")
-            name = coin["name"].upper().replace(" ", "")
-            if symbol in coins or name in coins:
-                new_prices.append(coin)
-            elif prices_number > 0 and coin in prices["data"][:prices_number]:
-                new_prices.append(coin)
+        coins = expand_price_tokens(msg_text.split(","))
+        new_prices = _select_listed_coins(prices["data"], coins, prices_number)
 
         if not new_prices:
-            found: list[dict[str, Any]] = []
-            not_found: list[str] = []
-            for coin_token in coins:
-                token = coin_token.upper().replace(" ", "")
-                quote_data = fetch_quotes([token], convert_parameter)
-                if quote_data:
-                    if _append_first_priced_quote(
-                        found, quote_data, convert_parameter
-                    ):
-                        continue
-                    quote_by_slug = fetch_quotes(
-                        [token.lower()], convert_parameter, by_slug=True
-                    )
-                    if quote_by_slug and _append_first_priced_quote(
-                        found, quote_by_slug, convert_parameter
-                    ):
-                        continue
-                not_found.append(token)
-
-            if not found and not_found:
-                return f"no encontre esos ponzis: {', '.join(not_found)}"
-            if not found:
+            requested = _fallback_quote_tokens(coins)
+            new_prices = _fetch_requested_quotes(
+                requested,
+                convert_parameter=convert_parameter,
+                fetch_quotes=fetch_quotes,
+            )
+            if not new_prices and requested:
+                return f"no encontre esos ponzis: {', '.join(requested)}"
+            if not new_prices:
                 return "no pude traer precios de crypto boludo"
-            new_prices = found
 
         prices_number = len(new_prices)
-        prices["data"] = new_prices
+        price_rows = new_prices
+    else:
+        price_rows = prices["data"] if prices and "data" in prices else []
 
     if prices_number < 1:
         prices_number = 10
@@ -146,14 +126,15 @@ def get_prices(
         return "no pude traer precios de crypto boludo"
 
     lines = []
-    for coin in prices["data"][:prices_number]:
+    for coin in price_rows[:prices_number]:
         quote = coin["quote"][convert_parameter]
+        display_price = float(quote["price"])
         if convert_to == "SATS":
-            quote["price"] *= 100000000
+            display_price *= 100000000
 
-        decimals = f"{quote['price']:.12f}".split(".")[-1]
+        decimals = f"{display_price:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
-        price = f"{quote['price']:.{zeros + 4}f}".rstrip("0").rstrip(".")
+        price = f"{display_price:.{zeros + 4}f}".rstrip("0").rstrip(".")
         percentage = f"{quote.get(change_field, 0):+.2f}".rstrip("0").rstrip(".")
         lines.append(
             f"{coin['symbol']}: {price} {convert_to} "
@@ -173,18 +154,87 @@ def _parse_timeframe(
     return msg_text.strip(), None
 
 
-def _append_first_priced_quote(
-    found: list[dict[str, Any]],
-    quote_data: dict[str, Any],
+def _select_listed_coins(
+    listed: list[dict[str, Any]],
+    requested: list[str],
+    top_n: int,
+) -> list[dict[str, Any]]:
+    requested_set = set(requested)
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, coin in enumerate(listed):
+        symbol = str(coin.get("symbol") or "").upper().replace(" ", "")
+        name = str(coin.get("name") or "").upper().replace(" ", "")
+        if symbol not in requested_set and name not in requested_set and index >= top_n:
+            continue
+        identity = str(coin.get("id") or symbol or name)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        selected.append(coin)
+    return selected
+
+
+def _fallback_quote_tokens(tokens: list[str]) -> list[str]:
+    return list(dict.fromkeys(
+        token
+        for token in tokens
+        if token not in {"STABLES", "STABLECOINS"} and not token.isdigit()
+    ))
+
+
+def _iter_quote_rows(quote_data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for value in (quote_data or {}).values():
+        candidates = value if isinstance(value, list) else [value]
+        rows.extend(candidate for candidate in candidates if isinstance(candidate, dict))
+    return rows
+
+
+def _has_price(coin: dict[str, Any], convert_parameter: str) -> bool:
+    return (
+        coin.get("quote", {})
+        .get(convert_parameter, {})
+        .get("price")
+        is not None
+    )
+
+
+def _fetch_requested_quotes(
+    requested: list[str],
+    *,
     convert_parameter: str,
-) -> bool:
-    for coin_data in quote_data.values():
-        price = (
-            coin_data.get("quote", {})
-            .get(convert_parameter, {})
-            .get("price")
+    fetch_quotes: QuoteFetcher,
+) -> list[dict[str, Any]]:
+    if not requested:
+        return []
+
+    symbol_rows = _iter_quote_rows(fetch_quotes(requested, convert_parameter))
+    found = [coin for coin in symbol_rows if _has_price(coin, convert_parameter)]
+    found_tokens = {
+        str(coin.get(field) or "").upper().replace(" ", "")
+        for coin in found
+        for field in ("symbol", "name", "slug")
+    }
+    missing = [token for token in requested if token not in found_tokens]
+    if missing:
+        slug_rows = _iter_quote_rows(
+            fetch_quotes(
+                [token.lower() for token in missing],
+                convert_parameter,
+                by_slug=True,
+            )
         )
-        if price:
-            found.append(coin_data)
-            return True
-    return False
+        found.extend(
+            coin for coin in slug_rows if _has_price(coin, convert_parameter)
+        )
+
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for coin in found:
+        identity = str(coin.get("id") or coin.get("symbol") or coin.get("slug") or "")
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(coin)
+    return unique
