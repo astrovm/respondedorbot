@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from api.markets.price_commands import (
+    AmountConversionRequest,
     SUPPORTED_PRICE_SYMBOLS,
     expand_price_tokens,
     find_coin_by_symbol_or_name,
@@ -18,6 +20,14 @@ PriceListFetcher = Callable[[str], dict[str, Any] | None]
 QuoteFetcher = Callable[..., dict[str, Any] | None]
 
 
+@dataclass(frozen=True, slots=True)
+class PriceDisplay:
+    convert_to: str
+    convert_parameter: str
+    change_field: str
+    timeframe_label: str
+
+
 def get_prices(
     msg_text: str,
     *,
@@ -26,119 +36,176 @@ def get_prices(
     fetch_quotes: QuoteFetcher,
 ) -> str | None:
     msg_text, timeframe = _parse_timeframe(msg_text, change_fields)
-    if timeframe is None and msg_text.strip():
-        last_token = msg_text.strip().rsplit(None, 1)[-1].lower()
-        if re.fullmatch(r"\d+[hd]", last_token):
-            valid = ", ".join(change_fields)
-            return f"timeframe '{last_token}' no soportado, uso: {valid}"
-    change_field = change_fields.get(
-        timeframe or "24h", "percent_change_24h"
+    timeframe_error = _unsupported_timeframe_error(
+        msg_text,
+        timeframe=timeframe,
+        change_fields=change_fields,
     )
-    timeframe_label = timeframe or "24h"
-
-    prices_number = 0
-    convert_to = "USD"
-    convert_parameter = "USD"
+    if timeframe_error:
+        return timeframe_error
 
     conversion_request = parse_amount_conversion(msg_text)
     if conversion_request:
-        amount = conversion_request.amount
-        source_symbol = conversion_request.source_symbol
-        convert_to = conversion_request.target_symbol
-        if convert_to not in SUPPORTED_PRICE_SYMBOLS:
-            return f"no laburo con {convert_to} gordo"
-
-        convert_parameter = conversion_request.target_parameter
-        prices = fetch_prices(convert_parameter)
-        if not prices or "data" not in prices:
-            return "no pude traer precios de crypto boludo"
-
-        requested_asset = find_coin_by_symbol_or_name(
-            prices["data"], source_symbol
-        )
-        if not requested_asset:
-            source_parameter = price_query_parameter(source_symbol)
-            reverse_prices = fetch_prices(source_parameter)
-            if not reverse_prices or "data" not in reverse_prices:
-                return "no pude traer precios de crypto boludo"
-
-            target_asset = find_coin_by_symbol_or_name(
-                reverse_prices["data"], convert_to
-            )
-            if not target_asset:
-                return "no laburo con esos ponzis boludo"
-
-            source_amount = amount / 100000000 if source_symbol == "SATS" else amount
-            asset_price = target_asset["quote"][source_parameter]["price"]
-            converted_value = source_amount / asset_price
-            return (
-                f"{fmt_num(amount, 8)} {source_symbol} = "
-                f"{fmt_num(converted_value, 8)} {target_asset['symbol'].upper()}"
-            )
-
-        quote_price = requested_asset["quote"][convert_parameter]["price"]
-        if convert_to == "SATS":
-            quote_price *= 100000000
-        converted_value = amount * quote_price
-        return (
-            f"{fmt_num(amount, 8)} {requested_asset['symbol'].upper()} = "
-            f"{fmt_num(converted_value, 8)} {convert_to}"
+        return _convert_amount(
+            conversion_request,
+            fetch_prices=fetch_prices,
         )
 
     msg_text, convert_to, convert_parameter = parse_conversion_only(msg_text)
     if convert_to not in SUPPORTED_PRICE_SYMBOLS:
         return f"no laburo con {convert_to} gordo"
-
     prices = fetch_prices(convert_parameter)
-    if msg_text:
-        for number in msg_text.upper().replace(" ", "").split(","):
-            try:
-                prices_number = max(prices_number, int(float(number)))
-            except ValueError:
-                continue
-
-    if msg_text.upper().isupper():
-        if not prices or "data" not in prices:
-            return "no pude traer precios de crypto boludo"
-        coins = expand_price_tokens(msg_text.split(","))
-        new_prices = _select_listed_coins(prices["data"], coins, prices_number)
-
-        if not new_prices:
-            requested = _fallback_quote_tokens(coins)
-            new_prices = _fetch_requested_quotes(
-                requested,
-                convert_parameter=convert_parameter,
-                fetch_quotes=fetch_quotes,
-            )
-            if not new_prices and requested:
-                return f"no encontre esos ponzis: {', '.join(requested)}"
-            if not new_prices:
-                return "no pude traer precios de crypto boludo"
-
-        prices_number = len(new_prices)
-        price_rows = new_prices
-    else:
-        price_rows = prices["data"] if prices and "data" in prices else []
-
-    if prices_number < 1:
-        prices_number = 10
-    if not prices or "data" not in prices:
+    listed = _price_data(prices)
+    if listed is None:
         return "no pude traer precios de crypto boludo"
 
+    price_rows, prices_number, selection_error = _select_price_rows(
+        msg_text,
+        listed=listed,
+        convert_parameter=convert_parameter,
+        fetch_quotes=fetch_quotes,
+    )
+    if selection_error:
+        return selection_error
+    display = PriceDisplay(
+        convert_to=convert_to,
+        convert_parameter=convert_parameter,
+        change_field=change_fields.get(
+            timeframe or "24h",
+            "percent_change_24h",
+        ),
+        timeframe_label=timeframe or "24h",
+    )
+    return _format_price_rows(price_rows[:prices_number], display)
+
+
+def _unsupported_timeframe_error(
+    msg_text: str,
+    *,
+    timeframe: str | None,
+    change_fields: Mapping[str, str],
+) -> str | None:
+    if timeframe is not None or not msg_text.strip():
+        return None
+    last_token = msg_text.strip().rsplit(None, 1)[-1].lower()
+    if not re.fullmatch(r"\d+[hd]", last_token):
+        return None
+    valid = ", ".join(change_fields)
+    return f"timeframe '{last_token}' no soportado, uso: {valid}"
+
+
+def _price_data(
+    prices: Mapping[str, Any] | None,
+) -> list[dict[str, Any]] | None:
+    if not prices or not isinstance(prices.get("data"), list):
+        return None
+    return [item for item in prices["data"] if isinstance(item, dict)]
+
+
+def _convert_amount(
+    request: AmountConversionRequest,
+    *,
+    fetch_prices: PriceListFetcher,
+) -> str:
+    if request.target_symbol not in SUPPORTED_PRICE_SYMBOLS:
+        return f"no laburo con {request.target_symbol} gordo"
+
+    prices = _price_data(fetch_prices(request.target_parameter))
+    if prices is None:
+        return "no pude traer precios de crypto boludo"
+    requested_asset = find_coin_by_symbol_or_name(prices, request.source_symbol)
+    if requested_asset:
+        quote_price = requested_asset["quote"][request.target_parameter]["price"]
+        if request.target_symbol == "SATS":
+            quote_price *= 100000000
+        converted_value = request.amount * quote_price
+        return (
+            f"{fmt_num(request.amount, 8)} {requested_asset['symbol'].upper()} = "
+            f"{fmt_num(converted_value, 8)} {request.target_symbol}"
+        )
+
+    source_parameter = price_query_parameter(request.source_symbol)
+    reverse_prices = _price_data(fetch_prices(source_parameter))
+    if reverse_prices is None:
+        return "no pude traer precios de crypto boludo"
+    target_asset = find_coin_by_symbol_or_name(
+        reverse_prices,
+        request.target_symbol,
+    )
+    if not target_asset:
+        return "no laburo con esos ponzis boludo"
+    source_amount = (
+        request.amount / 100000000
+        if request.source_symbol == "SATS"
+        else request.amount
+    )
+    asset_price = target_asset["quote"][source_parameter]["price"]
+    converted_value = source_amount / asset_price
+    return (
+        f"{fmt_num(request.amount, 8)} {request.source_symbol} = "
+        f"{fmt_num(converted_value, 8)} {target_asset['symbol'].upper()}"
+    )
+
+
+def _requested_price_count(msg_text: str) -> int:
+    result = 0
+    for token in msg_text.upper().replace(" ", "").split(","):
+        try:
+            result = max(result, int(float(token)))
+        except ValueError:
+            continue
+    return result
+
+
+def _select_price_rows(
+    msg_text: str,
+    *,
+    listed: list[dict[str, Any]],
+    convert_parameter: str,
+    fetch_quotes: QuoteFetcher,
+) -> tuple[list[dict[str, Any]], int, str | None]:
+    prices_number = _requested_price_count(msg_text)
+    if not msg_text.upper().isupper():
+        return listed, prices_number or 10, None
+
+    coins = expand_price_tokens(msg_text.split(","))
+    selected = _select_listed_coins(listed, coins, prices_number)
+    requested = _fallback_quote_tokens(coins)
+    if not selected:
+        selected = _fetch_requested_quotes(
+            requested,
+            convert_parameter=convert_parameter,
+            fetch_quotes=fetch_quotes,
+        )
+    if selected:
+        return selected, len(selected), None
+    if requested:
+        return [], 0, f"no encontre esos ponzis: {', '.join(requested)}"
+    return [], 0, "no pude traer precios de crypto boludo"
+
+
+def _format_price_rows(
+    rows: list[dict[str, Any]],
+    display: PriceDisplay,
+) -> str:
     lines = []
-    for coin in price_rows[:prices_number]:
-        quote = coin["quote"][convert_parameter]
+    for coin in rows:
+        quote = coin["quote"][display.convert_parameter]
         display_price = float(quote["price"])
-        if convert_to == "SATS":
+        if display.convert_to == "SATS":
             display_price *= 100000000
 
         decimals = f"{display_price:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
         price = f"{display_price:.{zeros + 4}f}".rstrip("0").rstrip(".")
-        percentage = f"{quote.get(change_field, 0):+.2f}".rstrip("0").rstrip(".")
+        percentage = (
+            f"{quote.get(display.change_field, 0):+.2f}"
+            .rstrip("0")
+            .rstrip(".")
+        )
         lines.append(
-            f"{coin['symbol']}: {price} {convert_to} "
-            f"({percentage}% {timeframe_label})"
+            f"{coin['symbol']}: {price} {display.convert_to} "
+            f"({percentage}% {display.timeframe_label})"
         )
     return "\n".join(lines)
 
