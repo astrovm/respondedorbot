@@ -2794,7 +2794,11 @@ def test_resolve_message_intent_uses_reply_text_for_command_without_params():
 
 
 def test_handle_non_ai_command_summary_uses_streaming():
-    from api.bot.message_handler import _handle_non_ai_command
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_non_ai_command,
+    )
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (
@@ -2806,16 +2810,21 @@ def test_handle_non_ai_command_summary_uses_streaming():
 
     response = _handle_non_ai_command(
         deps,
-        command="/resumen",
-        commands=commands,
-        sanitized_message_text="focus en crypto",
-        message={"message_id": "10"},
-        chat_id="123",
-        redis_client=MagicMock(),
-        billing_helper=MagicMock(),
-        user_id=7,
-        user_identity="Ana (ana)",
-        timezone_offset=-3,
+        CommandDispatchContext(
+            commands=commands,
+            command="/resumen",
+            sanitized_message_text="focus en crypto",
+            message={"message_id": "10"},
+            chat_id="123",
+            chat_type="private",
+            user_id=7,
+            numeric_chat_id=123,
+            prepared_message=PreparedMessage("/resumen", None, None),
+            billing_helper=MagicMock(),
+            reply_context_text=None,
+            user_identity="Ana (ana)",
+            redis_client=MagicMock(),
+        ),
     )
 
     assert response == (None, None, True, "/resumen")
@@ -2826,7 +2835,11 @@ def test_handle_non_ai_command_summary_uses_streaming():
 
 
 def test_handle_non_ai_command_summary_fallback_returns_text():
-    from api.bot.message_handler import _handle_non_ai_command
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_non_ai_command,
+    )
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (
@@ -2838,44 +2851,7 @@ def test_handle_non_ai_command_summary_fallback_returns_text():
 
     response = _handle_non_ai_command(
         deps,
-        command="/resumen",
-        commands=commands,
-        sanitized_message_text="focus en crypto",
-        message={"message_id": "10"},
-        chat_id="123",
-        redis_client=MagicMock(),
-        billing_helper=MagicMock(),
-        user_id=7,
-        user_identity="Ana (ana)",
-        timezone_offset=-3,
-    )
-
-    assert response == ("no pude generar el resumen", None, False, "/resumen")
-
-
-def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
-    from api.bot.message_handler import PreparedMessage, _handle_known_command
-
-    deps = MagicMock()
-    commands = {"/resumen": (MagicMock(), False, True)}
-
-    empty_response = (None, None, False, None)
-    with patch("api.bot.message_handler._handle_config_command", return_value=empty_response), patch(
-        "api.bot.message_handler._handle_topup_command", return_value=empty_response
-    ), patch("api.bot.message_handler._handle_balance_command", return_value=empty_response), patch(
-        "api.bot.message_handler._handle_transfer_command", return_value=empty_response
-    ), patch(
-        "api.bot.message_handler._handle_admin_printcredits_command",
-        return_value=empty_response,
-    ), patch(
-        "api.bot.message_handler._handle_admin_creditlog_command",
-        return_value=empty_response,
-    ), patch(
-        "api.bot.message_handler._handle_non_ai_command",
-        return_value=("resumen listo", None, True, "/resumen"),
-    ):
-        response = _handle_known_command(
-            deps,
+        CommandDispatchContext(
             commands=commands,
             command="/resumen",
             sanitized_message_text="focus en crypto",
@@ -2884,16 +2860,52 @@ def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
             chat_type="private",
             user_id=7,
             numeric_chat_id=123,
-            prepared_message=PreparedMessage(
-                message_text="/resumen focus en crypto",
-                photo_file_id=None,
-                audio_file_id=None,
-            ),
+            prepared_message=PreparedMessage("/resumen", None, None),
             billing_helper=MagicMock(),
             reply_context_text=None,
             user_identity="Ana (ana)",
             redis_client=MagicMock(),
-            timezone_offset=-3,
+        ),
+    )
+
+    assert response == ("no pude generar el resumen", None, False, "/resumen")
+
+
+def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_known_command,
+    )
+
+    deps = MagicMock()
+    commands = {"/resumen": (MagicMock(), False, True)}
+
+    with patch(
+        "api.bot.message_handler._handle_non_ai_command",
+        return_value=("resumen listo", None, True, "/resumen"),
+    ):
+        response = _handle_known_command(
+            deps,
+            CommandDispatchContext(
+                commands=commands,
+                command="/resumen",
+                sanitized_message_text="focus en crypto",
+                message={"message_id": "10"},
+                chat_id="123",
+                chat_type="private",
+                user_id=7,
+                numeric_chat_id=123,
+                prepared_message=PreparedMessage(
+                    message_text="/resumen focus en crypto",
+                    photo_file_id=None,
+                    audio_file_id=None,
+                ),
+                billing_helper=MagicMock(),
+                reply_context_text=None,
+                user_identity="Ana (ana)",
+                redis_client=MagicMock(),
+            ),
         )
 
     assert response == ("resumen listo", None, True, "/resumen")

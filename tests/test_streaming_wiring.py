@@ -84,7 +84,11 @@ def test_finalize_message_response_saves_streamed_text_to_redis():
 
 
 def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
-    from api.bot.message_handler import PreparedMessage, _handle_known_command
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_known_command,
+    )
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(handle_ai_stream=MagicMock(return_value="ignored"))
@@ -95,24 +99,25 @@ def test_handle_known_command_spontaneous_path_uses_run_ai_flow():
     ) as run_ai_flow:
         response = _handle_known_command(
             deps,
-            commands={},
-            command="",
-            sanitized_message_text="",
-            message={"message_id": "42", "from": {"first_name": "Ana"}},
-            chat_id="555",
-            chat_type="private",
-            user_id=77,
-            numeric_chat_id=555,
-            prepared_message=PreparedMessage(
-                message_text="hola",
-                photo_file_id=None,
-                audio_file_id=None,
+            CommandDispatchContext(
+                commands={},
+                command="",
+                sanitized_message_text="",
+                message={"message_id": "42", "from": {"first_name": "Ana"}},
+                chat_id="555",
+                chat_type="private",
+                user_id=77,
+                numeric_chat_id=555,
+                prepared_message=PreparedMessage(
+                    message_text="hola",
+                    photo_file_id=None,
+                    audio_file_id=None,
+                ),
+                billing_helper=MagicMock(),
+                reply_context_text=None,
+                user_identity="Ana (ana)",
+                redis_client=MagicMock(),
             ),
-            billing_helper=MagicMock(),
-            reply_context_text=None,
-            user_identity="Ana (ana)",
-            redis_client=MagicMock(),
-            timezone_offset=-3,
         )
 
     assert response == ("hola final", None, True, None)
