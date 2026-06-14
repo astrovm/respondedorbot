@@ -69,9 +69,20 @@ def main() -> int:
 
     from api import index
     from api.bot.ptb import run_polling
+    from api.markets.world_cup_goals import (
+        WorldCupGoalMonitor,
+        start_world_cup_goal_monitor,
+    )
     from api.tasks.scheduler import get_scheduler, init_scheduler
 
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
+    start_world_cup_goal_monitor(
+        WorldCupGoalMonitor(
+            list_chat_ids=index.list_world_cup_goal_chat_ids,
+            ask_ai=index.app_runtime.ai.ask,
+            send_message=index.app_runtime.telegram.send_message,
+        )
+    )
 
     try:
         init_scheduler(

@@ -9,6 +9,7 @@ CHAT_CONFIG_DEFAULTS: Dict[str, object] = {
     "ai_random_replies": True,
     "ai_command_followups": True,
     "ignore_link_fix_followups": True,
+    "world_cup_goal_alerts": False,
     "timezone_offset": -3,
     "creditless_user_hourly_limit": 5,
 }

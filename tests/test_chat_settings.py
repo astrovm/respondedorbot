@@ -87,9 +87,12 @@ def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
     assert (
         "ignoro respuestas normales a mensajes automáticos con links arreglados" in text
     )
-    assert "5. respuestas random" in text
+    assert "5. goles del mundial" in text
+    assert "grito cada gol en vivo y descanso al equipo rival" in text
+    assert "▫️ desactivado" in text
+    assert "6. respuestas random" in text
     assert "a veces respondo solo en el grupo aunque nadie me llame" in text
-    assert "6. mensajes gratis por usuario por hora" in text
+    assert "7. mensajes gratis por usuario por hora" in text
     assert "cuantos mensajes de ia paga el grupo por usuario cada hora" in text
     assert "\n5\n" in text
     assert "tocá los botones de abajo para cambiar la config" in text
@@ -469,21 +472,26 @@ def test_build_config_text_and_keyboard_reflect_values():
     keyboard = build_config_keyboard(config)
     assert keyboard["inline_keyboard"][0][1]["text"] == "✅ borrar link"
     assert keyboard["inline_keyboard"][0][2]["text"] == "▫️ apagado"
-    assert keyboard["inline_keyboard"][4][0]["text"] == "▫️ me meto en la charla"
+    assert keyboard["inline_keyboard"][4][0]["text"] == "▫️ gritar goles del mundial"
+    assert (
+        keyboard["inline_keyboard"][4][0]["callback_data"]
+        == "cfg:worldcupgoals:toggle"
+    )
+    assert keyboard["inline_keyboard"][5][0]["text"] == "▫️ me meto en la charla"
     assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ seguir charla en comandos"
     assert (
         keyboard["inline_keyboard"][2][0]["text"]
         == "✅ ignorar replies a links arreglados"
     )
-    assert keyboard["inline_keyboard"][4][0]["callback_data"] == "cfg:random:toggle"
-    assert keyboard["inline_keyboard"][5][0]["text"] == "0"
-    assert keyboard["inline_keyboard"][5][1]["text"] == "-"
-    assert keyboard["inline_keyboard"][5][2]["text"] == "5"
+    assert keyboard["inline_keyboard"][5][0]["callback_data"] == "cfg:random:toggle"
+    assert keyboard["inline_keyboard"][6][0]["text"] == "0"
+    assert keyboard["inline_keyboard"][6][1]["text"] == "-"
+    assert keyboard["inline_keyboard"][6][2]["text"] == "5"
     assert (
-        keyboard["inline_keyboard"][5][2]["callback_data"] == "cfg:creditless:current"
+        keyboard["inline_keyboard"][6][2]["callback_data"] == "cfg:creditless:current"
     )
-    assert keyboard["inline_keyboard"][5][3]["text"] == "+"
-    assert keyboard["inline_keyboard"][5][4]["text"] == "∞"
+    assert keyboard["inline_keyboard"][6][3]["text"] == "+"
+    assert keyboard["inline_keyboard"][6][4]["text"] == "∞"
 
 
 def test_handle_config_command_loads_config():
@@ -631,6 +639,43 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
     mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
     mock_send_msg.assert_not_called()
     mock_answer.assert_called_once_with("cbq")
+
+
+def test_handle_callback_query_enables_world_cup_goal_alerts():
+    redis_client = MagicMock()
+    callback = {
+        "id": "cbq",
+        "data": "cfg:worldcupgoals:toggle",
+        "message": {"chat": {"id": 1}, "message_id": 99},
+    }
+    current_config = dict(CHAT_CONFIG_DEFAULTS)
+    updated_config = {**current_config, "world_cup_goal_alerts": True}
+    with (
+        patch("api.index.app_runtime.config.redis", return_value=redis_client),
+        patch(
+            "api.index._chat_config_service.get_chat_config",
+            return_value=current_config,
+        ),
+        patch(
+            "api.index._chat_config_service.set_chat_config",
+            return_value=updated_config,
+        ) as mock_set,
+        patch("api.index.build_config_text", return_value="text"),
+        patch(
+            "api.index.build_config_keyboard",
+            return_value={"inline_keyboard": []},
+        ),
+        patch("api.index.edit_message", return_value=True),
+        patch("api.index.app_runtime.telegram.send_message"),
+        patch("api.index._answer_callback_query"),
+    ):
+        handle_callback_query(callback)
+
+    mock_set.assert_called_once_with(
+        redis_client,
+        "1",
+        world_cup_goal_alerts=True,
+    )
 
 
 def test_save_and_get_bot_message_metadata():
@@ -784,7 +829,7 @@ class TestTimezoneConfig:
         from api.bot.chat_settings import build_config_keyboard, CHAT_CONFIG_DEFAULTS
 
         keyboard = build_config_keyboard(dict(CHAT_CONFIG_DEFAULTS))
-        creditless_row = keyboard["inline_keyboard"][5]
+        creditless_row = keyboard["inline_keyboard"][6]
 
         assert [button["text"] for button in creditless_row] == [
             "0",

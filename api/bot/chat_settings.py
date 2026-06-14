@@ -159,6 +159,7 @@ class ChatConfigData:
     random_enabled: bool
     followups_enabled: bool
     ignore_link_fix_followups: bool
+    world_cup_goal_alerts: bool
     timezone_offset: int
     creditless_limit: int
 
@@ -170,6 +171,9 @@ def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
         followups_enabled=coerce_bool(config.get("ai_command_followups"), default=True),
         ignore_link_fix_followups=coerce_bool(
             config.get("ignore_link_fix_followups"), default=True
+        ),
+        world_cup_goal_alerts=coerce_bool(
+            config.get("world_cup_goal_alerts"), default=False
         ),
         timezone_offset=int(config.get("timezone_offset", -3)),
         creditless_limit=int(
@@ -217,17 +221,21 @@ def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> st
         "",
         "4. zona horaria",
         _format_utc_offset(parsed.timezone_offset),
+        "",
+        "5. goles del mundial",
+        "si está activado, grito cada gol en vivo y descanso al equipo rival",
+        f"{'✅ activado' if parsed.world_cup_goal_alerts else '▫️ desactivado'}",
     ]
 
     if is_group:
         lines.extend(
             [
                 "",
-                "5. respuestas random",
+                "6. respuestas random",
                 "si está activado, a veces respondo solo en el grupo aunque nadie me llame",
                 f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
                 "",
-                "6. mensajes gratis por usuario por hora",
+                "7. mensajes gratis por usuario por hora",
                 "cuantos mensajes de ia paga el grupo por usuario cada hora",
                 creditless_label,
             ]
@@ -298,6 +306,13 @@ def build_config_keyboard(
                 "callback_data": "cfg:timezone:current",
             },
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
+        ],
+        [
+            toggle_button(
+                "gritar goles del mundial",
+                parsed.world_cup_goal_alerts,
+                action="worldcupgoals",
+            )
         ],
     ]
 
