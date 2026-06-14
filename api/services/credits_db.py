@@ -483,6 +483,144 @@ def charge_ai_credits(
         }
 
 
+def charge_chat_ai_credits(
+    chat_id: int,
+    amount: int,
+    *,
+    event_type: str = "ai_reserve",
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Charge credits directly to a chat balance for chat-owned automation."""
+
+    ensure_schema()
+    charge_amount = int(amount)
+    metadata_dict = dict(metadata or {})
+
+    with connect() as conn, conn.cursor() as cur:
+        chat_balance = _get_balance_for_update(cur, "chat", chat_id)
+        if chat_balance >= charge_amount:
+            chat_balance -= charge_amount
+            _set_balance(cur, "chat", chat_id, chat_balance)
+            cur.execute(
+                """
+                    INSERT INTO credit_ledger (
+                        event_type,
+                        actor_user_id,
+                        user_id,
+                        chat_id,
+                        amount,
+                        metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                (
+                    str(event_type or "ai_reserve"),
+                    None,
+                    None,
+                    int(chat_id),
+                    -charge_amount,
+                    json.dumps({"source": "chat", **metadata_dict}),
+                ),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "source": "chat",
+                "chat_balance": chat_balance,
+                "chat_balance_credit_units": chat_balance,
+            }
+
+        conn.commit()
+        return {
+            "ok": False,
+            "source": None,
+            "chat_balance": chat_balance,
+            "chat_balance_credit_units": chat_balance,
+        }
+
+
+def refund_chat_ai_credits(
+    chat_id: int,
+    amount: int,
+    *,
+    event_type: str = "ai_refund",
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, int]:
+    """Refund a chat-owned AI reservation."""
+
+    ensure_schema()
+    refund_amount = int(amount)
+    metadata_dict = dict(metadata or {})
+
+    with connect() as conn, conn.cursor() as cur:
+        chat_balance = _get_balance_for_update(cur, "chat", chat_id) + refund_amount
+        _set_balance(cur, "chat", chat_id, chat_balance)
+        cur.execute(
+            """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+            (
+                str(event_type or "ai_refund"),
+                None,
+                None,
+                int(chat_id),
+                refund_amount,
+                json.dumps({"source": "chat", **metadata_dict}),
+            ),
+        )
+        conn.commit()
+        return {"chat_balance": int(chat_balance)}
+
+
+def apply_chat_ai_debt(
+    chat_id: int,
+    amount: int,
+    *,
+    event_type: str = "ai_settlement_debt",
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, int]:
+    """Apply settlement debt to a chat-owned automation charge."""
+
+    ensure_schema()
+    debt_amount = int(amount)
+    metadata_dict = dict(metadata or {})
+
+    with connect() as conn, conn.cursor() as cur:
+        chat_balance = _get_balance_for_update(cur, "chat", chat_id) - debt_amount
+        _set_balance(cur, "chat", chat_id, chat_balance)
+        cur.execute(
+            """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+            (
+                str(event_type or "ai_settlement_debt"),
+                None,
+                None,
+                int(chat_id),
+                -debt_amount,
+                json.dumps({"source": "chat", **metadata_dict}),
+            ),
+        )
+        conn.commit()
+        return {"chat_balance": int(chat_balance)}
+
+
 def refund_ai_charge(
     user_id: int,
     chat_id: Optional[int],

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from api.ai.pricing import calculate_billing_for_segments
 from api.core.logging import get_logger
 from api.services import http_client
 
@@ -41,6 +42,13 @@ class Goal:
     @property
     def dedupe_key(self) -> str:
         return f"{self.event_id}:{self.scoring_team}:{self.scoring_score}"
+
+
+@dataclass(frozen=True)
+class GoalCharge:
+    chat_id: int
+    reserved_credit_units: int
+    metadata: dict[str, Any]
 
 
 def _score(value: Any) -> int | None:
@@ -162,12 +170,17 @@ class WorldCupGoalMonitor:
         send_message: Callable[..., Any],
         http_get: Callable[..., Any] = http_client.get,
         now: Callable[[], datetime] | None = None,
+        credits_db_service: Any | None = None,
+        estimate_ai_base_reserve_credits: Callable[..., tuple[int, dict[str, Any]]]
+        | None = None,
     ) -> None:
         self._list_chat_ids = list_chat_ids
         self._ask_ai = ask_ai
         self._send_message = send_message
         self._http_get = http_get
         self._now = now or (lambda: datetime.now(UTC))
+        self._credits_db_service = credits_db_service
+        self._estimate_ai_base_reserve_credits = estimate_ai_base_reserve_credits
         self._scores: dict[str, MatchScore] | None = None
         self._announced: set[str] = set()
 
@@ -203,35 +216,151 @@ class WorldCupGoalMonitor:
         chat_ids = self._list_chat_ids()
         if not chat_ids:
             return
-        message = self._generate_message(goal)
         for chat_id in chat_ids:
+            message = self._generate_message(goal, chat_id=chat_id)
             self._send_message(chat_id, message)
 
-    def _generate_message(self, goal: Goal) -> str:
-        prompt = (
+    def _build_prompt(self, goal: Goal) -> str:
+        return (
             f"{goal.scoring_team} acaba de meterle un gol a {goal.opponent}. "
             f"El partido está {goal.scoring_score}-{goal.opponent_score}. "
             "Escribí un solo mensaje corto en español argentino: gritá el gol "
             "con mucha euforia y descansá o insultá futbolísticamente al equipo "
             "rival. Sin markdown ni explicación."
         )
-        response_meta: dict[str, Any] = {}
-        try:
-            message = self._ask_ai(
-                [{"role": "user", "content": prompt}],
-                enable_web_search=False,
-                response_meta=response_meta,
-            ).strip()
-        except Exception:
-            logger.exception("failed to generate World Cup goal message")
-            message = ""
-        if message and not response_meta.get("ai_fallback"):
-            return message
+
+    def _fallback_message(self, goal: Goal) -> str:
         return (
             f"GOOOOOOL DE {goal.scoring_team.upper()}! "
             f"{goal.opponent.upper()}, SON UNOS MUERTOS, MIREN COMO DEFIENDEN! "
             f"{goal.scoring_score}-{goal.opponent_score}"
         )
+
+    def _reserve_chat_credits(
+        self,
+        chat_id: str,
+        goal: Goal,
+        messages: list[dict[str, Any]],
+    ) -> GoalCharge | None:
+        if self._credits_db_service is None:
+            return GoalCharge(chat_id=0, reserved_credit_units=0, metadata={})
+        if (
+            self._estimate_ai_base_reserve_credits is None
+            or not self._credits_db_service.is_configured()
+        ):
+            return None
+        try:
+            numeric_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+
+        reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(
+            messages=messages,
+        )
+        metadata = {
+            "usage_tag": "world_cup_goal_alert",
+            "reserved_credit_units": reserve_credits,
+            "event_id": goal.event_id,
+            "scoring_team": goal.scoring_team,
+            "opponent": goal.opponent,
+            "scoring_score": goal.scoring_score,
+            "opponent_score": goal.opponent_score,
+            **reserve_meta,
+        }
+        try:
+            result = self._credits_db_service.charge_chat_ai_credits(
+                numeric_chat_id,
+                reserve_credits,
+                event_type="ai_reserve",
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("failed to reserve World Cup goal alert credits")
+            return None
+        if not result.get("ok"):
+            return None
+        return GoalCharge(
+            chat_id=numeric_chat_id,
+            reserved_credit_units=reserve_credits,
+            metadata=metadata,
+        )
+
+    def _settle_chat_credits(
+        self,
+        charge: GoalCharge,
+        billing_segments: list[Mapping[str, Any]],
+    ) -> None:
+        if self._credits_db_service is None or charge.reserved_credit_units <= 0:
+            return
+        breakdown = calculate_billing_for_segments(billing_segments)
+        settled_credit_units = int(breakdown.get("charged_credit_units", 0) or 0)
+        metadata = {
+            **charge.metadata,
+            "reason": "world_cup_goal_success",
+            "settled_credit_units": settled_credit_units,
+            "pricing_version": breakdown.get("pricing_version"),
+            "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
+            "model_breakdown": breakdown.get("model_breakdown", []),
+            "tool_breakdown": breakdown.get("tool_breakdown", []),
+        }
+        try:
+            if settled_credit_units < charge.reserved_credit_units:
+                self._credits_db_service.refund_chat_ai_credits(
+                    charge.chat_id,
+                    charge.reserved_credit_units - settled_credit_units,
+                    event_type="ai_refund",
+                    metadata=metadata,
+                )
+            elif settled_credit_units > charge.reserved_credit_units:
+                self._credits_db_service.apply_chat_ai_debt(
+                    charge.chat_id,
+                    settled_credit_units - charge.reserved_credit_units,
+                    event_type="ai_settlement_debt",
+                    metadata=metadata,
+                )
+        except Exception:
+            logger.exception("failed to settle World Cup goal alert credits")
+
+    def _refund_chat_credits(self, charge: GoalCharge, *, reason: str) -> None:
+        if self._credits_db_service is None or charge.reserved_credit_units <= 0:
+            return
+        try:
+            self._credits_db_service.refund_chat_ai_credits(
+                charge.chat_id,
+                charge.reserved_credit_units,
+                event_type="ai_refund",
+                metadata={**charge.metadata, "reason": reason},
+            )
+        except Exception:
+            logger.exception("failed to refund World Cup goal alert credits")
+
+    def _generate_message(self, goal: Goal, *, chat_id: str) -> str:
+        prompt = self._build_prompt(goal)
+        messages = [{"role": "user", "content": prompt}]
+        charge = self._reserve_chat_credits(chat_id, goal, messages)
+        if charge is None:
+            return self._fallback_message(goal)
+
+        response_meta: dict[str, Any] = {}
+        try:
+            message = self._ask_ai(
+                messages,
+                enable_web_search=False,
+                chat_id=chat_id,
+                response_meta=response_meta,
+            ).strip()
+        except Exception:
+            logger.exception("failed to generate World Cup goal message")
+            self._refund_chat_credits(charge, reason="world_cup_goal_error")
+            message = ""
+        if message and not response_meta.get("ai_fallback"):
+            self._settle_chat_credits(
+                charge,
+                list(response_meta.get("billing_segments") or []),
+            )
+            return message
+        self._refund_chat_credits(charge, reason="world_cup_goal_fallback")
+        return self._fallback_message(goal)
 
 
 def run_world_cup_goal_monitor(
