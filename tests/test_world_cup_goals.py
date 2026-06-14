@@ -99,9 +99,11 @@ def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     goals = monitor.poll_once()
 
     assert goals == [Goal("match-1", "Argentina", "England", 1, 0)]
-    ask_ai.assert_called_once()
-    assert ask_ai.call_args.kwargs["enable_web_search"] is False
-    assert ask_ai.call_args.kwargs["response_meta"] == {}
+    assert ask_ai.call_count == 2
+    assert ask_ai.call_args_list[0].kwargs["enable_web_search"] is False
+    assert ask_ai.call_args_list[0].kwargs["chat_id"] == "chat-1"
+    assert ask_ai.call_args_list[0].kwargs["response_meta"] == {}
+    assert ask_ai.call_args_list[1].kwargs["chat_id"] == "chat-2"
     send_message.assert_any_call("chat-1", "goooooool, ingleses muertos")
     send_message.assert_any_call("chat-2", "goooooool, ingleses muertos")
     assert http_get.call_args.kwargs["params"]["dates"] == "20260613-20260615"
@@ -154,6 +156,77 @@ def test_monitor_uses_fallback_when_ai_fails():
     assert "1-0" in message
 
 
+def test_monitor_charges_chat_for_ai_goal_message_and_refunds_unused_reserve():
+    http_get = MagicMock(
+        side_effect=[
+            _response(_payload(0, 0)),
+            _response(_payload(1, 0)),
+        ]
+    )
+
+    def ask_ai(_messages, *, response_meta, **_kwargs):
+        response_meta["billing_segments"] = [
+            {
+                "kind": "chat",
+                "model": "deepseek/deepseek-v4-flash",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            }
+        ]
+        return "goooooool"
+
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    credits.charge_chat_ai_credits.return_value = {"ok": True, "source": "chat"}
+    monitor = WorldCupGoalMonitor(
+        list_chat_ids=lambda: ["-100"],
+        ask_ai=ask_ai,
+        send_message=MagicMock(),
+        http_get=http_get,
+        credits_db_service=credits,
+        estimate_ai_base_reserve_credits=lambda **_kwargs: (10, {"model": "x"}),
+    )
+
+    monitor.poll_once()
+    monitor.poll_once()
+
+    credits.charge_chat_ai_credits.assert_called_once()
+    charge_args = credits.charge_chat_ai_credits.call_args
+    assert charge_args.args[:2] == (-100, 10)
+    assert charge_args.kwargs["event_type"] == "ai_reserve"
+    assert charge_args.kwargs["metadata"]["usage_tag"] == "world_cup_goal_alert"
+    credits.refund_chat_ai_credits.assert_called_once()
+    assert credits.refund_chat_ai_credits.call_args.args[:2] == (-100, 9)
+    credits.apply_chat_ai_debt.assert_not_called()
+
+
+def test_monitor_uses_local_fallback_when_chat_has_no_credits():
+    http_get = MagicMock(
+        side_effect=[
+            _response(_payload(0, 0)),
+            _response(_payload(1, 0)),
+        ]
+    )
+    ask_ai = MagicMock()
+    send_message = MagicMock()
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    credits.charge_chat_ai_credits.return_value = {"ok": False}
+    monitor = WorldCupGoalMonitor(
+        list_chat_ids=lambda: ["-100"],
+        ask_ai=ask_ai,
+        send_message=send_message,
+        http_get=http_get,
+        credits_db_service=credits,
+        estimate_ai_base_reserve_credits=lambda **_kwargs: (10, {}),
+    )
+
+    monitor.poll_once()
+    monitor.poll_once()
+
+    ask_ai.assert_not_called()
+    assert send_message.call_args.args[1].startswith("GOOOOOOL DE ARGENTINA")
+
+
 def test_monitor_uses_local_message_for_provider_fallback():
     http_get = MagicMock(
         side_effect=[
@@ -167,14 +240,20 @@ def test_monitor_uses_local_message_for_provider_fallback():
         return "respuesta genérica"
 
     send_message = MagicMock()
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    credits.charge_chat_ai_credits.return_value = {"ok": True, "source": "chat"}
     monitor = WorldCupGoalMonitor(
-        list_chat_ids=lambda: ["chat-1"],
+        list_chat_ids=lambda: ["-100"],
         ask_ai=fallback_ai,
         send_message=send_message,
         http_get=http_get,
+        credits_db_service=credits,
+        estimate_ai_base_reserve_credits=lambda **_kwargs: (10, {}),
     )
 
     monitor.poll_once()
     monitor.poll_once()
 
     assert send_message.call_args.args[1].startswith("GOOOOOOL DE ARGENTINA")
+    credits.refund_chat_ai_credits.assert_called_once()
