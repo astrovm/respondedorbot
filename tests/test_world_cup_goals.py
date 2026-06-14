@@ -99,6 +99,12 @@ def test_preferred_team_uses_global_ranking():
     assert preferred_team("Germany", "Curaçao") == "Germany"
     assert preferred_team("Switzerland", "Canada") == "Switzerland"
     assert preferred_team("Portugal", "Uzbekistan") == "Portugal"
+    assert preferred_team("Spain", "Mexico") == "Spain"
+    assert preferred_team("Norway", "France") == "Norway"
+    assert preferred_team("Australia", "Scotland") == "Australia"
+    assert preferred_team("Czechia", "Uzbekistan") == "Czechia"
+    assert preferred_team("Czechia", "Mexico") == "Czechia"
+    assert preferred_team("Netherlands", "Sweden") == "Sweden"
 
 
 def test_goal_prompt_keeps_the_ranked_team_side():
