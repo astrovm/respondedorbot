@@ -61,3 +61,29 @@ def test_set_chat_config_applies_updates_and_persists():
     cfg = service.set_chat_config(redis_client, "123", link_mode="delete")
     assert cfg["link_mode"] == "delete"
     repo.set_chat_config.assert_called_once()
+
+
+def test_list_world_cup_goal_chat_ids_uses_repository():
+    repo = Mock(spec=ChatConfigRepository)
+    repo.is_configured.return_value = True
+    repo.list_world_cup_goal_chat_ids.return_value = ["1", "2"]
+    service = build_chat_config_service(
+        repository=repo,
+        admin_reporter=lambda *a, **k: None,
+        log_event=lambda *a, **k: None,
+    )
+
+    assert service.list_world_cup_goal_chat_ids() == ["1", "2"]
+
+
+def test_list_world_cup_goal_chat_ids_returns_empty_without_postgres():
+    repo = Mock(spec=ChatConfigRepository)
+    repo.is_configured.return_value = False
+    service = build_chat_config_service(
+        repository=repo,
+        admin_reporter=lambda *a, **k: None,
+        log_event=lambda *a, **k: None,
+    )
+
+    assert service.list_world_cup_goal_chat_ids() == []
+    repo.list_world_cup_goal_chat_ids.assert_not_called()

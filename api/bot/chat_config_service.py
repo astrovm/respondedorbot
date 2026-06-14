@@ -156,6 +156,19 @@ class ChatConfigService:
         self._cache[chat_id] = config
         return config
 
+    def list_world_cup_goal_chat_ids(self) -> list[str]:
+        if not self._repo.is_configured():
+            return []
+        try:
+            return self._repo.list_world_cup_goal_chat_ids()
+        except Exception as error:
+            self._admin_reporter(
+                "Error listing World Cup goal alert chats",
+                error,
+                {},
+            )
+            return []
+
 
 def build_chat_config_service(
     repository: Optional[ChatConfigRepository] = None,

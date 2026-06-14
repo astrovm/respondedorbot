@@ -1046,6 +1046,10 @@ def handle_config_command(
     )
 
 
+def list_world_cup_goal_chat_ids() -> list[str]:
+    return _chat_config_service.list_world_cup_goal_chat_ids()
+
+
 def _answer_callback_query(
     callback_query_id: str,
     *,

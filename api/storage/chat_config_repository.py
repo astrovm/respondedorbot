@@ -33,6 +33,9 @@ class ChatConfigRepository:
     ) -> Dict[str, Any]:
         return _pg.set_chat_config(str(chat_id), config)
 
+    def list_world_cup_goal_chat_ids(self) -> list[str]:
+        return _pg.list_world_cup_goal_chat_ids()
+
 
 def build_chat_config_repository() -> ChatConfigRepository:
     return ChatConfigRepository()

@@ -238,6 +238,7 @@ def update_callback_config(
         "random": "ai_random_replies",
         "followups": "ai_command_followups",
         "linkfixfollowups": "ignore_link_fix_followups",
+        "worldcupgoals": "world_cup_goal_alerts",
     }
     if action == "link" and value in {"reply", "delete", "off"}:
         config = context.deps.set_chat_config(
@@ -246,7 +247,10 @@ def update_callback_config(
             link_mode=value,
         )
     elif field := toggle_fields.get(action):
-        current = context.deps.coerce_bool(config.get(field), default=True)
+        current = context.deps.coerce_bool(
+            config.get(field),
+            default=field != "world_cup_goal_alerts",
+        )
         config = context.deps.set_chat_config(
             context.redis_client,
             context.chat_id,

@@ -169,7 +169,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "config",
-        "config por chat: links, followups, replies a links arreglados, timezone, random replies y límite gratis por usuario/hora",
+        "config por chat: links, followups, timezone, goles del Mundial, random replies y límite gratis por usuario/hora",
         aliases_for("config_command"),
         category="admin",
         telegram_visible=True,
