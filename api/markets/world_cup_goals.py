@@ -18,6 +18,61 @@ SCOREBOARD_URL = (
 )
 POLL_INTERVAL_SECONDS = 15
 
+WORLD_CUP_TEAM_RANKING = (
+    "Argentina",
+    "Japan",
+    "Algeria",
+    "Australia",
+    "Austria",
+    "Belgium",
+    "Bosnia-Herzegovina",
+    "Brazil",
+    "Canada",
+    "Cape Verde",
+    "Colombia",
+    "Congo DR",
+    "Croatia",
+    "Curaçao",
+    "Czechia",
+    "Ecuador",
+    "Egypt",
+    "England",
+    "France",
+    "Germany",
+    "Ghana",
+    "Haiti",
+    "Iran",
+    "Iraq",
+    "Ivory Coast",
+    "Jordan",
+    "Mexico",
+    "Morocco",
+    "Netherlands",
+    "New Zealand",
+    "Norway",
+    "Panama",
+    "Paraguay",
+    "Portugal",
+    "Qatar",
+    "Saudi Arabia",
+    "Scotland",
+    "Senegal",
+    "South Africa",
+    "South Korea",
+    "Spain",
+    "Sweden",
+    "Switzerland",
+    "Tunisia",
+    "Türkiye",
+    "United States",
+    "Uruguay",
+    "Uzbekistan",
+)
+_TEAM_RANK = {
+    team.casefold(): position
+    for position, team in enumerate(WORLD_CUP_TEAM_RANKING)
+}
+
 logger = get_logger(__name__)
 
 
@@ -154,6 +209,14 @@ def detect_goals(
     return goals
 
 
+def preferred_team(first_team: str, second_team: str) -> str:
+    first_rank = _TEAM_RANK.get(first_team.casefold(), len(_TEAM_RANK))
+    second_rank = _TEAM_RANK.get(second_team.casefold(), len(_TEAM_RANK))
+    if first_rank != second_rank:
+        return first_team if first_rank < second_rank else second_team
+    return min(first_team, second_team, key=str.casefold)
+
+
 def _date_range(now: datetime) -> str:
     utc_now = now.astimezone(UTC)
     start = (utc_now - timedelta(days=1)).strftime("%Y%m%d")
@@ -230,15 +293,31 @@ class WorldCupGoalMonitor:
             self._send_message(chat_id, message)
 
     def _build_prompt(self, goal: Goal) -> str:
+        supported_team = preferred_team(goal.scoring_team, goal.opponent)
+        scored_for_us = supported_team == goal.scoring_team
+        reaction = (
+            "Tu equipo acaba de hacer el gol: festejalo con toda la euforia y "
+            "descansá o insultá futbolísticamente al rival."
+            if scored_for_us
+            else "El rival acaba de hacerle un gol a tu equipo: reaccioná como "
+            "hincha caliente, bancá a tu equipo y puteá futbolísticamente al rival."
+        )
         return (
+            f"En este partido hinchás por {supported_team}. No cambies de bando. "
             f"{goal.scoring_team} acaba de meterle un gol a {goal.opponent}. "
             f"El partido está {goal.scoring_score}-{goal.opponent_score}. "
-            "Escribí un solo mensaje corto en español argentino: gritá el gol "
-            "con mucha euforia y descansá o insultá futbolísticamente al equipo "
-            "rival. Sin markdown ni explicación."
+            f"{reaction} Escribí un solo mensaje corto en español argentino, "
+            "sin markdown ni explicación."
         )
 
     def _fallback_message(self, goal: Goal) -> str:
+        supported_team = preferred_team(goal.scoring_team, goal.opponent)
+        if supported_team != goal.scoring_team:
+            return (
+                f"LA PUTA MADRE, {goal.scoring_team.upper()}! "
+                f"VAMOS {supported_team.upper()}, HAY QUE DARLO VUELTA! "
+                f"{goal.scoring_score}-{goal.opponent_score}"
+            )
         return (
             f"GOOOOOOL DE {goal.scoring_team.upper()}! "
             f"{goal.opponent.upper()}, SON UNOS MUERTOS, MIREN COMO DEFIENDEN! "
