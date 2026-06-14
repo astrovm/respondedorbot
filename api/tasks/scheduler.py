@@ -18,6 +18,16 @@ from api.tasks.executor import (
     build_task_executor,
     TaskExecutor,
 )
+from api.tasks.models import (
+    CronTrigger,
+    DayIntervalTrigger,
+    DelayTrigger,
+    IntervalTrigger,
+    ScheduledTaskRequest,
+    TaskTrigger,
+    parse_task_trigger,
+    trigger_config,
+)
 
 logger = get_logger(__name__)
 
@@ -159,36 +169,27 @@ def format_interval(seconds: int, prefix: str = "cada ") -> str:
 def describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
     if not trigger_config:
         return ""
+    parsed = parse_task_trigger(trigger_config=trigger_config)
+    return describe_task_trigger(parsed.trigger) if parsed.trigger else ""
 
-    trigger_type = trigger_config.get("type", "interval")
 
-    if trigger_type == "cron":
-        hour = trigger_config.get("hour")
-        minute = trigger_config.get("minute", 0)
-        day_of_week = trigger_config.get("day_of_week")
-        day = trigger_config.get("day")
-        time_str = f"{hour:02d}:{minute:02d}" if hour is not None else "a alguna hora"
-
-        if day_of_week:
-            weekday_tokens = []
-            for token in str(day_of_week).split(","):
-                normalized = token.strip().lower()
-                if normalized:
-                    weekday_tokens.append(
-                        _ENGLISH_TO_SPANISH_WEEKDAY.get(normalized, normalized)
-                    )
-            weekdays_text = ", ".join(weekday_tokens) or str(day_of_week)
-            return f"los {weekdays_text} a las {time_str}"
-        if day:
-            return f"el dia {day} de cada mes a las {time_str}"
-        return f"todos los dias a las {time_str}"
-
-    if trigger_type == "interval":
-        days = trigger_config.get("days", 0)
-        if days > 0:
-            return f"cada {days} dias"
-
-    return ""
+def describe_task_trigger(trigger: TaskTrigger) -> str:
+    if isinstance(trigger, CronTrigger):
+        time_text = f"{trigger.hour:02d}:{trigger.minute:02d}"
+        if trigger.weekdays:
+            weekdays = ", ".join(
+                _ENGLISH_TO_SPANISH_WEEKDAY.get(day, day)
+                for day in trigger.weekdays
+            )
+            return f"los {weekdays} a las {time_text}"
+        if trigger.day is not None:
+            return f"el dia {trigger.day} de cada mes a las {time_text}"
+        return f"todos los dias a las {time_text}"
+    if isinstance(trigger, DayIntervalTrigger):
+        return f"cada {trigger.days} dias"
+    if isinstance(trigger, IntervalTrigger):
+        return format_interval(trigger.seconds)
+    return format_interval(trigger.seconds, "en ")
 
 
 def format_task_summary(task: Dict[str, Any], *, prefix: str = "") -> str:
@@ -396,19 +397,75 @@ def _execute_and_cleanup(
             )
 
 
-def schedule_task(
-    chat_id: str,
-    text: str,
-    delay_seconds: Optional[int] = None,
-    interval_seconds: Optional[int] = None,
-    user_name: str = "",
-    user_id: Optional[int] = None,
-    trigger_config: Optional[Dict[str, Any]] = None,
-    timezone_offset: int = -3,
-) -> Optional[str]:
-    if delay_seconds is None and interval_seconds is None and not trigger_config:
+def _run_date(trigger: TaskTrigger) -> datetime | None:
+    if not isinstance(trigger, DelayTrigger):
         return None
+    return datetime.fromtimestamp(
+        datetime.now(UTC).timestamp() + trigger.seconds,
+        tz=UTC,
+    )
 
+
+def _task_payload(
+    task_id: str,
+    request: ScheduledTaskRequest,
+    run_date: datetime | None,
+) -> Dict[str, Any]:
+    interval_seconds = (
+        request.trigger.seconds
+        if isinstance(request.trigger, IntervalTrigger)
+        else None
+    )
+    return {
+        "id": task_id,
+        "chat_id": request.chat_id,
+        "text": request.text,
+        "user_name": request.user_name,
+        "user_id": request.user_id,
+        "interval_seconds": interval_seconds,
+        "run_date": run_date.isoformat() if run_date else None,
+        "trigger_config": trigger_config(request.trigger),
+        "timezone_offset": _coerce_timezone_offset(request.timezone_offset),
+    }
+
+
+def _add_scheduled_job(
+    scheduler: Any,
+    task_id: str,
+    trigger: TaskTrigger,
+    timezone_offset: int,
+    run_date: datetime | None,
+) -> None:
+    common = {
+        "id": f"task_{task_id}",
+        "args": [task_id],
+        "replace_existing": True,
+    }
+    if isinstance(trigger, CronTrigger):
+        kwargs: Dict[str, Any] = {
+            "timezone": timezone(timedelta(hours=timezone_offset)),
+            "hour": trigger.hour,
+            "minute": trigger.minute,
+        }
+        if trigger.weekdays:
+            kwargs["day_of_week"] = ",".join(trigger.weekdays)
+        if trigger.day is not None:
+            kwargs["day"] = trigger.day
+        scheduler.add_job(_fire_task, "cron", **common, **kwargs)
+    elif isinstance(trigger, DayIntervalTrigger):
+        scheduler.add_job(_fire_task, "interval", days=trigger.days, **common)
+    elif isinstance(trigger, IntervalTrigger):
+        scheduler.add_job(
+            _fire_task,
+            "interval",
+            seconds=trigger.seconds,
+            **common,
+        )
+    elif run_date is not None:
+        scheduler.add_job(_fire_task, "date", run_date=run_date, **common)
+
+
+def schedule_task(request: ScheduledTaskRequest) -> Optional[str]:
     scheduler = get_scheduler()
     if scheduler is None:
         return None
@@ -419,27 +476,9 @@ def schedule_task(
         return None
 
     task_id = str(uuid.uuid4())[:8]
-
-    run_date = None
-
-    if delay_seconds is not None:
-        run_date = datetime.fromtimestamp(
-            datetime.now(UTC).timestamp() + delay_seconds,
-            tz=UTC,
-        )
-
+    run_date = _run_date(request.trigger)
     redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
-    data = {
-        "id": task_id,
-        "chat_id": str(chat_id),
-        "text": text,
-        "user_name": user_name,
-        "user_id": user_id,
-        "interval_seconds": interval_seconds,
-        "run_date": run_date.isoformat() if run_date else None,
-        "trigger_config": trigger_config,
-        "timezone_offset": _coerce_timezone_offset(timezone_offset),
-    }
+    data = _task_payload(task_id, request, run_date)
     try:
         redis_client.setex(redis_key, TASK_INDEX_TTL, json.dumps(data))
         _index_task(redis_client, data)
@@ -447,61 +486,19 @@ def schedule_task(
         logger.error("failed to persist task %s: %s", task_id, e)
         try:
             redis_client.delete(redis_key)
-            redis_client.zrem(_task_index_key(str(chat_id)), task_id)
+            redis_client.zrem(_task_index_key(request.chat_id), task_id)
         except Exception:
             pass
         return None
 
     try:
-        if trigger_config and trigger_config.get("type") == "cron":
-            tz = timezone(timedelta(hours=timezone_offset))
-
-            cron_kwargs: Dict[str, Any] = {"timezone": tz}
-            for key, conv in (
-                ("hour", int),
-                ("minute", int),
-                ("day", int),
-                ("day_of_week", str),
-            ):
-                if key in trigger_config:
-                    cron_kwargs[key] = conv(trigger_config[key])
-
-            scheduler.add_job(
-                _fire_task,
-                "cron",
-                id=f"task_{task_id}",
-                args=[task_id],
-                replace_existing=True,
-                **cron_kwargs,
-            )
-        elif trigger_config and trigger_config.get("type") == "interval":
-            days = int(trigger_config.get("days", 1))
-            scheduler.add_job(
-                _fire_task,
-                "interval",
-                days=max(days, 1),
-                id=f"task_{task_id}",
-                args=[task_id],
-                replace_existing=True,
-            )
-        elif interval_seconds:
-            scheduler.add_job(
-                _fire_task,
-                "interval",
-                seconds=interval_seconds,
-                id=f"task_{task_id}",
-                args=[task_id],
-                replace_existing=True,
-            )
-        elif run_date:
-            scheduler.add_job(
-                _fire_task,
-                "date",
-                run_date=run_date,
-                id=f"task_{task_id}",
-                args=[task_id],
-                replace_existing=True,
-            )
+        _add_scheduled_job(
+            scheduler,
+            task_id,
+            request.trigger,
+            request.timezone_offset,
+            run_date,
+        )
     except Exception as e:
         logger.error("add_job failed for %s: %s", task_id, e)
         if redis_client is not None:
