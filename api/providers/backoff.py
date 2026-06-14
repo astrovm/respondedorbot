@@ -2,7 +2,7 @@
 
 When a provider returns HTTP 429, we mark it as cooled down for a period
 extracted from retry-after headers (or a default). Calls always fall through
-to the next provider in the chain — backoff is advisory, not a hard block.
+to the next provider in the chain; backoff is advisory, not a hard block.
 """
 
 from __future__ import annotations

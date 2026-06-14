@@ -1,3 +1,5 @@
+"""Send Telegram Bot API requests and higher-level message operations."""
+
 from __future__ import annotations
 
 import json

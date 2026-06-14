@@ -1,3 +1,5 @@
+"""Build token signal cards from market and social metadata."""
+
 from __future__ import annotations
 
 import html

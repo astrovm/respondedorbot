@@ -1,3 +1,5 @@
+"""Resolve provider models, credentials, and endpoint configuration."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping

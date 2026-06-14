@@ -1,3 +1,5 @@
+"""Adapt python-telegram-bot updates to the application runtime."""
+
 from __future__ import annotations
 
 import asyncio

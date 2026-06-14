@@ -1,3 +1,5 @@
+"""Handle user-facing credit balance and transfer commands."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Protocol, Tuple

@@ -1,3 +1,5 @@
+"""Build and expose the application's fully wired runtime."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone, date, UTC
@@ -233,18 +235,17 @@ from api.utils.youtube_transcript import (
     get_youtube_transcript_context,
 )
 
-# TTL constants (seconds)
-TTL_PRICE = 300  # 5 minutes
-TTL_DOLLAR = 300  # 5 minutes
-TTL_WEATHER = 1800  # 30 minutes
-TTL_LINK_METADATA = 300  # 5 minutes
-TTL_POLYMARKET = 5  # 5 seconds
-TTL_POLYMARKET_STREAM = 5  # 5 seconds for live price lookups
+TTL_PRICE = 300
+TTL_DOLLAR = 300
+TTL_WEATHER = 1800
+TTL_LINK_METADATA = 300
+TTL_POLYMARKET = 5
+TTL_POLYMARKET_STREAM = 5
 LINK_METADATA_MAX_BYTES = 64_000
 MAX_LINKS_IN_MESSAGE = 3
-TTL_MEDIA_CACHE = 7 * 24 * 60 * 60  # 7 days
-TTL_HACKER_NEWS = 600  # 10 minutes
-TTL_STOCK_SCREENER = 3600  # 1 hour
+TTL_MEDIA_CACHE = 7 * 24 * 60 * 60
+TTL_HACKER_NEWS = 600
+TTL_STOCK_SCREENER = 3600
 DOLLAR_FORMATTED_STALE_GRACE = 30 * 60
 STABLE_AI_CONTEXT_TTL = 60
 
@@ -293,7 +294,7 @@ _BACKGROUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 atexit.register(_BACKGROUND_REFRESH_EXECUTOR.shutdown, wait=False)
 
-# Timeframe support for /usd (maps to Redis hourly snapshot lookback)
+# Maps /usd timeframes to Redis hourly snapshot lookbacks.
 _DOLLAR_TIMEFRAME_HOURS: Dict[str, int] = {
     "1h": 1,
     "6h": 6,

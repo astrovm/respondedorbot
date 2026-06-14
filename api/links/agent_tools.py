@@ -1,3 +1,5 @@
+"""Fetch public web content for AI tools with SSRF and size controls."""
+
 from __future__ import annotations
 
 import ipaddress

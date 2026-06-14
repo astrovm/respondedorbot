@@ -1,4 +1,4 @@
-"""task_set tool — create a one-shot or recurring task."""
+"""Create one-shot and recurring tasks requested by the AI."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""calculate tool — safe math evaluator for agentic use."""
+"""Evaluate arithmetic expressions requested by the AI."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""task_list tool — list all tasks for a chat."""
+"""List scheduled tasks for the current chat."""
 
 from __future__ import annotations
 

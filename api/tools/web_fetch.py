@@ -1,4 +1,4 @@
-"""web_fetch tool — wraps fetch_url_content for agentic use."""
+"""Fetch a public URL requested by the AI."""
 
 from __future__ import annotations
 

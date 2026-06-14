@@ -190,7 +190,6 @@ def ask_ai(
     """Run the full non-streaming request and fall back to a local reply."""
 
     try:
-        # Build prompt -> optionally describe image -> ask provider.
         system_message, messages, extra_tools, tool_context = build_request(
             messages,
             chat_id=chat_id,

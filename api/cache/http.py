@@ -1,3 +1,5 @@
+"""Cache external HTTP responses with stale-data recovery."""
+
 from __future__ import annotations
 
 import hashlib
