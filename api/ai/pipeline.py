@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import inspect
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 _logger = logging.getLogger(__name__)
@@ -30,6 +31,39 @@ INSTRUCCIONES_BASE = [
     "- respondé en minúsculas, sin emojis, sin punto final",
     "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
 ]
+
+
+@dataclass(frozen=True)
+class AIResponseRequest:
+    chat_id: str
+    handler: Callable[..., Any]
+    messages: List[Dict[str, Any]]
+    image_data: Optional[bytes] = None
+    image_file_id: Optional[str] = None
+    context_texts: Optional[Sequence[Optional[str]]] = None
+    user_identity: Optional[str] = None
+    response_meta: Optional[Dict[str, Any]] = None
+    user_id: Optional[int] = None
+    timezone_offset: int = -3
+    reply_to_message_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AIResponseRuntime:
+    send_typing: Callable[[str, str], None]
+    telegram_token: Optional[str]
+    reset_request_count: Callable[[], Any]
+    restore_request_count: Callable[[Any], None]
+    get_request_count: Callable[[], int]
+
+
+@dataclass(frozen=True)
+class _CleanupStages:
+    raw: str
+    persona: str
+    context: str
+    identity: str
+    final: str
 
 
 def _extract_user_name(user_identity: Optional[str]) -> str:
@@ -158,121 +192,139 @@ def strip_user_identity_prefix(response: str, user_identity: Optional[str]) -> s
     return pattern.sub("", response, count=1).lstrip()
 
 
-def handle_ai_response(
-    chat_id: str,
-    handler_func: Callable[..., Any],
-    messages: List[Dict[str, Any]],
+def _invoke_ask_ai(
+    request: AIResponseRequest,
     *,
-    image_data: Optional[bytes] = None,
-    image_file_id: Optional[str] = None,
-    context_texts: Optional[Sequence[Optional[str]]] = None,
-    user_identity: Optional[str] = None,
-    response_meta: Optional[Dict[str, Any]] = None,
-    user_id: Optional[int] = None,
-    timezone_offset: int = -3,
-    reply_to_message_id: Optional[str] = None,
-    send_typing_fn: Callable[[str, str], None],
-    telegram_token: Optional[str],
-    reset_request_count_fn: Callable[[], Any],
-    restore_request_count_fn: Callable[[Any], None],
-    get_request_count_fn: Callable[[], int],
+    user_name: str,
+) -> Any:
+    kwargs: Dict[str, Any] = {
+        "response_meta": request.response_meta,
+        "chat_id": request.chat_id,
+        "user_name": user_name,
+        "user_id": request.user_id,
+        "timezone_offset": request.timezone_offset,
+    }
+    if request.image_data:
+        kwargs["image_data"] = request.image_data
+        kwargs["image_file_id"] = request.image_file_id
+    return request.handler(request.messages, **kwargs)
+
+
+def _generic_handler_kwargs(request: AIResponseRequest) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {}
+    if request.response_meta is not None:
+        kwargs["response_meta"] = request.response_meta
+    if request.reply_to_message_id is not None:
+        kwargs["reply_to_message_id"] = request.reply_to_message_id
+    if request.image_data is not None:
+        kwargs["image_data"] = request.image_data
+        kwargs["image_file_id"] = request.image_file_id
+    return kwargs
+
+
+def _invoke_generic_handler(request: AIResponseRequest) -> Any:
+    kwargs = _generic_handler_kwargs(request)
+    if not kwargs:
+        return request.handler(request.messages)
+
+    try:
+        parameters = inspect.signature(request.handler).parameters
+    except (TypeError, ValueError):
+        return request.handler(request.messages)
+
+    accepted_kwargs = {
+        key: value for key, value in kwargs.items() if key in parameters
+    }
+    return request.handler(request.messages, **accepted_kwargs)
+
+
+def _invoke_handler(request: AIResponseRequest, handler_name: str) -> Any:
+    if handler_name == "ask_ai":
+        return _invoke_ask_ai(
+            request,
+            user_name=_extract_user_name(request.user_identity),
+        )
+    return _invoke_generic_handler(request)
+
+
+def _clean_response(request: AIResponseRequest, response: Any) -> _CleanupStages:
+    raw = str(response or "")
+    persona = remove_gordo_prefix(raw)
+    context = strip_leading_context(persona, request.context_texts)
+    identity = strip_user_identity_prefix(context, request.user_identity)
+    final = strip_markdown_formatting(clean_duplicate_response(identity))
+    return _CleanupStages(
+        raw=raw,
+        persona=persona,
+        context=context,
+        identity=identity,
+        final=final,
+    )
+
+
+def _empty_response_fallback(
+    request: AIResponseRequest,
+    handler_name: str,
+    cleanup: _CleanupStages,
+) -> str:
+    was_fallback = (
+        bool(request.response_meta.get("ai_fallback"))
+        if request.response_meta
+        else False
+    )
+    if request.response_meta is not None:
+        request.response_meta["ai_fallback"] = True
+    _logger.warning(
+        "cleaned response empty handler=%s ai_fallback=%s raw_len=%d",
+        handler_name or "<unknown>",
+        was_fallback,
+        len(cleanup.raw),
+    )
+    _logger.debug(
+        "empty response previews raw='%s' persona='%s' context='%s' prefix='%s'",
+        _preview_for_log(cleanup.raw),
+        _preview_for_log(cleanup.persona),
+        _preview_for_log(cleanup.context),
+        _preview_for_log(cleanup.identity),
+    )
+    return "me quedé reculando y no te pude responder, probá de nuevo"
+
+
+def handle_ai_response(
+    request: AIResponseRequest,
+    runtime: AIResponseRuntime,
 ) -> str:
     """Handle AI API responses and apply the response cleanup pipeline."""
 
-    if telegram_token:
-        send_typing_fn(telegram_token, chat_id)
+    if runtime.telegram_token:
+        runtime.send_typing(runtime.telegram_token, request.chat_id)
 
-    handler_name = getattr(handler_func, "__name__", "")
+    handler_name = getattr(request.handler, "__name__", "")
     is_ask_ai_handler = handler_name == "ask_ai"
     request_count_token: Optional[Any] = None
     if is_ask_ai_handler:
-        request_count_token = reset_request_count_fn()
-
-    user_name = _extract_user_name(user_identity)
+        request_count_token = runtime.reset_request_count()
 
     try:
-        if image_data and is_ask_ai_handler:
-            response = handler_func(
-                messages,
-                image_data=image_data,
-                image_file_id=image_file_id,
-                response_meta=response_meta,
-                chat_id=chat_id,
-                user_name=user_name,
-                user_id=user_id,
-                timezone_offset=timezone_offset,
-            )
-        elif is_ask_ai_handler:
-            response = handler_func(
-                messages,
-                response_meta=response_meta,
-                chat_id=chat_id,
-                user_name=user_name,
-                user_id=user_id,
-                timezone_offset=timezone_offset,
-            )
-        else:
-            kwargs: Dict[str, Any] = {}
-            if response_meta is not None:
-                kwargs["response_meta"] = response_meta
-            if reply_to_message_id is not None:
-                kwargs["reply_to_message_id"] = reply_to_message_id
-            if image_data is not None:
-                kwargs["image_data"] = image_data
-                kwargs["image_file_id"] = image_file_id
-            if kwargs:
-                try:
-                    sig = inspect.signature(handler_func)
-                    accepted_kwargs = {
-                        key: value for key, value in kwargs.items() if key in sig.parameters
-                    }
-                    response = handler_func(messages, **accepted_kwargs)
-                except (TypeError, ValueError):
-                    response = handler_func(messages)
-            else:
-                response = handler_func(messages)
+        response = _invoke_handler(request, handler_name)
     finally:
         if request_count_token is not None:
-            if response_meta is not None:
-                response_meta["provider_request_count"] = get_request_count_fn()
-            restore_request_count_fn(request_count_token)
+            if request.response_meta is not None:
+                request.response_meta["provider_request_count"] = (
+                    runtime.get_request_count()
+                )
+            runtime.restore_request_count(request_count_token)
 
-    response_text = str(response or "")
-
-    persona_stripped_response = remove_gordo_prefix(response_text)
-    context_stripped_response = strip_leading_context(
-        persona_stripped_response, context_texts
-    )
-    prefix_stripped_response = strip_user_identity_prefix(
-        context_stripped_response, user_identity
-    )
-    cleaned_response = clean_duplicate_response(prefix_stripped_response)
-    cleaned_response = strip_markdown_formatting(cleaned_response)
-
-    if not cleaned_response.strip():
-        was_fallback = bool(response_meta.get("ai_fallback")) if response_meta else False
-        if response_meta is not None:
-            response_meta["ai_fallback"] = True
-        _logger.warning(
-            "cleaned response empty handler=%s ai_fallback=%s raw_len=%d",
-            handler_name or "<unknown>",
-            was_fallback,
-            len(response_text),
-        )
-        _logger.debug(
-            "empty response previews raw='%s' persona='%s' context='%s' prefix='%s'",
-            _preview_for_log(response_text),
-            _preview_for_log(persona_stripped_response),
-            _preview_for_log(context_stripped_response),
-            _preview_for_log(prefix_stripped_response),
-        )
-        return "me quedé reculando y no te pude responder, probá de nuevo"
-
-    return cleaned_response
+    cleanup = _clean_response(request, response)
+    if cleanup.final.strip():
+        return cleanup.final
+    return _empty_response_fallback(request, handler_name, cleanup)
 
 
 __all__ = [
     "INSTRUCCIONES_BASE",
+    "AIResponseRequest",
+    "AIResponseRuntime",
     "clean_duplicate_response",
     "handle_ai_response",
     "remove_gordo_prefix",
