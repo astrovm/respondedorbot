@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +11,11 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from requests.exceptions import RequestException
 
+from api.utils.bounded_http import (
+    BoundedHttpResponse,
+    decode_bounded_body,
+    read_bounded_response,
+)
 from api.utils.http import request_with_ssl_fallback
 
 FETCH_TIMEOUT = 8
@@ -89,15 +95,6 @@ def _extract_redirect_url(base_url: str, response: Any) -> Optional[str]:
     if not redirected:
         return None
     return redirected
-
-
-def _decode_response_body(
-    body: bytes, encoding: Optional[str], fallback: Optional[str]
-) -> str:
-    try:
-        return body.decode(encoding or fallback or "utf-8", errors="replace")
-    except Exception:
-        return body.decode("utf-8", errors="replace")
 
 
 class HtmlTextExtractor(HTMLParser):
@@ -196,6 +193,89 @@ def _truncate_content(content: str) -> tuple[str, bool]:
     return content[:FETCH_MAX_CHARS].rstrip(), True
 
 
+@dataclass(frozen=True, slots=True)
+class PublicFetchResult:
+    url: str
+    response: Any | None = None
+    error: str | None = None
+
+
+def _close_response(response: Any) -> None:
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def _fetch_public_response(
+    url: str,
+    headers: Dict[str, str],
+) -> PublicFetchResult:
+    current_url = url
+    for _ in range(FETCH_MAX_REDIRECTS + 1):
+        try:
+            response = request_with_ssl_fallback(
+                current_url,
+                allow_redirects=False,
+                timeout=FETCH_TIMEOUT,
+                stream=True,
+                headers=headers,
+            )
+        except RequestException:
+            return PublicFetchResult(
+                url=current_url,
+                error="no se pudo obtener la url",
+            )
+
+        redirected_url = _extract_redirect_url(current_url, response)
+        if not redirected_url:
+            try:
+                response.raise_for_status()
+            except RequestException:
+                _close_response(response)
+                return PublicFetchResult(
+                    url=current_url,
+                    error="no se pudo obtener la url",
+                )
+            return PublicFetchResult(url=current_url, response=response)
+        _close_response(response)
+        if _is_blocked_url(redirected_url):
+            return PublicFetchResult(
+                url=redirected_url,
+                error="url no permitida",
+            )
+        current_url = redirected_url
+    return PublicFetchResult(
+        url=current_url,
+        error="no se pudo obtener la url",
+    )
+
+
+def _content_payload(
+    bounded: BoundedHttpResponse,
+    final_url: str,
+) -> Dict[str, Any]:
+    decoded = decode_bounded_body(bounded)
+    is_html = (
+        "html" in bounded.content_type
+        or b"<html" in bounded.body[:400].lower()
+    )
+    if is_html:
+        title, content = extract_text_from_html(decoded)
+    else:
+        title = None
+        content = re.sub(r"\s+", " ", unescape(decoded)).strip()
+    content, text_truncated = _truncate_content(content)
+    return {
+        "url": final_url,
+        "status": bounded.status,
+        "content_type": bounded.content_type,
+        "title": title,
+        "content": content,
+        "truncated": bounded.truncated or text_truncated,
+    }
+
+
 def fetch_url_content(url: str) -> Dict[str, Any]:
     normalized_url = normalize_http_url(url)
     if not normalized_url:
@@ -212,96 +292,19 @@ def fetch_url_content(url: str) -> Dict[str, Any]:
         )
     }
 
-    current_url = normalized_url
-    response = None
-    for _ in range(FETCH_MAX_REDIRECTS + 1):
-        try:
-            response = request_with_ssl_fallback(
-                current_url,
-                allow_redirects=False,
-                timeout=FETCH_TIMEOUT,
-                stream=True,
-                headers=request_headers,
-            )
-        except RequestException:
-            return {"url": current_url, "error": "no se pudo obtener la url"}
+    fetched = _fetch_public_response(normalized_url, request_headers)
+    if fetched.error or fetched.response is None:
+        return {
+            "url": fetched.url,
+            "error": fetched.error or "no se pudo obtener la url",
+        }
 
-        redirected_url = _extract_redirect_url(current_url, response)
-        if not redirected_url:
-            try:
-                response.raise_for_status()
-            except RequestException:
-                return {"url": current_url, "error": "no se pudo obtener la url"}
-            break
-        try:
-            response.close()
-        except Exception:
-            pass
-        if _is_blocked_url(redirected_url):
-            return {"url": redirected_url, "error": "url no permitida"}
-        current_url = redirected_url
-    else:
-        return {"url": current_url, "error": "no se pudo obtener la url"}
-
-    if response is None or getattr(response, "status_code", 0) >= 300:
-        return {"url": current_url, "error": "no se pudo obtener la url"}
-
-    final_url = current_url
-    content_type = ""
-    status_code = getattr(response, "status_code", None)
-    resp_encoding = getattr(response, "encoding", None)
-    resp_apparent_encoding = getattr(response, "apparent_encoding", None)
-    body = b""
-    body_truncated = False
-    try:
-        maybe_url = normalize_http_url(str(getattr(response, "url", "") or ""))
-        if maybe_url:
-            final_url = maybe_url
-        if _is_blocked_url(final_url):
-            return {"url": final_url, "error": "url no permitida"}
-
-        content_type = str(response.headers.get("Content-Type", "")).lower()
-        chunks = []
-        total = 0
-        for chunk in response.iter_content(chunk_size=4096):
-            if not chunk:
-                continue
-            remaining = FETCH_MAX_BYTES - total
-            if remaining <= 0:
-                body_truncated = True
-                break
-            if len(chunk) > remaining:
-                chunks.append(chunk[:remaining])
-                total += remaining
-                body_truncated = True
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        body = b"".join(chunks)
-    finally:
-        try:
-            response.close()
-        except Exception:
-            pass
-
-    decoded = _decode_response_body(
-        body,
-        resp_encoding,
-        resp_apparent_encoding,
+    bounded = read_bounded_response(
+        fetched.response,
+        max_bytes=FETCH_MAX_BYTES,
+        fallback_url=fetched.url,
     )
-    is_html = "html" in content_type or b"<html" in body[:400].lower()
-    if is_html:
-        title, content = extract_text_from_html(decoded)
-    else:
-        title = None
-        content = re.sub(r"\s+", " ", unescape(decoded)).strip()
-
-    content, text_truncated = _truncate_content(content)
-    return {
-        "url": final_url,
-        "status": status_code,
-        "content_type": content_type,
-        "title": title,
-        "content": content,
-        "truncated": body_truncated or text_truncated,
-    }
+    final_url = normalize_http_url(bounded.url) or fetched.url
+    if _is_blocked_url(final_url):
+        return {"url": final_url, "error": "url no permitida"}
+    return _content_payload(bounded, final_url)
