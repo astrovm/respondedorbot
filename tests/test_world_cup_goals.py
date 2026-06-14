@@ -95,6 +95,8 @@ def test_preferred_team_uses_global_ranking():
     assert preferred_team("Germany", "Morocco") == "Germany"
     assert preferred_team("United States", "Senegal") == "United States"
     assert preferred_team("Australia", "Qatar") == "Australia"
+    assert preferred_team("Haiti", "Scotland") == "Scotland"
+    assert preferred_team("Germany", "Curaçao") == "Germany"
 
 
 def test_goal_prompt_keeps_the_ranked_team_side():
