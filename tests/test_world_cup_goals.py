@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from api.markets.world_cup_goals import (
     Goal,
     MatchScore,
+    WORLD_CUP_TEAM_RANKING,
     WorldCupGoalMonitor,
     detect_goals,
     parse_scoreboard,
@@ -80,10 +81,20 @@ def test_detect_goals_preserves_multiple_score_increments_between_polls():
 
 
 def test_preferred_team_uses_global_ranking():
+    assert len(WORLD_CUP_TEAM_RANKING) == 48
+    assert len(set(WORLD_CUP_TEAM_RANKING)) == 48
+    assert WORLD_CUP_TEAM_RANKING[:3] == ("Argentina", "Japan", "South Korea")
+    assert WORLD_CUP_TEAM_RANKING[-1] == "Brazil"
     assert preferred_team("England", "Argentina") == "Argentina"
     assert preferred_team("Japan", "Argentina") == "Argentina"
     assert preferred_team("Japan", "Brazil") == "Japan"
-    assert preferred_team("France", "Germany") == "France"
+    assert preferred_team("South Korea", "Uruguay") == "South Korea"
+    assert preferred_team("Uruguay", "Brazil") == "Uruguay"
+    assert preferred_team("Mexico", "Brazil") == "Mexico"
+    assert preferred_team("England", "Brazil") == "England"
+    assert preferred_team("Germany", "Morocco") == "Germany"
+    assert preferred_team("United States", "Senegal") == "United States"
+    assert preferred_team("Australia", "Qatar") == "Australia"
 
 
 def test_goal_prompt_keeps_the_ranked_team_side():
