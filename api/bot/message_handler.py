@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from os import environ
 from typing import (
     Any,
@@ -800,6 +800,106 @@ def _probe_message_content(
     return deps.extract_message_content(message)
 
 
+def _should_process_media(prepared: PreparedMessage, auto_process_media: bool) -> bool:
+    return auto_process_media and not prepared.message_text.strip().lower().startswith(
+        "/transcribe"
+    )
+
+
+def _process_audio_media(
+    prepared: PreparedMessage,
+    *,
+    message: Dict[str, Any],
+    deps: MessageHandlerDeps,
+    billing_helper: AIMessageBilling,
+) -> PreparedMessage:
+    audio_file_id = prepared.audio_file_id
+    if not audio_file_id:
+        return prepared
+
+    duration = _resolve_audio_duration_seconds(
+        message,
+        audio_file_id=audio_file_id,
+        deps=deps,
+    )
+    if duration is None:
+        return replace(
+            prepared,
+            audio_duration_seconds=0.0,
+            early_response="ok" if not prepared.message_text else None,
+        )
+
+    media_charge_meta, reserve_error = _reserve_media_credits(
+        deps,
+        billing_helper,
+        "transcribe",
+        estimate_transcribe_reserve_credits(duration),
+        reason="auto_audio_media",
+        metadata={"audio_seconds": duration},
+    )
+    if reserve_error == "rate_limited":
+        chat_id = str(
+            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
+        )
+        return replace(
+            prepared,
+            audio_duration_seconds=duration,
+            early_response=deps.handle_rate_limit(chat_id, message),
+        )
+    if reserve_error:
+        return replace(
+            prepared,
+            audio_duration_seconds=duration,
+            early_response=reserve_error,
+        )
+
+    transcription, error, billing_segment = deps._transcribe_audio_file(
+        audio_file_id,
+        use_cache=False,
+    )
+    _settle_media_result(
+        billing_helper,
+        media_charge_meta,
+        [billing_segment] if billing_segment else [],
+        bool(transcription),
+        settle_reason="auto_audio_media_success",
+        refund_reason="auto_audio_transcribe_failed",
+    )
+    message_text = transcription or (
+        deps._transcription_error_message(
+            error,
+            download_message="no pude bajar tu audio, mandalo de vuelta",
+            transcribe_message="mandame texto que no soy alexa, boludo",
+        )
+        or "mandame texto que no soy alexa, boludo"
+    )
+    return replace(
+        prepared,
+        message_text=message_text,
+        audio_duration_seconds=duration,
+    )
+
+
+def _process_photo_media(
+    prepared: PreparedMessage,
+    *,
+    deps: MessageHandlerDeps,
+) -> PreparedMessage:
+    if not prepared.photo_file_id:
+        return prepared
+
+    image_data = deps.download_telegram_file(prepared.photo_file_id)
+    if image_data:
+        return replace(
+            prepared,
+            message_text=prepared.message_text or "que onda con esta foto",
+            resized_image_data=deps.resize_image_if_needed(image_data),
+        )
+    if prepared.message_text:
+        return prepared
+    return replace(prepared, message_text="no pude ver tu foto, boludo")
+
+
 def _process_message_media(
     prepared: PreparedMessage,
     *,
@@ -808,111 +908,19 @@ def _process_message_media(
     deps: MessageHandlerDeps,
     billing_helper: AIMessageBilling,
 ) -> PreparedMessage:
-    """Transcribe audio and resize images. Expensive — only call after should_respond."""
-    message_text = prepared.message_text
-    photo_file_id = prepared.photo_file_id
-    audio_file_id = prepared.audio_file_id
-    audio_duration_seconds = prepared.audio_duration_seconds
-    resized_image_data: Optional[bytes] = None
+    """Transcribe audio and resize images after response routing is decided."""
+    if not _should_process_media(prepared, auto_process_media):
+        return prepared
 
-    if (
-        auto_process_media
-        and audio_file_id
-        and not (
-            message_text and message_text.strip().lower().startswith("/transcribe")
-        )
-    ):
-        resolved_audio_duration = _resolve_audio_duration_seconds(
-            message,
-            audio_file_id=audio_file_id,
-            deps=deps,
-        )
-        if resolved_audio_duration is None:
-            if not message_text:
-                return PreparedMessage(
-                    message_text=message_text,
-                    photo_file_id=photo_file_id,
-                    audio_file_id=audio_file_id,
-                    audio_duration_seconds=0.0,
-                    early_response="ok",
-                )
-            return PreparedMessage(
-                message_text=message_text,
-                photo_file_id=photo_file_id,
-                audio_file_id=audio_file_id,
-                audio_duration_seconds=0.0,
-            )
-        audio_duration_seconds = resolved_audio_duration
-        reserved_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
-        media_charge_meta, reserve_error = _reserve_media_credits(
-            deps, billing_helper, "transcribe", reserved_credits,
-            reason="auto_audio_media",
-            metadata={"audio_seconds": audio_duration_seconds},
-        )
-        if reserve_error == "rate_limited":
-            rate_limited_chat_id = str(
-                cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
-            )
-            return PreparedMessage(
-                message_text=message_text,
-                photo_file_id=photo_file_id,
-                audio_file_id=audio_file_id,
-                audio_duration_seconds=audio_duration_seconds,
-                early_response=deps.handle_rate_limit(rate_limited_chat_id, message),
-            )
-        if reserve_error:
-            return PreparedMessage(
-                message_text=message_text,
-                photo_file_id=photo_file_id,
-                audio_file_id=audio_file_id,
-                audio_duration_seconds=audio_duration_seconds,
-                early_response=reserve_error,
-            )
-
-        transcription, err, billing_segment = deps._transcribe_audio_file(
-            audio_file_id, use_cache=False
-        )
-        _settle_media_result(
-            billing_helper, media_charge_meta,
-            [billing_segment] if billing_segment else [],
-            bool(transcription),
-            settle_reason="auto_audio_media_success",
-            refund_reason="auto_audio_transcribe_failed",
-        )
-        if transcription:
-            message_text = transcription
-        else:
-            message_text = (
-                deps._transcription_error_message(
-                    err,
-                    download_message="no pude bajar tu audio, mandalo de vuelta",
-                    transcribe_message="mandame texto que no soy alexa, boludo",
-                )
-                or "mandame texto que no soy alexa, boludo"
-            )
-
-    if (
-        auto_process_media
-        and photo_file_id
-        and not (
-            message_text and message_text.strip().lower().startswith("/transcribe")
-        )
-    ):
-        image_data = deps.download_telegram_file(photo_file_id)
-        if image_data:
-            resized_image_data = deps.resize_image_if_needed(image_data)
-            if not message_text:
-                message_text = "que onda con esta foto"
-        elif not message_text:
-            message_text = "no pude ver tu foto, boludo"
-
-    return PreparedMessage(
-        message_text=message_text,
-        photo_file_id=photo_file_id,
-        audio_file_id=audio_file_id,
-        resized_image_data=resized_image_data,
-        audio_duration_seconds=audio_duration_seconds,
+    processed = _process_audio_media(
+        prepared,
+        message=message,
+        deps=deps,
+        billing_helper=billing_helper,
     )
+    if processed.early_response is not None:
+        return processed
+    return _process_photo_media(processed, deps=deps)
 
 
 def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
