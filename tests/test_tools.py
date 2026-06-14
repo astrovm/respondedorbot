@@ -277,9 +277,9 @@ class TestTaskSetTool:
         assert "listo" in result.output
         assert "cada 3 dias" in result.output
         mock_schedule.assert_called_once()
-        call_kwargs = mock_schedule.call_args.kwargs
-        assert call_kwargs["trigger_config"]["type"] == "interval"
-        assert call_kwargs["trigger_config"]["days"] == 3
+        request = mock_schedule.call_args.args[0]
+        assert request.trigger.kind == "interval_days"
+        assert request.trigger.days == 3
 
     @patch("api.tools.task_set.schedule_task")
     def test_trigger_config_cron_daily(self, mock_schedule):
@@ -295,10 +295,10 @@ class TestTaskSetTool:
         assert "listo" in result.output
         assert "04:20" in result.output
         mock_schedule.assert_called_once()
-        call_kwargs = mock_schedule.call_args.kwargs
-        assert call_kwargs["trigger_config"]["type"] == "cron"
-        assert call_kwargs["trigger_config"]["hour"] == 4
-        assert call_kwargs["trigger_config"]["minute"] == 20
+        request = mock_schedule.call_args.args[0]
+        assert request.trigger.kind == "cron"
+        assert request.trigger.hour == 4
+        assert request.trigger.minute == 20
 
     @patch("api.tools.task_set.schedule_task")
     def test_trigger_config_cron_weekdays(self, mock_schedule):
@@ -337,8 +337,8 @@ class TestTaskSetTool:
         )
         assert "listo" in result.output
         mock_schedule.assert_called_once()
-        call_kwargs = mock_schedule.call_args.kwargs
-        assert call_kwargs["trigger_config"]["day_of_week"] == "mon,wed"
+        request = mock_schedule.call_args.args[0]
+        assert request.trigger.weekdays == ("mon", "wed")
 
     def test_trigger_config_invalid_type(self):
         result = execute_tool(

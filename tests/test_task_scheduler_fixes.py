@@ -18,6 +18,11 @@ from api.tasks.scheduler import (
     shutdown_scheduler,
     _get_task_executor,
 )
+from api.tasks.models import (
+    DelayTrigger,
+    IntervalTrigger,
+    ScheduledTaskRequest,
+)
 
 
 def _configure_legacy_tasks(redis_client, *payloads):
@@ -901,7 +906,13 @@ class TestScheduleTaskStoresRunDate:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
-        task_id = schedule_task("123", "test", delay_seconds=300)
+        task_id = schedule_task(
+            ScheduledTaskRequest(
+                chat_id="123",
+                text="test",
+                trigger=DelayTrigger(kind="delay", seconds=300),
+            )
+        )
 
         assert task_id is not None
         stored_data = _stored_task_payload(redis_client)
@@ -919,7 +930,16 @@ class TestScheduleTaskStoresRunDate:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
-        task_id = schedule_task("123", "test", interval_seconds=3600)
+        task_id = schedule_task(
+            ScheduledTaskRequest(
+                chat_id="123",
+                text="test",
+                trigger=IntervalTrigger(
+                    kind="interval_seconds",
+                    seconds=3600,
+                ),
+            )
+        )
 
         assert task_id is not None
         stored_data = _stored_task_payload(redis_client)
@@ -934,7 +954,14 @@ class TestScheduleTaskStoresRunDate:
         redis_client = MagicMock()
         mock_redis.return_value = redis_client
 
-        task_id = schedule_task("123", "test", delay_seconds=300, timezone_offset=-5)
+        task_id = schedule_task(
+            ScheduledTaskRequest(
+                chat_id="123",
+                text="test",
+                trigger=DelayTrigger(kind="delay", seconds=300),
+                timezone_offset=-5,
+            )
+        )
 
         assert task_id is not None
         stored_data = _stored_task_payload(redis_client)
@@ -947,7 +974,13 @@ class TestScheduleTaskStoresRunDate:
         mock_sched.return_value = scheduler
         mock_redis.return_value = None
 
-        task_id = schedule_task("123", "test", delay_seconds=300)
+        task_id = schedule_task(
+            ScheduledTaskRequest(
+                chat_id="123",
+                text="test",
+                trigger=DelayTrigger(kind="delay", seconds=300),
+            )
+        )
 
         assert task_id is None
         scheduler.add_job.assert_not_called()
