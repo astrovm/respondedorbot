@@ -102,6 +102,12 @@ class ToolRoundDecision:
     continue_rounds: bool = False
 
 
+@dataclass(frozen=True)
+class StreamRoundDecision:
+    messages: Optional[List[Dict[str, Any]]]
+    continue_rounds: bool = False
+
+
 class ProviderRuntime:
     def __init__(self, deps: ProviderRuntimeDeps, tool_runtime: ToolRuntime) -> None:
         self._deps = deps
@@ -268,22 +274,13 @@ class ProviderRuntime:
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
     ) -> ToolCall | None:
-        # Some models print tool syntax as text instead of structured tool calls.
         dsml_match = _DSML_TOOL_CALL_PATTERN.search(str(text or ""))
         if dsml_match:
-            tool_name = dsml_match.group("name")
-            if tool_name != "web_fetch":
-                return None
-            if tool_name not in _extra_tool_names(extra_tools):
-                return None
-            if not self._tool_runtime.has_tool(tool_name):
-                return None
-            return ToolCall(
-                id=f"pseudo_call_{round_idx + 1}",
-                function=ToolFunctionCall(
-                    name=tool_name,
-                    arguments=json.dumps({"url": dsml_match.group("url")}),
-                ),
+            return self._build_pseudo_tool_call(
+                tool_name=dsml_match.group("name"),
+                url=dsml_match.group("url"),
+                round_idx=round_idx,
+                extra_tools=extra_tools,
             )
 
         lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
@@ -293,35 +290,51 @@ class ProviderRuntime:
             return None
 
         tool_name = match.group("name")
-        if tool_name not in _extra_tool_names(extra_tools):
+        url = self._parse_pseudo_tool_url(match.group("arguments"))
+        if url is None:
             return None
-        if not self._tool_runtime.has_tool(tool_name):
-            return None
+        return self._build_pseudo_tool_call(
+            tool_name=tool_name,
+            url=url,
+            round_idx=round_idx,
+            extra_tools=extra_tools,
+        )
 
-        raw_arguments = match.group("arguments").strip()
-        if tool_name != "web_fetch":
-            return None
-
-        params: Dict[str, Any]
+    @staticmethod
+    def _parse_pseudo_tool_url(raw_arguments: str) -> Optional[str]:
+        raw_arguments = raw_arguments.strip()
         if raw_arguments.startswith(("'", '"')):
             try:
                 url = ast.literal_eval(raw_arguments)
             except (SyntaxError, ValueError):
                 return None
-            params = {"url": url}
         else:
             try:
-                parsed = json.loads(raw_arguments)
+                params = json.loads(raw_arguments)
             except (json.JSONDecodeError, TypeError):
                 return None
-            if not isinstance(parsed, dict):
+            if not isinstance(params, dict):
                 return None
-            params = parsed
+            url = params.get("url")
 
-        url = params.get("url")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+        return None
+
+    def _build_pseudo_tool_call(
+        self,
+        *,
+        tool_name: str,
+        url: str,
+        round_idx: int,
+        extra_tools: Optional[List[Dict[str, Any]]],
+    ) -> ToolCall | None:
+        if tool_name != "web_fetch":
             return None
-
+        if tool_name not in _extra_tool_names(extra_tools):
+            return None
+        if not self._tool_runtime.has_tool(tool_name):
+            return None
         return ToolCall(
             id=f"pseudo_call_{round_idx + 1}",
             function=ToolFunctionCall(
@@ -329,6 +342,62 @@ class ProviderRuntime:
                 arguments=json.dumps({"url": url}),
             ),
         )
+
+    def _handle_stream_structured_calls(
+        self,
+        *,
+        message: Any,
+        current_messages: List[Dict[str, Any]],
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> StreamRoundDecision:
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not extra_tools or not tool_calls:
+            return StreamRoundDecision(
+                current_messages if str(message.content or "").strip() else None
+            )
+
+        known_calls = self._filter_known_calls(tool_calls, tool_context, round_idx)
+        if not known_calls:
+            return StreamRoundDecision(
+                current_messages if str(message.content or "").strip() else None
+            )
+
+        messages = self._tool_runtime.apply_tool_calls(
+            message,
+            known_calls,
+            current_messages,
+            tool_context or {},
+        )
+        self._deps.increment_request_count()
+        return StreamRoundDecision(messages, continue_rounds=True)
+
+    def _handle_stream_stop(
+        self,
+        *,
+        message: Any,
+        current_messages: List[Dict[str, Any]],
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> StreamRoundDecision:
+        pseudo_call = self._parse_pseudo_tool_call(
+            str(getattr(message, "content", "") or ""),
+            round_idx,
+            extra_tools,
+        )
+        if pseudo_call is None:
+            return StreamRoundDecision(current_messages)
+
+        messages = self._tool_runtime.apply_tool_calls(
+            EmptyAssistantMessage(),
+            [pseudo_call],
+            current_messages,
+            tool_context or {},
+        )
+        self._deps.increment_request_count()
+        return StreamRoundDecision(messages, continue_rounds=True)
 
     def _execute_tool_rounds(
         self,
@@ -362,52 +431,30 @@ class ProviderRuntime:
                 return None
             _response, choice = round_response
             finish_reason = choice.finish_reason
-
             message = choice.message
 
             if finish_reason == "tool_calls":
-                tool_calls = getattr(message, "tool_calls", None) or []
-                if not extra_tools or not tool_calls:
-                    text = str(message.content or "").strip()
-                    if text:
-                        return current_messages
-                    return None
-
-                known_calls = self._filter_known_calls(
-                    tool_calls, tool_context, round_idx
+                decision = self._handle_stream_structured_calls(
+                    message=message,
+                    current_messages=current_messages,
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
+                    round_idx=round_idx,
                 )
-                if not known_calls:
-                    # Unknown tools cannot run; retry once as a plain completion.
-                    text = str(message.content or "").strip()
-                    if text:
-                        return current_messages
-                    return None
-
-                current_messages = self._tool_runtime.apply_tool_calls(
-                    message,
-                    known_calls,
-                    current_messages,
-                    tool_context or {},
+            elif finish_reason == "stop":
+                decision = self._handle_stream_stop(
+                    message=message,
+                    current_messages=current_messages,
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
+                    round_idx=round_idx,
                 )
+            else:
+                return current_messages
 
-                self._deps.increment_request_count()
-                continue
-
-            if finish_reason == "stop":
-                pseudo_call = self._parse_pseudo_tool_call(
-                    str(getattr(message, "content", "") or ""), round_idx, extra_tools
-                )
-                if pseudo_call is not None:
-                    current_messages = self._tool_runtime.apply_tool_calls(
-                        EmptyAssistantMessage(),
-                        [pseudo_call],
-                        current_messages,
-                        tool_context or {},
-                    )
-                    self._deps.increment_request_count()
-                    continue
-
-            return current_messages
+            if not decision.continue_rounds:
+                return decision.messages
+            current_messages = decision.messages or current_messages
 
         return current_messages
 
