@@ -7,8 +7,9 @@ import importlib
 import logging
 import os
 import time
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, cast
 
+from api.bot.types import TelegramUpdate
 from api.index import app_runtime
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,9 @@ _POLLING_NETWORK_REPORT_INTERVAL_SECONDS = 300.0
 _last_polling_network_report = 0.0
 
 
-def _update_to_dict(update: Any) -> Dict[str, Any]:
+def _update_to_dict(update: Any) -> TelegramUpdate:
     payload = update.to_dict()
-    return dict(payload) if isinstance(payload, Mapping) else {}
+    return cast(TelegramUpdate, dict(payload)) if isinstance(payload, Mapping) else {}
 
 
 async def _run_sync(func: Any, *args: Any) -> Any:

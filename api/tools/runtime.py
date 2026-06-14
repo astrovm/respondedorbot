@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from api.core.logging import format_log_context, get_logger
+from api.providers.types import AssistantMessageLike, ToolCallLike
 from api.tools.registry import TOOL_REGISTRY, execute_tool, parse_tool_call_arguments
 
 
@@ -35,8 +36,8 @@ class ToolRuntime:
 
     def apply_tool_calls(
         self,
-        message: Any,
-        tool_calls: Sequence[Any],
+        message: AssistantMessageLike,
+        tool_calls: Sequence[ToolCallLike],
         current_messages: List[Dict[str, Any]],
         tool_context: Mapping[str, Any],
     ) -> List[Dict[str, Any]]:
