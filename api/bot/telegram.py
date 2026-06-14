@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import requests
 from urllib.parse import urlparse
@@ -15,8 +16,116 @@ from api.services import http_client
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
 
 
+@dataclass(frozen=True)
+class _TelegramRequestData:
+    method: str
+    params: Optional[Dict[str, Any]]
+    json_payload: Optional[Dict[str, Any]]
+    data_payload: Optional[Dict[str, Any]]
+    files: Optional[Dict[str, Any]]
+    timeout: int
+
+
 def _redact_telegram_tokens(value: str) -> str:
     return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", value)
+
+
+def _send_telegram_request(
+    url: str,
+    request: _TelegramRequestData,
+) -> requests.Response:
+    method = request.method.upper()
+    if method == "GET" and request.json_payload is None:
+        return http_client.get(url, params=request.params, timeout=request.timeout)
+    if method == "POST" and request.params is None and request.files is None:
+        return http_client.post(
+            url,
+            json=request.json_payload,
+            timeout=request.timeout,
+        )
+    if method == "POST" and request.files is not None:
+        return http_client.post(
+            url,
+            data=request.data_payload,
+            files=request.files,
+            timeout=request.timeout,
+        )
+    return http_client.request(
+        method,
+        url,
+        params=request.params,
+        json=request.json_payload,
+        data=request.data_payload,
+        files=request.files,
+        timeout=request.timeout,
+    )
+
+
+def _request_error_details(
+    error: requests.RequestException,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    description = str(error)
+    if error.response is None:
+        return None, description
+
+    try:
+        payload = error.response.json()
+    except (requests.RequestException, ValueError):
+        return None, description
+    if not isinstance(payload, dict):
+        return None, description
+
+    typed_payload = dict(payload)
+    return typed_payload, str(typed_payload.get("description") or error)
+
+
+def _log_request_error(
+    endpoint: str,
+    error: requests.RequestException,
+    description: str,
+) -> None:
+    if "message is not modified" in description.lower():
+        return
+
+    response_body = ""
+    if error.response is not None:
+        try:
+            body = _redact_telegram_tokens(error.response.text)
+        except requests.RequestException:
+            body = ""
+        if body:
+            response_body = f" response={body[:500]!r}"
+
+    detail = _redact_telegram_tokens(str(error))
+    print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
+
+
+def _parse_telegram_payload(
+    endpoint: str,
+    response: requests.Response,
+    *,
+    log_errors: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        raw_payload = response.json()
+    except ValueError as error:
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned invalid JSON: {error}")
+        return None, str(error)
+
+    if not isinstance(raw_payload, Mapping):
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned unexpected payload type")
+        return None, "unexpected response"
+
+    payload = dict(raw_payload)
+    if payload.get("ok"):
+        return payload, None
+
+    description = str(payload.get("description") or "telegram request failed")
+    if log_errors:
+        print(f"Telegram request to {endpoint} returned ok=false: {description}")
+    return payload, description
 
 
 def telegram_request(
@@ -42,75 +151,26 @@ def telegram_request(
         return None, error_msg
 
     url = f"https://api.telegram.org/bot{resolved_token}/{endpoint}"
-    method_upper = method.upper()
+    request = _TelegramRequestData(
+        method=method,
+        params=params,
+        json_payload=json_payload,
+        data_payload=data_payload,
+        files=files,
+        timeout=timeout,
+    )
     try:
-        if method_upper == "GET" and json_payload is None:
-            response = http_client.get(url, params=params, timeout=timeout)
-        elif method_upper == "POST" and params is None and files is None:
-            response = http_client.post(url, json=json_payload, timeout=timeout)
-        elif method_upper == "POST" and files is not None:
-            response = http_client.post(
-                url,
-                data=data_payload,
-                files=files,
-                timeout=timeout,
-            )
-        else:
-            response = http_client.request(
-                method_upper,
-                url,
-                params=params,
-                json=json_payload,
-                data=data_payload,
-                files=files,
-                timeout=timeout,
-            )
+        response = _send_telegram_request(url, request)
         response.raise_for_status()
-        if not expect_json:
-            return {}, None
     except requests.RequestException as error:
-        error_payload = None
-        error_description = str(error)
-        if error.response is not None:
-            try:
-                parsed_error = error.response.json()
-                if isinstance(parsed_error, dict):
-                    error_payload = parsed_error
-                    error_description = str(parsed_error.get("description") or error)
-            except Exception:
-                pass
-        is_not_modified = "message is not modified" in error_description.lower()
-        if log_errors and not is_not_modified:
-            detail = _redact_telegram_tokens(str(error))
-            response_body = ""
-            if error.response is not None:
-                try:
-                    body = _redact_telegram_tokens(error.response.text)
-                    response_body = f" response={body[:500]!r}"
-                except Exception:
-                    pass
-            print(f"Telegram request to {endpoint} failed: {detail}{response_body}")
-        return error_payload, error_description
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
+        error_payload, description = _request_error_details(error)
         if log_errors:
-            print(f"Telegram request to {endpoint} returned invalid JSON: {exc}")
-        return None, str(exc)
+            _log_request_error(endpoint, error, description)
+        return error_payload, description
 
-    if not isinstance(payload, dict):
-        if log_errors:
-            print(f"Telegram request to {endpoint} returned unexpected payload type")
-        return None, "unexpected response"
-
-    if not payload.get("ok"):
-        description = str(payload.get("description") or "telegram request failed")
-        if log_errors:
-            print(f"Telegram request to {endpoint} returned ok=false: {description}")
-        return payload, description
-
-    return payload, None
+    if not expect_json:
+        return {}, None
+    return _parse_telegram_payload(endpoint, response, log_errors=log_errors)
 
 
 def send_typing(token: str, chat_id: str) -> None:
