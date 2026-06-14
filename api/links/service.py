@@ -95,14 +95,16 @@ class LinkService:
     def fetch_metadata(self, raw_url: str) -> Dict[str, Any]:
         return link_commands.fetch_link_metadata(
             raw_url,
-            local_cache=self.local_metadata_cache,
-            ttl=self.metadata_ttl,
-            max_bytes=self.metadata_max_bytes,
-            optional_redis_client=self.optional_redis_client,
-            hash_cache_key=self.hash_cache_key,
-            request_fn=self.request_fn,
-            redis_get_json_fn=self.redis_get_json,
-            redis_setex_json_fn=self.redis_setex_json,
+            deps=link_commands.LinkMetadataDeps(
+                local_cache=self.local_metadata_cache,
+                ttl=self.metadata_ttl,
+                max_bytes=self.metadata_max_bytes,
+                optional_redis_client=self.optional_redis_client,
+                hash_cache_key=self.hash_cache_key,
+                request=self.request_fn,
+                redis_get_json=self.redis_get_json,
+                redis_setex_json=self.redis_setex_json,
+            ),
         )
 
     def build_context(self, message: Mapping[str, Any]) -> str:
