@@ -7,6 +7,7 @@ from api.markets.world_cup_goals import (
     WorldCupGoalMonitor,
     detect_goals,
     parse_scoreboard,
+    preferred_team,
 )
 
 
@@ -76,6 +77,33 @@ def test_detect_goals_preserves_multiple_score_increments_between_polls():
         Goal("match-1", "Argentina", "England", 1, 0),
         Goal("match-1", "Argentina", "England", 2, 0),
     ]
+
+
+def test_preferred_team_uses_global_ranking():
+    assert preferred_team("England", "Argentina") == "Argentina"
+    assert preferred_team("Japan", "Argentina") == "Argentina"
+    assert preferred_team("Japan", "Brazil") == "Japan"
+    assert preferred_team("France", "Germany") == "France"
+
+
+def test_goal_prompt_keeps_the_ranked_team_side():
+    monitor = WorldCupGoalMonitor(
+        list_chat_ids=lambda: [],
+        ask_ai=MagicMock(),
+        send_message=MagicMock(),
+    )
+
+    argentina_scores = monitor._build_prompt(
+        Goal("match-1", "Argentina", "England", 1, 0)
+    )
+    england_scores = monitor._build_prompt(
+        Goal("match-1", "England", "Argentina", 1, 0)
+    )
+
+    assert "hinchás por Argentina" in argentina_scores
+    assert "Tu equipo acaba de hacer el gol" in argentina_scores
+    assert "hinchás por Argentina" in england_scores
+    assert "El rival acaba de hacerle un gol a tu equipo" in england_scores
 
 
 def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
@@ -151,8 +179,8 @@ def test_monitor_uses_fallback_when_ai_fails():
     monitor.poll_once()
 
     message = send_message.call_args.args[1]
-    assert "GOOOOOOL DE ENGLAND" in message
-    assert "ARGENTINA, SON UNOS MUERTOS" in message
+    assert "LA PUTA MADRE, ENGLAND" in message
+    assert "VAMOS ARGENTINA" in message
     assert "1-0" in message
 
 
