@@ -1,6 +1,6 @@
 from tests.support import *
 from tests.support import assert_no_raw_tool_syntax
-from tests.test_message_handler import _build_message_handler_deps
+from tests.message_handler_support import _build_message_handler_deps
 
 
 def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata(monkeypatch):

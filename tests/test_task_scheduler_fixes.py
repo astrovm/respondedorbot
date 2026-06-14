@@ -1047,7 +1047,7 @@ def test_get_scheduler_uses_integer_misfire_grace_time(monkeypatch):
 
 class TestToolCallFiltering:
     def _build_runtime(self, *, client, tool_runtime=None):
-        from tests.test_ai_pipeline import _build_provider_runtime
+        from tests.provider_pipeline_support import _build_provider_runtime
 
         return _build_provider_runtime(client=client, tool_runtime=tool_runtime)
 
