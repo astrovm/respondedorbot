@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
@@ -13,6 +13,7 @@ from typing import Any
 import pycountry
 
 from api.cache.service import CacheService
+from api.markets.world_cup_goals import MatchScore, fetch_scoreboard_scores
 from api.services import http_client
 from api.utils import fmt_num
 
@@ -47,6 +48,7 @@ LivePricesFetcher = Callable[[Sequence[str]], dict[str, float]]
 EventFetcher = Callable[[str], tuple[dict[str, Any], int | None] | None]
 CountryFormatter = Callable[[str], str]
 TimezoneFactory = Callable[[int], timezone]
+ScoreFetcher = Callable[[], Mapping[str, MatchScore]]
 
 
 @dataclass(frozen=True)
@@ -430,6 +432,7 @@ def get_world_cup_games(
     fetch_live: LivePriceFetcher,
     format_country: CountryFormatter,
     make_timezone: TimezoneFactory,
+    fetch_scores: ScoreFetcher,
 ) -> str:
     winner_event = fetch_winner_event(WORLD_CUP_WINNER_SLUG)
     response = cached_request(
@@ -457,6 +460,10 @@ def get_world_cup_games(
     ]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
     lines = ["Polymarket - World Cup"]
+    try:
+        live_scores = fetch_scores()
+    except Exception:
+        live_scores = {}
 
     if winner_event:
         event, _timestamp = winner_event
@@ -484,41 +491,18 @@ def get_world_cup_games(
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
     for event in games[:WORLD_CUP_LIMIT]:
-        title, slug = event.get("title"), event.get("slug")
-        if not title or not slug:
-            continue
-        outcomes = _top_outcomes(
-            normalize_event_quotes(event),
-            limit=3,
+        formatted_event = _format_world_cup_game(
+            event,
             fetch_live=fetch_live,
+            format_country=format_country,
+            chat_timezone=chat_timezone,
+            timezone_label=timezone_label,
+            live_scores=live_scores,
         )
-        probabilities = dict(outcomes)
-        favorite = outcomes[0][0] if outcomes else ""
-        teams = []
-        for team_name in [part.strip() for part in str(title).split(" vs. ")]:
-            team_probability = probabilities.get(team_name)
-            if team_probability is None:
-                continue
-            decimals = 2 if team_probability < 10 else 1
-            label = (
-                f"{format_country(team_name)} "
-                f"{fmt_num(team_probability, decimals)}%"
-            )
-            teams.append(f"[{label}]" if team_name == favorite else label)
-
-        event_url = f"https://polymarket.com/sports/world-cup/{slug}"
-        linked_title = (
-            f'<a href="{escape(event_url, quote=True)}">'
-            f"{escape(' vs. '.join(teams))}</a>"
-        )
-        date_string, time_string = _format_kickoff(
-            str(event.get("endDate") or ""),
-            chat_timezone,
-            timezone_label,
-        )
-        games_by_date.setdefault(date_string, []).append(
-            (linked_title, time_string)
-        )
+        if formatted_event is None:
+            continue
+        date_string, linked_title, time_string = formatted_event
+        games_by_date.setdefault(date_string, []).append((linked_title, time_string))
 
     for date_string, daily_games in games_by_date.items():
         lines.extend([""] if date_string == "Unknown Date" else ["", date_string])
@@ -534,6 +518,85 @@ def get_world_cup_games(
         if len(lines) > 1
         else "Could not fetch World Cup games from Polymarket"
     )
+
+
+def _format_world_cup_game(
+    event: dict[str, Any],
+    *,
+    fetch_live: LivePriceFetcher,
+    format_country: CountryFormatter,
+    chat_timezone: timezone,
+    timezone_label: str,
+    live_scores: Mapping[str, MatchScore],
+) -> tuple[str, str, str] | None:
+    title, slug = event.get("title"), event.get("slug")
+    if not title or not slug:
+        return None
+    outcomes = _top_outcomes(
+        normalize_event_quotes(event),
+        limit=3,
+        fetch_live=fetch_live,
+    )
+    probabilities = dict(outcomes)
+    favorite = outcomes[0][0] if outcomes else ""
+    teams = []
+    team_names = [part.strip() for part in str(title).split(" vs. ")]
+    scores = _score_by_team(team_names, live_scores)
+    for team_name in team_names:
+        team_probability = probabilities.get(team_name)
+        if team_probability is None:
+            continue
+        decimals = 2 if team_probability < 10 else 1
+        score = scores.get(team_name)
+        probability = f"{fmt_num(team_probability, decimals)}%"
+        if score is None:
+            label = f"{format_country(team_name)} {probability}"
+        else:
+            label = f"{format_country(team_name)} {score} ({probability})"
+        teams.append(f"[{label}]" if team_name == favorite else label)
+
+    event_url = f"https://polymarket.com/sports/world-cup/{slug}"
+    linked_title = (
+        f'<a href="{escape(event_url, quote=True)}">'
+        f"{escape(' vs. '.join(teams))}</a>"
+    )
+    date_string, time_string = _format_kickoff(
+        str(event.get("endDate") or ""),
+        chat_timezone,
+        timezone_label,
+    )
+    return date_string, linked_title, time_string
+
+
+def _score_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.casefold())
+
+
+def _score_by_team(
+    teams: Sequence[str],
+    scores: Mapping[str, MatchScore],
+) -> dict[str, int]:
+    if len(teams) != 2:
+        return {}
+    requested = {_score_key(teams[0]), _score_key(teams[1])}
+    for match in scores.values():
+        if match.state not in {"in", "post"}:
+            continue
+        available = {_score_key(match.home_team), _score_key(match.away_team)}
+        if requested != available:
+            continue
+        first_score = (
+            match.home_score
+            if _score_key(teams[0]) == _score_key(match.home_team)
+            else match.away_score
+        )
+        second_score = (
+            match.home_score
+            if _score_key(teams[1]) == _score_key(match.home_team)
+            else match.away_score
+        )
+        return {teams[0]: first_score, teams[1]: second_score}
+    return {}
 
 
 def _format_kickoff(
@@ -629,6 +692,7 @@ class PolymarketService:
             fetch_live=self.fetch_live_price,
             format_country=flagged_country_name,
             make_timezone=self._make_timezone,
+            fetch_scores=fetch_scoreboard_scores,
         )
 
 

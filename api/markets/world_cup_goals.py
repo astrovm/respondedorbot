@@ -161,6 +161,24 @@ def _date_range(now: datetime) -> str:
     return f"{start}-{end}"
 
 
+def fetch_scoreboard_scores(
+    *,
+    http_get: Callable[..., Any] = http_client.get,
+    now: Callable[[], datetime] | None = None,
+) -> dict[str, MatchScore]:
+    clock = now or (lambda: datetime.now(UTC))
+    response = http_get(
+        SCOREBOARD_URL,
+        params={"dates": _date_range(clock()), "limit": 20},
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, Mapping):
+        raise ValueError("World Cup scoreboard returned an invalid payload")
+    return parse_scoreboard(payload)
+
+
 class WorldCupGoalMonitor:
     def __init__(
         self,
@@ -185,16 +203,7 @@ class WorldCupGoalMonitor:
         self._announced: set[str] = set()
 
     def fetch_scores(self) -> dict[str, MatchScore]:
-        response = self._http_get(
-            SCOREBOARD_URL,
-            params={"dates": _date_range(self._now()), "limit": 20},
-            timeout=10,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, Mapping):
-            raise ValueError("World Cup scoreboard returned an invalid payload")
-        return parse_scoreboard(payload)
+        return fetch_scoreboard_scores(http_get=self._http_get, now=self._now)
 
     def poll_once(self) -> list[Goal]:
         current = self.fetch_scores()
