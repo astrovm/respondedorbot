@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+from api.ai.pipeline import AIResponseRequest, AIResponseRuntime
+
 
 def handle_rate_limit(
     chat_id: str,
@@ -77,22 +79,26 @@ def handle_ai_response(
         effective_handler = run_stream
 
     return handle_response(
-        chat_id,
-        effective_handler,
-        messages,
-        image_data=image_data,
-        image_file_id=image_file_id,
-        context_texts=context_texts,
-        user_identity=user_identity,
-        response_meta=response_meta,
-        user_id=user_id,
-        timezone_offset=timezone_offset,
-        reply_to_message_id=reply_to_message_id,
-        send_typing_fn=send_typing,
-        telegram_token=telegram_token,
-        reset_request_count_fn=reset_request_count,
-        restore_request_count_fn=restore_request_count,
-        get_request_count_fn=get_request_count,
+        AIResponseRequest(
+            chat_id=chat_id,
+            handler=effective_handler,
+            messages=messages,
+            image_data=image_data,
+            image_file_id=image_file_id,
+            context_texts=context_texts,
+            user_identity=user_identity,
+            response_meta=response_meta,
+            user_id=user_id,
+            timezone_offset=timezone_offset,
+            reply_to_message_id=reply_to_message_id,
+        ),
+        AIResponseRuntime(
+            send_typing=send_typing,
+            telegram_token=telegram_token,
+            reset_request_count=reset_request_count,
+            restore_request_count=restore_request_count,
+            get_request_count=get_request_count,
+        ),
     )
 
 
