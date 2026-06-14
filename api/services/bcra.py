@@ -37,6 +37,12 @@ from api.core.config_runtime import ConfigRuntime
 from api.core.logging import get_logger
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
+from api.services.tcrm import (
+    TCRMCacheDeps,
+    TCRMCacheService,
+    TCRMCalculationDeps,
+    TCRMCalculator,
+)
 from api.utils import (
     local_cache_get,
     now_utc_iso,
@@ -1084,107 +1090,25 @@ def calculate_tcrm_100(
     """Calculate nominal exchange rate that sets ITCRM to 100."""
 
     try:
-        config = config_redis_fn or _config_redis
-        get_json = redis_get_json_fn or redis_get_json
-        set_json = redis_set_json_fn or redis_set_json
-        bcra_value_for_date = bcra_get_value_for_date_fn or bcra_get_value_for_date
-        cache_missing = cache_mayorista_missing_fn or cache_mayorista_missing
-        itcrm_getter = itcrm_getter_fn or get_latest_itcrm_value_and_date
-
-        normalized_target: Optional[datetime] = None
-        if target_date is not None:
-            if isinstance(target_date, datetime):
-                normalized_target = target_date
-            elif isinstance(target_date, date):
-                normalized_target = datetime.combine(target_date, datetime.min.time())
-            else:
-                normalized_target = parse_date_string(str(target_date))
-            if normalized_target is None:
-                return None
-
-        itcrm_value: float
-        itcrm_dt: datetime
-
-        if normalized_target is None:
-            details = itcrm_getter()
-            if not details:
-                return None
-            raw_value, raw_date_str = details
-            try:
-                itcrm_value = float(raw_value)
-            except Exception:
-                return None
-            parsed_dt = parse_date_string(raw_date_str)
-            if not parsed_dt:
-                return None
-            itcrm_dt = parsed_dt
-        else:
-            lookup = _get_itcrm_value_for_date(normalized_target)
-            if not lookup:
-                return None
-            value, matched_dt = lookup
-            try:
-                itcrm_value = float(value)
-            except Exception:
-                return None
-            itcrm_dt = matched_dt
-
-        date_key = itcrm_dt.date().isoformat()
-
-        try:
-            redis_client = config()
-        except Exception:
-            redis_client = None
-
-        wholesale_value: Optional[float] = None
-        if redis_client is not None:
-            try:
-                cached = get_json(redis_client, f"bcra_mayorista:{date_key}")
-                if isinstance(cached, dict):
-                    if cached.get("missing"):
-                        return None
-                    if "value" in cached:
-                        parsed = parse_monetary_number(cached["value"])
-                        if parsed is not None:
-                            wholesale_value = float(parsed)
-                if wholesale_value is None:
-                    fetched = bcra_value_for_date("tipo de cambio mayorista", date_key)
-                    if fetched is not None:
-                        wholesale_value = float(fetched)
-                    else:
-                        cache_missing(
-                            date_key,
-                            redis_client,
-                            redis_setex_json_fn=redis_setex_json_fn,
-                        )
-                        return None
-            except Exception:
-                pass
-
-        if wholesale_value is None:
-            fetched = bcra_value_for_date("tipo de cambio mayorista", date_key)
-            if fetched is not None:
-                wholesale_value = float(fetched)
-            else:
-                cache_missing(
-                    date_key,
-                    redis_client,
-                    redis_setex_json_fn=redis_setex_json_fn,
-                )
-                return None
-
-        result = wholesale_value * 100 / itcrm_value
-
-        if redis_client is not None and wholesale_value is not None:
-            try:
-                set_json(
-                    redis_client,
-                    f"bcra_mayorista:{date_key}",
-                    {"value": wholesale_value, "date": to_ddmmyy(date_key)},
-                )
-            except Exception:
-                pass
-        return result
+        calculator = TCRMCalculator(
+            TCRMCalculationDeps(
+                redis_factory=config_redis_fn or _config_redis,
+                get_json=redis_get_json_fn or redis_get_json,
+                set_json=redis_set_json_fn or redis_set_json,
+                setex_json=redis_setex_json_fn,
+                get_wholesale_rate=(
+                    bcra_get_value_for_date_fn or bcra_get_value_for_date
+                ),
+                cache_missing_wholesale=(
+                    cache_mayorista_missing_fn or cache_mayorista_missing
+                ),
+                get_latest_itcrm=(
+                    itcrm_getter_fn or get_latest_itcrm_value_and_date
+                ),
+                get_historical_itcrm=_get_itcrm_value_for_date,
+            )
+        )
+        return calculator.calculate(target_date)
     except Exception as exc:
         logger.error("Error calculating TCRM 100: %s", exc)
         return None
@@ -1208,123 +1132,26 @@ def get_cached_tcrm_100(
 ) -> Tuple[Optional[float], Optional[float]]:
     """Get cached TCRM 100 value with optional historical change."""
 
-    cache_key = "tcrm_100"
-
-    try:
-        config = config_redis_fn or _config_redis
-        get_json = redis_get_json_fn or redis_get_json
-        set_json = redis_set_json_fn or redis_set_json
-        setex_json = redis_setex_json_fn
-        calculate_tcrm = calculate_tcrm_fn or calculate_tcrm_100
-        latest_itcrm = get_latest_itcrm_fn or get_latest_itcrm_value_and_date
-        bcra_value_for_date = bcra_get_value_for_date_fn or bcra_get_value_for_date
-        cache_missing = cache_mayorista_missing_fn or cache_mayorista_missing
-        get_history = get_cache_history_fn or _get_cache_history
-
-        redis_client = config()
-        redis_response = get_json(redis_client, cache_key)
-        timestamp = int(time.time())
-
-        same_day_ok = False
-        skip_mayorista_fetch = False
-        try:
-            itcrm_cached = get_json(redis_client, "latest_itcrm_details")
-            itcrm_date_str = None
-            if isinstance(itcrm_cached, dict) and "date" in itcrm_cached:
-                itcrm_date_str = str(itcrm_cached.get("date", ""))
-            else:
-                details = latest_itcrm()
-                if details:
-                    itcrm_date_str = details[1]
-            dt = parse_date_string(itcrm_date_str or "")
-            if dt is not None:
-                date_key = dt.date().isoformat()
-                mayorista_cached = get_json(redis_client, f"bcra_mayorista:{date_key}")
-                if isinstance(mayorista_cached, dict):
-                    if mayorista_cached.get("missing"):
-                        skip_mayorista_fetch = True
-                    elif "value" in mayorista_cached:
-                        if parse_monetary_number(mayorista_cached["value"]) is not None:
-                            same_day_ok = True
-                if not same_day_ok and not skip_mayorista_fetch:
-                    fetched_val = bcra_value_for_date(
-                        "tipo de cambio mayorista", date_key
-                    )
-                    if fetched_val is not None:
-                        same_day_ok = True
-                    else:
-                        cache_missing(
-                            date_key,
-                            redis_client,
-                            redis_setex_json_fn=setex_json,
-                        )
-                        skip_mayorista_fetch = True
-        except Exception:
-            same_day_ok = False
-
-        history_data: Optional[Dict[str, Any]] = None
-        try:
-            history_data = get_history(hours_ago, cache_key, redis_client)
-        except Exception:
-            history_data = None
-
-        if history_data is None and hours_ago:
-            try:
-                history_dt = datetime.now(BA_TZ) - timedelta(hours=hours_ago)
-                history_prefix = history_dt.strftime("%Y-%m-%d-%H")
-                history_key = history_prefix + cache_key
-                existing_slot = redis_client.get(history_key)
-                if not existing_slot:
-                    backfill_value = calculate_tcrm(target_date=history_dt)
-                    if backfill_value is not None:
-                        history_timestamp = int(
-                            history_dt.replace(
-                                minute=0, second=0, microsecond=0
-                            ).timestamp()
-                        )
-                        history_data = {
-                            "timestamp": history_timestamp,
-                            "data": backfill_value,
-                        }
-                        set_json(redis_client, history_key, history_data)
-            except Exception:
-                history_data = None
-
-        history_value = history_data["data"] if history_data else None
-
-        def compute_and_store() -> Optional[float]:
-            value = calculate_tcrm()
-            if value is None:
-                return None
-            redis_value = {"timestamp": timestamp, "data": value}
-            set_json(redis_client, cache_key, redis_value)
-            current_hour = datetime.now(BA_TZ).strftime("%Y-%m-%d-%H")
-            set_json(redis_client, current_hour + cache_key, redis_value)
-            return value
-
-        if not same_day_ok or skip_mayorista_fetch:
-            current_value = None
-        elif redis_response is None:
-            current_value = compute_and_store()
-        else:
-            cached_data = cast(Dict[str, Any], redis_response)
-            cache_age = timestamp - int(cached_data["timestamp"])
-            if cache_age > expiration_time:
-                current_value = compute_and_store()
-            else:
-                current_value = cached_data.get("data")
-
-        change = None
-        if current_value is not None and history_value:
-            try:
-                change = ((current_value / history_value) - 1) * 100
-            except ZeroDivisionError:
-                change = None
-
-        return current_value, change
-    except Exception as exc:
-        logger.error("Error getting cached TCRM 100: %s", exc)
-        return None, None
+    service = TCRMCacheService(
+        TCRMCacheDeps(
+            redis_factory=config_redis_fn or _config_redis,
+            get_json=redis_get_json_fn or redis_get_json,
+            set_json=redis_set_json_fn or redis_set_json,
+            setex_json=redis_setex_json_fn,
+            calculate=calculate_tcrm_fn or calculate_tcrm_100,
+            get_latest_itcrm=(
+                get_latest_itcrm_fn or get_latest_itcrm_value_and_date
+            ),
+            get_wholesale_rate=(
+                bcra_get_value_for_date_fn or bcra_get_value_for_date
+            ),
+            cache_missing_wholesale=(
+                cache_mayorista_missing_fn or cache_mayorista_missing
+            ),
+            get_history=get_cache_history_fn or _get_cache_history,
+        )
+    )
+    return service.get(hours_ago, expiration_time)
 
 
 def get_latest_itcrm_details() -> Optional[Tuple[float, str]]:
