@@ -5,13 +5,18 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from api.ai.pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT, ensure_mapping
 from api.core.logging import format_log_context, get_logger
+from api.providers.types import (
+    EmptyAssistantMessage,
+    ToolCall,
+    ToolCallLike,
+    ToolFunctionCall,
+)
 from api.tools.runtime import ToolRuntime
 
 
@@ -207,11 +212,11 @@ class ProviderRuntime:
 
     def _filter_known_calls(
         self,
-        tool_calls: List[Any],
+        tool_calls: List[ToolCallLike],
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
-    ) -> List[Any]:
-        known_calls = []
+    ) -> List[ToolCallLike]:
+        known_calls: List[ToolCallLike] = []
         for tool_call in tool_calls:
             fn = getattr(tool_call, "function", None)
             if fn is None:
@@ -262,7 +267,7 @@ class ProviderRuntime:
         text: str,
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
-    ) -> Optional[Any]:
+    ) -> ToolCall | None:
         # Some models print tool syntax as text instead of structured tool calls.
         dsml_match = _DSML_TOOL_CALL_PATTERN.search(str(text or ""))
         if dsml_match:
@@ -273,9 +278,9 @@ class ProviderRuntime:
                 return None
             if not self._tool_runtime.has_tool(tool_name):
                 return None
-            return SimpleNamespace(
+            return ToolCall(
                 id=f"pseudo_call_{round_idx + 1}",
-                function=SimpleNamespace(
+                function=ToolFunctionCall(
                     name=tool_name,
                     arguments=json.dumps({"url": dsml_match.group("url")}),
                 ),
@@ -317,9 +322,9 @@ class ProviderRuntime:
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             return None
 
-        return SimpleNamespace(
+        return ToolCall(
             id=f"pseudo_call_{round_idx + 1}",
-            function=SimpleNamespace(
+            function=ToolFunctionCall(
                 name=tool_name,
                 arguments=json.dumps({"url": url}),
             ),
@@ -394,7 +399,7 @@ class ProviderRuntime:
                 )
                 if pseudo_call is not None:
                     current_messages = self._tool_runtime.apply_tool_calls(
-                        SimpleNamespace(content=""),
+                        EmptyAssistantMessage(),
                         [pseudo_call],
                         current_messages,
                         tool_context or {},
@@ -504,7 +509,7 @@ class ProviderRuntime:
         )
         if pseudo_call is not None:
             updated_messages = self._tool_runtime.apply_tool_calls(
-                SimpleNamespace(content=""),
+                EmptyAssistantMessage(),
                 [pseudo_call],
                 current_messages,
                 tool_context or {},
