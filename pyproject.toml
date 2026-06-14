@@ -40,7 +40,23 @@ target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF", "PLE", "PLW"]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "S",
+    "RUF",
+    "PLE",
+    "PLW",
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+]
 ignore = [
     "B023",
     "B905",
@@ -79,8 +95,36 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"api/index.py" = ["F401"]
-"tests/**" = ["E712", "F403", "F405", "F841", "RUF059", "RUF100", "PLW0108"]
+"api/admin/commands.py" = ["PLR0911"]
+"api/ai/pricing.py" = ["C901"]
+"api/ai/service.py" = ["C901", "PLR0911"]
+"api/billing/ai.py" = ["PLR0911"]
+"api/billing/commands.py" = ["PLR0911"]
+"api/bot/message_links.py" = ["C901"]
+"api/cache/http.py" = ["C901"]
+"api/index.py" = ["C901", "F401", "PLR0912"]
+"api/links/context.py" = ["C901"]
+"api/markets/bcra_formatters.py" = ["C901", "PLR0912"]
+"api/markets/polymarket.py" = ["C901"]
+"api/markets/token_signals.py" = ["C901", "PLR0911", "PLR0915"]
+"api/media/commands.py" = ["C901", "PLR0911"]
+"api/memory/state.py" = ["PLR0911"]
+"api/providers/openrouter.py" = ["C901", "PLR0912"]
+"api/services/bcra.py" = ["C901", "PLR0911", "PLR0912"]
+"api/tasks/executor.py" = ["C901", "PLR0915"]
+"api/tools/calculate.py" = ["PLR0911"]
+"api/utils/links.py" = ["C901", "PLR0911"]
+"api/utils/youtube_transcript.py" = ["C901", "PLR0911"]
+"tests/**" = [
+    "E712",
+    "F403",
+    "F405",
+    "F841",
+    "PLR0915",
+    "RUF059",
+    "RUF100",
+    "PLW0108",
+]
 
 [tool.mypy]
 python_version = "3.14"
