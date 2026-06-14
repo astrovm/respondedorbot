@@ -1,3 +1,5 @@
+"""Fetch and cache metadata used by link commands."""
+
 from __future__ import annotations
 
 import re

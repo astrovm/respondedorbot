@@ -1,4 +1,4 @@
-"""task_cancel tool — cancel a task by id."""
+"""Cancel a scheduled task requested by the AI."""
 
 from __future__ import annotations
 

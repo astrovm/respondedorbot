@@ -1,3 +1,5 @@
+"""Choose whether and how the bot should handle a message."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

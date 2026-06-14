@@ -1,3 +1,5 @@
+"""Run provider completions, retries, and tool-call rounds."""
+
 from __future__ import annotations
 
 import ast

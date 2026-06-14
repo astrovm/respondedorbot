@@ -1,3 +1,5 @@
+"""Serve stale cache values while one worker refreshes them."""
+
 from __future__ import annotations
 
 import json

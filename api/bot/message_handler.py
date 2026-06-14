@@ -1,3 +1,5 @@
+"""Coordinate routing, media preparation, billing, and AI replies."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace

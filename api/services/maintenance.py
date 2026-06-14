@@ -1,3 +1,5 @@
+"""Run periodic Redis and application cache maintenance."""
+
 from __future__ import annotations
 
 import os

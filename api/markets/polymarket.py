@@ -1,3 +1,5 @@
+"""Fetch and format Polymarket events and prices."""
+
 from __future__ import annotations
 
 import json

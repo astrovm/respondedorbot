@@ -1,4 +1,4 @@
-"""stock_prices tool — fetches stock prices from Yahoo Finance for agentic use."""
+"""Fetch stock prices from Yahoo Finance for the AI."""
 
 from __future__ import annotations
 

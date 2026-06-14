@@ -1,3 +1,5 @@
+"""Fetch, cache, and format BCRA and Argentine market indicators."""
+
 from __future__ import annotations
 
 import io

@@ -1,4 +1,4 @@
-"""get_chat_members tool — returns known group members to the AI."""
+"""Return known group members to the AI."""
 
 from __future__ import annotations
 

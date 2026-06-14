@@ -1,3 +1,5 @@
+"""Extract text and media identifiers from Telegram messages."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping

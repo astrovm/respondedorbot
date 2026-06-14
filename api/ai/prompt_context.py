@@ -1,3 +1,5 @@
+"""Build stable market, time, and link context for AI prompts."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping

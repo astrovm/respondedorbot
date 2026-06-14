@@ -1,3 +1,5 @@
+"""Format and deliver operational error reports."""
+
 from __future__ import annotations
 
 import traceback

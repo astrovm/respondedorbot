@@ -1,3 +1,5 @@
+"""Normalize provider failures into retry and fallback decisions."""
+
 from __future__ import annotations
 
 import re

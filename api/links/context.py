@@ -1,3 +1,5 @@
+"""Turn message links into bounded AI prompt context."""
+
 from __future__ import annotations
 
 import re

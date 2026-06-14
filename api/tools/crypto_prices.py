@@ -1,4 +1,4 @@
-"""crypto_prices tool — wraps get_prices (CoinMarketCap) for agentic use."""
+"""Fetch cryptocurrency prices requested by the AI."""
 
 from __future__ import annotations
 
