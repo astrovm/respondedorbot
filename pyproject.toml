@@ -120,11 +120,11 @@ ignore = [
     "F403",
     "F405",
     "F841",
-    "PLR0915",
     "RUF059",
     "RUF100",
     "PLW0108",
 ]
+"tests/test_message_routing.py" = ["PLR0915"]
 
 [tool.mypy]
 python_version = "3.14"
