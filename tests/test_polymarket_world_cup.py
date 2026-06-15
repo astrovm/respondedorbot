@@ -140,14 +140,15 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         "ascending": "true",
         },
     ]
-    assert "World Cup Winner</a>" in result
+    assert result.startswith("Polymarket - Mundial")
+    assert "Campeón del Mundial</a>" in result
     assert (
         "🇪🇸 España 18% | 🇫🇷 Francia 16% | 🇧🇷 Brasil 14% | "
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
         "\U000e0067\U000e007f Inglaterra 12% | 🇦🇷 Argentina 10%"
     ) in result
     assert "Germany" not in result
-    assert "Next 8 games" not in result
+    assert "World Cup" not in result
     assert result.index("fifwc-mex-rsa-2026-06-11") < result.index(
         "fifwc-kr-cze-2026-06-11"
     )
@@ -157,7 +158,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "· live" not in result
     assert "Mexico 69.5%" not in result
     assert "Draw 18%" not in result
-    assert "Thu, June 11\n<a href=" in result
+    assert "jue, 11 de junio\n<a href=" in result
     assert "16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
@@ -171,7 +172,7 @@ def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
 
     assert (
         index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
-        == "Could not fetch World Cup games from Polymarket"
+        == "No pude traer los partidos del Mundial desde Polymarket"
     )
 
 
@@ -267,6 +268,8 @@ def test_country_flags_use_iso_data_with_sports_aliases():
     assert flagged_country_name("IR Iran") == "🇮🇷 Irán"
     assert flagged_country_name("Congo DR") == "🇨🇩 Congo"
     assert flagged_country_name("Ivory Coast") == "🇨🇮 Costa de Marfil"
+    assert flagged_country_name("Côte d'Ivoire") == "🇨🇮 Costa de Marfil"
+    assert flagged_country_name("New Zealand") == "🇳🇿 Nueva Zelanda"
     assert flagged_country_name("Bosnia-Herzegovina") == (
         "🇧🇦 Bosnia y Herzegovina"
     )
