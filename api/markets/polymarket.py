@@ -13,7 +13,12 @@ from typing import Any
 import pycountry
 
 from api.cache.service import CacheService
-from api.markets.world_cup_goals import MatchScore, fetch_scoreboard_scores
+from api.markets.world_cup_goals import (
+    MatchScore,
+    canonical_team_name,
+    fetch_scoreboard_scores,
+    team_name_es,
+)
 from api.services import http_client
 from api.utils import fmt_num
 
@@ -29,8 +34,10 @@ WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
 COUNTRY_NAME_ALIASES = {
     "bosnia-herzegovina": "BA",
+    "congo dr": "CD",
     "england": "GB",
     "ir iran": "IR",
+    "ivory coast": "CI",
     "korea republic": "KR",
     "scotland": "GB",
     "uk": "GB",
@@ -334,7 +341,8 @@ def event_country_flag(event: dict[str, Any]) -> str:
 
 def flagged_country_name(name: str) -> str:
     flag = country_flag_from_name(name)
-    return f"{flag} {name}" if flag else name
+    display_name = team_name_es(name)
+    return f"{flag} {display_name}" if flag else display_name
 
 
 def get_global_elections(
@@ -569,7 +577,7 @@ def _format_world_cup_game(
 
 
 def _score_key(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", name.casefold())
+    return re.sub(r"[^a-z0-9]+", "", canonical_team_name(name).casefold())
 
 
 def _score_by_team(

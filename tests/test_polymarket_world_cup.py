@@ -142,9 +142,9 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     ]
     assert "World Cup Winner</a>" in result
     assert (
-        "🇪🇸 Spain 18% | 🇫🇷 France 16% | 🇧🇷 Brazil 14% | "
+        "🇪🇸 España 18% | 🇫🇷 Francia 16% | 🇧🇷 Brasil 14% | "
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
-        "\U000e0067\U000e007f England 12% | 🇦🇷 Argentina 10%"
+        "\U000e0067\U000e007f Inglaterra 12% | 🇦🇷 Argentina 10%"
     ) in result
     assert "Germany" not in result
     assert "Next 8 games" not in result
@@ -152,7 +152,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         "fifwc-kr-cze-2026-06-11"
     )
     assert "Exact Score" not in result
-    assert "[🇲🇽 Mexico 2 (72%)] vs. 🇿🇦 South Africa 1 (10%)" in result
+    assert "[🇲🇽 México 2 (72%)] vs. 🇿🇦 Sudáfrica 1 (10%)" in result
     assert "Mexico 2-1 South Africa" not in result
     assert "· live" not in result
     assert "Mexico 69.5%" not in result
@@ -161,8 +161,8 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
-        'fifwc-mex-rsa-2026-06-11">[🇲🇽 Mexico 2 (72%)] vs. '
-        "🇿🇦 South Africa 1 (10%)</a>"
+        'fifwc-mex-rsa-2026-06-11">[🇲🇽 México 2 (72%)] vs. '
+        "🇿🇦 Sudáfrica 1 (10%)</a>"
     ) in result
 
 
@@ -262,18 +262,21 @@ def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
 
 def test_country_flags_use_iso_data_with_sports_aliases():
     assert flagged_country_name("Romania") == "🇷🇴 Romania"
-    assert flagged_country_name("Türkiye") == "🇹🇷 Türkiye"
-    assert flagged_country_name("Korea Republic") == "🇰🇷 Korea Republic"
+    assert flagged_country_name("Türkiye") == "🇹🇷 Turquía"
+    assert flagged_country_name("Korea Republic") == "🇰🇷 Corea del Sur"
+    assert flagged_country_name("IR Iran") == "🇮🇷 Irán"
+    assert flagged_country_name("Congo DR") == "🇨🇩 Congo"
+    assert flagged_country_name("Ivory Coast") == "🇨🇮 Costa de Marfil"
     assert flagged_country_name("Bosnia-Herzegovina") == (
-        "🇧🇦 Bosnia-Herzegovina"
+        "🇧🇦 Bosnia y Herzegovina"
     )
     assert flagged_country_name("England") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e"
-        "\U000e0067\U000e007f England"
+        "\U000e0067\U000e007f Inglaterra"
     )
     assert flagged_country_name("Scotland") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063"
-        "\U000e0074\U000e007f Scotland"
+        "\U000e0074\U000e007f Escocia"
     )
     assert flagged_country_name("Wales") == (
         "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c"
