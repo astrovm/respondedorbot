@@ -72,6 +72,12 @@ _TEAM_RANK = {
     team.casefold(): position
     for position, team in enumerate(WORLD_CUP_TEAM_RANKING)
 }
+TEAM_NAME_ALIASES = {
+    "Cabo Verde": "Cape Verde",
+    "Côte d'Ivoire": "Ivory Coast",
+    "IR Iran": "Iran",
+    "Korea Republic": "South Korea",
+}
 TEAM_NAMES_ES = {
     "Argentina": "Argentina",
     "Japan": "Japón",
@@ -103,7 +109,7 @@ TEAM_NAMES_ES = {
     "Haiti": "Haití",
     "Curaçao": "Curazao",
     "Cape Verde": "Cabo Verde",
-    "Congo DR": "RD Congo",
+    "Congo DR": "Congo",
     "South Africa": "Sudáfrica",
     "Senegal": "Senegal",
     "Ivory Coast": "Costa de Marfil",
@@ -260,15 +266,22 @@ def detect_goals(
 
 
 def preferred_team(first_team: str, second_team: str) -> str:
-    first_rank = _TEAM_RANK.get(first_team.casefold(), len(_TEAM_RANK))
-    second_rank = _TEAM_RANK.get(second_team.casefold(), len(_TEAM_RANK))
+    canonical_first = canonical_team_name(first_team)
+    canonical_second = canonical_team_name(second_team)
+    first_rank = _TEAM_RANK.get(canonical_first.casefold(), len(_TEAM_RANK))
+    second_rank = _TEAM_RANK.get(canonical_second.casefold(), len(_TEAM_RANK))
     if first_rank != second_rank:
         return first_team if first_rank < second_rank else second_team
     return min(first_team, second_team, key=str.casefold)
 
 
+def canonical_team_name(team: str) -> str:
+    return TEAM_NAME_ALIASES.get(team, team)
+
+
 def team_name_es(team: str) -> str:
-    return TEAM_NAMES_ES.get(team, team)
+    canonical = canonical_team_name(team)
+    return TEAM_NAMES_ES.get(canonical, canonical)
 
 
 def _date_range(now: datetime) -> str:
