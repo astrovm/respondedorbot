@@ -9,6 +9,7 @@ from api.markets.world_cup_goals import (
     detect_goals,
     parse_scoreboard,
     preferred_team,
+    team_name_es,
 )
 
 
@@ -133,6 +134,29 @@ def test_goal_prompt_keeps_the_ranked_team_side():
     assert "El rival acaba de hacerle un gol a tu equipo" in england_scores
 
 
+def test_goal_messages_use_spanish_team_names():
+    monitor = WorldCupGoalMonitor(
+        list_chat_ids=lambda: [],
+        ask_ai=MagicMock(),
+        send_message=MagicMock(),
+    )
+
+    prompt = monitor._build_prompt(
+        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0)
+    )
+    fallback = monitor._fallback_message(
+        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0)
+    )
+
+    assert team_name_es("Ivory Coast") == "Costa de Marfil"
+    assert team_name_es("Japan") == "Japón"
+    assert team_name_es("Netherlands") == "Países Bajos"
+    assert "Costa de Marfil acaba de meterle un gol a Ecuador" in prompt
+    assert "Ivory Coast" not in prompt
+    assert "COSTA DE MARFIL" in fallback
+    assert "IVORY COAST" not in fallback
+
+
 def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     http_get = MagicMock(
         side_effect=[
@@ -206,7 +230,7 @@ def test_monitor_uses_fallback_when_ai_fails():
     monitor.poll_once()
 
     message = send_message.call_args.args[1]
-    assert "LA PUTA MADRE, ENGLAND" in message
+    assert "LA PUTA MADRE, INGLATERRA" in message
     assert "VAMOS ARGENTINA" in message
     assert "1-0" in message
 
