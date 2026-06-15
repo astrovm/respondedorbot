@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from api.markets.world_cup_goals import (
     Goal,
     MatchScore,
+    TEAM_NAMES_ES,
     WORLD_CUP_TEAM_RANKING,
     WorldCupGoalMonitor,
     detect_goals,
@@ -151,6 +152,12 @@ def test_goal_messages_use_spanish_team_names():
     assert team_name_es("Ivory Coast") == "Costa de Marfil"
     assert team_name_es("Japan") == "Japón"
     assert team_name_es("Netherlands") == "Países Bajos"
+    assert set(TEAM_NAMES_ES) == set(WORLD_CUP_TEAM_RANKING)
+    assert team_name_es("Canada") == "Canadá"
+    assert team_name_es("Belgium") == "Bélgica"
+    assert team_name_es("Croatia") == "Croacia"
+    assert team_name_es("Uzbekistan") == "Uzbekistán"
+    assert team_name_es("Iran") == "Irán"
     assert "Costa de Marfil acaba de meterle un gol a Ecuador" in prompt
     assert "Ivory Coast" not in prompt
     assert "COSTA DE MARFIL" in fallback
