@@ -32,6 +32,21 @@ WORLD_CUP_LIMIT = 10
 WORLD_CUP_FETCH_LIMIT = 100
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
+SPANISH_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
+SPANISH_MONTHS = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
 COUNTRY_NAME_ALIASES = {
     "bosnia-herzegovina": "BA",
     "congo dr": "CD",
@@ -458,7 +473,7 @@ def get_world_cup_games(
     )
     events = response.get("data") if response else None
     if not isinstance(events, list) or not events:
-        return "Could not fetch World Cup games from Polymarket"
+        return "No pude traer los partidos del Mundial desde Polymarket"
 
     pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
     games = [
@@ -467,7 +482,7 @@ def get_world_cup_games(
         if pattern.fullmatch(str(event.get("slug") or ""))
     ]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
-    lines = ["Polymarket - World Cup"]
+    lines = ["Polymarket - Mundial"]
     try:
         live_scores = fetch_scores()
     except Exception:
@@ -490,7 +505,7 @@ def get_world_cup_games(
                 [
                     "",
                     f'<a href="https://polymarket.com/event/{WORLD_CUP_WINNER_SLUG}">'
-                    "World Cup Winner</a>",
+                    "Campeón del Mundial</a>",
                     " | ".join(winner_outcomes),
                 ]
             )
@@ -513,7 +528,7 @@ def get_world_cup_games(
         games_by_date.setdefault(date_string, []).append((linked_title, time_string))
 
     for date_string, daily_games in games_by_date.items():
-        lines.extend([""] if date_string == "Unknown Date" else ["", date_string])
+        lines.extend([""] if date_string == "Fecha desconocida" else ["", date_string])
         for linked_title, time_string in daily_games:
             lines.append(linked_title)
             if time_string:
@@ -524,7 +539,7 @@ def get_world_cup_games(
     return (
         "\n".join(lines)
         if len(lines) > 1
-        else "Could not fetch World Cup games from Polymarket"
+        else "No pude traer los partidos del Mundial desde Polymarket"
     )
 
 
@@ -616,13 +631,16 @@ def _format_kickoff(
         kickoff = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
         local = kickoff.astimezone(chat_timezone)
         return (
-            local.strftime("%a, %B %d").replace(" 0", " "),
+            (
+                f"{SPANISH_WEEKDAYS[local.weekday()]}, "
+                f"{local.day} de {SPANISH_MONTHS[local.month - 1]}"
+            ),
             local.strftime(f"%H:%M {timezone_label}"),
         )
     except ValueError:
         if end_date:
             return end_date[:10], end_date[11:16].replace("T", " ")
-        return "Unknown Date", ""
+        return "Fecha desconocida", ""
 
 
 class PolymarketService:
