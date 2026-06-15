@@ -50,6 +50,7 @@ SPANISH_MONTHS = (
 COUNTRY_NAME_ALIASES = {
     "bosnia-herzegovina": "BA",
     "congo dr": "CD",
+    "dr congo": "CD",
     "england": "GB",
     "ir iran": "IR",
     "ivory coast": "CI",
