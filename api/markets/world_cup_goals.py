@@ -75,6 +75,7 @@ _TEAM_RANK = {
 TEAM_NAME_ALIASES = {
     "Cabo Verde": "Cape Verde",
     "Côte d'Ivoire": "Ivory Coast",
+    "DR Congo": "Congo DR",
     "IR Iran": "Iran",
     "Korea Republic": "South Korea",
 }

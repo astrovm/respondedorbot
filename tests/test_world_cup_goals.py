@@ -162,6 +162,7 @@ def test_goal_messages_use_spanish_team_names():
     assert team_name_es("Korea Republic") == "Corea del Sur"
     assert team_name_es("Côte d'Ivoire") == "Costa de Marfil"
     assert team_name_es("Congo DR") == "Congo"
+    assert team_name_es("DR Congo") == "Congo"
     assert "Costa de Marfil acaba de meterle un gol a Ecuador" in prompt
     assert "Ivory Coast" not in prompt
     assert "COSTA DE MARFIL" in fallback

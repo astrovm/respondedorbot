@@ -267,6 +267,7 @@ def test_country_flags_use_iso_data_with_sports_aliases():
     assert flagged_country_name("Korea Republic") == "🇰🇷 Corea del Sur"
     assert flagged_country_name("IR Iran") == "🇮🇷 Irán"
     assert flagged_country_name("Congo DR") == "🇨🇩 Congo"
+    assert flagged_country_name("DR Congo") == "🇨🇩 Congo"
     assert flagged_country_name("Ivory Coast") == "🇨🇮 Costa de Marfil"
     assert flagged_country_name("Côte d'Ivoire") == "🇨🇮 Costa de Marfil"
     assert flagged_country_name("New Zealand") == "🇳🇿 Nueva Zelanda"
