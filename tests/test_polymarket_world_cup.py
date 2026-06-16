@@ -191,7 +191,7 @@ def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
     )
 
 
-def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
+def test_get_polymarket_world_cup_games_marks_team_when_team_leads_draw(
     monkeypatch,
 ):
     event = {
@@ -202,7 +202,7 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
             {
                 "groupItemTitle": "Draw (Team A vs. Team B)",
                 "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.40", "0.60"]',
+                "outcomePrices": '["0.30", "0.70"]',
             },
             {
                 "groupItemTitle": "Team A",
@@ -228,6 +228,60 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
 
     assert ">[Team A 35%] vs. Team B 25%</a>" in result
     assert "[Draw]" not in result
+
+
+def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
+    monkeypatch,
+):
+    event = {
+        "title": "Saudi Arabia vs. Uruguay",
+        "slug": "fifwc-ksa-ury-2026-06-15",
+        "endDate": "2026-06-15T22:00:00Z",
+        "markets": [
+            {
+                "groupItemTitle": "Saudi Arabia",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.0005", "0.9995"]',
+            },
+            {
+                "groupItemTitle": "Draw (Saudi Arabia vs. Uruguay)",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.9995", "0.0005"]',
+            },
+            {
+                "groupItemTitle": "Uruguay",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.0005", "0.9995"]',
+            },
+        ],
+    }
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": [event]}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": MatchScore(
+                event_id="game-1",
+                home_team="Saudi Arabia",
+                away_team="Uruguay",
+                home_score=1,
+                away_score=1,
+                state="post",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "🇸🇦 Arabia Saudita 1 (0.05%) vs. 🇺🇾 Uruguay 1 (0.05%)" in result
+    assert "[🇸🇦 Arabia Saudita" not in result
+    assert "[🇺🇾 Uruguay" not in result
+    assert "Draw" not in result
 
 
 def test_get_polymarket_world_cup_games_skips_match_with_closed_team_market(
