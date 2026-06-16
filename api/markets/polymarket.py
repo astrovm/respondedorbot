@@ -556,18 +556,21 @@ def _format_world_cup_game(
     title, slug = event.get("title"), event.get("slug")
     if not title or not slug:
         return None
-    outcomes = _top_outcomes(
-        normalize_event_quotes(event),
-        limit=3,
-        fetch_live=fetch_live,
-    )
-    probabilities = dict(outcomes)
-    favorite = outcomes[0][0] if outcomes else ""
     teams = []
     team_names = [part.strip() for part in str(title).split(" vs. ")]
+    quotes_by_team = _world_cup_team_quotes(
+        normalize_event_quotes(event),
+        team_names,
+        fetch_live=fetch_live,
+    )
+    favorite = max(
+        quotes_by_team.items(),
+        key=lambda item: item[1],
+        default=("", 0.0),
+    )[0]
     scores = _score_by_team(team_names, live_scores)
     for team_name in team_names:
-        team_probability = probabilities.get(team_name)
+        team_probability = quotes_by_team.get(team_name)
         if team_probability is None:
             continue
         decimals = 2 if team_probability < 10 else 1
@@ -590,6 +593,27 @@ def _format_world_cup_game(
         timezone_label,
     )
     return date_string, linked_title, time_string
+
+
+def _world_cup_team_quotes(
+    quotes: Sequence[MarketQuote],
+    team_names: Sequence[str],
+    *,
+    fetch_live: LivePriceFetcher,
+) -> dict[str, float]:
+    team_by_key = {_score_key(team_name): team_name for team_name in team_names}
+    probabilities: dict[str, float] = {}
+    for quote in quotes:
+        team_name = team_by_key.get(_score_key(quote.title))
+        if team_name is None:
+            continue
+        probability = quote.probability
+        if quote.token_id:
+            live = fetch_live(quote.token_id)
+            if live:
+                probability = max(0.0, min(live[0], 1.0))
+        probabilities[team_name] = probability * 100
+    return probabilities
 
 
 def _score_key(name: str) -> str:
