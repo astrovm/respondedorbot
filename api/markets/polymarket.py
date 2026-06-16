@@ -560,18 +560,26 @@ def _format_world_cup_game(
     team_names = [part.strip() for part in str(title).split(" vs. ")]
     if len(team_names) != 2:
         return None
+    quotes = normalize_event_quotes(event)
     quotes_by_team = _world_cup_team_quotes(
-        normalize_event_quotes(event),
+        quotes,
         team_names,
         fetch_live=fetch_live,
     )
     if len(quotes_by_team) != len(team_names):
         return None
-    favorite = max(
+    favorite, favorite_probability = max(
         quotes_by_team.items(),
         key=lambda item: item[1],
         default=("", 0.0),
-    )[0]
+    )
+    draw_probability = _world_cup_draw_probability(
+        quotes,
+        team_names,
+        fetch_live=fetch_live,
+    )
+    if draw_probability is not None and draw_probability > favorite_probability:
+        favorite = ""
     scores = _score_by_team(team_names, live_scores)
     for team_name in team_names:
         team_probability = quotes_by_team.get(team_name)
@@ -611,13 +619,40 @@ def _world_cup_team_quotes(
         team_name = team_by_key.get(_score_key(quote.title))
         if team_name is None:
             continue
-        probability = quote.probability
-        if quote.token_id:
-            live = fetch_live(quote.token_id)
-            if live:
-                probability = max(0.0, min(live[0], 1.0))
-        probabilities[team_name] = probability * 100
+        probabilities[team_name] = _quote_probability_percent(
+            quote,
+            fetch_live=fetch_live,
+        )
     return probabilities
+
+
+def _world_cup_draw_probability(
+    quotes: Sequence[MarketQuote],
+    team_names: Sequence[str],
+    *,
+    fetch_live: LivePriceFetcher,
+) -> float | None:
+    draw_keys = {
+        _score_key(f"Draw ({team_names[0]} vs. {team_names[1]})"),
+        _score_key(f"Draw ({team_names[1]} vs. {team_names[0]})"),
+    }
+    for quote in quotes:
+        if _score_key(quote.title) in draw_keys:
+            return _quote_probability_percent(quote, fetch_live=fetch_live)
+    return None
+
+
+def _quote_probability_percent(
+    quote: MarketQuote,
+    *,
+    fetch_live: LivePriceFetcher,
+) -> float:
+    probability = quote.probability
+    if quote.token_id:
+        live = fetch_live(quote.token_id)
+        if live:
+            probability = max(0.0, min(live[0], 1.0))
+    return probability * 100
 
 
 def _score_key(name: str) -> str:
