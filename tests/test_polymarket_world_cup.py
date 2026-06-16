@@ -211,8 +211,66 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
 
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
-    assert ">Team A 35% vs. Team B 25%</a>" in result
+    assert ">[Team A 35%] vs. Team B 25%</a>" in result
     assert "[Draw]" not in result
+
+
+def test_get_polymarket_world_cup_games_keeps_both_teams_when_draw_is_top(
+    monkeypatch,
+):
+    event = {
+        "title": "Belgium vs. Egypt",
+        "slug": "fifwc-bel-egy-2026-06-15",
+        "endDate": "2026-06-15T19:00:00Z",
+        "markets": [
+            {
+                "groupItemTitle": "Draw (Belgium vs. Egypt)",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.999", "0.001"]',
+            },
+            {
+                "groupItemTitle": "Belgium win either half",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.51", "0.49"]',
+            },
+            {
+                "groupItemTitle": "Belgium",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.0005", "0.9995"]',
+            },
+            {
+                "groupItemTitle": "Egypt",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.0005", "0.9995"]',
+            },
+        ],
+    }
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": [event]}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": MatchScore(
+                event_id="game-1",
+                home_team="Belgium",
+                away_team="Egypt",
+                home_score=1,
+                away_score=1,
+                state="post",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "[🇧🇪 Bélgica 1 (0.05%)] vs. 🇪🇬 Egipto 1 (0.05%)" in result
+    assert "Draw" not in result
+    assert "win either half" not in result
 
 
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
