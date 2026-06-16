@@ -40,7 +40,22 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
             "title": "Korea Republic vs. Czechia",
             "slug": "fifwc-kr-cze-2026-06-11",
             "endDate": "2026-06-12T02:00:00Z",
-            "markets": [],
+            "markets": [
+                {
+                    "groupItemTitle": "Korea Republic",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.55", "0.45"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Czechia",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.25", "0.75"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
         },
         {
             "title": "Mexico vs. South Africa",
@@ -215,7 +230,7 @@ def test_get_polymarket_world_cup_games_does_not_mark_draw_as_favorite(
     assert "[Draw]" not in result
 
 
-def test_get_polymarket_world_cup_games_keeps_both_teams_when_draw_is_top(
+def test_get_polymarket_world_cup_games_skips_match_with_closed_team_market(
     monkeypatch,
 ):
     event = {
@@ -242,6 +257,7 @@ def test_get_polymarket_world_cup_games_keeps_both_teams_when_draw_is_top(
                 "groupItemTitle": "Egypt",
                 "outcomes": '["Yes", "No"]',
                 "outcomePrices": '["0.0005", "0.9995"]',
+                "closed": True,
             },
         ],
     }
@@ -268,7 +284,9 @@ def test_get_polymarket_world_cup_games_keeps_both_teams_when_draw_is_top(
 
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
-    assert "[🇧🇪 Bélgica 1 (0.05%)] vs. 🇪🇬 Egipto 1 (0.05%)" in result
+    assert "Bélgica" not in result
+    assert "Egipto" not in result
+    assert "fifwc-bel-egy-2026-06-15" not in result
     assert "Draw" not in result
     assert "win either half" not in result
 
