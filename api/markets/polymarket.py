@@ -558,11 +558,15 @@ def _format_world_cup_game(
         return None
     teams = []
     team_names = [part.strip() for part in str(title).split(" vs. ")]
+    if len(team_names) != 2:
+        return None
     quotes_by_team = _world_cup_team_quotes(
         normalize_event_quotes(event),
         team_names,
         fetch_live=fetch_live,
     )
+    if len(quotes_by_team) != len(team_names):
+        return None
     favorite = max(
         quotes_by_team.items(),
         key=lambda item: item[1],
