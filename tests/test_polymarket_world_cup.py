@@ -138,6 +138,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
                 home_score=1,
                 away_score=2,
                 state="in",
+                display_clock="35'",
             )
         },
     )
@@ -174,7 +175,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "Mexico 69.5%" not in result
     assert "Draw 18%" not in result
     assert "jue, 11 de junio\n<a href=" in result
-    assert "16:00 UTC-3\n\n<a href=" in result
+    assert "35' · 16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
         'fifwc-mex-rsa-2026-06-11">[🇲🇽 México 2 (72%)] vs. '
@@ -271,7 +272,8 @@ def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
                 away_team="Uruguay",
                 home_score=1,
                 away_score=1,
-                state="post",
+                state="in",
+                display_clock="75'",
             )
         },
     )
@@ -279,6 +281,7 @@ def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
     assert "🇸🇦 Arabia Saudita 1 (0.05%) vs. 🇺🇾 Uruguay 1 (0.05%)" in result
+    assert "75' · 19:00 UTC-3" in result
     assert "[🇸🇦 Arabia Saudita" not in result
     assert "[🇺🇾 Uruguay" not in result
     assert "Draw" not in result
@@ -389,6 +392,159 @@ def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
     assert "Team A 0-0 Team B" not in result
+
+
+def test_get_polymarket_world_cup_games_omits_odds_for_final_scores(
+    monkeypatch,
+):
+    event = {
+        "title": "Team A vs. Team B",
+        "slug": "fifwc-a-b-2026-06-11",
+        "endDate": "2026-06-11T19:00:00Z",
+        "markets": [
+            {
+                "groupItemTitle": "Team A",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.60", "0.40"]',
+            },
+            {
+                "groupItemTitle": "Team B",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.40", "0.60"]',
+            },
+        ],
+    }
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": [event]}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": MatchScore(
+                event_id="game-1",
+                home_team="Team A",
+                away_team="Team B",
+                home_score=2,
+                away_score=1,
+                state="post",
+                display_clock="90'+5'",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert ">[Team A 2] vs. Team B 1</a>" in result
+    assert "Team A 2 (60%)" not in result
+    assert "Team B 1 (40%)" not in result
+    assert "\nFinal" in result
+
+
+def test_get_polymarket_world_cup_games_keeps_only_two_latest_final_matches(
+    monkeypatch,
+):
+    def event(slug, title, end_date, first_team, second_team):
+        return {
+            "title": title,
+            "slug": slug,
+            "endDate": end_date,
+            "markets": [
+                {
+                    "groupItemTitle": first_team,
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.60", "0.40"]',
+                },
+                {
+                    "groupItemTitle": second_team,
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.30", "0.70"]',
+                },
+            ],
+        }
+
+    events = [
+        event(
+            "fifwc-a-b-2026-06-11",
+            "Team A vs. Team B",
+            "2026-06-11T19:00:00Z",
+            "Team A",
+            "Team B",
+        ),
+        event(
+            "fifwc-c-d-2026-06-11",
+            "Team C vs. Team D",
+            "2026-06-11T22:00:00Z",
+            "Team C",
+            "Team D",
+        ),
+        event(
+            "fifwc-e-f-2026-06-12",
+            "Team E vs. Team F",
+            "2026-06-12T01:00:00Z",
+            "Team E",
+            "Team F",
+        ),
+        event(
+            "fifwc-g-h-2026-06-12",
+            "Team G vs. Team H",
+            "2026-06-12T04:00:00Z",
+            "Team G",
+            "Team H",
+        ),
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": MatchScore(
+                event_id="game-1",
+                home_team="Team A",
+                away_team="Team B",
+                home_score=1,
+                away_score=0,
+                state="post",
+            ),
+            "game-2": MatchScore(
+                event_id="game-2",
+                home_team="Team C",
+                away_team="Team D",
+                home_score=2,
+                away_score=1,
+                state="post",
+            ),
+            "game-3": MatchScore(
+                event_id="game-3",
+                home_team="Team E",
+                away_team="Team F",
+                home_score=3,
+                away_score=2,
+                state="post",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "fifwc-a-b-2026-06-11" not in result
+    assert "fifwc-c-d-2026-06-11" in result
+    assert "fifwc-e-f-2026-06-12" in result
+    assert "fifwc-g-h-2026-06-12" in result
+    assert result.index("fifwc-c-d-2026-06-11") < result.index(
+        "fifwc-e-f-2026-06-12"
+    )
+    assert result.index("fifwc-e-f-2026-06-12") < result.index(
+        "fifwc-g-h-2026-06-12"
+    )
 
 
 def test_country_flags_use_iso_data_with_sports_aliases():

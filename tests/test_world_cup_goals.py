@@ -14,12 +14,21 @@ from api.markets.world_cup_goals import (
 )
 
 
-def _payload(home_score: int, away_score: int, *, state: str = "in"):
+def _payload(
+    home_score: int,
+    away_score: int,
+    *,
+    state: str = "in",
+    display_clock: str = "",
+):
     return {
         "events": [
             {
                 "id": "match-1",
-                "status": {"type": {"state": state}},
+                "status": {
+                    "displayClock": display_clock,
+                    "type": {"state": state},
+                },
                 "competitions": [
                     {
                         "competitors": [
@@ -48,7 +57,7 @@ def _response(payload):
 
 
 def test_parse_scoreboard_extracts_match_scores():
-    scores = parse_scoreboard(_payload(2, 1))
+    scores = parse_scoreboard(_payload(2, 1, display_clock="35'"))
 
     assert scores == {
         "match-1": MatchScore(
@@ -58,17 +67,18 @@ def test_parse_scoreboard_extracts_match_scores():
             home_score=2,
             away_score=1,
             state="in",
+            display_clock="35'",
         )
     }
 
 
 def test_detect_goals_returns_each_team_that_increased():
     previous = parse_scoreboard(_payload(0, 0))
-    current = parse_scoreboard(_payload(1, 1))
+    current = parse_scoreboard(_payload(1, 1, display_clock="58'"))
 
     assert detect_goals(previous, current) == [
-        Goal("match-1", "Argentina", "England", 1, 1),
-        Goal("match-1", "England", "Argentina", 1, 1),
+        Goal("match-1", "Argentina", "England", 1, 1, "58'"),
+        Goal("match-1", "England", "Argentina", 1, 1, "58'"),
     ]
 
 
@@ -133,6 +143,18 @@ def test_goal_prompt_keeps_the_ranked_team_side():
     assert "Tu equipo acaba de hacer el gol" in argentina_scores
     assert "hinchás por Argentina" in england_scores
     assert "El rival acaba de hacerle un gol a tu equipo" in england_scores
+
+
+def test_goal_prompt_and_fallback_include_match_clock():
+    monitor = WorldCupGoalMonitor(
+        list_chat_ids=lambda: [],
+        ask_ai=MagicMock(),
+        send_message=MagicMock(),
+    )
+    goal = Goal("match-1", "Argentina", "England", 1, 0, "35'")
+
+    assert "Va 35'." in monitor._build_prompt(goal)
+    assert monitor._fallback_message(goal).endswith("1-0 (35')")
 
 
 def test_goal_messages_use_spanish_team_names():
