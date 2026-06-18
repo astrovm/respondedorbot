@@ -460,11 +460,15 @@ def get_world_cup_games(
     fetch_scores: ScoreFetcher,
 ) -> str:
     winner_event = fetch_winner_event(WORLD_CUP_WINNER_SLUG)
+    try:
+        live_scores = fetch_scores()
+    except Exception:
+        live_scores = {}
     events = _fetch_world_cup_events(
         cached_request=cached_request,
         cache_ttl=cache_ttl,
     )
-    if not events:
+    if not events and not live_scores:
         return "No pude traer los partidos del Mundial desde Polymarket"
 
     pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
@@ -475,10 +479,6 @@ def get_world_cup_games(
     ]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
     lines = ["Polymarket - Mundial"]
-    try:
-        live_scores = fetch_scores()
-    except Exception:
-        live_scores = {}
 
     if winner_event:
         event, _timestamp = winner_event
@@ -505,14 +505,15 @@ def get_world_cup_games(
     games_by_date: dict[str, list[tuple[str, str]]] = {}
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
-    for event in _select_world_cup_games(games, live_scores):
+    events_by_match = _world_cup_events_by_match(games)
+    for match in _select_world_cup_matches(live_scores):
         formatted_event = _format_world_cup_game(
-            event,
+            match,
+            event=events_by_match.get(_match_key(match.home_team, match.away_team)),
             fetch_live=fetch_live,
             format_country=format_country,
             chat_timezone=chat_timezone,
             timezone_label=timezone_label,
-            live_scores=live_scores,
         )
         if formatted_event is None:
             continue
@@ -564,45 +565,53 @@ def _fetch_world_cup_events(
     return events
 
 
-def _select_world_cup_games(
+def _select_world_cup_matches(
+    scores: Mapping[str, MatchScore],
+) -> list[MatchScore]:
+    matches = sorted(scores.values(), key=lambda match: match.start_time)
+    finished = [match for match in matches if match.state == "post"]
+    active_or_future = [match for match in matches if match.state != "post"]
+    return (finished[-2:] + active_or_future)[:WORLD_CUP_LIMIT]
+
+
+def _world_cup_events_by_match(
     games: Sequence[dict[str, Any]],
-    live_scores: Mapping[str, MatchScore],
-) -> list[dict[str, Any]]:
-    finished: list[dict[str, Any]] = []
-    active_or_future: list[dict[str, Any]] = []
+) -> dict[frozenset[str], dict[str, Any]]:
+    events_by_match: dict[frozenset[str], dict[str, Any]] = {}
     for event in games:
-        match = _match_display_for_event(event, live_scores)
-        if match.state == "post":
-            finished.append(event)
-        elif event.get("closed") is True:
+        title = event.get("title")
+        if not title:
             continue
-        else:
-            active_or_future.append(event)
-    selected = finished[-2:] + active_or_future
-    selected.sort(key=lambda event: str(event.get("endDate") or ""))
-    return selected[:WORLD_CUP_LIMIT]
+        team_names = [part.strip() for part in str(title).split(" vs. ")]
+        if len(team_names) != 2:
+            continue
+        key = _match_key(team_names[0], team_names[1])
+        if key not in events_by_match or event.get("closed") is not True:
+            events_by_match[key] = event
+    return events_by_match
+
+
+def _match_key(first_team: str, second_team: str) -> frozenset[str]:
+    return frozenset({_score_key(first_team), _score_key(second_team)})
 
 
 def _format_world_cup_game(
-    event: dict[str, Any],
+    match: MatchScore,
     *,
+    event: dict[str, Any] | None,
     fetch_live: LivePriceFetcher,
     format_country: CountryFormatter,
     chat_timezone: timezone,
     timezone_label: str,
-    live_scores: Mapping[str, MatchScore],
 ) -> tuple[str, str, str] | None:
-    title, slug = event.get("title"), event.get("slug")
-    if not title or not slug:
-        return None
     teams = []
-    team_names = [part.strip() for part in str(title).split(" vs. ")]
-    if len(team_names) != 2:
-        return None
-    scores = _score_by_team(team_names, live_scores)
+    team_names = [match.home_team, match.away_team]
+    scores = _match_display(match)
     quotes_by_team: dict[str, float] = {}
     favorite = _final_winner(scores) if scores.state == "post" else ""
     if scores.state != "post":
+        if event is None:
+            return None
         quotes = normalize_event_quotes(event)
         quotes_by_team = _world_cup_team_quotes(
             quotes,
@@ -643,13 +652,16 @@ def _format_world_cup_game(
             label = f"{format_country(team_name)} {score} ({probability})"
         teams.append(f"[{label}]" if team_name == favorite else label)
 
-    event_url = f"https://polymarket.com/sports/world-cup/{slug}"
+    title = escape(" vs. ".join(teams))
+    slug = event.get("slug") if event else None
     linked_title = (
-        f'<a href="{escape(event_url, quote=True)}">'
-        f"{escape(' vs. '.join(teams))}</a>"
+        f'<a href="{escape(f"https://polymarket.com/sports/world-cup/{slug}", quote=True)}">'
+        f"{title}</a>"
+        if slug
+        else title
     )
     date_string, time_string = _format_kickoff(
-        str(event.get("endDate") or ""),
+        match.start_time,
         chat_timezone,
         timezone_label,
     )
@@ -716,46 +728,17 @@ class MatchDisplay:
     display_clock: str
 
 
-def _match_display_for_event(
-    event: dict[str, Any],
-    scores: Mapping[str, MatchScore],
-) -> MatchDisplay:
-    title = event.get("title")
-    if not title:
-        return MatchDisplay({}, "", "")
-    team_names = [part.strip() for part in str(title).split(" vs. ")]
-    return _score_by_team(team_names, scores)
-
-
-def _score_by_team(
-    teams: Sequence[str],
-    scores: Mapping[str, MatchScore],
-) -> MatchDisplay:
-    if len(teams) != 2:
-        return MatchDisplay({}, "", "")
-    requested = {_score_key(teams[0]), _score_key(teams[1])}
-    for match in scores.values():
-        if match.state not in {"in", "post"}:
-            continue
-        available = {_score_key(match.home_team), _score_key(match.away_team)}
-        if requested != available:
-            continue
-        first_score = (
-            match.home_score
-            if _score_key(teams[0]) == _score_key(match.home_team)
-            else match.away_score
-        )
-        second_score = (
-            match.home_score
-            if _score_key(teams[1]) == _score_key(match.home_team)
-            else match.away_score
-        )
-        return MatchDisplay(
-            {teams[0]: first_score, teams[1]: second_score},
-            match.state,
-            match.display_clock,
-        )
-    return MatchDisplay({}, "", "")
+def _match_display(match: MatchScore) -> MatchDisplay:
+    if match.state not in {"in", "post"}:
+        return MatchDisplay({}, match.state, match.display_clock)
+    return MatchDisplay(
+        {
+            match.home_team: match.home_score,
+            match.away_team: match.away_score,
+        },
+        match.state,
+        match.display_clock,
+    )
 
 
 def _final_winner(scores: MatchDisplay) -> str:

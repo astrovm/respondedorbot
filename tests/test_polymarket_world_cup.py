@@ -4,6 +4,29 @@ from api.markets.polymarket import flagged_country_name
 from api.markets import polymarket as polymarket_commands
 
 
+def _match_score(
+    event_id: str,
+    home_team: str,
+    away_team: str,
+    home_score: int = 0,
+    away_score: int = 0,
+    *,
+    state: str = "pre",
+    display_clock: str = "0'",
+    start_time: str = "2026-06-11T19:00:00Z",
+) -> MatchScore:
+    return MatchScore(
+        event_id=event_id,
+        home_team=home_team,
+        away_team=away_team,
+        home_score=home_score,
+        away_score=away_score,
+        state=state,
+        display_clock=display_clock,
+        start_time=start_time,
+    )
+
+
 def test_fetch_live_price_uses_clob_midpoint():
     captured = {}
 
@@ -131,15 +154,24 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="South Africa",
-                away_team="Mexico",
-                home_score=1,
-                away_score=2,
+            "game-1": _match_score(
+                "game-1",
+                "South Africa",
+                "Mexico",
+                1,
+                2,
                 state="in",
                 display_clock="35'",
-            )
+                start_time="2026-06-11T19:00:00Z",
+            ),
+            "game-2": _match_score(
+                "game-2",
+                "Korea Republic",
+                "Czechia",
+                state="pre",
+                display_clock="0'",
+                start_time="2026-06-12T02:00:00Z",
+            ),
         },
     )
 
@@ -148,12 +180,12 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert captured == [
         {"slug": "world-cup-winner"},
         {
-        "limit": 100,
-        "offset": 0,
-        "active": "true",
-        "series_id": 11433,
-        "order": "endDate",
-        "ascending": "true",
+            "limit": 100,
+            "offset": 0,
+            "active": "true",
+            "series_id": 11433,
+            "order": "endDate",
+            "ascending": "true",
         },
     ]
     assert result.startswith("Polymarket - Mundial")
@@ -169,7 +201,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         "fifwc-kr-cze-2026-06-11"
     )
     assert "Exact Score" not in result
-    assert "[🇲🇽 México 2 (72%)] vs. 🇿🇦 Sudáfrica 1 (10%)" in result
+    assert "🇿🇦 Sudáfrica 1 (10%) vs. [🇲🇽 México 2 (72%)]" in result
     assert "Mexico 2-1 South Africa" not in result
     assert "· live" not in result
     assert "Mexico 69.5%" not in result
@@ -178,18 +210,57 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     assert "35' · 16:00 UTC-3\n\n<a href=" in result
     assert (
         '<a href="https://polymarket.com/sports/world-cup/'
-        'fifwc-mex-rsa-2026-06-11">[🇲🇽 México 2 (72%)] vs. '
-        "🇿🇦 Sudáfrica 1 (10%)</a>"
+        'fifwc-mex-rsa-2026-06-11">🇿🇦 Sudáfrica 1 (10%) vs. '
+        "[🇲🇽 México 2 (72%)]</a>"
     ) in result
 
 
 def test_get_polymarket_world_cup_games_handles_empty_response(monkeypatch):
-    monkeypatch.setattr(index.app_runtime.cache, "request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        index.app_runtime.cache,
+        "request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        dict,
+    )
 
     assert (
         index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
         == "No pude traer los partidos del Mundial desde Polymarket"
     )
+
+
+def test_get_polymarket_world_cup_games_shows_final_without_polymarket_event(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        index.app_runtime.cache,
+        "request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": _match_score(
+                "game-1",
+                "Ghana",
+                "Panama",
+                1,
+                0,
+                state="post",
+                display_clock="FT",
+                start_time="2026-06-18T02:00:00Z",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "[🇬🇭 Ghana 1] vs. 🇵🇦 Panamá 0" in result
+    assert "polymarket.com/sports/world-cup" not in result
+    assert "\nFinal" in result
 
 
 def test_get_polymarket_world_cup_games_marks_team_when_team_leads_draw(
@@ -224,6 +295,18 @@ def test_get_polymarket_world_cup_games_marks_team_when_team_leads_draw(
         return {"data": [event]}
 
     monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": _match_score(
+                "game-1",
+                "Team A",
+                "Team B",
+                state="pre",
+                display_clock="0'",
+            )
+        },
+    )
 
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
@@ -266,14 +349,15 @@ def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Saudi Arabia",
-                away_team="Uruguay",
-                home_score=1,
-                away_score=1,
+            "game-1": _match_score(
+                "game-1",
+                "Saudi Arabia",
+                "Uruguay",
+                1,
+                1,
                 state="in",
                 display_clock="75'",
+                start_time="2026-06-15T22:00:00Z",
             )
         },
     )
@@ -307,14 +391,15 @@ def test_get_polymarket_world_cup_games_shows_final_with_closed_team_market(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Belgium",
-                away_team="Egypt",
-                home_score=1,
-                away_score=1,
+            "game-1": _match_score(
+                "game-1",
+                "Belgium",
+                "Egypt",
+                1,
+                1,
                 state="post",
                 display_clock="FT",
+                start_time="2026-06-15T19:00:00Z",
             )
         },
     )
@@ -360,14 +445,15 @@ def test_get_polymarket_world_cup_games_uses_later_pages_for_recent_matches(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Team A",
-                away_team="Team B",
-                home_score=2,
-                away_score=1,
+            "game-1": _match_score(
+                "game-1",
+                "Team A",
+                "Team B",
+                2,
+                1,
                 state="post",
                 display_clock="FT",
+                start_time="2026-06-18T02:00:00Z",
             )
         },
     )
@@ -409,12 +495,12 @@ def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Team A",
-                away_team="Team B",
-                home_score=0,
-                away_score=0,
+            "game-1": _match_score(
+                "game-1",
+                "Team A",
+                "Team B",
+                0,
+                0,
                 state="pre",
                 display_clock="0'",
             )
@@ -456,12 +542,12 @@ def test_get_polymarket_world_cup_games_omits_odds_for_final_scores(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Team A",
-                away_team="Team B",
-                home_score=2,
-                away_score=1,
+            "game-1": _match_score(
+                "game-1",
+                "Team A",
+                "Team B",
+                2,
+                1,
                 state="post",
                 display_clock="90'+5'",
             )
@@ -538,32 +624,43 @@ def test_get_polymarket_world_cup_games_keeps_only_two_latest_final_matches(
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
         lambda: {
-            "game-1": MatchScore(
-                event_id="game-1",
-                home_team="Team A",
-                away_team="Team B",
-                home_score=1,
-                away_score=0,
+            "game-1": _match_score(
+                "game-1",
+                "Team A",
+                "Team B",
+                1,
+                0,
                 state="post",
                 display_clock="FT",
+                start_time="2026-06-11T19:00:00Z",
             ),
-            "game-2": MatchScore(
-                event_id="game-2",
-                home_team="Team C",
-                away_team="Team D",
-                home_score=2,
-                away_score=1,
+            "game-2": _match_score(
+                "game-2",
+                "Team C",
+                "Team D",
+                2,
+                1,
                 state="post",
                 display_clock="FT",
+                start_time="2026-06-11T22:00:00Z",
             ),
-            "game-3": MatchScore(
-                event_id="game-3",
-                home_team="Team E",
-                away_team="Team F",
-                home_score=3,
-                away_score=2,
+            "game-3": _match_score(
+                "game-3",
+                "Team E",
+                "Team F",
+                3,
+                2,
                 state="post",
                 display_clock="FT",
+                start_time="2026-06-12T01:00:00Z",
+            ),
+            "game-4": _match_score(
+                "game-4",
+                "Team G",
+                "Team H",
+                state="pre",
+                display_clock="0'",
+                start_time="2026-06-12T04:00:00Z",
             ),
         },
     )

@@ -142,6 +142,7 @@ class MatchScore:
     away_score: int
     state: str
     display_clock: str
+    start_time: str
 
 
 @dataclass(frozen=True)
@@ -203,8 +204,14 @@ def _parse_event(event: Any) -> MatchScore | None:
     if not isinstance(event, Mapping):
         return None
     event_id = event.get("id")
+    start_time = event.get("date")
     competitions = event.get("competitions")
-    if not event_id or not isinstance(competitions, list) or not competitions:
+    if (
+        not event_id
+        or not start_time
+        or not isinstance(competitions, list)
+        or not competitions
+    ):
         return None
     competition = competitions[0]
     competitors = (
@@ -236,6 +243,7 @@ def _parse_event(event: Any) -> MatchScore | None:
         away_score=away_score,
         state=state,
         display_clock=display_clock,
+        start_time=str(start_time),
     )
 
 
