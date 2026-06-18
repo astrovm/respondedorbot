@@ -141,7 +141,7 @@ class MatchScore:
     home_score: int
     away_score: int
     state: str
-    display_clock: str = ""
+    display_clock: str
 
 
 @dataclass(frozen=True)
@@ -151,7 +151,7 @@ class Goal:
     opponent: str
     scoring_score: int
     opponent_score: int
-    display_clock: str = ""
+    display_clock: str
 
     @property
     def dedupe_key(self) -> str:
@@ -190,6 +190,15 @@ def _parse_competitor(competitor: Any) -> tuple[str, str, int] | None:
     return str(side), str(name), score
 
 
+def _parse_status(event: Mapping[str, Any]) -> tuple[str, str] | None:
+    status = event.get("status")
+    if not isinstance(status, Mapping) or status.get("displayClock") is None:
+        return None
+    status_type = status.get("type")
+    state = status_type.get("state") if isinstance(status_type, Mapping) else ""
+    return str(state), str(status["displayClock"])
+
+
 def _parse_event(event: Any) -> MatchScore | None:
     if not isinstance(event, Mapping):
         return None
@@ -198,9 +207,11 @@ def _parse_event(event: Any) -> MatchScore | None:
     if not event_id or not isinstance(competitions, list) or not competitions:
         return None
     competition = competitions[0]
-    if not isinstance(competition, Mapping):
-        return None
-    competitors = competition.get("competitors")
+    competitors = (
+        competition.get("competitors")
+        if isinstance(competition, Mapping)
+        else None
+    )
     if not isinstance(competitors, list):
         return None
 
@@ -211,10 +222,10 @@ def _parse_event(event: Any) -> MatchScore | None:
     }
     if "home" not in teams or "away" not in teams:
         return None
-    status = event.get("status")
-    status_type = status.get("type") if isinstance(status, Mapping) else None
-    state = status_type.get("state") if isinstance(status_type, Mapping) else ""
-    display_clock = status.get("displayClock") if isinstance(status, Mapping) else ""
+    parsed_status = _parse_status(event)
+    if parsed_status is None:
+        return None
+    state, display_clock = parsed_status
     home_team, home_score = teams["home"]
     away_team, away_score = teams["away"]
     return MatchScore(
@@ -223,8 +234,8 @@ def _parse_event(event: Any) -> MatchScore | None:
         away_team=away_team,
         home_score=home_score,
         away_score=away_score,
-        state=str(state),
-        display_clock=str(display_clock or ""),
+        state=state,
+        display_clock=display_clock,
     )
 
 

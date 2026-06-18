@@ -18,8 +18,8 @@ def _payload(
     home_score: int,
     away_score: int,
     *,
+    display_clock: str,
     state: str = "in",
-    display_clock: str = "",
 ):
     return {
         "events": [
@@ -73,7 +73,7 @@ def test_parse_scoreboard_extracts_match_scores():
 
 
 def test_detect_goals_returns_each_team_that_increased():
-    previous = parse_scoreboard(_payload(0, 0))
+    previous = parse_scoreboard(_payload(0, 0, display_clock="0'"))
     current = parse_scoreboard(_payload(1, 1, display_clock="58'"))
 
     assert detect_goals(previous, current) == [
@@ -83,12 +83,12 @@ def test_detect_goals_returns_each_team_that_increased():
 
 
 def test_detect_goals_preserves_multiple_score_increments_between_polls():
-    previous = parse_scoreboard(_payload(0, 0))
-    current = parse_scoreboard(_payload(2, 0))
+    previous = parse_scoreboard(_payload(0, 0, display_clock="0'"))
+    current = parse_scoreboard(_payload(2, 0, display_clock="58'"))
 
     assert detect_goals(previous, current) == [
-        Goal("match-1", "Argentina", "England", 1, 0),
-        Goal("match-1", "Argentina", "England", 2, 0),
+        Goal("match-1", "Argentina", "England", 1, 0, "58'"),
+        Goal("match-1", "Argentina", "England", 2, 0, "58'"),
     ]
 
 
@@ -133,10 +133,10 @@ def test_goal_prompt_keeps_the_ranked_team_side():
     )
 
     argentina_scores = monitor._build_prompt(
-        Goal("match-1", "Argentina", "England", 1, 0)
+        Goal("match-1", "Argentina", "England", 1, 0, "35'")
     )
     england_scores = monitor._build_prompt(
-        Goal("match-1", "England", "Argentina", 1, 0)
+        Goal("match-1", "England", "Argentina", 1, 0, "35'")
     )
 
     assert "hinchás por Argentina" in argentina_scores
@@ -165,10 +165,10 @@ def test_goal_messages_use_spanish_team_names():
     )
 
     prompt = monitor._build_prompt(
-        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0)
+        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0, "35'")
     )
     fallback = monitor._fallback_message(
-        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0)
+        Goal("match-1", "Ivory Coast", "Ecuador", 1, 0, "35'")
     )
 
     assert team_name_es("Ivory Coast") == "Costa de Marfil"
@@ -194,8 +194,8 @@ def test_goal_messages_use_spanish_team_names():
 def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(1, 0)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(1, 0, display_clock="35'")),
         ]
     )
     ask_ai = MagicMock(return_value="goooooool, ingleses muertos")
@@ -211,7 +211,7 @@ def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     assert monitor.poll_once() == []
     goals = monitor.poll_once()
 
-    assert goals == [Goal("match-1", "Argentina", "England", 1, 0)]
+    assert goals == [Goal("match-1", "Argentina", "England", 1, 0, "35'")]
     assert ask_ai.call_count == 2
     assert ask_ai.call_args_list[0].kwargs["enable_web_search"] is False
     assert ask_ai.call_args_list[0].kwargs["chat_id"] == "chat-1"
@@ -225,8 +225,8 @@ def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
 def test_monitor_does_not_generate_message_when_no_chat_is_enabled():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(1, 0)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(1, 0, display_clock="35'")),
         ]
     )
     ask_ai = MagicMock()
@@ -248,8 +248,8 @@ def test_monitor_does_not_generate_message_when_no_chat_is_enabled():
 def test_monitor_uses_fallback_when_ai_fails():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(0, 1)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(0, 1, display_clock="35'")),
         ]
     )
     send_message = MagicMock()
@@ -272,8 +272,8 @@ def test_monitor_uses_fallback_when_ai_fails():
 def test_monitor_charges_chat_for_ai_goal_message_and_refunds_unused_reserve():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(1, 0)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(1, 0, display_clock="35'")),
         ]
     )
 
@@ -315,8 +315,8 @@ def test_monitor_charges_chat_for_ai_goal_message_and_refunds_unused_reserve():
 def test_monitor_uses_local_fallback_when_chat_has_no_credits():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(1, 0)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(1, 0, display_clock="35'")),
         ]
     )
     ask_ai = MagicMock()
@@ -343,8 +343,8 @@ def test_monitor_uses_local_fallback_when_chat_has_no_credits():
 def test_monitor_uses_local_message_for_provider_fallback():
     http_get = MagicMock(
         side_effect=[
-            _response(_payload(0, 0)),
-            _response(_payload(1, 0)),
+            _response(_payload(0, 0, display_clock="0'")),
+            _response(_payload(1, 0, display_clock="35'")),
         ]
     )
 
