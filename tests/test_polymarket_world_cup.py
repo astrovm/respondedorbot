@@ -149,8 +149,8 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
         {"slug": "world-cup-winner"},
         {
         "limit": 100,
+        "offset": 0,
         "active": "true",
-        "closed": "false",
         "series_id": 11433,
         "order": "endDate",
         "ascending": "true",
@@ -287,36 +287,15 @@ def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
     assert "Draw" not in result
 
 
-def test_get_polymarket_world_cup_games_skips_match_with_closed_team_market(
+def test_get_polymarket_world_cup_games_shows_final_with_closed_team_market(
     monkeypatch,
 ):
     event = {
         "title": "Belgium vs. Egypt",
         "slug": "fifwc-bel-egy-2026-06-15",
         "endDate": "2026-06-15T19:00:00Z",
-        "markets": [
-            {
-                "groupItemTitle": "Draw (Belgium vs. Egypt)",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.999", "0.001"]',
-            },
-            {
-                "groupItemTitle": "Belgium win either half",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.51", "0.49"]',
-            },
-            {
-                "groupItemTitle": "Belgium",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.0005", "0.9995"]',
-            },
-            {
-                "groupItemTitle": "Egypt",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.0005", "0.9995"]',
-                "closed": True,
-            },
-        ],
+        "closed": True,
+        "markets": [],
     }
 
     def fake_cached_requests(_url, parameters, *_args):
@@ -342,11 +321,62 @@ def test_get_polymarket_world_cup_games_skips_match_with_closed_team_market(
 
     result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
 
-    assert "Bélgica" not in result
-    assert "Egipto" not in result
-    assert "fifwc-bel-egy-2026-06-15" not in result
-    assert "Draw" not in result
-    assert "win either half" not in result
+    assert "🇧🇪 Bélgica 1 vs. 🇪🇬 Egipto 1" in result
+    assert "fifwc-bel-egy-2026-06-15" in result
+    assert "[🇧🇪 Bélgica" not in result
+    assert "[🇪🇬 Egipto" not in result
+    assert "\nFinal" in result
+
+
+def test_get_polymarket_world_cup_games_uses_later_pages_for_recent_matches(
+    monkeypatch,
+):
+    old_events = [
+        {
+            "title": f"Old Team {index_} vs. Old Rival {index_}",
+            "slug": f"fifwc-old{index_}-rvl{index_}-2026-06-11",
+            "endDate": "2026-06-11T19:00:00Z",
+            "closed": True,
+            "markets": [],
+        }
+        for index_ in range(100)
+    ]
+    recent_event = {
+        "title": "Team A vs. Team B",
+        "slug": "fifwc-a-b-2026-06-17",
+        "endDate": "2026-06-18T02:00:00Z",
+        "closed": True,
+        "markets": [],
+    }
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        if parameters["offset"] == 0:
+            return {"data": old_events}
+        return {"data": [recent_event]}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": MatchScore(
+                event_id="game-1",
+                home_team="Team A",
+                away_team="Team B",
+                home_score=2,
+                away_score=1,
+                state="post",
+                display_clock="FT",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "fifwc-a-b-2026-06-17" in result
+    assert "[Team A 2] vs. Team B 1" in result
+    assert "fifwc-old0-rvl0-2026-06-11" not in result
 
 
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(

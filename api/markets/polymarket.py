@@ -30,6 +30,7 @@ GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
 WORLD_CUP_LIMIT = 10
 WORLD_CUP_FETCH_LIMIT = 100
+WORLD_CUP_FETCH_PAGES = 5
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
 SPANISH_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
@@ -459,21 +460,11 @@ def get_world_cup_games(
     fetch_scores: ScoreFetcher,
 ) -> str:
     winner_event = fetch_winner_event(WORLD_CUP_WINNER_SLUG)
-    response = cached_request(
-        EVENTS_URL,
-        {
-            "limit": WORLD_CUP_FETCH_LIMIT,
-            "active": "true",
-            "closed": "false",
-            "series_id": WORLD_CUP_SERIES_ID,
-            "order": "endDate",
-            "ascending": "true",
-        },
-        None,
-        cache_ttl,
+    events = _fetch_world_cup_events(
+        cached_request=cached_request,
+        cache_ttl=cache_ttl,
     )
-    events = response.get("data") if response else None
-    if not isinstance(events, list) or not events:
+    if not events:
         return "No pude traer los partidos del Mundial desde Polymarket"
 
     pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
@@ -544,6 +535,35 @@ def get_world_cup_games(
     )
 
 
+def _fetch_world_cup_events(
+    *,
+    cached_request: CachedRequest,
+    cache_ttl: int,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for page in range(WORLD_CUP_FETCH_PAGES):
+        response = cached_request(
+            EVENTS_URL,
+            {
+                "limit": WORLD_CUP_FETCH_LIMIT,
+                "offset": page * WORLD_CUP_FETCH_LIMIT,
+                "active": "true",
+                "series_id": WORLD_CUP_SERIES_ID,
+                "order": "endDate",
+                "ascending": "true",
+            },
+            None,
+            cache_ttl,
+        )
+        page_events = response.get("data") if response else None
+        if not isinstance(page_events, list) or not page_events:
+            break
+        events.extend(event for event in page_events if isinstance(event, dict))
+        if len(page_events) < WORLD_CUP_FETCH_LIMIT:
+            break
+    return events
+
+
 def _select_world_cup_games(
     games: Sequence[dict[str, Any]],
     live_scores: Mapping[str, MatchScore],
@@ -554,6 +574,8 @@ def _select_world_cup_games(
         match = _match_display_for_event(event, live_scores)
         if match.state == "post":
             finished.append(event)
+        elif event.get("closed") is True:
+            continue
         else:
             active_or_future.append(event)
     selected = finished[-2:] + active_or_future
@@ -577,41 +599,47 @@ def _format_world_cup_game(
     team_names = [part.strip() for part in str(title).split(" vs. ")]
     if len(team_names) != 2:
         return None
-    quotes = normalize_event_quotes(event)
-    quotes_by_team = _world_cup_team_quotes(
-        quotes,
-        team_names,
-        fetch_live=fetch_live,
-    )
-    if len(quotes_by_team) != len(team_names):
-        return None
-    favorite, favorite_probability = max(
-        quotes_by_team.items(),
-        key=lambda item: item[1],
-        default=("", 0.0),
-    )
-    draw_probability = _world_cup_draw_probability(
-        quotes,
-        team_names,
-        fetch_live=fetch_live,
-    )
-    if draw_probability is not None and draw_probability > favorite_probability:
-        favorite = ""
     scores = _score_by_team(team_names, live_scores)
-    if scores.state == "post":
-        favorite = _final_winner(scores)
+    quotes_by_team: dict[str, float] = {}
+    favorite = _final_winner(scores) if scores.state == "post" else ""
+    if scores.state != "post":
+        quotes = normalize_event_quotes(event)
+        quotes_by_team = _world_cup_team_quotes(
+            quotes,
+            team_names,
+            fetch_live=fetch_live,
+        )
+        if len(quotes_by_team) != len(team_names):
+            return None
+        favorite, favorite_probability = max(
+            quotes_by_team.items(),
+            key=lambda item: item[1],
+            default=("", 0.0),
+        )
+        draw_probability = _world_cup_draw_probability(
+            quotes,
+            team_names,
+            fetch_live=fetch_live,
+        )
+        if draw_probability is not None and draw_probability > favorite_probability:
+            favorite = ""
     for team_name in team_names:
-        team_probability = quotes_by_team.get(team_name)
-        if team_probability is None:
-            continue
-        decimals = 2 if team_probability < 10 else 1
         score = scores.scores.get(team_name)
-        probability = f"{fmt_num(team_probability, decimals)}%"
         if score is None:
+            team_probability = quotes_by_team.get(team_name)
+            if team_probability is None:
+                continue
+            decimals = 2 if team_probability < 10 else 1
+            probability = f"{fmt_num(team_probability, decimals)}%"
             label = f"{format_country(team_name)} {probability}"
         elif scores.state == "post":
             label = f"{format_country(team_name)} {score}"
         else:
+            team_probability = quotes_by_team.get(team_name)
+            if team_probability is None:
+                continue
+            decimals = 2 if team_probability < 10 else 1
+            probability = f"{fmt_num(team_probability, decimals)}%"
             label = f"{format_country(team_name)} {score} ({probability})"
         teams.append(f"[{label}]" if team_name == favorite else label)
 
