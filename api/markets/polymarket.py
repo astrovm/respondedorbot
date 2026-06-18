@@ -514,7 +514,7 @@ def get_world_cup_games(
     games_by_date: dict[str, list[tuple[str, str]]] = {}
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
-    for event in games[:WORLD_CUP_LIMIT]:
+    for event in _select_world_cup_games(games, live_scores):
         formatted_event = _format_world_cup_game(
             event,
             fetch_live=fetch_live,
@@ -542,6 +542,23 @@ def get_world_cup_games(
         if len(lines) > 1
         else "No pude traer los partidos del Mundial desde Polymarket"
     )
+
+
+def _select_world_cup_games(
+    games: Sequence[dict[str, Any]],
+    live_scores: Mapping[str, MatchScore],
+) -> list[dict[str, Any]]:
+    finished: list[dict[str, Any]] = []
+    active_or_future: list[dict[str, Any]] = []
+    for event in games:
+        match = _match_display_for_event(event, live_scores)
+        if match.state == "post":
+            finished.append(event)
+        else:
+            active_or_future.append(event)
+    selected = finished[-2:] + active_or_future
+    selected.sort(key=lambda event: str(event.get("endDate") or ""))
+    return selected[:WORLD_CUP_LIMIT]
 
 
 def _format_world_cup_game(
@@ -581,15 +598,19 @@ def _format_world_cup_game(
     if draw_probability is not None and draw_probability > favorite_probability:
         favorite = ""
     scores = _score_by_team(team_names, live_scores)
+    if scores.state == "post":
+        favorite = _final_winner(scores)
     for team_name in team_names:
         team_probability = quotes_by_team.get(team_name)
         if team_probability is None:
             continue
         decimals = 2 if team_probability < 10 else 1
-        score = scores.get(team_name)
+        score = scores.scores.get(team_name)
         probability = f"{fmt_num(team_probability, decimals)}%"
         if score is None:
             label = f"{format_country(team_name)} {probability}"
+        elif scores.state == "post":
+            label = f"{format_country(team_name)} {score}"
         else:
             label = f"{format_country(team_name)} {score} ({probability})"
         teams.append(f"[{label}]" if team_name == favorite else label)
@@ -604,6 +625,7 @@ def _format_world_cup_game(
         chat_timezone,
         timezone_label,
     )
+    time_string = _format_match_time(time_string, scores)
     return date_string, linked_title, time_string
 
 
@@ -659,12 +681,30 @@ def _score_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", canonical_team_name(name).casefold())
 
 
+@dataclass(frozen=True)
+class MatchDisplay:
+    scores: dict[str, int]
+    state: str
+    display_clock: str
+
+
+def _match_display_for_event(
+    event: dict[str, Any],
+    scores: Mapping[str, MatchScore],
+) -> MatchDisplay:
+    title = event.get("title")
+    if not title:
+        return MatchDisplay({}, "", "")
+    team_names = [part.strip() for part in str(title).split(" vs. ")]
+    return _score_by_team(team_names, scores)
+
+
 def _score_by_team(
     teams: Sequence[str],
     scores: Mapping[str, MatchScore],
-) -> dict[str, int]:
+) -> MatchDisplay:
     if len(teams) != 2:
-        return {}
+        return MatchDisplay({}, "", "")
     requested = {_score_key(teams[0]), _score_key(teams[1])}
     for match in scores.values():
         if match.state not in {"in", "post"}:
@@ -682,8 +722,35 @@ def _score_by_team(
             if _score_key(teams[1]) == _score_key(match.home_team)
             else match.away_score
         )
-        return {teams[0]: first_score, teams[1]: second_score}
-    return {}
+        return MatchDisplay(
+            {teams[0]: first_score, teams[1]: second_score},
+            match.state,
+            match.display_clock,
+        )
+    return MatchDisplay({}, "", "")
+
+
+def _final_winner(scores: MatchDisplay) -> str:
+    if len(scores.scores) != 2:
+        return ""
+    first_team, second_team = scores.scores
+    first_score = scores.scores[first_team]
+    second_score = scores.scores[second_team]
+    if first_score == second_score:
+        return ""
+    return first_team if first_score > second_score else second_team
+
+
+def _format_match_time(time_string: str, scores: MatchDisplay) -> str:
+    if scores.state == "post":
+        return "Final"
+    if scores.state == "in" and scores.display_clock:
+        return (
+            f"{scores.display_clock} · {time_string}"
+            if time_string
+            else scores.display_clock
+        )
+    return time_string
 
 
 def _format_kickoff(

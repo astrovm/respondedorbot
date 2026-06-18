@@ -141,6 +141,7 @@ class MatchScore:
     home_score: int
     away_score: int
     state: str
+    display_clock: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ class Goal:
     opponent: str
     scoring_score: int
     opponent_score: int
+    display_clock: str = ""
 
     @property
     def dedupe_key(self) -> str:
@@ -212,6 +214,7 @@ def _parse_event(event: Any) -> MatchScore | None:
     status = event.get("status")
     status_type = status.get("type") if isinstance(status, Mapping) else None
     state = status_type.get("state") if isinstance(status_type, Mapping) else ""
+    display_clock = status.get("displayClock") if isinstance(status, Mapping) else ""
     home_team, home_score = teams["home"]
     away_team, away_score = teams["away"]
     return MatchScore(
@@ -221,6 +224,7 @@ def _parse_event(event: Any) -> MatchScore | None:
         home_score=home_score,
         away_score=away_score,
         state=str(state),
+        display_clock=str(display_clock or ""),
     )
 
 
@@ -251,6 +255,7 @@ def detect_goals(
                     opponent=match.away_team,
                     scoring_score=scoring_score,
                     opponent_score=match.away_score,
+                    display_clock=match.display_clock,
                 )
             )
         for scoring_score in range(old.away_score + 1, match.away_score + 1):
@@ -261,6 +266,7 @@ def detect_goals(
                     opponent=match.home_team,
                     scoring_score=scoring_score,
                     opponent_score=match.home_score,
+                    display_clock=match.display_clock,
                 )
             )
     return goals
@@ -366,6 +372,7 @@ class WorldCupGoalMonitor:
         scoring_team_es = team_name_es(goal.scoring_team)
         opponent_es = team_name_es(goal.opponent)
         scored_for_us = supported_team == goal.scoring_team
+        clock_context = f"Va {goal.display_clock}. " if goal.display_clock else ""
         reaction = (
             "Tu equipo acaba de hacer el gol: festejalo con toda la euforia y "
             "descansá o insultá futbolísticamente al rival."
@@ -377,7 +384,7 @@ class WorldCupGoalMonitor:
             f"En este partido hinchás por {supported_team_es}. No cambies de bando. "
             f"{scoring_team_es} acaba de meterle un gol a {opponent_es}. "
             f"El partido está {goal.scoring_score}-{goal.opponent_score}. "
-            f"{reaction} Escribí un solo mensaje corto en español argentino, "
+            f"{clock_context}{reaction} Escribí un solo mensaje corto en español argentino, "
             "sin markdown ni explicación."
         )
 
@@ -386,16 +393,17 @@ class WorldCupGoalMonitor:
         supported_team_es = team_name_es(supported_team)
         scoring_team_es = team_name_es(goal.scoring_team)
         opponent_es = team_name_es(goal.opponent)
+        clock = f" ({goal.display_clock})" if goal.display_clock else ""
         if supported_team != goal.scoring_team:
             return (
                 f"LA PUTA MADRE, {scoring_team_es.upper()}! "
                 f"VAMOS {supported_team_es.upper()}, HAY QUE DARLO VUELTA! "
-                f"{goal.scoring_score}-{goal.opponent_score}"
+                f"{goal.scoring_score}-{goal.opponent_score}{clock}"
             )
         return (
             f"GOOOOOOL DE {scoring_team_es.upper()}! "
             f"{opponent_es.upper()}, SON UNOS MUERTOS, MIREN COMO DEFIENDEN! "
-            f"{goal.scoring_score}-{goal.opponent_score}"
+            f"{goal.scoring_score}-{goal.opponent_score}{clock}"
         )
 
     def _reserve_chat_credits(
@@ -427,6 +435,7 @@ class WorldCupGoalMonitor:
             "opponent": goal.opponent,
             "scoring_score": goal.scoring_score,
             "opponent_score": goal.opponent_score,
+            "display_clock": goal.display_clock,
             **reserve_meta,
         }
         try:
