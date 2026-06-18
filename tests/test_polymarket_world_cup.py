@@ -335,6 +335,7 @@ def test_get_polymarket_world_cup_games_skips_match_with_closed_team_market(
                 home_score=1,
                 away_score=1,
                 state="post",
+                display_clock="FT",
             )
         },
     )
@@ -385,6 +386,7 @@ def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
                 home_score=0,
                 away_score=0,
                 state="pre",
+                display_clock="0'",
             )
         },
     )
@@ -513,6 +515,7 @@ def test_get_polymarket_world_cup_games_keeps_only_two_latest_final_matches(
                 home_score=1,
                 away_score=0,
                 state="post",
+                display_clock="FT",
             ),
             "game-2": MatchScore(
                 event_id="game-2",
@@ -521,6 +524,7 @@ def test_get_polymarket_world_cup_games_keeps_only_two_latest_final_matches(
                 home_score=2,
                 away_score=1,
                 state="post",
+                display_clock="FT",
             ),
             "game-3": MatchScore(
                 event_id="game-3",
@@ -529,6 +533,7 @@ def test_get_polymarket_world_cup_games_keeps_only_two_latest_final_matches(
                 home_score=3,
                 away_score=2,
                 state="post",
+                display_clock="FT",
             ),
         },
     )
