@@ -383,7 +383,6 @@ class WorldCupGoalMonitor:
         scoring_team_es = team_name_es(goal.scoring_team)
         opponent_es = team_name_es(goal.opponent)
         scored_for_us = supported_team == goal.scoring_team
-        clock_context = f"Va {goal.display_clock}. " if goal.display_clock else ""
         reaction = (
             "Tu equipo acaba de hacer el gol: festejalo con toda la euforia y "
             "descansá o insultá futbolísticamente al rival."
@@ -395,7 +394,7 @@ class WorldCupGoalMonitor:
             f"En este partido hinchás por {supported_team_es}. No cambies de bando. "
             f"{scoring_team_es} acaba de meterle un gol a {opponent_es}. "
             f"El partido está {goal.scoring_score}-{goal.opponent_score}. "
-            f"{clock_context}{reaction} Escribí un solo mensaje corto en español argentino, "
+            f"Va {goal.display_clock}. {reaction} Escribí un solo mensaje corto en español argentino, "
             "sin markdown ni explicación."
         )
 
@@ -404,17 +403,16 @@ class WorldCupGoalMonitor:
         supported_team_es = team_name_es(supported_team)
         scoring_team_es = team_name_es(goal.scoring_team)
         opponent_es = team_name_es(goal.opponent)
-        clock = f" ({goal.display_clock})" if goal.display_clock else ""
         if supported_team != goal.scoring_team:
             return (
                 f"LA PUTA MADRE, {scoring_team_es.upper()}! "
                 f"VAMOS {supported_team_es.upper()}, HAY QUE DARLO VUELTA! "
-                f"{goal.scoring_score}-{goal.opponent_score}{clock}"
+                f"{goal.scoring_score}-{goal.opponent_score} ({goal.display_clock})"
             )
         return (
             f"GOOOOOOL DE {scoring_team_es.upper()}! "
             f"{opponent_es.upper()}, SON UNOS MUERTOS, MIREN COMO DEFIENDEN! "
-            f"{goal.scoring_score}-{goal.opponent_score}{clock}"
+            f"{goal.scoring_score}-{goal.opponent_score} ({goal.display_clock})"
         )
 
     def _reserve_chat_credits(
