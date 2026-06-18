@@ -20,11 +20,13 @@ def _payload(
     *,
     display_clock: str,
     state: str = "in",
+    start_time: str = "2026-06-11T19:00:00Z",
 ):
     return {
         "events": [
             {
                 "id": "match-1",
+                "date": start_time,
                 "status": {
                     "displayClock": display_clock,
                     "type": {"state": state},
@@ -68,6 +70,7 @@ def test_parse_scoreboard_extracts_match_scores():
             away_score=1,
             state="in",
             display_clock="35'",
+            start_time="2026-06-11T19:00:00Z",
         )
     }
 
