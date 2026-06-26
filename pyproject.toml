@@ -33,7 +33,7 @@ dev = [
 
 [tool.uv]
 package = false
-required-version = "==0.11.24"
+required-version = ">=0.11.21,<0.12"
 
 [tool.ruff]
 target-version = "py314"
