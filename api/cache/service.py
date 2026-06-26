@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from logging import Logger
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Union, cast
 
 import redis
 
@@ -52,7 +52,7 @@ class CacheService:
         )
         if cached_data is None:
             return None
-        cache_history = json.loads(cached_data)
+        cache_history = json.loads(cast(str | bytes | bytearray, cached_data))
         if isinstance(cache_history, dict) and "timestamp" in cache_history:
             return cache_history
         return None
