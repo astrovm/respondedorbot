@@ -30,9 +30,16 @@ GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
 WORLD_CUP_LIMIT = 10
 WORLD_CUP_FETCH_LIMIT = 100
-WORLD_CUP_FETCH_PAGES = 5
+WORLD_CUP_FETCH_MAX_PAGES = 20
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
+WORLD_CUP_GAME_SLUG_PATTERN = re.compile(
+    r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$"
+)
+WORLD_CUP_SCORE_TIME_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z"
+)
+WORLD_CUP_MINUTE_TIME_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
 SPANISH_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
 SPANISH_MONTHS = (
     "enero",
@@ -464,19 +471,20 @@ def get_world_cup_games(
         live_scores = fetch_scores()
     except Exception:
         live_scores = {}
-    events = _fetch_world_cup_events(
-        cached_request=cached_request,
-        cache_ttl=cache_ttl,
+    selected_matches = _select_world_cup_matches(live_scores)
+    events = (
+        _fetch_world_cup_events(
+            cached_request=cached_request,
+            cache_ttl=cache_ttl,
+            selected_matches=selected_matches,
+        )
+        if selected_matches
+        else []
     )
-    if not events and not live_scores:
+    if not winner_event and not events and not live_scores:
         return "No pude traer los partidos del Mundial desde Polymarket"
 
-    pattern = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$")
-    games = [
-        event
-        for event in events
-        if pattern.fullmatch(str(event.get("slug") or ""))
-    ]
+    games = [event for event in events if _is_world_cup_game_event(event)]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
     lines = ["Polymarket - Mundial"]
 
@@ -506,7 +514,7 @@ def get_world_cup_games(
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
     events_by_match = _world_cup_events_by_match(games)
-    for match in _select_world_cup_matches(live_scores):
+    for match in selected_matches:
         formatted_event = _format_world_cup_game(
             match,
             event=events_by_match.get(_match_key(match.home_team, match.away_team)),
@@ -540,29 +548,74 @@ def _fetch_world_cup_events(
     *,
     cached_request: CachedRequest,
     cache_ttl: int,
+    selected_matches: Sequence[MatchScore],
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    for page in range(WORLD_CUP_FETCH_PAGES):
+    fetch_start, fetch_end = _world_cup_fetch_bounds(selected_matches)
+    target_keys = {
+        _match_key(match.home_team, match.away_team)
+        for match in selected_matches
+        if match.state != "post"
+    }
+    found_keys: set[frozenset[str]] = set()
+    for page in range(WORLD_CUP_FETCH_MAX_PAGES):
+        parameters: dict[str, Any] = {
+            "limit": WORLD_CUP_FETCH_LIMIT,
+            "offset": page * WORLD_CUP_FETCH_LIMIT,
+            "active": "true",
+            "series_id": WORLD_CUP_SERIES_ID,
+            "order": "endDate",
+            "ascending": "true",
+        }
+        if fetch_start:
+            parameters["end_date_min"] = fetch_start
+        if fetch_end:
+            parameters["end_date_max"] = fetch_end
         response = cached_request(
             EVENTS_URL,
-            {
-                "limit": WORLD_CUP_FETCH_LIMIT,
-                "offset": page * WORLD_CUP_FETCH_LIMIT,
-                "active": "true",
-                "series_id": WORLD_CUP_SERIES_ID,
-                "order": "endDate",
-                "ascending": "true",
-            },
+            parameters,
             None,
             cache_ttl,
         )
         page_events = response.get("data") if response else None
         if not isinstance(page_events, list) or not page_events:
             break
-        events.extend(event for event in page_events if isinstance(event, dict))
+        for event in page_events:
+            if not isinstance(event, dict):
+                continue
+            events.append(event)
+            if _is_world_cup_game_event(event):
+                match_key = _world_cup_event_match_key(event)
+                if match_key is not None:
+                    found_keys.add(match_key)
+        if target_keys and target_keys <= found_keys:
+            break
         if len(page_events) < WORLD_CUP_FETCH_LIMIT:
             break
     return events
+
+
+def _world_cup_fetch_bounds(
+    matches: Sequence[MatchScore],
+) -> tuple[str | None, str | None]:
+    start_times = [
+        _normalize_world_cup_fetch_time(match.start_time)
+        for match in matches
+        if WORLD_CUP_SCORE_TIME_PATTERN.fullmatch(match.start_time)
+    ]
+    if not start_times:
+        return None, None
+    return min(start_times), max(start_times)
+
+
+def _normalize_world_cup_fetch_time(start_time: str) -> str:
+    if WORLD_CUP_MINUTE_TIME_PATTERN.fullmatch(start_time):
+        return start_time[:-1] + ":00Z"
+    return start_time
+
+
+def _is_world_cup_game_event(event: Mapping[str, Any]) -> bool:
+    return WORLD_CUP_GAME_SLUG_PATTERN.fullmatch(str(event.get("slug") or "")) is not None
 
 
 def _select_world_cup_matches(
@@ -579,16 +632,22 @@ def _world_cup_events_by_match(
 ) -> dict[frozenset[str], dict[str, Any]]:
     events_by_match: dict[frozenset[str], dict[str, Any]] = {}
     for event in games:
-        title = event.get("title")
-        if not title:
+        key = _world_cup_event_match_key(event)
+        if key is None:
             continue
-        team_names = [part.strip() for part in str(title).split(" vs. ")]
-        if len(team_names) != 2:
-            continue
-        key = _match_key(team_names[0], team_names[1])
         if key not in events_by_match or event.get("closed") is not True:
             events_by_match[key] = event
     return events_by_match
+
+
+def _world_cup_event_match_key(event: Mapping[str, Any]) -> frozenset[str] | None:
+    title = event.get("title")
+    if not title:
+        return None
+    team_names = [part.strip() for part in str(title).split(" vs. ")]
+    if len(team_names) != 2:
+        return None
+    return _match_key(team_names[0], team_names[1])
 
 
 def _match_key(first_team: str, second_team: str) -> frozenset[str]:

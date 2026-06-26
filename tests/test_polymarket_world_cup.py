@@ -186,6 +186,8 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
             "series_id": 11433,
             "order": "endDate",
             "ascending": "true",
+            "end_date_min": "2026-06-11T19:00:00Z",
+            "end_date_max": "2026-06-12T02:00:00Z",
         },
     ]
     assert result.startswith("Polymarket - Mundial")
@@ -463,6 +465,73 @@ def test_get_polymarket_world_cup_games_uses_later_pages_for_recent_matches(
     assert "fifwc-a-b-2026-06-17" in result
     assert "[Team A 2] vs. Team B 1" in result
     assert "fifwc-old0-rvl0-2026-06-11" not in result
+
+
+def test_get_polymarket_world_cup_games_pages_until_selected_match_is_found(
+    monkeypatch,
+):
+    filler_events = [
+        {
+            "title": f"Prop Team {index_} vs. Prop Rival {index_} - Total Corners",
+            "slug": f"fifwc-prop{index_}-rvl{index_}-2026-06-26-total-corners",
+            "endDate": "2026-06-27T00:00:00Z",
+            "markets": [],
+        }
+        for index_ in range(100)
+    ]
+    target_event = {
+        "title": "Uruguay vs. Spain",
+        "slug": "fifwc-ury-esp-2026-06-26",
+        "endDate": "2026-06-27T00:00:00Z",
+        "markets": [
+            {
+                "groupItemTitle": "Uruguay",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.20", "0.80"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Spain",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.62", "0.38"]',
+                "active": True,
+                "closed": False,
+            },
+        ],
+    }
+    captured_offsets = []
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        captured_offsets.append(parameters["offset"])
+        assert parameters["end_date_min"] == "2026-06-27T00:00:00Z"
+        assert parameters["end_date_max"] == "2026-06-27T00:00:00Z"
+        if parameters["offset"] < 500:
+            return {"data": filler_events}
+        return {"data": [target_event]}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": _match_score(
+                "game-1",
+                "Uruguay",
+                "Spain",
+                state="pre",
+                display_clock="0'",
+                start_time="2026-06-27T00:00Z",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert captured_offsets == [0, 100, 200, 300, 400, 500]
+    assert "fifwc-ury-esp-2026-06-26" in result
+    assert "🇺🇾 Uruguay 20% vs. [🇪🇸 España 62%]" in result
 
 
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
