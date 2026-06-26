@@ -1,6 +1,12 @@
 from api import index
-from api.markets.world_cup_goals import MatchScore
-from api.markets.polymarket import flagged_country_name
+from api.markets.world_cup_goals import (
+    MatchScore,
+    TEAM_NAME_ALIASES,
+    TEAM_NAMES_ES,
+    WORLD_CUP_TEAM_RANKING,
+    team_name_es,
+)
+from api.markets.polymarket import country_flag_from_name, flagged_country_name
 from api.markets import polymarket as polymarket_commands
 
 
@@ -534,6 +540,59 @@ def test_get_polymarket_world_cup_games_pages_until_selected_match_is_found(
     assert "🇺🇾 Uruguay 20% vs. [🇪🇸 España 62%]" in result
 
 
+def test_get_polymarket_world_cup_games_matches_provider_aliases(monkeypatch):
+    events = [
+        {
+            "title": "Cabo Verde vs. Côte d'Ivoire",
+            "slug": "fifwc-cvi-civ-2026-06-26",
+            "endDate": "2026-06-26T21:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Cabo Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.36", "0.64"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Côte d'Ivoire",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.44", "0.56"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": _match_score(
+                "game-1",
+                "Cape Verde",
+                "Ivory Coast",
+                state="pre",
+                display_clock="0'",
+                start_time="2026-06-26T21:00:00Z",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "fifwc-cvi-civ-2026-06-26" in result
+    assert "🇨🇻 Cabo Verde 36% vs. [🇨🇮 Costa de Marfil 44%]" in result
+    assert "Cape Verde" not in result
+    assert "Ivory Coast" not in result
+
+
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
     monkeypatch,
 ):
@@ -776,3 +835,18 @@ def test_country_flags_use_iso_data_with_sports_aliases():
         "\U000e0073\U000e007f Wales"
     )
     assert flagged_country_name("UK") == "🇬🇧 UK"
+
+
+def test_all_ranked_world_cup_teams_have_flags_and_spanish_display_names():
+    assert set(TEAM_NAMES_ES) == set(WORLD_CUP_TEAM_RANKING)
+    for team in WORLD_CUP_TEAM_RANKING:
+        flag = country_flag_from_name(team)
+        assert flag, team
+        assert flagged_country_name(team) == f"{flag} {team_name_es(team)}"
+
+
+def test_all_provider_team_aliases_have_flags_and_canonical_display_names():
+    for alias, canonical in TEAM_NAME_ALIASES.items():
+        flag = country_flag_from_name(alias)
+        assert flag, alias
+        assert flagged_country_name(alias) == f"{flag} {team_name_es(canonical)}"
