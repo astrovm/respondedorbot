@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, cast
 
 import redis
 
@@ -91,7 +91,10 @@ def prune_redis_growth(
 def apply_redis_memory_policy(redis_client: redis.Redis) -> Dict[str, Any]:
     redis_client.config_set("maxmemory", REDIS_MAXMEMORY)
     redis_client.config_set("maxmemory-policy", REDIS_MAXMEMORY_POLICY)
-    config = redis_client.config_get("maxmemory", "maxmemory-policy")
+    config = cast(
+        Mapping[str, Any],
+        redis_client.config_get("maxmemory", "maxmemory-policy"),
+    )
     return {
         "maxmemory": config.get("maxmemory"),
         "maxmemory_policy": config.get("maxmemory-policy"),
