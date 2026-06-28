@@ -73,11 +73,16 @@ _TEAM_RANK = {
     for position, team in enumerate(WORLD_CUP_TEAM_RANKING)
 }
 TEAM_NAME_ALIASES = {
+    "Bosnia and Herzegovina": "Bosnia-Herzegovina",
     "Cabo Verde": "Cape Verde",
+    "Cote d'Ivoire": "Ivory Coast",
     "Côte d'Ivoire": "Ivory Coast",
     "DR Congo": "Congo DR",
     "IR Iran": "Iran",
     "Korea Republic": "South Korea",
+    "Turkey": "Türkiye",
+    "Turkiye": "Türkiye",
+    "USA": "United States",
 }
 TEAM_NAMES_ES = {
     "Argentina": "Argentina",
