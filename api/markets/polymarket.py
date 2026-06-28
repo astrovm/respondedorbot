@@ -99,6 +99,7 @@ class WorldCupSelectedMatch:
     match: MatchScore
     projected_team: str = ""
     projection_token: str = ""
+    projection_predicted: bool = False
     token_predictions: Mapping[str, str] | None = None
 
 
@@ -540,6 +541,7 @@ def get_world_cup_games(
             timezone_label=timezone_label,
             projected_team=selected.projected_team,
             projection_token=selected.projection_token,
+            projection_predicted=selected.projection_predicted,
             token_predictions=selected.token_predictions or {},
         )
         if formatted_event is None:
@@ -789,6 +791,7 @@ def _project_team_world_cup_path(
         fetch_live=fetch_live,
     )
     token = ""
+    token_is_predicted = False
     for match in matches:
         if _score_key(selected_team) not in {
             _score_key(match.home_team),
@@ -796,9 +799,12 @@ def _project_team_world_cup_path(
         }:
             continue
         token = round_winner_tokens.get(match.event_id, "")
+        token_is_predicted = False
         winner = predicted_winners.get(match.event_id)
         if winner and _score_key(winner) != _score_key(selected_team):
             return []
+        if winner:
+            token_is_predicted = match.state != "post"
     if not token:
         return []
 
@@ -828,6 +834,7 @@ def _project_team_world_cup_path(
                 match,
                 projected_team=selected_team,
                 projection_token=token,
+                projection_predicted=token_is_predicted,
                 token_predictions=token_predictions,
             )
         )
@@ -835,6 +842,7 @@ def _project_team_world_cup_path(
         if winner and _score_key(winner) != _score_key(selected_team):
             break
         token = round_winner_tokens.get(match.event_id, "")
+        token_is_predicted = bool(winner and match.state != "post")
         if not token:
             break
     return projected
@@ -971,6 +979,7 @@ def _format_world_cup_game(
     timezone_label: str,
     projected_team: str = "",
     projection_token: str = "",
+    projection_predicted: bool = False,
     token_predictions: Mapping[str, str] | None = None,
 ) -> tuple[str, str, str] | None:
     teams = []
@@ -1007,6 +1016,7 @@ def _format_world_cup_game(
                     team_name,
                     projected_team=projected_team,
                     projection_token=projection_token,
+                    projection_predicted=projection_predicted,
                     token_predictions=token_predictions or {},
                     format_country=format_country,
                 )
@@ -1048,10 +1058,13 @@ def _format_world_cup_team_label(
     *,
     projected_team: str,
     projection_token: str,
+    projection_predicted: bool,
     token_predictions: Mapping[str, str],
     format_country: CountryFormatter,
 ) -> str:
     if projection_token and team_name == projection_token:
+        if projection_predicted:
+            return f"{format_country(projected_team)} (pronóstico)"
         return f"{format_country(projected_team)} (si avanza)"
     predicted_team = token_predictions.get(team_name)
     if predicted_team:
