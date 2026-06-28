@@ -986,6 +986,166 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
     assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇴 Colombia (pronóstico)" in result
 
 
+def test_get_polymarket_world_cup_games_joins_us_bosnia_aliases(monkeypatch):
+    events = [
+        {
+            "title": "United States vs. Bosnia and Herzegovina",
+            "slug": "fifwc-usa-bih-2026-07-01",
+            "endDate": "2026-07-01T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Draw (United States vs. Bosnia and Herzegovina)",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.185", "0.815"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Bosnia and Herzegovina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.095", "0.905"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "United States",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.715", "0.285"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760494": _match_score(
+                "760494",
+                "United States",
+                "Bosnia-Herzegovina",
+                state="pre",
+                start_time="2026-07-01T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760507": _match_score(
+                "760507",
+                "Round of 32 1 Winner",
+                "Round of 32 10 Winner",
+                state="pre",
+                start_time="2026-07-07T17:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="usa",
+    )
+
+    assert "[🇺🇸 Estados Unidos 71.5%] vs. 🇧🇦 Bosnia y Herzegovina 9.5%" in result
+    assert "🇺🇸 Estados Unidos (pronóstico) vs. Ganador Round of 32 10" in result
+
+
+def test_get_polymarket_world_cup_games_falls_back_when_match_market_is_close(
+    monkeypatch,
+):
+    winner_event = {
+        "title": "World Cup Winner",
+        "slug": "world-cup-winner",
+        "markets": [
+            {
+                "groupItemTitle": "Argentina",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.05", "0.95"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Cape Verde",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.10", "0.90"]',
+                "active": True,
+                "closed": False,
+            },
+        ],
+    }
+    events = [
+        {
+            "title": "Argentina vs. Cape Verde",
+            "slug": "fifwc-arg-cvi-2026-07-03",
+            "endDate": "2026-07-03T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Argentina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.40", "0.60"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Cape Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.38", "0.62"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Draw (Argentina vs. Cape Verde)",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.22", "0.78"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return {"data": [winner_event]}
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 1 Winner",
+                "Round of 32 2 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert "[🇦🇷 Argentina 40%] vs. 🇨🇻 Cabo Verde 38%" in result
+    assert "🇨🇻 Cabo Verde (pronóstico) vs. Ganador Round of 32 2" in result
+
+
 def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
     monkeypatch,
 ):

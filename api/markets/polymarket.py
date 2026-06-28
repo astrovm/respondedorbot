@@ -40,10 +40,7 @@ WORLD_CUP_FETCH_LIMIT = 100
 WORLD_CUP_FETCH_MAX_PAGES = 20
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
 WORLD_CUP_WINNER_LIMIT = 5
-WORLD_CUP_RANKING_STRENGTHS = {
-    re.sub(r"[^a-z0-9]+", "", team.casefold()): len(WORLD_CUP_TEAM_RANKING) - index
-    for index, team in enumerate(WORLD_CUP_TEAM_RANKING)
-}
+WORLD_CUP_MATCH_MARKET_MIN_EDGE = 5.0
 WORLD_CUP_GAME_SLUG_PATTERN = re.compile(
     r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$"
 )
@@ -74,12 +71,15 @@ COUNTRY_NAME_ALIASES = {
     "cabo verde": "CV",
     "cape verde": "CV",
     "congo dr": "CD",
+    "cote d'ivoire": "CI",
     "dr congo": "CD",
     "england": "GB",
     "ir iran": "IR",
     "ivory coast": "CI",
     "korea republic": "KR",
     "scotland": "GB",
+    "turkey": "TR",
+    "turkiye": "TR",
     "uk": "GB",
     "wales": "GB",
 }
@@ -105,6 +105,12 @@ class WorldCupSelectedMatch:
     projection_token: str = ""
     projection_predicted: bool = False
     token_predictions: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class WorldCupPrediction:
+    team: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -810,9 +816,9 @@ def _project_team_world_cup_path(
             continue
         token = round_winner_tokens.get(match.event_id, "")
         token_is_predicted = False
-        winner = predicted_winners.get(match.event_id)
-        if winner:
-            path_team = winner
+        prediction = predicted_winners.get(match.event_id)
+        if prediction:
+            path_team = prediction.team
             token_is_predicted = match.state != "post"
     if not token:
         return []
@@ -847,10 +853,10 @@ def _project_team_world_cup_path(
                 token_predictions=token_predictions,
             )
         )
-        winner = predicted_winners.get(match.event_id)
+        prediction = predicted_winners.get(match.event_id)
         token = round_winner_tokens.get(match.event_id, "")
-        if winner:
-            path_team = winner
+        if prediction:
+            path_team = prediction.team
             token_is_predicted = match.state != "post"
         else:
             token_is_predicted = False
@@ -885,15 +891,15 @@ def _world_cup_predicted_winners(
     events_by_match: Mapping[frozenset[str], dict[str, Any]],
     fetch_live: LivePriceFetcher | None,
     winner_event: tuple[dict[str, Any], int | None] | None,
-) -> dict[str, str]:
-    winners: dict[str, str] = {}
+) -> dict[str, WorldCupPrediction]:
+    winners: dict[str, WorldCupPrediction] = {}
     token_by_match_id = {
         winner_token: event_id
         for event_id, winner_token in _world_cup_round_winner_tokens(matches).items()
     }
     title_strengths = _world_cup_title_strengths(winner_event, fetch_live)
     for match in matches:
-        winner = _world_cup_match_winner(
+        prediction = _world_cup_match_winner(
             match,
             event=events_by_match.get(_match_key(match.home_team, match.away_team)),
             fetch_live=fetch_live,
@@ -901,8 +907,8 @@ def _world_cup_predicted_winners(
             token_by_match_id=token_by_match_id,
             title_strengths=title_strengths,
         )
-        if winner:
-            winners[match.event_id] = winner
+        if prediction:
+            winners[match.event_id] = prediction
     return winners
 
 
@@ -911,15 +917,15 @@ def _world_cup_match_winner(
     *,
     event: dict[str, Any] | None,
     fetch_live: LivePriceFetcher | None,
-    predicted_winners: Mapping[str, str],
+    predicted_winners: Mapping[str, WorldCupPrediction],
     token_by_match_id: Mapping[str, str],
     title_strengths: Mapping[str, float],
-) -> str:
+) -> WorldCupPrediction | None:
     if match.winner_team:
-        return match.winner_team
+        return WorldCupPrediction(match.winner_team, "espn_result")
     score_winner = _final_winner(_match_display(match))
     if match.state == "post" and score_winner:
-        return score_winner
+        return WorldCupPrediction(score_winner, "espn_result")
     if event is not None and fetch_live is not None:
         event_winner = _world_cup_event_winner(
             match,
@@ -941,7 +947,7 @@ def _world_cup_event_winner(
     *,
     event: dict[str, Any],
     fetch_live: LivePriceFetcher,
-) -> str:
+) -> WorldCupPrediction | None:
     quotes = normalize_event_quotes(event)
     team_names = [match.home_team, match.away_team]
     quotes_by_team = _world_cup_team_quotes(
@@ -950,47 +956,51 @@ def _world_cup_event_winner(
         fetch_live=fetch_live,
     )
     if len(quotes_by_team) != 2:
-        return ""
+        return None
     favorite, favorite_probability = max(quotes_by_team.items(), key=lambda item: item[1])
     draw_probability = _world_cup_draw_probability(
         quotes,
         team_names,
         fetch_live=fetch_live,
     )
-    if draw_probability is not None and draw_probability >= favorite_probability:
-        return ""
-    return favorite
+    challengers = [probability for team, probability in quotes_by_team.items() if team != favorite]
+    if draw_probability is not None:
+        challengers.append(draw_probability)
+    if challengers and favorite_probability - max(challengers) < WORLD_CUP_MATCH_MARKET_MIN_EDGE:
+        return None
+    return WorldCupPrediction(favorite, "match_market")
 
 
 def _world_cup_strength_winner(
     match: MatchScore,
     *,
-    predicted_winners: Mapping[str, str],
+    predicted_winners: Mapping[str, WorldCupPrediction],
     token_by_match_id: Mapping[str, str],
     title_strengths: Mapping[str, float],
-) -> str:
+) -> WorldCupPrediction | None:
     if not title_strengths:
-        return ""
+        return None
     teams = _world_cup_resolved_match_teams(
         match,
         predicted_winners=predicted_winners,
         token_by_match_id=token_by_match_id,
     )
     if len(teams) != 2:
-        return ""
+        return None
     first_strength = _world_cup_team_strength(teams[0], title_strengths)
     second_strength = _world_cup_team_strength(teams[1], title_strengths)
     if first_strength is None or second_strength is None:
-        return ""
+        return None
     if first_strength == second_strength:
-        return ""
-    return teams[0] if first_strength > second_strength else teams[1]
+        return None
+    winner = teams[0] if first_strength > second_strength else teams[1]
+    return WorldCupPrediction(winner, "winner_market")
 
 
 def _world_cup_resolved_match_teams(
     match: MatchScore,
     *,
-    predicted_winners: Mapping[str, str],
+    predicted_winners: Mapping[str, WorldCupPrediction],
     token_by_match_id: Mapping[str, str],
 ) -> list[str]:
     teams = []
@@ -999,24 +1009,18 @@ def _world_cup_resolved_match_teams(
         if source_event_id is None:
             teams.append(team_name)
             continue
-        predicted = predicted_winners.get(source_event_id)
-        if predicted:
-            teams.append(predicted)
+        prediction = predicted_winners.get(source_event_id)
+        if prediction:
+            teams.append(prediction.team)
     return teams
 
 
 def _world_cup_team_strength(
     team_name: str,
     title_strengths: Mapping[str, float],
-) -> tuple[int, float] | None:
+) -> float | None:
     key = _score_key(canonical_team_name(team_name))
-    title_strength = title_strengths.get(key)
-    if title_strength is not None:
-        return 2, title_strength
-    ranking_strength = WORLD_CUP_RANKING_STRENGTHS.get(key)
-    if ranking_strength is None:
-        return None
-    return 1, float(ranking_strength)
+    return title_strengths.get(key)
 
 
 def _world_cup_title_strengths(
@@ -1036,7 +1040,7 @@ def _world_cup_title_strengths(
 def _world_cup_token_predictions(
     match: MatchScore,
     *,
-    predicted_winners: Mapping[str, str],
+    predicted_winners: Mapping[str, WorldCupPrediction],
     round_winner_tokens: Mapping[str, str],
 ) -> dict[str, str]:
     predictions: dict[str, str] = {}
@@ -1048,9 +1052,9 @@ def _world_cup_token_predictions(
         source_event_id = token_by_match_id.get(team_name)
         if source_event_id is None:
             continue
-        predicted = predicted_winners.get(source_event_id)
-        if predicted:
-            predictions[team_name] = predicted
+        prediction = predicted_winners.get(source_event_id)
+        if prediction:
+            predictions[team_name] = prediction.team
     return predictions
 
 
