@@ -918,6 +918,27 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
             ],
         },
         {
+            "title": "Australia vs. Egypt",
+            "slug": "fifwc-aus-egy-2026-07-03",
+            "endDate": "2026-07-03T18:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Australia",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.30", "0.70"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Egypt",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.50", "0.50"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+        {
             "title": "Colombia vs. Ghana",
             "slug": "fifwc-col-gha-2026-07-03",
             "endDate": "2026-07-04T01:30:00Z",
@@ -926,13 +947,6 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
                     "groupItemTitle": "Colombia",
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.70", "0.30"]',
-                    "active": True,
-                    "closed": False,
-                },
-                {
-                    "groupItemTitle": "Ghana",
-                    "outcomes": '["Yes", "No"]',
-                    "outcomePrices": '["0.20", "0.80"]',
                     "active": True,
                     "closed": False,
                 },
@@ -965,12 +979,20 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
                 start_time="2026-07-04T01:30:00Z",
                 round_slug="round-of-32",
             ),
-            "760508": _match_score(
-                "760508",
-                "Round of 32 1 Winner",
-                "Round of 32 2 Winner",
+            "760499": _match_score(
+                "760499",
+                "Australia",
+                "Egypt",
                 state="pre",
-                start_time="2026-07-07T20:00:00Z",
+                start_time="2026-07-03T18:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760509": _match_score(
+                "760509",
+                "Round of 32 14 Winner",
+                "Round of 32 16 Winner",
+                state="pre",
+                start_time="2026-07-07T16:00:00Z",
                 round_slug="round-of-16",
             ),
         },
@@ -981,7 +1003,7 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
         team_query="argentina",
     )
 
-    assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇴 Colombia (pronóstico)" in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇪🇬 Egipto (pronóstico)" in result
 
 
 def test_get_polymarket_world_cup_games_uses_referenced_bracket_tokens(
@@ -1118,8 +1140,8 @@ def test_get_polymarket_world_cup_games_uses_referenced_bracket_tokens(
         team_query="argentina",
     )
 
-    assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" in result
-    assert "🇪🇬 Egipto" not in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇪🇬 Egipto (pronóstico)" in result
+    assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" not in result
 
 
 def test_get_polymarket_world_cup_games_joins_us_bosnia_aliases(monkeypatch):
@@ -1311,9 +1333,9 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 "closed": False,
             },
             {
-                "groupItemTitle": "Mexico",
+                "groupItemTitle": "Egypt",
                 "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.03", "0.97"]',
+                "outcomePrices": '["0.04", "0.96"]',
                 "active": True,
                 "closed": False,
             },
@@ -1335,6 +1357,41 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 "groupItemTitle": "Cape Verde",
                 "outcomes": '["Yes", "No"]',
                 "outcomePrices": '["0.005", "0.995"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Australia",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.01", "0.99"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Colombia",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.015", "0.985"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Ghana",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.005", "0.995"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Mexico",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.03", "0.97"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Spain",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.09", "0.91"]',
                 "active": True,
                 "closed": False,
             },
@@ -1381,6 +1438,14 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 start_time="2026-07-03T03:00:00Z",
                 round_slug="round-of-32",
             ),
+            "760499": _match_score(
+                "760499",
+                "Australia",
+                "Egypt",
+                state="pre",
+                start_time="2026-07-03T18:00:00Z",
+                round_slug="round-of-32",
+            ),
             "760500": _match_score(
                 "760500",
                 "Argentina",
@@ -1389,26 +1454,58 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 start_time="2026-07-03T22:00:00Z",
                 round_slug="round-of-32",
             ),
+            "760501": _match_score(
+                "760501",
+                "Colombia",
+                "Ghana",
+                state="pre",
+                start_time="2026-07-04T01:30:00Z",
+                round_slug="round-of-32",
+            ),
+            "760509": _match_score(
+                "760509",
+                "Round of 32 14 Winner",
+                "Round of 32 16 Winner",
+                state="pre",
+                start_time="2026-07-07T16:00:00Z",
+                round_slug="round-of-16",
+            ),
             "760508": _match_score(
                 "760508",
-                "Round of 32 1 Winner",
-                "Round of 32 2 Winner",
+                "Round of 32 13 Winner",
+                "Round of 32 15 Winner",
                 state="pre",
                 start_time="2026-07-07T20:00:00Z",
                 round_slug="round-of-16",
             ),
+            "760512": _match_score(
+                "760512",
+                "France",
+                "Mexico",
+                state="pre",
+                start_time="2026-07-11T21:00:00Z",
+                round_slug="quarterfinals",
+            ),
             "760513": _match_score(
                 "760513",
-                "Round of 16 1 Winner",
-                "Mexico",
+                "Round of 16 7 Winner",
+                "Round of 16 8 Winner",
                 state="pre",
                 start_time="2026-07-12T01:00:00Z",
                 round_slug="quarterfinals",
             ),
             "760514": _match_score(
                 "760514",
+                "Brazil",
+                "Spain",
+                state="pre",
+                start_time="2026-07-14T19:00:00Z",
+                round_slug="semifinals",
+            ),
+            "760515": _match_score(
+                "760515",
                 "France",
-                "Quarterfinal 1 Winner",
+                "Quarterfinal 4 Winner",
                 state="pre",
                 start_time="2026-07-15T19:00:00Z",
                 round_slug="semifinals",
@@ -1416,7 +1513,7 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
             "760517": _match_score(
                 "760517",
                 "Semifinal 1 Winner",
-                "Brazil",
+                "Semifinal 2 Winner",
                 state="pre",
                 start_time="2026-07-19T19:00:00Z",
                 round_slug="final",
@@ -1429,10 +1526,10 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
         team_query="argentina",
     )
 
-    assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" in result
-    assert "🇦🇷 Argentina (pronóstico) vs. 🇲🇽 México" in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇪🇬 Egipto (pronóstico)" in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇭 Suiza (pronóstico)" in result
     assert "🇫🇷 Francia vs. 🇦🇷 Argentina (pronóstico)" in result
-    assert "🇫🇷 Francia (pronóstico) vs. 🇧🇷 Brasil" in result
+    assert "🇧🇷 Brasil (pronóstico) vs. 🇫🇷 Francia (pronóstico)" in result
 
 
 def test_get_polymarket_world_cup_games_accepts_spanish_country_query(monkeypatch):
