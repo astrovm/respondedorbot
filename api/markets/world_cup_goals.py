@@ -310,10 +310,10 @@ def team_name_es(team: str) -> str:
     return TEAM_NAMES_ES.get(canonical, canonical)
 
 
-def _date_range(now: datetime) -> str:
+def _date_range(now: datetime, *, days_after: int = 1) -> str:
     utc_now = now.astimezone(UTC)
     start = (utc_now - timedelta(days=1)).strftime("%Y%m%d")
-    end = (utc_now + timedelta(days=1)).strftime("%Y%m%d")
+    end = (utc_now + timedelta(days=max(1, days_after))).strftime("%Y%m%d")
     return f"{start}-{end}"
 
 
@@ -321,11 +321,13 @@ def fetch_scoreboard_scores(
     *,
     http_get: Callable[..., Any] = http_client.get,
     now: Callable[[], datetime] | None = None,
+    days_after: int = 4,
+    limit: int = 50,
 ) -> dict[str, MatchScore]:
     clock = now or (lambda: datetime.now(UTC))
     response = http_get(
         SCOREBOARD_URL,
-        params={"dates": _date_range(clock()), "limit": 20},
+        params={"dates": _date_range(clock(), days_after=days_after), "limit": limit},
         timeout=10,
     )
     response.raise_for_status()
@@ -359,7 +361,12 @@ class WorldCupGoalMonitor:
         self._announced: set[str] = set()
 
     def fetch_scores(self) -> dict[str, MatchScore]:
-        return fetch_scoreboard_scores(http_get=self._http_get, now=self._now)
+        return fetch_scoreboard_scores(
+            http_get=self._http_get,
+            now=self._now,
+            days_after=1,
+            limit=20,
+        )
 
     def poll_once(self) -> list[Goal]:
         current = self.fetch_scores()

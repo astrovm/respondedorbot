@@ -29,6 +29,7 @@ GLOBAL_ELECTIONS_TAG = "global-elections"
 GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
 WORLD_CUP_LIMIT = 10
+WORLD_CUP_CANDIDATE_LIMIT = 30
 WORLD_CUP_FETCH_LIMIT = 100
 WORLD_CUP_FETCH_MAX_PAGES = 20
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
@@ -516,6 +517,7 @@ def get_world_cup_games(
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
     events_by_match = _world_cup_events_by_match(games)
+    rendered_games = 0
     for match in selected_matches:
         formatted_event = _format_world_cup_game(
             match,
@@ -529,6 +531,9 @@ def get_world_cup_games(
             continue
         date_string, linked_title, time_string = formatted_event
         games_by_date.setdefault(date_string, []).append((linked_title, time_string))
+        rendered_games += 1
+        if rendered_games >= WORLD_CUP_LIMIT:
+            break
 
     for date_string, daily_games in games_by_date.items():
         lines.extend([""] if date_string == "Fecha desconocida" else ["", date_string])
@@ -626,7 +631,7 @@ def _select_world_cup_matches(
     matches = sorted(scores.values(), key=lambda match: match.start_time)
     finished = [match for match in matches if match.state == "post"]
     active_or_future = [match for match in matches if match.state != "post"]
-    return (finished[-2:] + active_or_future)[:WORLD_CUP_LIMIT]
+    return finished[-2:] + active_or_future[:WORLD_CUP_CANDIDATE_LIMIT]
 
 
 def _world_cup_events_by_match(
@@ -670,47 +675,46 @@ def _format_world_cup_game(
     scores = _match_display(match)
     quotes_by_team: dict[str, float] = {}
     favorite = _final_winner(scores) if scores.state == "post" else ""
-    if scores.state != "post":
-        if event is None:
-            return None
+    if scores.state != "post" and event is not None:
         quotes = normalize_event_quotes(event)
         quotes_by_team = _world_cup_team_quotes(
             quotes,
             team_names,
             fetch_live=fetch_live,
         )
-        if len(quotes_by_team) != len(team_names):
-            return None
-        favorite, favorite_probability = max(
-            quotes_by_team.items(),
-            key=lambda item: item[1],
-            default=("", 0.0),
-        )
-        draw_probability = _world_cup_draw_probability(
-            quotes,
-            team_names,
-            fetch_live=fetch_live,
-        )
-        if draw_probability is not None and draw_probability > favorite_probability:
-            favorite = ""
+        if len(quotes_by_team) == len(team_names):
+            favorite, favorite_probability = max(
+                quotes_by_team.items(),
+                key=lambda item: item[1],
+                default=("", 0.0),
+            )
+            draw_probability = _world_cup_draw_probability(
+                quotes,
+                team_names,
+                fetch_live=fetch_live,
+            )
+            if draw_probability is not None and draw_probability > favorite_probability:
+                favorite = ""
     for team_name in team_names:
         score = scores.scores.get(team_name)
         if score is None:
             team_probability = quotes_by_team.get(team_name)
             if team_probability is None:
-                continue
-            decimals = 2 if team_probability < 10 else 1
-            probability = f"{fmt_num(team_probability, decimals)}%"
-            label = f"{format_country(team_name)} {probability}"
+                label = format_country(team_name)
+            else:
+                decimals = 2 if team_probability < 10 else 1
+                probability = f"{fmt_num(team_probability, decimals)}%"
+                label = f"{format_country(team_name)} {probability}"
         elif scores.state == "post":
             label = f"{format_country(team_name)} {score}"
         else:
             team_probability = quotes_by_team.get(team_name)
             if team_probability is None:
-                continue
-            decimals = 2 if team_probability < 10 else 1
-            probability = f"{fmt_num(team_probability, decimals)}%"
-            label = f"{format_country(team_name)} {score} ({probability})"
+                label = f"{format_country(team_name)} {score}"
+            else:
+                decimals = 2 if team_probability < 10 else 1
+                probability = f"{fmt_num(team_probability, decimals)}%"
+                label = f"{format_country(team_name)} {score} ({probability})"
         teams.append(f"[{label}]" if team_name == favorite else label)
 
     title = escape(" vs. ".join(teams))

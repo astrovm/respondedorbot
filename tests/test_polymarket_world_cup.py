@@ -540,6 +540,109 @@ def test_get_polymarket_world_cup_games_pages_until_selected_match_is_found(
     assert "🇺🇾 Uruguay 20% vs. [🇪🇸 España 62%]" in result
 
 
+def test_get_polymarket_world_cup_games_uses_later_candidates_when_odds_missing(
+    monkeypatch,
+):
+    def event(index_):
+        return {
+            "title": f"Future {index_} vs. Rival {index_}",
+            "slug": f"fifwc-fut{index_}-riv{index_}-2026-06-29",
+            "endDate": f"2026-06-29T{index_:02d}:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": f"Future {index_}",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.60", "0.40"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": f"Rival {index_}",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.30", "0.70"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+
+    events = [
+        {
+            "title": "Final A vs. Final B",
+            "slug": "fifwc-fina-finb-2026-06-28",
+            "endDate": "2026-06-28T01:00:00Z",
+            "closed": True,
+            "markets": [],
+        },
+        {
+            "title": "Final C vs. Final D",
+            "slug": "fifwc-finc-find-2026-06-28",
+            "endDate": "2026-06-28T02:00:00Z",
+            "closed": True,
+            "markets": [],
+        },
+        *(event(index_) for index_ in range(2, 11)),
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    scores = {
+        "final-1": _match_score(
+            "final-1",
+            "Final A",
+            "Final B",
+            1,
+            0,
+            state="post",
+            display_clock="FT",
+            start_time="2026-06-28T01:00:00Z",
+        ),
+        "final-2": _match_score(
+            "final-2",
+            "Final C",
+            "Final D",
+            2,
+            0,
+            state="post",
+            display_clock="FT",
+            start_time="2026-06-28T02:00:00Z",
+        ),
+        "missing-odds": _match_score(
+            "missing-odds",
+            "Future 1",
+            "Rival 1",
+            state="pre",
+            start_time="2026-06-29T01:00:00Z",
+        ),
+    }
+    scores.update(
+        {
+            f"future-{index_}": _match_score(
+                f"future-{index_}",
+                f"Future {index_}",
+                f"Rival {index_}",
+                state="pre",
+                start_time=f"2026-06-29T{index_:02d}:00:00Z",
+            )
+            for index_ in range(2, 11)
+        }
+    )
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr("api.markets.polymarket.fetch_scoreboard_scores", lambda: scores)
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert result.count("polymarket.com/sports/world-cup/") == 9
+    assert "Future 1 vs. Rival 1" in result
+    assert "fifwc-fut1-riv1-2026-06-29" not in result
+    assert "fifwc-fut8-riv8-2026-06-29" in result
+    assert "fifwc-fut9-riv9-2026-06-29" not in result
+
+
 def test_get_polymarket_world_cup_games_matches_provider_aliases(monkeypatch):
     events = [
         {
@@ -591,6 +694,36 @@ def test_get_polymarket_world_cup_games_matches_provider_aliases(monkeypatch):
     assert "🇨🇻 Cabo Verde 36% vs. [🇨🇮 Costa de Marfil 44%]" in result
     assert "Cape Verde" not in result
     assert "Ivory Coast" not in result
+
+
+def test_get_polymarket_world_cup_games_shows_scheduled_match_without_polymarket_event(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        index.app_runtime.cache,
+        "request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda: {
+            "game-1": _match_score(
+                "game-1",
+                "Mexico",
+                "Ecuador",
+                state="pre",
+                display_clock="0'",
+                start_time="2026-07-01T01:00:00Z",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(timezone_offset=-3)
+
+    assert "🇲🇽 México vs. 🇪🇨 Ecuador" in result
+    assert "22:00 UTC-3" in result
+    assert "polymarket.com/sports/world-cup" not in result
+    assert "%" not in result
 
 
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(
