@@ -986,6 +986,127 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
     assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇴 Colombia (pronóstico)" in result
 
 
+def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
+    monkeypatch,
+):
+    winner_event = {
+        "title": "World Cup Winner",
+        "slug": "world-cup-winner",
+        "markets": [
+            {
+                "groupItemTitle": "Argentina",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.22", "0.78"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Switzerland",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.02", "0.98"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Algeria",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.01", "0.99"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Mexico",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.03", "0.97"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Cape Verde",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.005", "0.995"]',
+                "active": True,
+                "closed": False,
+            },
+        ],
+    }
+    events = [
+        {
+            "title": "Argentina vs. Cape Verde",
+            "slug": "fifwc-arg-cvi-2026-07-03",
+            "endDate": "2026-07-03T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Argentina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.80", "0.20"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Cape Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.10", "0.90"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return {"data": [winner_event]}
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760498": _match_score(
+                "760498",
+                "Switzerland",
+                "Algeria",
+                state="pre",
+                start_time="2026-07-03T03:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 1 Winner",
+                "Round of 32 2 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+            "760513": _match_score(
+                "760513",
+                "Round of 16 1 Winner",
+                "Mexico",
+                state="pre",
+                start_time="2026-07-12T01:00:00Z",
+                round_slug="quarterfinals",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇲🇽 México" in result
+
+
 def test_get_polymarket_world_cup_games_accepts_spanish_country_query(monkeypatch):
     monkeypatch.setattr(
         index.app_runtime.cache,
