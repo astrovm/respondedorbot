@@ -51,6 +51,56 @@ WORLD_CUP_MINUTE_TIME_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
 WORLD_CUP_WINNER_PLACEHOLDER_PATTERN = re.compile(
     r"^(Round of 32|Round of 16|Quarterfinal|Semifinal) (\d+) Winner$"
 )
+WORLD_CUP_OFFICIAL_MATCH_BY_ESPN_EVENT_ID = {
+    "760486": 73,
+    "760489": 74,
+    "760488": 75,
+    "760487": 76,
+    "760492": 77,
+    "760490": 78,
+    "760491": 79,
+    "760495": 80,
+    "760494": 81,
+    "760493": 82,
+    "760496": 83,
+    "760497": 84,
+    "760498": 85,
+    "760500": 86,
+    "760501": 87,
+    "760499": 88,
+    "760503": 89,
+    "760502": 90,
+    "760504": 91,
+    "760505": 92,
+    "760506": 93,
+    "760507": 94,
+    "760509": 95,
+    "760508": 96,
+    "760510": 97,
+    "760511": 98,
+    "760512": 99,
+    "760513": 100,
+    "760514": 101,
+    "760515": 102,
+    "760517": 104,
+}
+WORLD_CUP_OFFICIAL_MATCH_SOURCES = {
+    89: (74, 77),
+    90: (73, 75),
+    91: (76, 78),
+    92: (79, 80),
+    93: (83, 84),
+    94: (81, 82),
+    95: (86, 88),
+    96: (85, 87),
+    97: (89, 90),
+    98: (93, 94),
+    99: (91, 92),
+    100: (95, 96),
+    101: (97, 98),
+    102: (99, 100),
+    104: (101, 102),
+}
 SPANISH_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
 SPANISH_MONTHS = (
     "enero",
@@ -808,6 +858,7 @@ def _project_team_world_cup_path(
     token = ""
     path_team = selected_team
     token_is_predicted = False
+    current_event_id = ""
     for match in matches:
         if _score_key(selected_team) not in {
             _score_key(match.home_team),
@@ -820,10 +871,13 @@ def _project_team_world_cup_path(
         if prediction:
             path_team = prediction.team
             token_is_predicted = match.state != "post"
+        current_event_id = match.event_id
     if not token:
         return []
 
     projected: list[WorldCupSelectedMatch] = []
+    match_by_event_id = {match.event_id: match for match in matches}
+    next_match_ids = _world_cup_next_match_ids(matches)
     seen_event_ids = {
         match.event_id
         for match in matches
@@ -832,13 +886,25 @@ def _project_team_world_cup_path(
             _score_key(match.away_team),
         }
     }
-    for match in matches:
-        if match.event_id in seen_event_ids or token not in {match.home_team, match.away_team}:
-            continue
+    while current_event_id:
+        next_event_id = next_match_ids.get(current_event_id)
+        if next_event_id is None or next_event_id in seen_event_ids:
+            break
+        target_match = match_by_event_id.get(next_event_id)
+        if target_match is None:
+            break
+        token = _world_cup_projection_token(
+            current_event_id,
+            target_match,
+            projected_team=path_team,
+            round_winner_tokens=round_winner_tokens,
+        )
+        if not token:
+            break
         token_predictions = {
             placeholder: predicted
             for placeholder, predicted in _world_cup_token_predictions(
-                match,
+                target_match,
                 predicted_winners=predicted_winners,
                 round_winner_tokens=round_winner_tokens,
             ).items()
@@ -846,85 +912,126 @@ def _project_team_world_cup_path(
         }
         projected.append(
             WorldCupSelectedMatch(
-                match,
+                target_match,
                 projected_team=path_team,
                 projection_token=token,
                 projection_predicted=token_is_predicted,
                 token_predictions=token_predictions,
             )
         )
-        prediction = predicted_winners.get(match.event_id)
-        token = round_winner_tokens.get(match.event_id, "")
+        prediction = predicted_winners.get(target_match.event_id)
+        current_event_id = target_match.event_id
+        seen_event_ids.add(target_match.event_id)
         if prediction:
             path_team = prediction.team
-            token_is_predicted = match.state != "post"
+            token_is_predicted = target_match.state != "post"
         else:
             token_is_predicted = False
-        if not token:
-            break
     return projected
 
 
 def _world_cup_round_winner_tokens(
     matches: Sequence[MatchScore],
 ) -> dict[str, str]:
-    return _world_cup_referenced_winner_tokens(matches)
+    return _world_cup_official_winner_tokens(matches)
 
 
-def _world_cup_referenced_winner_tokens(
+def _world_cup_official_winner_tokens(
     matches: Sequence[MatchScore],
 ) -> dict[str, str]:
-    matches_by_round = _world_cup_matches_by_round(matches)
     tokens: dict[str, str] = {}
-    for source_round, target_round in (
-        ("round-of-32", "round-of-16"),
-        ("round-of-16", "quarterfinals"),
-        ("quarterfinals", "semifinals"),
-        ("semifinals", "final"),
-    ):
-        source_matches = sorted(
-            matches_by_round.get(source_round, []),
-            key=lambda match: match.start_time,
-        )
-        referenced = sorted(
-            _world_cup_referenced_token_numbers(
-                matches_by_round.get(target_round, []),
-            )
-        )
-        if len(referenced) != len(source_matches):
+    match_number_by_event_id = _world_cup_match_numbers_by_event_id(matches)
+    event_id_by_match_number = {
+        match_number: event_id
+        for event_id, match_number in match_number_by_event_id.items()
+    }
+    match_by_event_id = {match.event_id: match for match in matches}
+    for target_number, source_numbers in WORLD_CUP_OFFICIAL_MATCH_SOURCES.items():
+        target_event_id = event_id_by_match_number.get(target_number)
+        if target_event_id is None:
             continue
-        label = _world_cup_round_label(source_round)
-        for match, token_number in zip(source_matches, referenced):
-            tokens[match.event_id] = f"{label} {token_number} Winner"
+        target_match = match_by_event_id.get(target_event_id)
+        if target_match is None:
+            continue
+        target_teams = (target_match.home_team, target_match.away_team)
+        if len(target_teams) != len(source_numbers):
+            continue
+        for source_number, team_name in zip(source_numbers, target_teams):
+            if not WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name):
+                continue
+            source_event_id = event_id_by_match_number.get(source_number)
+            if source_event_id is not None:
+                tokens[source_event_id] = team_name
     return tokens
 
 
-def _world_cup_matches_by_round(
+def _world_cup_next_match_ids(matches: Sequence[MatchScore]) -> dict[str, str]:
+    next_match_ids: dict[str, str] = {}
+    match_number_by_event_id = _world_cup_match_numbers_by_event_id(matches)
+    event_id_by_match_number = {
+        match_number: event_id
+        for event_id, match_number in match_number_by_event_id.items()
+    }
+    for target_number, source_numbers in WORLD_CUP_OFFICIAL_MATCH_SOURCES.items():
+        target_event_id = event_id_by_match_number.get(target_number)
+        if target_event_id is None:
+            continue
+        source_event_ids = [
+            event_id_by_match_number.get(source_number)
+            for source_number in source_numbers
+        ]
+        if any(source_event_id is None for source_event_id in source_event_ids):
+            continue
+        for source_event_id in source_event_ids:
+            if source_event_id is not None:
+                next_match_ids[source_event_id] = target_event_id
+    return next_match_ids
+
+
+def _world_cup_match_numbers_by_event_id(
     matches: Sequence[MatchScore],
-) -> dict[str, list[MatchScore]]:
-    matches_by_round: dict[str, list[MatchScore]] = {}
-    for match in matches:
-        matches_by_round.setdefault(match.round_slug, []).append(match)
-    return matches_by_round
-
-
-def _world_cup_referenced_token_numbers(matches: Sequence[MatchScore]) -> list[int]:
-    numbers: list[int] = []
-    for match in sorted(matches, key=lambda item: item.start_time):
-        for team_name in (match.home_team, match.away_team):
-            placeholder = WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
-            if placeholder:
-                numbers.append(int(placeholder.group(2)))
-    return numbers
-
-
-def _world_cup_round_label(round_slug: str) -> str:
+) -> dict[str, int]:
     return {
-        "round-of-32": "Round of 32",
-        "round-of-16": "Round of 16",
-        "quarterfinals": "Quarterfinal",
-        "semifinals": "Semifinal",
-    }.get(round_slug, "")
+        match.event_id: match_number
+        for match in matches
+        if (
+            match_number := WORLD_CUP_OFFICIAL_MATCH_BY_ESPN_EVENT_ID.get(
+                match.event_id,
+            )
+        )
+    }
+
+
+def _world_cup_placeholder_team_names(match: MatchScore) -> tuple[str, ...]:
+    return tuple(
+        team_name
+        for team_name in (match.home_team, match.away_team)
+        if WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
+    )
+
+
+def _world_cup_projection_token(
+    source_event_id: str,
+    target_match: MatchScore,
+    *,
+    projected_team: str,
+    round_winner_tokens: Mapping[str, str],
+) -> str:
+    token = round_winner_tokens.get(source_event_id, "")
+    if token:
+        return token
+    placeholders = _world_cup_placeholder_team_names(target_match)
+    if len(placeholders) != 1:
+        return ""
+    materialized_teams = [
+        team_name
+        for team_name in (target_match.home_team, target_match.away_team)
+        if not WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
+    ]
+    projected_key = _score_key(projected_team)
+    if any(_score_key(team_name) == projected_key for team_name in materialized_teams):
+        return ""
+    return placeholders[0]
 
 
 def _world_cup_predicted_winners(
