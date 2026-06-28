@@ -868,21 +868,63 @@ def _project_team_world_cup_path(
 def _world_cup_round_winner_tokens(
     matches: Sequence[MatchScore],
 ) -> dict[str, str]:
+    return _world_cup_referenced_winner_tokens(matches)
+
+
+def _world_cup_referenced_winner_tokens(
+    matches: Sequence[MatchScore],
+) -> dict[str, str]:
+    matches_by_round = _world_cup_matches_by_round(matches)
     tokens: dict[str, str] = {}
-    round_specs = {
+    for source_round, target_round in (
+        ("round-of-32", "round-of-16"),
+        ("round-of-16", "quarterfinals"),
+        ("quarterfinals", "semifinals"),
+        ("semifinals", "final"),
+    ):
+        source_matches = sorted(
+            matches_by_round.get(source_round, []),
+            key=lambda match: match.start_time,
+        )
+        referenced = sorted(
+            _world_cup_referenced_token_numbers(
+                matches_by_round.get(target_round, []),
+            )
+        )
+        if len(referenced) != len(source_matches):
+            continue
+        label = _world_cup_round_label(source_round)
+        for match, token_number in zip(source_matches, referenced):
+            tokens[match.event_id] = f"{label} {token_number} Winner"
+    return tokens
+
+
+def _world_cup_matches_by_round(
+    matches: Sequence[MatchScore],
+) -> dict[str, list[MatchScore]]:
+    matches_by_round: dict[str, list[MatchScore]] = {}
+    for match in matches:
+        matches_by_round.setdefault(match.round_slug, []).append(match)
+    return matches_by_round
+
+
+def _world_cup_referenced_token_numbers(matches: Sequence[MatchScore]) -> list[int]:
+    numbers: list[int] = []
+    for match in sorted(matches, key=lambda item: item.start_time):
+        for team_name in (match.home_team, match.away_team):
+            placeholder = WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
+            if placeholder:
+                numbers.append(int(placeholder.group(2)))
+    return numbers
+
+
+def _world_cup_round_label(round_slug: str) -> str:
+    return {
         "round-of-32": "Round of 32",
         "round-of-16": "Round of 16",
         "quarterfinals": "Quarterfinal",
         "semifinals": "Semifinal",
-    }
-    for round_slug, label in round_specs.items():
-        round_matches = sorted(
-            (match for match in matches if match.round_slug == round_slug),
-            key=lambda match: int(match.event_id) if match.event_id.isdigit() else 0,
-        )
-        for index, match in enumerate(round_matches, start=1):
-            tokens[match.event_id] = f"{label} {index} Winner"
-    return tokens
+    }.get(round_slug, "")
 
 
 def _world_cup_predicted_winners(
