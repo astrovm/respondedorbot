@@ -1438,7 +1438,10 @@ def _handle_non_ai_command(
         )
 
     if command in ("/mundial", "/worldcup"):
-        response_msg = handler_func(timezone_offset=context.timezone_offset)
+        response_msg = handler_func(
+            timezone_offset=context.timezone_offset,
+            team_query=context.sanitized_message_text,
+        )
     elif takes_params:
         response_msg = handler_func(context.sanitized_message_text)
     else:
