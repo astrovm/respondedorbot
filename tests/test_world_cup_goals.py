@@ -8,6 +8,7 @@ from api.markets.world_cup_goals import (
     WORLD_CUP_TEAM_RANKING,
     WorldCupGoalMonitor,
     detect_goals,
+    fetch_scoreboard_scores,
     parse_scoreboard,
     preferred_team,
     team_name_es,
@@ -223,6 +224,22 @@ def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     send_message.assert_any_call("chat-1", "goooooool, ingleses muertos")
     send_message.assert_any_call("chat-2", "goooooool, ingleses muertos")
     assert http_get.call_args.kwargs["params"]["dates"] == "20260613-20260615"
+
+
+def test_fetch_scoreboard_scores_allows_extended_future_window():
+    http_get = MagicMock(return_value=_response({"events": []}))
+
+    fetch_scoreboard_scores(
+        http_get=http_get,
+        now=lambda: datetime(2026, 6, 28, tzinfo=UTC),
+        days_after=4,
+        limit=50,
+    )
+
+    assert http_get.call_args.kwargs["params"] == {
+        "dates": "20260627-20260702",
+        "limit": 50,
+    }
 
 
 def test_monitor_does_not_generate_message_when_no_chat_is_enabled():
