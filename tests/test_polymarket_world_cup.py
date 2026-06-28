@@ -829,7 +829,7 @@ def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
     assert "Colombia" not in result
 
 
-def test_get_polymarket_world_cup_games_stops_when_country_is_predicted_out(
+def test_get_polymarket_world_cup_games_continues_when_country_is_predicted_out(
     monkeypatch,
 ):
     events = [
@@ -891,7 +891,7 @@ def test_get_polymarket_world_cup_games_stops_when_country_is_predicted_out(
 
     assert "🇦🇷 Argentina 35% vs. [🇨🇻 Cabo Verde 55%]" in result
     assert "si avanza" not in result
-    assert "Round of 32" not in result
+    assert "🇨🇻 Cabo Verde (pronóstico) vs. Ganador Round of 32 2" in result
 
 
 def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
@@ -1022,6 +1022,20 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 "closed": False,
             },
             {
+                "groupItemTitle": "France",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.30", "0.70"]',
+                "active": True,
+                "closed": False,
+            },
+            {
+                "groupItemTitle": "Brazil",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.10", "0.90"]',
+                "active": True,
+                "closed": False,
+            },
+            {
                 "groupItemTitle": "Cape Verde",
                 "outcomes": '["Yes", "No"]',
                 "outcomePrices": '["0.005", "0.995"]',
@@ -1095,6 +1109,22 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
                 start_time="2026-07-12T01:00:00Z",
                 round_slug="quarterfinals",
             ),
+            "760514": _match_score(
+                "760514",
+                "France",
+                "Quarterfinal 1 Winner",
+                state="pre",
+                start_time="2026-07-15T19:00:00Z",
+                round_slug="semifinals",
+            ),
+            "760517": _match_score(
+                "760517",
+                "Semifinal 1 Winner",
+                "Brazil",
+                state="pre",
+                start_time="2026-07-19T19:00:00Z",
+                round_slug="final",
+            ),
         },
     )
 
@@ -1105,6 +1135,8 @@ def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
 
     assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" in result
     assert "🇦🇷 Argentina (pronóstico) vs. 🇲🇽 México" in result
+    assert "🇫🇷 Francia vs. 🇦🇷 Argentina (pronóstico)" in result
+    assert "🇫🇷 Francia (pronóstico) vs. 🇧🇷 Brasil" in result
 
 
 def test_get_polymarket_world_cup_games_accepts_spanish_country_query(monkeypatch):

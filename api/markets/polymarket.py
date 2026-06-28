@@ -800,6 +800,7 @@ def _project_team_world_cup_path(
         winner_event=winner_event,
     )
     token = ""
+    path_team = selected_team
     token_is_predicted = False
     for match in matches:
         if _score_key(selected_team) not in {
@@ -810,9 +811,8 @@ def _project_team_world_cup_path(
         token = round_winner_tokens.get(match.event_id, "")
         token_is_predicted = False
         winner = predicted_winners.get(match.event_id)
-        if winner and _score_key(winner) != _score_key(selected_team):
-            return []
         if winner:
+            path_team = winner
             token_is_predicted = match.state != "post"
     if not token:
         return []
@@ -841,17 +841,19 @@ def _project_team_world_cup_path(
         projected.append(
             WorldCupSelectedMatch(
                 match,
-                projected_team=selected_team,
+                projected_team=path_team,
                 projection_token=token,
                 projection_predicted=token_is_predicted,
                 token_predictions=token_predictions,
             )
         )
         winner = predicted_winners.get(match.event_id)
-        if winner and _score_key(winner) != _score_key(selected_team):
-            break
         token = round_winner_tokens.get(match.event_id, "")
-        token_is_predicted = bool(winner and match.state != "post")
+        if winner:
+            path_team = winner
+            token_is_predicted = match.state != "post"
+        else:
+            token_is_predicted = False
         if not token:
             break
     return projected
