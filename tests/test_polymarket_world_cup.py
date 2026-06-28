@@ -821,10 +821,8 @@ def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
     assert result.startswith("Polymarket - Mundial: Argentina")
     assert "[🇦🇷 Argentina 3] vs. 🇯🇴 Jordania 1" in result
     assert "🇦🇷 Argentina vs. 🇨🇻 Cabo Verde" in result
-    assert "Ganador Round of 32 1 vs. 🇦🇷 Argentina (si avanza)" in result
-    assert "🇦🇷 Argentina (si avanza) vs. Ganador Round of 16 4" in result
-    assert "🇦🇷 Argentina (si avanza) vs. Ganador Quarterfinal 2" in result
-    assert "🇦🇷 Argentina (si avanza) vs. Ganador Semifinal 2" in result
+    assert "si avanza" not in result
+    assert "Ganador Round" not in result
     assert "Australia" not in result
     assert "Colombia" not in result
 
@@ -891,7 +889,7 @@ def test_get_polymarket_world_cup_games_continues_when_country_is_predicted_out(
 
     assert "🇦🇷 Argentina 35% vs. [🇨🇻 Cabo Verde 55%]" in result
     assert "si avanza" not in result
-    assert "🇨🇻 Cabo Verde (pronóstico) vs. Ganador Round of 32 2" in result
+    assert "Ganador Round" not in result
 
 
 def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
@@ -986,6 +984,144 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
     assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇴 Colombia (pronóstico)" in result
 
 
+def test_get_polymarket_world_cup_games_uses_referenced_bracket_tokens(
+    monkeypatch,
+):
+    events = [
+        {
+            "title": "Argentina vs. Cape Verde",
+            "slug": "fifwc-arg-cvi-2026-07-03",
+            "endDate": "2026-07-03T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Argentina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.80", "0.20"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Cape Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.10", "0.90"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+        {
+            "title": "Australia vs. Egypt",
+            "slug": "fifwc-aus-egy-2026-07-03",
+            "endDate": "2026-07-03T18:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Australia",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.30", "0.70"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Egypt",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.50", "0.50"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+        {
+            "title": "Switzerland vs. Algeria",
+            "slug": "fifwc-che-alg-2026-07-03",
+            "endDate": "2026-07-03T03:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Switzerland",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.60", "0.40"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Algeria",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.20", "0.80"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760498": _match_score(
+                "760498",
+                "Switzerland",
+                "Algeria",
+                state="pre",
+                start_time="2026-07-03T03:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760499": _match_score(
+                "760499",
+                "Australia",
+                "Egypt",
+                state="pre",
+                start_time="2026-07-03T18:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760501": _match_score(
+                "760501",
+                "Colombia",
+                "Ghana",
+                state="pre",
+                start_time="2026-07-04T01:30:00Z",
+                round_slug="round-of-32",
+            ),
+            "760509": _match_score(
+                "760509",
+                "Round of 32 14 Winner",
+                "Round of 32 16 Winner",
+                state="pre",
+                start_time="2026-07-07T16:00:00Z",
+                round_slug="round-of-16",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 13 Winner",
+                "Round of 32 15 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert "🇨🇭 Suiza (pronóstico) vs. 🇦🇷 Argentina (pronóstico)" in result
+    assert "🇪🇬 Egipto" not in result
+
+
 def test_get_polymarket_world_cup_games_joins_us_bosnia_aliases(monkeypatch):
     events = [
         {
@@ -1052,7 +1188,7 @@ def test_get_polymarket_world_cup_games_joins_us_bosnia_aliases(monkeypatch):
     )
 
     assert "[🇺🇸 Estados Unidos 71.5%] vs. 🇧🇦 Bosnia y Herzegovina 9.5%" in result
-    assert "🇺🇸 Estados Unidos (pronóstico) vs. Ganador Round of 32 10" in result
+    assert "Ganador Round" not in result
 
 
 def test_get_polymarket_world_cup_games_falls_back_when_match_market_is_close(
@@ -1143,7 +1279,7 @@ def test_get_polymarket_world_cup_games_falls_back_when_match_market_is_close(
     )
 
     assert "[🇦🇷 Argentina 40%] vs. 🇨🇻 Cabo Verde 38%" in result
-    assert "🇨🇻 Cabo Verde (pronóstico) vs. Ganador Round of 32 2" in result
+    assert "Ganador Round" not in result
 
 
 def test_get_polymarket_world_cup_games_projects_deeper_with_winner_market(
