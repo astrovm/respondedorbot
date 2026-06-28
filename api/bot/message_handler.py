@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from os import environ
+import re
 from typing import (
     Any,
     Callable,
@@ -1002,7 +1003,15 @@ def _should_bypass_link_replacement(
     if command in commands:
         return True
 
-    return _is_reply_to_bot(message)
+    return _is_reply_to_bot(message) and not _is_plain_replaceable_link_message(
+        message_text
+    )
+
+
+def _is_plain_replaceable_link_message(message_text: str) -> bool:
+    if not has_replaceable_link(message_text):
+        return False
+    return re.sub(r"https?://[^\s]+", "", message_text).strip() == ""
 
 
 def _is_reply_to_bot(message: Mapping[str, Any]) -> bool:

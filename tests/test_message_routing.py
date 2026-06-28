@@ -638,6 +638,54 @@ def test_message_handler_explicit_intent_with_link_bypasses_replacement(
     deps.handle_ai_stream.assert_called_once()
 
 
+def test_message_handler_replaces_plain_link_reply_to_bot(monkeypatch):
+    from api.bot.message_handler import handle_msg
+
+    make_deps, redis_client = _build_message_handler_deps()
+    link_service = MagicMock()
+    link_service.replace.return_value = (
+        "https://fixupx.com/status/2071194631480414436",
+        True,
+        ["https://x.com/i/status/2071194631480414436"],
+    )
+    link_service.build_context.return_value = ""
+    link_service.download_oversized_instagram_video.return_value = None
+    deps = make_deps(link_service=link_service)
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    message = {
+        "message_id": 506,
+        "chat": {"id": 562, "type": "group"},
+        "from": {"id": 1008, "first_name": "Profe", "username": "profe"},
+        "reply_to_message": {
+            "message_id": 405,
+            "from": {"username": "testbot"},
+            "text": "https://kkinstagram.com/reel/DaHY1E7Ar9d/?tg=495182",
+        },
+        "text": "https://x.com/i/status/2071194631480414436",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    link_service.replace.assert_called_once_with(
+        "https://x.com/i/status/2071194631480414436"
+    )
+    deps.send_msg.assert_called_once_with(
+        "562",
+        "https://fixupx.com/status/2071194631480414436\n\ncompartido por @profe",
+        "405",
+        ["https://x.com/i/status/2071194631480414436"],
+    )
+    deps.save_message_to_redis.assert_called_once_with(
+        "562",
+        "bot_999",
+        "https://fixupx.com/status/2071194631480414436\n\ncompartido por @profe",
+        redis_client,
+    )
+    deps.handle_ai_stream.assert_not_called()
+
+
 def test_handle_msg_with_unknown_command():
     from api.bot.message_handler import handle_msg
 
