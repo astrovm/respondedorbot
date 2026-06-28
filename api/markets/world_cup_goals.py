@@ -143,6 +143,8 @@ class MatchScore:
     state: str
     display_clock: str
     start_time: str
+    round_slug: str = ""
+    winner_team: str = ""
 
 
 @dataclass(frozen=True)
@@ -173,7 +175,7 @@ def _score(value: Any) -> int | None:
         return None
 
 
-def _parse_competitor(competitor: Any) -> tuple[str, str, int] | None:
+def _parse_competitor(competitor: Any) -> tuple[str, str, int, bool] | None:
     if not isinstance(competitor, Mapping):
         return None
     side = competitor.get("homeAway")
@@ -188,7 +190,7 @@ def _parse_competitor(competitor: Any) -> tuple[str, str, int] | None:
     name = team.get("displayName") or team.get("name")
     if not name:
         return None
-    return str(side), str(name), score
+    return str(side), str(name), score, bool(competitor.get("winner"))
 
 
 def _parse_status(event: Mapping[str, Any]) -> tuple[str, str] | None:
@@ -223,7 +225,7 @@ def _parse_event(event: Any) -> MatchScore | None:
         return None
 
     teams = {
-        parsed[0]: (parsed[1], parsed[2])
+        parsed[0]: (parsed[1], parsed[2], parsed[3])
         for competitor in competitors
         if (parsed := _parse_competitor(competitor)) is not None
     }
@@ -233,8 +235,15 @@ def _parse_event(event: Any) -> MatchScore | None:
     if parsed_status is None:
         return None
     state, display_clock = parsed_status
-    home_team, home_score = teams["home"]
-    away_team, away_score = teams["away"]
+    home_team, home_score, home_winner = teams["home"]
+    away_team, away_score, away_winner = teams["away"]
+    winner_team = home_team if home_winner else away_team if away_winner else ""
+    season = event.get("season")
+    round_slug = (
+        str(season.get("slug"))
+        if isinstance(season, Mapping) and season.get("slug")
+        else ""
+    )
     return MatchScore(
         event_id=str(event_id),
         home_team=home_team,
@@ -244,6 +253,8 @@ def _parse_event(event: Any) -> MatchScore | None:
         state=state,
         display_clock=display_clock,
         start_time=str(start_time),
+        round_slug=round_slug,
+        winner_team=winner_team,
     )
 
 
@@ -310,9 +321,14 @@ def team_name_es(team: str) -> str:
     return TEAM_NAMES_ES.get(canonical, canonical)
 
 
-def _date_range(now: datetime, *, days_after: int = 1) -> str:
+def _date_range(
+    now: datetime,
+    *,
+    days_before: int = 1,
+    days_after: int = 1,
+) -> str:
     utc_now = now.astimezone(UTC)
-    start = (utc_now - timedelta(days=1)).strftime("%Y%m%d")
+    start = (utc_now - timedelta(days=max(1, days_before))).strftime("%Y%m%d")
     end = (utc_now + timedelta(days=max(1, days_after))).strftime("%Y%m%d")
     return f"{start}-{end}"
 
@@ -321,13 +337,21 @@ def fetch_scoreboard_scores(
     *,
     http_get: Callable[..., Any] = http_client.get,
     now: Callable[[], datetime] | None = None,
+    days_before: int = 1,
     days_after: int = 4,
     limit: int = 50,
 ) -> dict[str, MatchScore]:
     clock = now or (lambda: datetime.now(UTC))
     response = http_get(
         SCOREBOARD_URL,
-        params={"dates": _date_range(clock(), days_after=days_after), "limit": limit},
+        params={
+            "dates": _date_range(
+                clock(),
+                days_before=days_before,
+                days_after=days_after,
+            ),
+            "limit": limit,
+        },
         timeout=10,
     )
     response.raise_for_status()
@@ -364,6 +388,7 @@ class WorldCupGoalMonitor:
         return fetch_scoreboard_scores(
             http_get=self._http_get,
             now=self._now,
+            days_before=1,
             days_after=1,
             limit=20,
         )

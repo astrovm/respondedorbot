@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ import pycountry
 from api.cache.service import CacheService
 from api.markets.world_cup_goals import (
     MatchScore,
+    TEAM_NAME_ALIASES,
+    WORLD_CUP_TEAM_RANKING,
     canonical_team_name,
     fetch_scoreboard_scores,
     team_name_es,
@@ -30,6 +33,9 @@ GLOBAL_ELECTIONS_LIMIT = 10
 WORLD_CUP_SERIES_ID = 11433
 WORLD_CUP_LIMIT = 10
 WORLD_CUP_CANDIDATE_LIMIT = 30
+WORLD_CUP_TEAM_SCOREBOARD_DAYS_BEFORE = 30
+WORLD_CUP_TEAM_SCOREBOARD_DAYS_AFTER = 40
+WORLD_CUP_TEAM_SCOREBOARD_LIMIT = 300
 WORLD_CUP_FETCH_LIMIT = 100
 WORLD_CUP_FETCH_MAX_PAGES = 20
 WORLD_CUP_WINNER_SLUG = "world-cup-winner"
@@ -41,6 +47,9 @@ WORLD_CUP_SCORE_TIME_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z"
 )
 WORLD_CUP_MINUTE_TIME_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
+WORLD_CUP_WINNER_PLACEHOLDER_PATTERN = re.compile(
+    r"^(Round of 32|Round of 16|Quarterfinal|Semifinal) (\d+) Winner$"
+)
 SPANISH_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
 SPANISH_MONTHS = (
     "enero",
@@ -83,6 +92,14 @@ EventFetcher = Callable[[str], tuple[dict[str, Any], int | None] | None]
 CountryFormatter = Callable[[str], str]
 TimezoneFactory = Callable[[int], timezone]
 ScoreFetcher = Callable[[], Mapping[str, MatchScore]]
+
+
+@dataclass(frozen=True)
+class WorldCupSelectedMatch:
+    match: MatchScore
+    projected_team: str = ""
+    projection_token: str = ""
+    token_predictions: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -468,57 +485,52 @@ def get_world_cup_games(
     format_country: CountryFormatter,
     make_timezone: TimezoneFactory,
     fetch_scores: ScoreFetcher,
+    team_query: str = "",
 ) -> str:
-    winner_event = fetch_winner_event(WORLD_CUP_WINNER_SLUG)
+    selected_team = _world_cup_team_from_query(team_query)
+    if team_query and not selected_team:
+        return "No encontré ese país en el Mundial"
+    winner_event = (
+        None if selected_team else fetch_winner_event(WORLD_CUP_WINNER_SLUG)
+    )
     try:
         live_scores = fetch_scores()
     except Exception:
         live_scores = {}
-    selected_matches = _select_world_cup_matches(live_scores)
-    events = (
-        _fetch_world_cup_events(
-            cached_request=cached_request,
-            cache_ttl=cache_ttl,
-            selected_matches=selected_matches,
-        )
-        if selected_matches
-        else []
+    match_scores, selected_matches = _initial_world_cup_match_selection(
+        live_scores,
+        selected_team=selected_team,
+    )
+    events = _fetch_available_world_cup_events(
+        cached_request=cached_request,
+        cache_ttl=cache_ttl,
+        match_scores=match_scores,
     )
     if not winner_event and not events and not live_scores:
         return "No pude traer los partidos del Mundial desde Polymarket"
 
     games = [event for event in events if _is_world_cup_game_event(event)]
     games.sort(key=lambda event: str(event.get("endDate") or ""))
-    lines = ["Polymarket - Mundial"]
-
-    if winner_event:
-        event, _timestamp = winner_event
-        winner_outcomes = []
-        for title, probability in _top_outcomes(
-            normalize_event_quotes(event),
-            limit=WORLD_CUP_WINNER_LIMIT,
-        ):
-            decimals = 2 if probability < 10 else 1
-            winner_outcomes.append(
-                f"{escape(format_country(title))} "
-                f"{fmt_num(probability, decimals)}%"
-            )
-        if winner_outcomes:
-            lines.extend(
-                [
-                    "",
-                    f'<a href="https://polymarket.com/event/{WORLD_CUP_WINNER_SLUG}">'
-                    "Campeón del Mundial</a>",
-                    " | ".join(winner_outcomes),
-                ]
-            )
+    events_by_match = _world_cup_events_by_match(games)
+    if selected_team:
+        selected_matches = _select_world_cup_matches(
+            live_scores,
+            team_query=team_query,
+            events_by_match=events_by_match,
+            fetch_live=fetch_live,
+        )
+    lines = _world_cup_header_lines(
+        selected_team=selected_team,
+        winner_event=winner_event,
+        format_country=format_country,
+    )
 
     games_by_date: dict[str, list[tuple[str, str]]] = {}
     chat_timezone = make_timezone(timezone_offset)
     timezone_label = f"UTC{timezone_offset:+d}" if timezone_offset else "UTC"
-    events_by_match = _world_cup_events_by_match(games)
     rendered_games = 0
-    for match in selected_matches:
+    for selected in selected_matches:
+        match = selected.match
         formatted_event = _format_world_cup_game(
             match,
             event=events_by_match.get(_match_key(match.home_team, match.away_team)),
@@ -526,6 +538,9 @@ def get_world_cup_games(
             format_country=format_country,
             chat_timezone=chat_timezone,
             timezone_label=timezone_label,
+            projected_team=selected.projected_team,
+            projection_token=selected.projection_token,
+            token_predictions=selected.token_predictions or {},
         )
         if formatted_event is None:
             continue
@@ -549,6 +564,72 @@ def get_world_cup_games(
         if len(lines) > 1
         else "No pude traer los partidos del Mundial desde Polymarket"
     )
+
+
+def _fetch_available_world_cup_events(
+    *,
+    cached_request: CachedRequest,
+    cache_ttl: int,
+    match_scores: Sequence[MatchScore],
+) -> list[dict[str, Any]]:
+    if not match_scores:
+        return []
+    return _fetch_world_cup_events(
+        cached_request=cached_request,
+        cache_ttl=cache_ttl,
+        selected_matches=match_scores,
+    )
+
+
+def _initial_world_cup_match_selection(
+    live_scores: Mapping[str, MatchScore],
+    *,
+    selected_team: str,
+) -> tuple[list[MatchScore], list[WorldCupSelectedMatch]]:
+    if selected_team:
+        return sorted(live_scores.values(), key=lambda match: match.start_time), []
+    selected_matches = _select_world_cup_matches(live_scores)
+    return [selected.match for selected in selected_matches], selected_matches
+
+
+def _world_cup_header_lines(
+    *,
+    selected_team: str,
+    winner_event: tuple[dict[str, Any], int | None] | None,
+    format_country: CountryFormatter,
+) -> list[str]:
+    title = "Polymarket - Mundial"
+    if selected_team:
+        title = f"Polymarket - Mundial: {team_name_es(selected_team)}"
+    lines = [title]
+    if winner_event and not selected_team:
+        lines.extend(_format_world_cup_winner_lines(winner_event, format_country))
+    return lines
+
+
+def _format_world_cup_winner_lines(
+    winner_event: tuple[dict[str, Any], int | None],
+    format_country: CountryFormatter,
+) -> list[str]:
+    event, _timestamp = winner_event
+    winner_outcomes = []
+    for title, probability in _top_outcomes(
+        normalize_event_quotes(event),
+        limit=WORLD_CUP_WINNER_LIMIT,
+    ):
+        decimals = 2 if probability < 10 else 1
+        winner_outcomes.append(
+            f"{escape(format_country(title))} "
+            f"{fmt_num(probability, decimals)}%"
+        )
+    if not winner_outcomes:
+        return []
+    return [
+        "",
+        f'<a href="https://polymarket.com/event/{WORLD_CUP_WINNER_SLUG}">'
+        "Campeón del Mundial</a>",
+        " | ".join(winner_outcomes),
+    ]
 
 
 def _fetch_world_cup_events(
@@ -621,17 +702,236 @@ def _normalize_world_cup_fetch_time(start_time: str) -> str:
     return start_time
 
 
+def _normalize_team_query(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "", ascii_text.casefold())
+
+
+def _world_cup_team_from_query(query: str) -> str:
+    normalized = _normalize_team_query(query)
+    if not normalized:
+        return ""
+    candidates: dict[str, str] = {}
+    for team in WORLD_CUP_TEAM_RANKING:
+        candidates[_normalize_team_query(team)] = team
+        candidates[_normalize_team_query(team_name_es(team))] = team
+    for alias, canonical in TEAM_NAME_ALIASES.items():
+        candidates[_normalize_team_query(alias)] = canonical
+    return candidates.get(normalized, "")
+
+
 def _is_world_cup_game_event(event: Mapping[str, Any]) -> bool:
     return WORLD_CUP_GAME_SLUG_PATTERN.fullmatch(str(event.get("slug") or "")) is not None
 
 
 def _select_world_cup_matches(
     scores: Mapping[str, MatchScore],
-) -> list[MatchScore]:
+    *,
+    team_query: str = "",
+    events_by_match: Mapping[frozenset[str], dict[str, Any]] | None = None,
+    fetch_live: LivePriceFetcher | None = None,
+) -> list[WorldCupSelectedMatch]:
+    selected_team = _world_cup_team_from_query(team_query)
+    if selected_team:
+        return _select_team_world_cup_matches(
+            scores,
+            selected_team,
+            events_by_match=events_by_match or {},
+            fetch_live=fetch_live,
+        )
+
     matches = sorted(scores.values(), key=lambda match: match.start_time)
     finished = [match for match in matches if match.state == "post"]
     active_or_future = [match for match in matches if match.state != "post"]
-    return finished[-2:] + active_or_future[:WORLD_CUP_CANDIDATE_LIMIT]
+    return [
+        WorldCupSelectedMatch(match)
+        for match in finished[-2:] + active_or_future[:WORLD_CUP_CANDIDATE_LIMIT]
+    ]
+
+
+def _select_team_world_cup_matches(
+    scores: Mapping[str, MatchScore],
+    selected_team: str,
+    *,
+    events_by_match: Mapping[frozenset[str], dict[str, Any]],
+    fetch_live: LivePriceFetcher | None,
+) -> list[WorldCupSelectedMatch]:
+    team_key = _score_key(selected_team)
+    matches = sorted(scores.values(), key=lambda match: match.start_time)
+    selected: list[WorldCupSelectedMatch] = [
+        WorldCupSelectedMatch(match)
+        for match in matches
+        if team_key in {_score_key(match.home_team), _score_key(match.away_team)}
+    ]
+    selected.extend(
+        _project_team_world_cup_path(
+            matches,
+            selected_team,
+            events_by_match=events_by_match,
+            fetch_live=fetch_live,
+        )
+    )
+    return selected
+
+
+def _project_team_world_cup_path(
+    matches: Sequence[MatchScore],
+    selected_team: str,
+    *,
+    events_by_match: Mapping[frozenset[str], dict[str, Any]],
+    fetch_live: LivePriceFetcher | None,
+) -> list[WorldCupSelectedMatch]:
+    round_winner_tokens = _world_cup_round_winner_tokens(matches)
+    predicted_winners = _world_cup_predicted_winners(
+        matches,
+        events_by_match=events_by_match,
+        fetch_live=fetch_live,
+    )
+    token = ""
+    for match in matches:
+        if _score_key(selected_team) not in {
+            _score_key(match.home_team),
+            _score_key(match.away_team),
+        }:
+            continue
+        token = round_winner_tokens.get(match.event_id, "")
+        winner = predicted_winners.get(match.event_id)
+        if winner and _score_key(winner) != _score_key(selected_team):
+            return []
+    if not token:
+        return []
+
+    projected: list[WorldCupSelectedMatch] = []
+    seen_event_ids = {
+        match.event_id
+        for match in matches
+        if _score_key(selected_team) in {
+            _score_key(match.home_team),
+            _score_key(match.away_team),
+        }
+    }
+    for match in matches:
+        if match.event_id in seen_event_ids or token not in {match.home_team, match.away_team}:
+            continue
+        token_predictions = {
+            placeholder: predicted
+            for placeholder, predicted in _world_cup_token_predictions(
+                match,
+                predicted_winners=predicted_winners,
+                round_winner_tokens=round_winner_tokens,
+            ).items()
+            if placeholder != token
+        }
+        projected.append(
+            WorldCupSelectedMatch(
+                match,
+                projected_team=selected_team,
+                projection_token=token,
+                token_predictions=token_predictions,
+            )
+        )
+        winner = predicted_winners.get(match.event_id)
+        if winner and _score_key(winner) != _score_key(selected_team):
+            break
+        token = round_winner_tokens.get(match.event_id, "")
+        if not token:
+            break
+    return projected
+
+
+def _world_cup_round_winner_tokens(
+    matches: Sequence[MatchScore],
+) -> dict[str, str]:
+    tokens: dict[str, str] = {}
+    round_specs = {
+        "round-of-32": "Round of 32",
+        "round-of-16": "Round of 16",
+        "quarterfinals": "Quarterfinal",
+        "semifinals": "Semifinal",
+    }
+    for round_slug, label in round_specs.items():
+        round_matches = sorted(
+            (match for match in matches if match.round_slug == round_slug),
+            key=lambda match: int(match.event_id) if match.event_id.isdigit() else 0,
+        )
+        for index, match in enumerate(round_matches, start=1):
+            tokens[match.event_id] = f"{label} {index} Winner"
+    return tokens
+
+
+def _world_cup_predicted_winners(
+    matches: Sequence[MatchScore],
+    *,
+    events_by_match: Mapping[frozenset[str], dict[str, Any]],
+    fetch_live: LivePriceFetcher | None,
+) -> dict[str, str]:
+    winners: dict[str, str] = {}
+    for match in matches:
+        winner = _world_cup_match_winner(
+            match,
+            event=events_by_match.get(_match_key(match.home_team, match.away_team)),
+            fetch_live=fetch_live,
+        )
+        if winner:
+            winners[match.event_id] = winner
+    return winners
+
+
+def _world_cup_match_winner(
+    match: MatchScore,
+    *,
+    event: dict[str, Any] | None,
+    fetch_live: LivePriceFetcher | None,
+) -> str:
+    if match.winner_team:
+        return match.winner_team
+    score_winner = _final_winner(_match_display(match))
+    if match.state == "post" and score_winner:
+        return score_winner
+    if event is None or fetch_live is None:
+        return ""
+    quotes = normalize_event_quotes(event)
+    quotes_by_team = _world_cup_team_quotes(
+        quotes,
+        [match.home_team, match.away_team],
+        fetch_live=fetch_live,
+    )
+    if len(quotes_by_team) != 2:
+        return ""
+    favorite, favorite_probability = max(
+        quotes_by_team.items(),
+        key=lambda item: item[1],
+    )
+    draw_probability = _world_cup_draw_probability(
+        quotes,
+        [match.home_team, match.away_team],
+        fetch_live=fetch_live,
+    )
+    if draw_probability is not None and draw_probability >= favorite_probability:
+        return ""
+    return favorite
+
+
+def _world_cup_token_predictions(
+    match: MatchScore,
+    *,
+    predicted_winners: Mapping[str, str],
+    round_winner_tokens: Mapping[str, str],
+) -> dict[str, str]:
+    predictions: dict[str, str] = {}
+    token_by_match_id = {
+        winner_token: event_id
+        for event_id, winner_token in round_winner_tokens.items()
+    }
+    for team_name in (match.home_team, match.away_team):
+        source_event_id = token_by_match_id.get(team_name)
+        if source_event_id is None:
+            continue
+        predicted = predicted_winners.get(source_event_id)
+        if predicted:
+            predictions[team_name] = predicted
+    return predictions
 
 
 def _world_cup_events_by_match(
@@ -669,6 +969,9 @@ def _format_world_cup_game(
     format_country: CountryFormatter,
     chat_timezone: timezone,
     timezone_label: str,
+    projected_team: str = "",
+    projection_token: str = "",
+    token_predictions: Mapping[str, str] | None = None,
 ) -> tuple[str, str, str] | None:
     teams = []
     team_names = [match.home_team, match.away_team]
@@ -700,7 +1003,13 @@ def _format_world_cup_game(
         if score is None:
             team_probability = quotes_by_team.get(team_name)
             if team_probability is None:
-                label = format_country(team_name)
+                label = _format_world_cup_team_label(
+                    team_name,
+                    projected_team=projected_team,
+                    projection_token=projection_token,
+                    token_predictions=token_predictions or {},
+                    format_country=format_country,
+                )
             else:
                 decimals = 2 if team_probability < 10 else 1
                 probability = f"{fmt_num(team_probability, decimals)}%"
@@ -732,6 +1041,25 @@ def _format_world_cup_game(
     )
     time_string = _format_match_time(time_string, scores)
     return date_string, linked_title, time_string
+
+
+def _format_world_cup_team_label(
+    team_name: str,
+    *,
+    projected_team: str,
+    projection_token: str,
+    token_predictions: Mapping[str, str],
+    format_country: CountryFormatter,
+) -> str:
+    if projection_token and team_name == projection_token:
+        return f"{format_country(projected_team)} (si avanza)"
+    predicted_team = token_predictions.get(team_name)
+    if predicted_team:
+        return f"{format_country(predicted_team)} (pronóstico)"
+    match = WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
+    if match:
+        return f"Ganador {match.group(1)} {match.group(2)}"
+    return format_country(team_name)
 
 
 def _world_cup_team_quotes(
@@ -916,7 +1244,20 @@ class PolymarketService:
             format_liquidity=format_usd_compact,
         )
 
-    def get_world_cup_games(self, timezone_offset: int = -3) -> str:
+    def get_world_cup_games(
+        self,
+        timezone_offset: int = -3,
+        team_query: str = "",
+    ) -> str:
+        def fetch_scores() -> Mapping[str, MatchScore]:
+            if team_query:
+                return fetch_scoreboard_scores(
+                    days_before=WORLD_CUP_TEAM_SCOREBOARD_DAYS_BEFORE,
+                    days_after=WORLD_CUP_TEAM_SCOREBOARD_DAYS_AFTER,
+                    limit=WORLD_CUP_TEAM_SCOREBOARD_LIMIT,
+                )
+            return fetch_scoreboard_scores()
+
         return get_world_cup_games(
             timezone_offset,
             fetch_winner_event=self.fetch_event,
@@ -925,7 +1266,8 @@ class PolymarketService:
             fetch_live=self.fetch_live_price,
             format_country=flagged_country_name,
             make_timezone=self._make_timezone,
-            fetch_scores=fetch_scoreboard_scores,
+            fetch_scores=fetch_scores,
+            team_query=team_query,
         )
 
 

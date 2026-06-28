@@ -1,3 +1,6 @@
+from datetime import timedelta, timezone
+from unittest.mock import MagicMock
+
 from api import index
 from api.markets.world_cup_goals import (
     MatchScore,
@@ -20,6 +23,8 @@ def _match_score(
     state: str = "pre",
     display_clock: str = "0'",
     start_time: str = "2026-06-11T19:00:00Z",
+    round_slug: str = "",
+    winner_team: str = "",
 ) -> MatchScore:
     return MatchScore(
         event_id=event_id,
@@ -30,6 +35,8 @@ def _match_score(
         state=state,
         display_clock=display_clock,
         start_time=start_time,
+        round_slug=round_slug,
+        winner_team=winner_team,
     )
 
 
@@ -159,7 +166,7 @@ def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     )
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
-        lambda: {
+        lambda **_kwargs: {
             "game-1": _match_score(
                 "game-1",
                 "South Africa",
@@ -250,7 +257,7 @@ def test_get_polymarket_world_cup_games_shows_final_without_polymarket_event(
     )
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
-        lambda: {
+        lambda **_kwargs: {
             "game-1": _match_score(
                 "game-1",
                 "Ghana",
@@ -305,7 +312,7 @@ def test_get_polymarket_world_cup_games_marks_team_when_team_leads_draw(
     monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
-        lambda: {
+        lambda **_kwargs: {
             "game-1": _match_score(
                 "game-1",
                 "Team A",
@@ -356,7 +363,7 @@ def test_get_polymarket_world_cup_games_does_not_mark_team_when_draw_leads(
     monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
     monkeypatch.setattr(
         "api.markets.polymarket.fetch_scoreboard_scores",
-        lambda: {
+        lambda **_kwargs: {
             "game-1": _match_score(
                 "game-1",
                 "Saudi Arabia",
@@ -724,6 +731,307 @@ def test_get_polymarket_world_cup_games_shows_scheduled_match_without_polymarket
     assert "22:00 UTC-3" in result
     assert "polymarket.com/sports/world-cup" not in result
     assert "%" not in result
+
+
+def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        index.app_runtime.cache,
+        "request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760480": _match_score(
+                "760480",
+                "Argentina",
+                "Jordan",
+                3,
+                1,
+                state="post",
+                display_clock="FT",
+                start_time="2026-06-28T02:00:00Z",
+            ),
+            "760499": _match_score(
+                "760499",
+                "Australia",
+                "Egypt",
+                state="pre",
+                start_time="2026-07-03T18:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760501": _match_score(
+                "760501",
+                "Colombia",
+                "Ghana",
+                state="pre",
+                start_time="2026-07-04T01:30:00Z",
+                round_slug="round-of-32",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 1 Winner",
+                "Round of 32 2 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+            "760513": _match_score(
+                "760513",
+                "Round of 16 1 Winner",
+                "Round of 16 4 Winner",
+                state="pre",
+                start_time="2026-07-12T01:00:00Z",
+                round_slug="quarterfinals",
+            ),
+            "760515": _match_score(
+                "760515",
+                "Quarterfinal 1 Winner",
+                "Quarterfinal 2 Winner",
+                state="pre",
+                start_time="2026-07-15T19:00:00Z",
+                round_slug="semifinals",
+            ),
+            "760517": _match_score(
+                "760517",
+                "Semifinal 1 Winner",
+                "Semifinal 2 Winner",
+                state="pre",
+                start_time="2026-07-19T19:00:00Z",
+                round_slug="final",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert result.startswith("Polymarket - Mundial: Argentina")
+    assert "[🇦🇷 Argentina 3] vs. 🇯🇴 Jordania 1" in result
+    assert "🇦🇷 Argentina vs. 🇨🇻 Cabo Verde" in result
+    assert "Ganador Round of 32 1 vs. 🇦🇷 Argentina (si avanza)" in result
+    assert "🇦🇷 Argentina (si avanza) vs. Ganador Round of 16 4" in result
+    assert "🇦🇷 Argentina (si avanza) vs. Ganador Quarterfinal 2" in result
+    assert "🇦🇷 Argentina (si avanza) vs. Ganador Semifinal 2" in result
+    assert "Australia" not in result
+    assert "Colombia" not in result
+
+
+def test_get_polymarket_world_cup_games_stops_when_country_is_predicted_out(
+    monkeypatch,
+):
+    events = [
+        {
+            "title": "Argentina vs. Cape Verde",
+            "slug": "fifwc-arg-cvi-2026-07-03",
+            "endDate": "2026-07-03T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Argentina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.35", "0.65"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Cape Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.55", "0.45"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 1 Winner",
+                "Round of 32 2 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert "🇦🇷 Argentina 35% vs. [🇨🇻 Cabo Verde 55%]" in result
+    assert "si avanza" not in result
+    assert "Round of 32" not in result
+
+
+def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
+    monkeypatch,
+):
+    events = [
+        {
+            "title": "Argentina vs. Cape Verde",
+            "slug": "fifwc-arg-cvi-2026-07-03",
+            "endDate": "2026-07-03T22:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Argentina",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.80", "0.20"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Cape Verde",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.10", "0.90"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+        {
+            "title": "Colombia vs. Ghana",
+            "slug": "fifwc-col-gha-2026-07-03",
+            "endDate": "2026-07-04T01:30:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "Colombia",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.70", "0.30"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Ghana",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.20", "0.80"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760500": _match_score(
+                "760500",
+                "Argentina",
+                "Cape Verde",
+                state="pre",
+                start_time="2026-07-03T22:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760501": _match_score(
+                "760501",
+                "Colombia",
+                "Ghana",
+                state="pre",
+                start_time="2026-07-04T01:30:00Z",
+                round_slug="round-of-32",
+            ),
+            "760508": _match_score(
+                "760508",
+                "Round of 32 1 Winner",
+                "Round of 32 2 Winner",
+                state="pre",
+                start_time="2026-07-07T20:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="argentina",
+    )
+
+    assert "🇦🇷 Argentina (si avanza) vs. 🇨🇴 Colombia (pronóstico)" in result
+
+
+def test_get_polymarket_world_cup_games_accepts_spanish_country_query(monkeypatch):
+    monkeypatch.setattr(
+        index.app_runtime.cache,
+        "request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "game-1": _match_score(
+                "game-1",
+                "South Korea",
+                "Japan",
+                1,
+                0,
+                state="post",
+                display_clock="FT",
+            )
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="corea del sur",
+    )
+
+    assert result.startswith("Polymarket - Mundial: Corea del Sur")
+    assert "[🇰🇷 Corea del Sur 1] vs. 🇯🇵 Japón 0" in result
+
+
+def test_get_polymarket_world_cup_games_rejects_unknown_country(monkeypatch):
+    fetch_scores = MagicMock(return_value={})
+    result = polymarket_commands.get_world_cup_games(
+        -3,
+        fetch_winner_event=lambda _slug: None,
+        cached_request=lambda *_args, **_kwargs: None,
+        cache_ttl=0,
+        fetch_live=lambda _token_id: None,
+        format_country=flagged_country_name,
+        make_timezone=lambda offset: timezone(timedelta(hours=offset)),
+        fetch_scores=fetch_scores,
+        team_query="narnia",
+    )
+
+    assert result == "No encontré ese país en el Mundial"
+    fetch_scores.assert_not_called()
 
 
 def test_get_polymarket_world_cup_games_omits_scheduled_zero_zero_scores(

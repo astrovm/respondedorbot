@@ -55,7 +55,7 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
         False,
         "top 10 de elecciones globales en Polymarket por liquidez",
     ),
-    CommandDefinition(("/mundial", "/worldcup"), "get_polymarket_world_cup_games", False, False, "próximos 10 partidos del Mundial en Polymarket"),
+    CommandDefinition(("/mundial", "/worldcup"), "get_polymarket_world_cup_games", False, True, "partidos del Mundial [argentina]"),
     CommandDefinition(("/rulo",), "get_rulo", False, False, "te armo los rulos desde el oficial"),
     CommandDefinition(("/devo",), "get_devo", False, True, "te calculo el arbitraje entre tarjeta y crypto"),
     CommandDefinition(("/powerlaw",), "powerlaw", False, False, "te tiro el precio justo de btc según power law"),

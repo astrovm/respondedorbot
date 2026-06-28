@@ -303,6 +303,44 @@ def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
     assert response == ("resumen listo", None, True, "/resumen")
 
 
+def test_handle_non_ai_command_passes_world_cup_country_query():
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_non_ai_command,
+    )
+
+    handler = MagicMock(return_value="fixture")
+    commands = {"/mundial": (handler, False, True)}
+
+    response = _handle_non_ai_command(
+        MagicMock(),
+        CommandDispatchContext(
+            commands=commands,
+            command="/mundial",
+            sanitized_message_text="argentina",
+            message={"message_id": "10"},
+            chat_id="123",
+            chat_type="private",
+            user_id=7,
+            numeric_chat_id=123,
+            prepared_message=PreparedMessage(
+                message_text="/mundial argentina",
+                photo_file_id=None,
+                audio_file_id=None,
+            ),
+            billing_helper=MagicMock(),
+            reply_context_text=None,
+            user_identity="Ana (ana)",
+            redis_client=MagicMock(),
+            timezone_offset=-3,
+        ),
+    )
+
+    assert response == ("fixture", None, False, "/mundial")
+    handler.assert_called_once_with(timezone_offset=-3, team_query="argentina")
+
+
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
     from api.bot.message_handler import handle_msg
 

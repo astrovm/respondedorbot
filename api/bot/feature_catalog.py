@@ -104,7 +104,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "mundial",
-        "próximos 10 partidos del Mundial en Polymarket",
+        "partidos del Mundial [argentina]",
         aliases_for("get_polymarket_world_cup_games"),
         category="mercado",
         telegram_visible=True,
