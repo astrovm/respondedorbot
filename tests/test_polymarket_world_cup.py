@@ -983,7 +983,7 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
         team_query="argentina",
     )
 
-    assert "🇦🇷 Argentina (si avanza) vs. 🇨🇴 Colombia (pronóstico)" in result
+    assert "🇦🇷 Argentina (pronóstico) vs. 🇨🇴 Colombia (pronóstico)" in result
 
 
 def test_get_polymarket_world_cup_games_accepts_spanish_country_query(monkeypatch):
