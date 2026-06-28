@@ -1006,7 +1006,7 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
     assert "🇦🇷 Argentina (pronóstico) vs. 🇪🇬 Egipto (pronóstico)" in result
 
 
-def test_get_polymarket_world_cup_games_uses_referenced_bracket_tokens(
+def test_get_polymarket_world_cup_games_uses_official_bracket_path(
     monkeypatch,
 ):
     events = [

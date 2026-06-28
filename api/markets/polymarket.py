@@ -1023,13 +1023,12 @@ def _world_cup_projection_token(
     placeholders = _world_cup_placeholder_team_names(target_match)
     if len(placeholders) != 1:
         return ""
-    materialized_teams = [
-        team_name
+    projected_key = _score_key(projected_team)
+    if any(
+        _score_key(team_name) == projected_key
         for team_name in (target_match.home_team, target_match.away_team)
         if not WORLD_CUP_WINNER_PLACEHOLDER_PATTERN.fullmatch(team_name)
-    ]
-    projected_key = _score_key(projected_team)
-    if any(_score_key(team_name) == projected_key for team_name in materialized_teams):
+    ):
         return ""
     return placeholders[0]
 
