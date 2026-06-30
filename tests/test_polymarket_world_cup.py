@@ -1006,6 +1006,81 @@ def test_get_polymarket_world_cup_games_resolves_predicted_placeholder_opponent(
     assert "🇦🇷 Argentina (pronóstico) vs. 🇪🇬 Egipto (pronóstico)" in result
 
 
+def test_get_polymarket_world_cup_games_resolves_placeholder_for_selected_match(
+    monkeypatch,
+):
+    events = [
+        {
+            "title": "France vs. Sweden",
+            "slug": "fifwc-fra-swe-2026-06-30",
+            "endDate": "2026-06-30T21:00:00Z",
+            "markets": [
+                {
+                    "groupItemTitle": "France",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.75", "0.25"]',
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "groupItemTitle": "Sweden",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.15", "0.85"]',
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        },
+    ]
+
+    def fake_cached_requests(_url, parameters, *_args):
+        if parameters == {"slug": "world-cup-winner"}:
+            return None
+        return {"data": events}
+
+    monkeypatch.setattr(index.app_runtime.cache, "request", fake_cached_requests)
+    monkeypatch.setattr(
+        "api.markets.polymarket.fetch_scoreboard_scores",
+        lambda **_kwargs: {
+            "760489": _match_score(
+                "760489",
+                "Germany",
+                "Paraguay",
+                home_score=1,
+                away_score=1,
+                state="post",
+                start_time="2026-06-29T20:30:00Z",
+                round_slug="round-of-32",
+                winner_team="Paraguay",
+            ),
+            "760492": _match_score(
+                "760492",
+                "France",
+                "Sweden",
+                state="in",
+                start_time="2026-06-30T21:00:00Z",
+                round_slug="round-of-32",
+            ),
+            "760503": _match_score(
+                "760503",
+                "Paraguay",
+                "Round of 32 5 Winner",
+                state="pre",
+                start_time="2026-07-04T21:00:00Z",
+                round_slug="round-of-16",
+            ),
+        },
+    )
+
+    result = index.app_runtime.polymarket.get_world_cup_games(
+        timezone_offset=-3,
+        team_query="paraguay",
+    )
+
+    assert "🇵🇾 Paraguay vs. 🇫🇷 Francia (pronóstico)" in result
+    assert "Ganador Round of 32 5" not in result
+
+
 def test_get_polymarket_world_cup_games_uses_official_bracket_path(
     monkeypatch,
 ):

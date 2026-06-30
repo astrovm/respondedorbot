@@ -823,8 +823,22 @@ def _select_team_world_cup_matches(
 ) -> list[WorldCupSelectedMatch]:
     team_key = _score_key(selected_team)
     matches = sorted(scores.values(), key=lambda match: match.start_time)
+    round_winner_tokens = _world_cup_round_winner_tokens(matches)
+    predicted_winners = _world_cup_predicted_winners(
+        matches,
+        events_by_match=events_by_match,
+        fetch_live=fetch_live,
+        winner_event=winner_event,
+    )
     selected: list[WorldCupSelectedMatch] = [
-        WorldCupSelectedMatch(match)
+        WorldCupSelectedMatch(
+            match,
+            token_predictions=_world_cup_token_predictions(
+                match,
+                predicted_winners=predicted_winners,
+                round_winner_tokens=round_winner_tokens,
+            ),
+        )
         for match in matches
         if team_key in {_score_key(match.home_team), _score_key(match.away_team)}
     ]
@@ -832,9 +846,8 @@ def _select_team_world_cup_matches(
         _project_team_world_cup_path(
             matches,
             selected_team,
-            events_by_match=events_by_match,
-            fetch_live=fetch_live,
-            winner_event=winner_event,
+            round_winner_tokens=round_winner_tokens,
+            predicted_winners=predicted_winners,
         )
     )
     return selected
@@ -844,17 +857,9 @@ def _project_team_world_cup_path(
     matches: Sequence[MatchScore],
     selected_team: str,
     *,
-    events_by_match: Mapping[frozenset[str], dict[str, Any]],
-    fetch_live: LivePriceFetcher | None,
-    winner_event: tuple[dict[str, Any], int | None] | None,
+    round_winner_tokens: Mapping[str, str],
+    predicted_winners: Mapping[str, WorldCupPrediction],
 ) -> list[WorldCupSelectedMatch]:
-    round_winner_tokens = _world_cup_round_winner_tokens(matches)
-    predicted_winners = _world_cup_predicted_winners(
-        matches,
-        events_by_match=events_by_match,
-        fetch_live=fetch_live,
-        winner_event=winner_event,
-    )
     token = ""
     path_team = selected_team
     token_is_predicted = False
