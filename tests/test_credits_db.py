@@ -84,6 +84,14 @@ class _FakeConnection:
         self.commit_count += 1
 
 
+def _locked_accounts(cursor):
+    return [
+        params
+        for query, params in cursor.executed
+        if "SELECT balance" in query and "FOR UPDATE" in query
+    ]
+
+
 class _MigrationCursor:
     def __init__(self):
         self.balance = 3
@@ -257,6 +265,27 @@ def test_apply_ai_debt_allows_negative_user_balance():
     )
 
 
+def test_charge_ai_credits_locks_user_before_chat():
+    fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    fake_cursor.balance = 1
+    fake_cursor.chat_balance = 40
+    fake_connection = _FakeConnection(fake_cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
+    ):
+        result = credits_db.charge_ai_credits(
+            user_id=42,
+            chat_id=202,
+            amount=whole_credits_to_units(3),
+        )
+
+    assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
+    assert result["source"] == "chat"
+    assert result["chat_balance"] == 10
+
+
 def test_refund_ai_charge_chat_source_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
     fake_cursor.balance = 11
@@ -274,12 +303,7 @@ def test_refund_ai_charge_chat_source_locks_user_before_chat():
             source="chat",
         )
 
-    lock_params = [
-        params
-        for query, params in fake_cursor.executed
-        if "SELECT balance" in query and "FOR UPDATE" in query
-    ]
-    assert lock_params == [("user", 42), ("chat", 202)]
+    assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
     assert result == {"user_balance": 11, "chat_balance": 52}
 
 
@@ -300,13 +324,67 @@ def test_apply_ai_debt_chat_source_locks_user_before_chat():
             source="chat",
         )
 
-    lock_params = [
-        params
-        for query, params in fake_cursor.executed
-        if "SELECT balance" in query and "FOR UPDATE" in query
-    ]
-    assert lock_params == [("user", 42), ("chat", 202)]
+    assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
     assert result == {"user_balance": 11, "chat_balance": -8}
+
+
+def test_transfer_user_to_chat_locks_user_before_chat():
+    fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    fake_cursor.balance = 50
+    fake_cursor.chat_balance = 22
+    fake_connection = _FakeConnection(fake_cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=fake_connection),
+    ):
+        result = credits_db.transfer_user_to_chat(
+            user_id=42,
+            chat_id=202,
+            amount=whole_credits_to_units(3),
+        )
+
+    assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
+    assert result == {
+        "ok": True,
+        "error": None,
+        "user_balance": 20,
+        "chat_balance": 52,
+    }
+
+
+def test_credit_transaction_retries_deadlocks():
+    class DeadlockDetected(Exception):
+        pass
+
+    attempts = 0
+    first_connection = _FakeConnection(
+        _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    )
+    second_connection = _FakeConnection(
+        _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    )
+
+    def operation(_cur):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DeadlockDetected("deadlock detected")
+        return "ok"
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch(
+            "api.services.credits_db.connect",
+            side_effect=[first_connection, second_connection],
+        ),
+    ):
+        result = credits_db._run_credit_transaction(operation)
+
+    assert result == "ok"
+    assert attempts == 2
+    assert first_connection.commit_count == 0
+    assert second_connection.commit_count == 1
 
 
 def test_mint_user_credits_increases_balance_and_writes_ledger():
