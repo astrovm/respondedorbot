@@ -638,11 +638,11 @@ def refund_ai_charge(
 
     with connect() as conn, conn.cursor() as cur:
         if source == "chat" and chat_id is not None:
+            user_balance = _get_balance_for_update(cur, "user", user_id)
             chat_balance = (
                 _get_balance_for_update(cur, "chat", chat_id) + refund_amount
             )
             _set_balance(cur, "chat", chat_id, chat_balance)
-            user_balance = _get_balance_for_update(cur, "user", user_id)
             cur.execute(
                 """
                     INSERT INTO credit_ledger (
@@ -722,11 +722,11 @@ def apply_ai_debt(
 
     with connect() as conn, conn.cursor() as cur:
         if source == "chat" and chat_id is not None:
+            user_balance = _get_balance_for_update(cur, "user", user_id)
             chat_balance = (
                 _get_balance_for_update(cur, "chat", chat_id) - debt_amount
             )
             _set_balance(cur, "chat", chat_id, chat_balance)
-            user_balance = _get_balance_for_update(cur, "user", user_id)
             cur.execute(
                 """
                     INSERT INTO credit_ledger (
