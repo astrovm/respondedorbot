@@ -7,6 +7,7 @@ from api.markets.world_cup_goals import (
     TEAM_NAMES_ES,
     WORLD_CUP_TEAM_RANKING,
     WorldCupGoalMonitor,
+    WorldCupScoreboard,
     detect_goals,
     fetch_scoreboard_scores,
     parse_scoreboard,
@@ -223,7 +224,7 @@ def test_monitor_warms_up_then_announces_new_goal_to_enabled_chats():
     assert ask_ai.call_args_list[1].kwargs["chat_id"] == "chat-2"
     send_message.assert_any_call("chat-1", "goooooool, ingleses muertos")
     send_message.assert_any_call("chat-2", "goooooool, ingleses muertos")
-    assert http_get.call_args.kwargs["params"]["dates"] == "20260613-20260615"
+    assert http_get.call_args.kwargs["params"]["dates"] == "20260613-20260618"
 
 
 def test_fetch_scoreboard_scores_allows_extended_future_window():
@@ -240,6 +241,35 @@ def test_fetch_scoreboard_scores_allows_extended_future_window():
         "dates": "20260627-20260702",
         "limit": 50,
     }
+
+
+def test_scoreboard_does_not_regress_a_live_score_from_a_stale_response():
+    responses = iter(
+        [
+            parse_scoreboard(_payload(1, 0, display_clock="61'")),
+            parse_scoreboard(_payload(0, 0, display_clock="55'")),
+        ]
+    )
+    scoreboard = WorldCupScoreboard(fetch_scores=lambda: next(responses))
+    scoreboard.enable_monitoring()
+
+    assert scoreboard.refresh()["match-1"].home_score == 1
+    current = scoreboard.refresh()["match-1"]
+
+    assert current.home_score == 1
+    assert current.display_clock == "61'"
+
+
+def test_scoreboard_reuses_the_monitor_snapshot_for_commands():
+    fetch_scores = MagicMock(return_value=parse_scoreboard(_payload(1, 0, display_clock="61'")))
+    scoreboard = WorldCupScoreboard(fetch_scores=fetch_scores)
+    scoreboard.enable_monitoring()
+
+    monitor_scores = scoreboard.refresh()
+    command_scores = scoreboard.get_scores()
+
+    assert command_scores == monitor_scores
+    fetch_scores.assert_called_once()
 
 
 def test_monitor_does_not_generate_message_when_no_chat_is_enabled():

@@ -45,6 +45,7 @@ def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
     clear_all_cooldowns()
     reset_chat_config_cache()
+    index_module._world_cup_scoreboard.reset()
     monkeypatch.setenv(
         "BOT_SYSTEM_PROMPT",
         "sos el gordo, un bot argentino de prueba.\n\nReglas de prueba.",

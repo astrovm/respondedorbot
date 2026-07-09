@@ -83,6 +83,7 @@ def main() -> int:
             send_message=index.app_runtime.telegram.send_message,
             credits_db_service=index.credits_db_service,
             estimate_ai_base_reserve_credits=index.estimate_ai_base_reserve_credits,
+            scoreboard=index._world_cup_scoreboard,
         )
     )
 

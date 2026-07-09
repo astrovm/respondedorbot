@@ -20,6 +20,7 @@ from api.markets.world_cup_goals import (
     WORLD_CUP_TEAM_RANKING,
     canonical_team_name,
     fetch_scoreboard_scores,
+    WorldCupScoreboard,
     team_name_es,
 )
 from api.services import http_client
@@ -1468,11 +1469,15 @@ class PolymarketService:
         cache_ttl: int,
         stream_cache_ttl: int,
         make_timezone: TimezoneFactory,
+        scoreboard: WorldCupScoreboard | None = None,
     ) -> None:
         self._cache = cache
         self._cache_ttl = cache_ttl
         self._stream_cache_ttl = stream_cache_ttl
         self._make_timezone = make_timezone
+        self._scoreboard = scoreboard or WorldCupScoreboard(
+            fetch_scores=fetch_scoreboard_scores
+        )
 
     def fetch_live_price(self, token_id: str) -> tuple[float, int | None] | None:
         return fetch_live_price(
@@ -1531,15 +1536,9 @@ class PolymarketService:
         timezone_offset: int = -3,
         team_query: str = "",
     ) -> str:
-        def fetch_scores() -> Mapping[str, MatchScore]:
-            if team_query:
-                return fetch_scoreboard_scores(
-                    days_before=WORLD_CUP_TEAM_SCOREBOARD_DAYS_BEFORE,
-                    days_after=WORLD_CUP_TEAM_SCOREBOARD_DAYS_AFTER,
-                    limit=WORLD_CUP_TEAM_SCOREBOARD_LIMIT,
-                )
-            return fetch_scoreboard_scores()
-
+        fetch_scores = self._scoreboard.get_scores
+        if team_query:
+            fetch_scores = self._fetch_team_world_cup_scores
         return get_world_cup_games(
             timezone_offset,
             fetch_winner_event=self.fetch_event,
@@ -1552,5 +1551,23 @@ class PolymarketService:
             team_query=team_query,
         )
 
+    def _fetch_team_world_cup_scores(self) -> dict[str, MatchScore]:
+        bracket_scores = fetch_scoreboard_scores(
+            days_before=WORLD_CUP_TEAM_SCOREBOARD_DAYS_BEFORE,
+            days_after=WORLD_CUP_TEAM_SCOREBOARD_DAYS_AFTER,
+            limit=WORLD_CUP_TEAM_SCOREBOARD_LIMIT,
+        )
+        return _overlay_live_scores(bracket_scores, self._scoreboard.get_scores())
 
-__all__ = ["PolymarketService"]
+
+def _overlay_live_scores(
+    bracket_scores: Mapping[str, MatchScore],
+    live_scores: Mapping[str, MatchScore],
+) -> dict[str, MatchScore]:
+    return {
+        event_id: live_scores.get(event_id, match)
+        for event_id, match in bracket_scores.items()
+    }
+
+
+__all__ = ["MatchScore", "PolymarketService", "fetch_scoreboard_scores"]
