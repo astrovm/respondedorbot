@@ -9,7 +9,11 @@ from api.markets.world_cup_goals import (
     WORLD_CUP_TEAM_RANKING,
     team_name_es,
 )
-from api.markets.polymarket import country_flag_from_name, flagged_country_name
+from api.markets.polymarket import (
+    _overlay_live_scores,
+    country_flag_from_name,
+    flagged_country_name,
+)
 from api.markets import polymarket as polymarket_commands
 
 
@@ -741,9 +745,11 @@ def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
         "request",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        "api.markets.polymarket.fetch_scoreboard_scores",
-        lambda **_kwargs: {
+    score_fetch_arguments = []
+
+    def fetch_scores(**kwargs):
+        score_fetch_arguments.append(kwargs)
+        return {
             "760480": _match_score(
                 "760480",
                 "Argentina",
@@ -810,8 +816,9 @@ def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
                 start_time="2026-07-19T19:00:00Z",
                 round_slug="final",
             ),
-        },
-    )
+        }
+
+    monkeypatch.setattr("api.markets.polymarket.fetch_scoreboard_scores", fetch_scores)
 
     result = index.app_runtime.polymarket.get_world_cup_games(
         timezone_offset=-3,
@@ -825,6 +832,29 @@ def test_get_polymarket_world_cup_games_filters_country_and_projects_path(
     assert "Ganador Round" not in result
     assert "Australia" not in result
     assert "Colombia" not in result
+    assert {
+        "days_before": 30,
+        "days_after": 40,
+        "limit": 300,
+    } in score_fetch_arguments
+
+
+def test_overlay_live_scores_replaces_only_matching_bracket_matches():
+    bracket_scores = {
+        "live": _match_score("live", "Argentina", "Japan", 0, 0),
+        "future": _match_score("future", "Argentina", "Japan"),
+    }
+    live_scores = {
+        "live": _match_score("live", "Argentina", "Japan", 1, 0, state="in"),
+        "outside-window": _match_score("outside-window", "France", "Morocco", 2, 0),
+    }
+
+    merged = _overlay_live_scores(bracket_scores, live_scores)
+
+    assert merged == {
+        "live": live_scores["live"],
+        "future": bracket_scores["future"],
+    }
 
 
 def test_get_polymarket_world_cup_games_continues_when_country_is_predicted_out(

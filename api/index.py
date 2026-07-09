@@ -99,6 +99,7 @@ from api.providers.errors import (
 from api.providers.service import ProviderService
 from api.markets import polymarket as polymarket_commands
 from api.markets.polymarket import PolymarketService
+from api.markets.world_cup_goals import MatchScore, WorldCupScoreboard
 from api.markets.price import PriceService
 from api.markets import dollar as dollar_runtime
 from api.markets.dollar import DollarService
@@ -942,6 +943,10 @@ def build_routing_policy() -> RoutingPolicy:
 # Business services share the lower-level config, cache, provider, and state
 # objects created above. Handlers use these services instead of rebuilding
 # integrations for every Telegram update.
+def _fetch_world_cup_scores() -> dict[str, MatchScore]:
+    return polymarket_commands.fetch_scoreboard_scores()
+
+
 _cache_service = CacheService(
     config=_config_runtime,
     admin=_admin_service,
@@ -963,11 +968,15 @@ _giphy_service = GiphyService(
     config=_config_runtime,
     logger=_logger,
 )
+_world_cup_scoreboard = WorldCupScoreboard(
+    fetch_scores=_fetch_world_cup_scores
+)
 _polymarket_service = PolymarketService(
     cache=_cache_service,
     cache_ttl=TTL_POLYMARKET,
     stream_cache_ttl=TTL_POLYMARKET_STREAM,
     make_timezone=make_chat_tz,
+    scoreboard=_world_cup_scoreboard,
 )
 _bcra_service = BCRAService(
     cache=_cache_service,

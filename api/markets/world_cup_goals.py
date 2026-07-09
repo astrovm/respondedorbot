@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -366,6 +367,79 @@ def fetch_scoreboard_scores(
     return parse_scoreboard(payload)
 
 
+class WorldCupScoreboard:
+    """Share one monotonic live-score snapshot across World Cup features."""
+
+    def __init__(
+        self,
+        *,
+        fetch_scores: Callable[[], dict[str, MatchScore]] = fetch_scoreboard_scores,
+        refresh_interval_seconds: float = POLL_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._fetch_scores = fetch_scores
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._monotonic = monotonic
+        self._scores: dict[str, MatchScore] | None = None
+        self._updated_at = 0.0
+        self._monitor_active = False
+        self._lock = threading.Lock()
+
+    def enable_monitoring(self) -> None:
+        with self._lock:
+            self._monitor_active = True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._scores = None
+            self._updated_at = 0.0
+            self._monitor_active = False
+
+    def get_scores(self) -> dict[str, MatchScore]:
+        with self._lock:
+            if (
+                self._monitor_active
+                and self._scores is not None
+                and self._monotonic() - self._updated_at
+                < self._refresh_interval_seconds
+            ):
+                return self._scores.copy()
+        return self.refresh()
+
+    def refresh(self) -> dict[str, MatchScore]:
+        fetched = self._fetch_scores()
+        with self._lock:
+            self._scores = (
+                _merge_scoreboard_scores(self._scores or {}, fetched)
+                if self._monitor_active
+                else fetched
+            )
+            self._updated_at = self._monotonic()
+            return self._scores.copy()
+
+
+def _merge_scoreboard_scores(
+    previous: Mapping[str, MatchScore],
+    current: Mapping[str, MatchScore],
+) -> dict[str, MatchScore]:
+    merged = dict(current)
+    for event_id, old_match in previous.items():
+        new_match = current.get(event_id)
+        if new_match is None or _is_older_match_state(old_match, new_match):
+            merged[event_id] = old_match
+    return merged
+
+
+def _is_older_match_state(previous: MatchScore, current: MatchScore) -> bool:
+    if previous.state == "post" and current.state != "post":
+        return True
+    if current.home_score < previous.home_score:
+        return True
+    if current.away_score < previous.away_score:
+        return True
+    return False
+
+
 class WorldCupGoalMonitor:
     def __init__(
         self,
@@ -374,6 +448,7 @@ class WorldCupGoalMonitor:
         ask_ai: Callable[..., str],
         send_message: Callable[..., Any],
         http_get: Callable[..., Any] = http_client.get,
+        scoreboard: WorldCupScoreboard | None = None,
         now: Callable[[], datetime] | None = None,
         credits_db_service: Any | None = None,
         estimate_ai_base_reserve_credits: Callable[..., tuple[int, dict[str, Any]]]
@@ -383,6 +458,13 @@ class WorldCupGoalMonitor:
         self._ask_ai = ask_ai
         self._send_message = send_message
         self._http_get = http_get
+        self._scoreboard = scoreboard or WorldCupScoreboard(
+            fetch_scores=lambda: fetch_scoreboard_scores(
+                http_get=self._http_get,
+                now=self._now,
+            )
+        )
+        self._scoreboard.enable_monitoring()
         self._now = now or (lambda: datetime.now(UTC))
         self._credits_db_service = credits_db_service
         self._estimate_ai_base_reserve_credits = estimate_ai_base_reserve_credits
@@ -390,13 +472,7 @@ class WorldCupGoalMonitor:
         self._announced: set[str] = set()
 
     def fetch_scores(self) -> dict[str, MatchScore]:
-        return fetch_scoreboard_scores(
-            http_get=self._http_get,
-            now=self._now,
-            days_before=1,
-            days_after=1,
-            limit=20,
-        )
+        return self._scoreboard.refresh()
 
     def poll_once(self) -> list[Goal]:
         current = self.fetch_scores()
