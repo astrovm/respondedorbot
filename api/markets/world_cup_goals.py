@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -433,11 +434,32 @@ def _merge_scoreboard_scores(
 def _is_older_match_state(previous: MatchScore, current: MatchScore) -> bool:
     if previous.state == "post" and current.state != "post":
         return True
-    if current.home_score < previous.home_score:
-        return True
-    if current.away_score < previous.away_score:
-        return True
-    return False
+    if current.state == "post":
+        return False
+
+    previous_progress = _match_progress(previous)
+    current_progress = _match_progress(current)
+    if previous_progress is not None and current_progress is not None:
+        return current_progress < previous_progress
+
+    score_decreased = (
+        current.home_score < previous.home_score
+        or current.away_score < previous.away_score
+    )
+    return score_decreased
+
+
+def _match_progress(match: MatchScore) -> int | None:
+    if match.state == "pre":
+        return 0
+    if match.state != "in":
+        return None
+    if match.display_clock.casefold() in {"ht", "halftime"}:
+        return 45
+    clock_parts = re.findall(r"\d+", match.display_clock)
+    if not clock_parts:
+        return None
+    return sum(int(part) for part in clock_parts)
 
 
 class WorldCupGoalMonitor:

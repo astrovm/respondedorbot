@@ -260,6 +260,42 @@ def test_scoreboard_does_not_regress_a_live_score_from_a_stale_response():
     assert current.display_clock == "61'"
 
 
+def test_scoreboard_accepts_a_disallowed_goal_correction_at_the_same_minute():
+    responses = iter(
+        [
+            parse_scoreboard(_payload(2, 1, display_clock="58'")),
+            parse_scoreboard(_payload(1, 1, display_clock="58'")),
+        ]
+    )
+    scoreboard = WorldCupScoreboard(fetch_scores=lambda: next(responses))
+    scoreboard.enable_monitoring()
+
+    scoreboard.refresh()
+    corrected = scoreboard.refresh()["match-1"]
+
+    assert corrected.home_score == 1
+    assert corrected.away_score == 1
+    assert corrected.display_clock == "58'"
+
+
+def test_scoreboard_accepts_a_final_score_correction():
+    responses = iter(
+        [
+            parse_scoreboard(_payload(2, 1, display_clock="58'")),
+            parse_scoreboard(_payload(1, 2, display_clock="120'+2'", state="post")),
+        ]
+    )
+    scoreboard = WorldCupScoreboard(fetch_scores=lambda: next(responses))
+    scoreboard.enable_monitoring()
+
+    scoreboard.refresh()
+    final = scoreboard.refresh()["match-1"]
+
+    assert final.home_score == 1
+    assert final.away_score == 2
+    assert final.state == "post"
+
+
 def test_scoreboard_reuses_the_monitor_snapshot_for_commands():
     fetch_scores = MagicMock(return_value=parse_scoreboard(_payload(1, 0, display_clock="61'")))
     scoreboard = WorldCupScoreboard(fetch_scores=fetch_scores)
