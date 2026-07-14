@@ -65,6 +65,41 @@ def test_fetch_live_price_uses_clob_midpoint():
     }
 
 
+def test_world_cup_winner_header_uses_live_prices():
+    winner_event = {
+        "slug": "world-cup-winner",
+        "markets": [
+            {
+                "groupItemTitle": "Spain",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.376", "0.624"]',
+                "clobTokenIds": '["spain-yes", "spain-no"]',
+                "active": True,
+            },
+            {
+                "groupItemTitle": "France",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.178", "0.822"]',
+                "clobTokenIds": '["france-yes", "france-no"]',
+                "active": True,
+            },
+        ],
+    }
+
+    lines = polymarket_commands._format_world_cup_winner_lines(
+        (winner_event, None),
+        fetch_live=lambda token_id: {
+            "spain-yes": (0.52, None),
+            "france-yes": (0.045, None),
+        }.get(token_id),
+        format_country=flagged_country_name,
+    )
+
+    assert "España 52%" in lines[2]
+    assert "Francia 4.5%" in lines[2]
+    assert "Francia 17.8%" not in lines[2]
+
+
 def test_get_polymarket_world_cup_games_filters_props_and_formats_kickoff(
     monkeypatch,
 ):

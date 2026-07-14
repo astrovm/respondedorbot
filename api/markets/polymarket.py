@@ -583,6 +583,7 @@ def get_world_cup_games(
     lines = _world_cup_header_lines(
         selected_team=selected_team,
         winner_event=winner_event,
+        fetch_live=fetch_live,
         format_country=format_country,
     )
 
@@ -658,6 +659,7 @@ def _world_cup_header_lines(
     *,
     selected_team: str,
     winner_event: tuple[dict[str, Any], int | None] | None,
+    fetch_live: LivePriceFetcher,
     format_country: CountryFormatter,
 ) -> list[str]:
     title = "Polymarket - Mundial"
@@ -665,12 +667,20 @@ def _world_cup_header_lines(
         title = f"Polymarket - Mundial: {team_name_es(selected_team)}"
     lines = [title]
     if winner_event and not selected_team:
-        lines.extend(_format_world_cup_winner_lines(winner_event, format_country))
+        lines.extend(
+            _format_world_cup_winner_lines(
+                winner_event,
+                fetch_live=fetch_live,
+                format_country=format_country,
+            )
+        )
     return lines
 
 
 def _format_world_cup_winner_lines(
     winner_event: tuple[dict[str, Any], int | None],
+    *,
+    fetch_live: LivePriceFetcher,
     format_country: CountryFormatter,
 ) -> list[str]:
     event, _timestamp = winner_event
@@ -678,6 +688,7 @@ def _format_world_cup_winner_lines(
     for title, probability in _top_outcomes(
         normalize_event_quotes(event),
         limit=WORLD_CUP_WINNER_LIMIT,
+        fetch_live=fetch_live,
     ):
         decimals = 2 if probability < 10 else 1
         winner_outcomes.append(
