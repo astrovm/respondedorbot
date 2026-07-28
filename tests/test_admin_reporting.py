@@ -25,8 +25,9 @@ def test_admin_report_formats_error_traceback_from_exception():
         index.app_runtime.admin.report("failed", captured_error)
 
     message = send_msg.call_args.args[1]
-    assert "tipo de error: RuntimeError" in message
-    assert "mensaje de error: boom" in message
+    assert message.startswith("admin report from test: failed")
+    assert "error type: RuntimeError" in message
+    assert "error message: boom" in message
     assert "RuntimeError: boom" in message
     assert "NoneType: None" not in message
 
@@ -53,6 +54,31 @@ def test_admin_report_redacts_telegram_token_from_error_message_and_traceback():
     message = send_msg.call_args.args[1]
     assert fake_bot_auth not in message
     assert "/bot<redacted>/sendMessage" in message
+
+
+def test_admin_report_formats_additional_context_in_english():
+    with (
+        patch.dict(
+            "api.admin.reporting.environ",
+            {"ADMIN_CHAT_ID": "1", "FRIENDLY_INSTANCE_NAME": "VPS"},
+            clear=True,
+        ),
+        patch.object(index.app_runtime.telegram, "send_message") as send_msg,
+    ):
+        index.app_runtime.admin.report(
+            "OpenRouter unexpected finish_reason=None",
+            extra_context={
+                "model": "deepseek/deepseek-v4-flash",
+                "enable_web_search": True,
+            },
+        )
+
+    assert send_msg.call_args.args[1] == (
+        "admin report from VPS: OpenRouter unexpected finish_reason=None"
+        "\n\nadditional context:"
+        "\nmodel: deepseek/deepseek-v4-flash"
+        "\nenable_web_search: True"
+    )
 
 
 def test_telegram_request_redacts_token_in_error_log(capsys):

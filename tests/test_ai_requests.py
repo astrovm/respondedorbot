@@ -214,6 +214,9 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     monkeypatch,
 ):
     from api.index import estimate_ai_base_reserve_credits
+    from api.ai.pricing import estimate_chat_reserve_credits
+
+    messages = [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
 
     monkeypatch.setattr("api.index.get_market_context", lambda: {})
     monkeypatch.setattr("api.index.get_weather_context", lambda: {})
@@ -224,11 +227,13 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
     )
 
-    reserve, metadata = estimate_ai_base_reserve_credits(
-        [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
+    reserve, metadata = estimate_ai_base_reserve_credits(messages)
+    expected_reserve = estimate_chat_reserve_credits(
+        system_message={"role": "system", "content": "sys"},
+        messages=messages,
     )
 
-    assert reserve == 3
+    assert reserve == expected_reserve
     assert metadata == {}
 
 

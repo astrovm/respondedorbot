@@ -742,6 +742,135 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     assert helper_execute_tool_fn.call_count == 2
 
 
+@pytest.mark.parametrize("retryable_finish_reason", [None, "error"])
+def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
+    retryable_finish_reason,
+):
+    from api.ai.pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    incomplete_response = _FakeResponse(
+        [
+            _FakeChoice(
+                retryable_finish_reason,
+                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    incomplete_response.id = "gen-incomplete"
+    incomplete_response._request_id = "req-incomplete"
+    incomplete_response.model = "upstream-model"
+    incomplete_response.provider = "upstream-provider"
+    complete_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="done", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    client = _FakeClient([incomplete_response, complete_response])
+    admin_report = MagicMock()
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=admin_report,
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
+    )
+
+    with patch("api.providers.runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "research this"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is not None
+    assert result.text == "done"
+    assert len(client.calls) == 2
+    assert all(call["max_tokens"] == CHAT_OUTPUT_TOKEN_LIMIT for call in client.calls)
+    assert CHAT_OUTPUT_TOKEN_LIMIT == 8192
+    sleep.assert_called_once_with(1)
+    admin_report.assert_not_called()
+
+
+def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    responses = []
+    for index in range(5):
+        choice = _FakeChoice(
+            None,
+            SimpleNamespace(content="", tool_calls=[], annotations=[]),
+        )
+        choice.native_finish_reason = "upstream_null"
+        response = _FakeResponse([choice])
+        response.id = f"gen-{index}"
+        response._request_id = f"req-{index}"
+        response.model = "upstream-model"
+        response.provider = "upstream-provider"
+        responses.append(response)
+
+    client = _FakeClient(responses)
+    admin_report = MagicMock()
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=admin_report,
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=MagicMock(),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
+    )
+
+    with patch("api.providers.runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "research this"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is None
+    assert len(client.calls) == 5
+    assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8]
+    admin_report.assert_called_once()
+    assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
+    report_context = admin_report.call_args.kwargs["extra_context"]
+    assert report_context == {
+        "model": "test-model",
+        "enable_web_search": True,
+        "tool_round": 1,
+        "response_id": "gen-4",
+        "request_id": "req-4",
+        "response_model": "upstream-model",
+        "provider": "upstream-provider",
+        "native_finish_reason": "upstream_null",
+        "has_content": False,
+        "tool_call_count": 0,
+    }
+
+
 def test_provider_runtime_retries_json_decode_errors_then_returns_result():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps

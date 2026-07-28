@@ -24,6 +24,7 @@ from api.tools.runtime import ToolRuntime
 
 logger = get_logger(__name__)
 _MAX_RETRIES = 5
+_RETRYABLE_FINISH_REASONS = {None, "error"}
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
     re.DOTALL,
@@ -169,7 +170,7 @@ class ProviderRuntime:
         try:
             for attempt in range(_MAX_RETRIES):
                 try:
-                    return client.chat.completions.create(**request_kwargs)
+                    response = client.chat.completions.create(**request_kwargs)
                 except Exception as error:
                     if _is_retryable_provider_error(error) and attempt < _MAX_RETRIES - 1:
                         wait = 2**attempt
@@ -193,6 +194,34 @@ class ProviderRuntime:
                         time.sleep(wait)
                         continue
                     raise
+                choices = getattr(response, "choices", None) or []
+                finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+                if (
+                    choices
+                    and finish_reason in _RETRYABLE_FINISH_REASONS
+                    and attempt < _MAX_RETRIES - 1
+                ):
+                    wait = 2**attempt
+                    retry_context = dict(tool_context or {})
+                    retry_context.update(
+                        {
+                            "model": self._deps.primary_model,
+                            "tool_round": round_idx + 1,
+                            "finish_reason": finish_reason,
+                            **self._response_diagnostics(response, choices[0]),
+                        }
+                    )
+                    logger.warning(
+                        "openrouter: retryable finish_reason=%r retrying in %ss attempt=%d/%d%s",
+                        finish_reason,
+                        wait,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        format_log_context(retry_context),
+                    )
+                    time.sleep(wait)
+                    continue
+                return response
         except Exception as error:
             error_context = dict(tool_context or {})
             error_context.update(
@@ -217,6 +246,31 @@ class ProviderRuntime:
             )
             return None
         return None
+
+    @staticmethod
+    def _response_diagnostics(response: Any, choice: Any) -> Dict[str, Any]:
+        diagnostics: Dict[str, Any] = {}
+        fields = {
+            "response_id": getattr(response, "id", None),
+            "request_id": getattr(response, "_request_id", None),
+            "response_model": getattr(response, "model", None),
+            "provider": getattr(response, "provider", None),
+            "native_finish_reason": getattr(choice, "native_finish_reason", None),
+        }
+        diagnostics.update({key: value for key, value in fields.items() if value is not None})
+
+        error = getattr(choice, "error", None)
+        if isinstance(error, Mapping):
+            if error.get("code") is not None:
+                diagnostics["provider_error_code"] = error["code"]
+            metadata = ensure_mapping(error.get("metadata")) or {}
+            if metadata.get("error_type") is not None:
+                diagnostics["provider_error_type"] = metadata["error_type"]
+
+        message = getattr(choice, "message", None)
+        diagnostics["has_content"] = bool(str(getattr(message, "content", "") or "").strip())
+        diagnostics["tool_call_count"] = len(getattr(message, "tool_calls", None) or [])
+        return diagnostics
 
     def _filter_known_calls(
         self,
@@ -578,6 +632,8 @@ class ProviderRuntime:
 
     def _report_unexpected_finish(
         self,
+        response: Any,
+        choice: Any,
         finish_reason: Any,
         round_idx: int,
         *,
@@ -586,7 +642,11 @@ class ProviderRuntime:
     ) -> None:
         unexpected_context = dict(tool_context or {})
         unexpected_context.update(
-            {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+            {
+                "model": self._deps.primary_model,
+                "tool_round": round_idx + 1,
+                **self._response_diagnostics(response, choice),
+            }
         )
         logger.warning(
             "provider_runtime: unexpected finish_reason=%r%s",
@@ -598,6 +658,8 @@ class ProviderRuntime:
             extra_context={
                 "model": self._deps.primary_model,
                 "enable_web_search": enable_web_search,
+                "tool_round": round_idx + 1,
+                **self._response_diagnostics(response, choice),
             },
         )
 
@@ -670,6 +732,8 @@ class ProviderRuntime:
                 )
 
             self._report_unexpected_finish(
+                response,
+                choice,
                 finish_reason,
                 round_idx,
                 enable_web_search=enable_web_search,
