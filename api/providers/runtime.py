@@ -273,7 +273,7 @@ class ProviderRuntime:
         error = self._response_error(response, choice)
         code = error.get("code")
         try:
-            status_code = int(code)
+            status_code = int(code) if code is not None else 0
         except (TypeError, ValueError):
             status_code = 0
         if status_code in {408, 409, 429} or status_code >= 500:
