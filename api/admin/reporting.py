@@ -23,10 +23,10 @@ def admin_report(
 ) -> None:
     admin_chat_id = environ.get("ADMIN_CHAT_ID")
     instance_name = environ.get("FRIENDLY_INSTANCE_NAME")
-    formatted_message = f"reporte admin desde {instance_name}: {message}"
+    formatted_message = f"admin report from {instance_name}: {message}"
 
     if extra_context:
-        context_details = "\n\ncontexto adicional:"
+        context_details = "\n\nadditional context:"
         for key, value in extra_context.items():
             context_details += f"\n{key}: {_format_context_value(key, value)}"
         formatted_message += context_details
@@ -45,12 +45,12 @@ def _format_context_value(key: str, value: Any) -> Any:
         units = int(value)
     except (TypeError, ValueError):
         return value
-    return f"{format_credit_units(units)} créditos ({units} unidades)"
+    return f"{format_credit_units(units)} credits ({units} units)"
 
 
 def _format_error(error: Exception, *, redact: Redactor) -> str:
-    details = f"\n\ntipo de error: {type(error).__name__}"
-    details += f"\nmensaje de error: {redact(str(error))}"
+    details = f"\n\nerror type: {type(error).__name__}"
+    details += f"\nerror message: {redact(str(error))}"
     if error.__traceback__ is not None:
         formatted_traceback = "".join(
             traceback.format_exception(type(error), error, error.__traceback__)

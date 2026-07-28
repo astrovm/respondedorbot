@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-from api.ai.pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT
+from api.ai.pricing import AIUsageResult, chat_output_token_limit
 from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.tools.runtime import ToolRuntime
 from api.providers.base import StreamingAIProvider
@@ -89,6 +89,7 @@ class OpenRouterProvider(StreamingAIProvider):
             return
 
         has_tools = bool(extra_tools) or enable_web_search
+        output_token_limit = chat_output_token_limit(self._primary_model)
 
         try:
             if not has_tools:
@@ -96,7 +97,7 @@ class OpenRouterProvider(StreamingAIProvider):
                 request_kwargs: Dict[str, Any] = {
                     "model": self._primary_model,
                     "messages": [system_message] + list(messages),
-                    "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
+                    "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
                     "stream": True,
                 }
 
@@ -113,7 +114,7 @@ class OpenRouterProvider(StreamingAIProvider):
                 request_kwargs = {
                     "model": self._primary_model,
                     "messages": [system_message] + list(messages),
-                    "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
+                    "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
                     "stream": True,
                     "tools": [self._build_web_search_tool()],
                 }
@@ -143,7 +144,7 @@ class OpenRouterProvider(StreamingAIProvider):
                     request_kwargs = {
                         "model": self._primary_model,
                         "messages": [system_message] + final_messages,
-                        "max_tokens": max_tokens if max_tokens is not None else CHAT_OUTPUT_TOKEN_LIMIT,
+                        "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
                         "stream": True,
                     }
                     for chunk in client.chat.completions.create(**request_kwargs):
