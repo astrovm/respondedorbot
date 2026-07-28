@@ -214,7 +214,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     monkeypatch,
 ):
     from api.index import estimate_ai_base_reserve_credits
-    from api.ai.pricing import estimate_chat_reserve_credits
+    from api.ai.pricing import chat_output_token_limit, estimate_chat_reserve_credits
 
     messages = [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
 
@@ -231,6 +231,8 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     expected_reserve = estimate_chat_reserve_credits(
         system_message={"role": "system", "content": "sys"},
         messages=messages,
+        max_output_tokens=chat_output_token_limit(index.PRIMARY_CHAT_MODEL),
+        model=index.PRIMARY_CHAT_MODEL,
     )
 
     assert reserve == expected_reserve

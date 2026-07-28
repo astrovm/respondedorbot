@@ -127,15 +127,15 @@ from api.bot.chat_context import (
     extract_user_id as _billing_extract_user_id,
 )
 from api.ai.pricing import (
-    CHAT_OUTPUT_TOKEN_LIMIT,
     AIUsageResult,
+    MODEL_PRICING_USD_MICROS,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
+    chat_output_token_limit,
+    ensure_mapping,
     estimate_chat_reserve_credits,
     estimate_message_tokens,
     estimate_vision_reserve_credits,
-    ensure_mapping,
-    MODEL_PRICING_USD_MICROS,
 )
 from api.links.agent_tools import fetch_url_content
 from api.core.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
@@ -708,7 +708,7 @@ def estimate_ai_base_reserve_credits(
     reserve = estimate_chat_reserve_credits(
         system_message=system_message,
         messages=messages,
-        max_output_tokens=CHAT_OUTPUT_TOKEN_LIMIT,
+        max_output_tokens=chat_output_token_limit(PRIMARY_CHAT_MODEL),
         extra_input_tokens=extra_input_tokens,
         model=PRIMARY_CHAT_MODEL,
     )

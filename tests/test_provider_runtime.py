@@ -742,22 +742,61 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     assert helper_execute_tool_fn.call_count == 2
 
 
-@pytest.mark.parametrize("retryable_finish_reason", [None, "error"])
-def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
-    retryable_finish_reason,
-):
-    from api.ai.pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT
+def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
+    from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
 
-    incomplete_response = _FakeResponse(
-        [
-            _FakeChoice(
-                retryable_finish_reason,
-                SimpleNamespace(content="", tool_calls=[], annotations=[]),
-            )
-        ]
+    client = _FakeClient(responses)
+    admin_report = MagicMock()
+    request_count = MagicMock()
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=admin_report,
+            increment_request_count=request_count,
+            build_web_search_tool=lambda: {"type": "web_search"},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=extract_usage,
+            primary_model="deepseek/deepseek-v4-flash",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(),
     )
+    return runtime, client, admin_report, request_count
+
+
+@pytest.mark.parametrize(
+    ("retryable_finish_reason", "error"),
+    [
+        (None, None),
+        (
+            "error",
+            {
+                "code": 503,
+                "metadata": {"error_type": "provider_unavailable"},
+            },
+        ),
+    ],
+)
+def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
+    retryable_finish_reason,
+    error,
+):
+    from api.ai.pricing import chat_output_token_limit
+
+    incomplete_choice = _FakeChoice(
+        retryable_finish_reason,
+        SimpleNamespace(content="", tool_calls=[], annotations=[]),
+    )
+    incomplete_choice.error = error
+    incomplete_response = _FakeResponse([incomplete_choice])
     incomplete_response.id = "gen-incomplete"
     incomplete_response._request_id = "req-incomplete"
     incomplete_response.model = "upstream-model"
@@ -770,26 +809,8 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
             )
         ]
     )
-    client = _FakeClient([incomplete_response, complete_response])
-    admin_report = MagicMock()
-    runtime = ProviderRuntime(
-        ProviderRuntimeDeps(
-            get_client=lambda: client,
-            admin_report=admin_report,
-            increment_request_count=MagicMock(),
-            build_web_search_tool=lambda: {"type": "web_search"},
-            build_usage_result=lambda **kwargs: AIUsageResult(
-                kind=kwargs["kind"],
-                text=kwargs["text"],
-                model=kwargs["model"],
-                usage={},
-                metadata=kwargs.get("metadata") or {},
-            ),
-            extract_usage_map=lambda _response: {},
-            primary_model="test-model",
-            max_tool_rounds=5,
-        ),
-        ToolRuntime(),
+    runtime, client, admin_report, request_count = _build_retry_runtime(
+        [incomplete_response, complete_response]
     )
 
     with patch("api.providers.runtime.time.sleep") as sleep:
@@ -803,16 +824,58 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
     assert result is not None
     assert result.text == "done"
     assert len(client.calls) == 2
-    assert all(call["max_tokens"] == CHAT_OUTPUT_TOKEN_LIMIT for call in client.calls)
-    assert CHAT_OUTPUT_TOKEN_LIMIT == 8192
+    assert all(
+        call["max_tokens"] == chat_output_token_limit("deepseek/deepseek-v4-flash")
+        for call in client.calls
+    )
+    assert request_count.call_count == 2
     sleep.assert_called_once_with(1)
     admin_report.assert_not_called()
 
 
-def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
-    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
-    from api.tools.runtime import ToolRuntime
+@pytest.mark.parametrize(
+    ("finish_reason", "error", "usage"),
+    [
+        (
+            "error",
+            {"code": 400, "metadata": {"error_type": "invalid_request"}},
+            {},
+        ),
+        (None, None, {"prompt_tokens": 10}),
+    ],
+)
+def test_provider_runtime_does_not_retry_permanent_or_billable_responses(
+    finish_reason,
+    error,
+    usage,
+):
+    choice = _FakeChoice(
+        finish_reason,
+        SimpleNamespace(content="", tool_calls=[], annotations=[]),
+    )
+    choice.error = error
+    response = _FakeResponse([choice])
+    runtime, client, admin_report, request_count = _build_retry_runtime(
+        [response],
+        extract_usage=lambda _response: usage,
+    )
 
+    with patch("api.providers.runtime.time.sleep") as sleep:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "research this"}],
+            enable_web_search=True,
+            tool_context={"chat_id": "123"},
+        )
+
+    assert result is None
+    assert len(client.calls) == 1
+    assert request_count.call_count == 1
+    sleep.assert_not_called()
+    admin_report.assert_called_once()
+
+
+def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
     responses = []
     for index in range(5):
         choice = _FakeChoice(
@@ -827,21 +890,7 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
         response.provider = "upstream-provider"
         responses.append(response)
 
-    client = _FakeClient(responses)
-    admin_report = MagicMock()
-    runtime = ProviderRuntime(
-        ProviderRuntimeDeps(
-            get_client=lambda: client,
-            admin_report=admin_report,
-            increment_request_count=MagicMock(),
-            build_web_search_tool=lambda: {"type": "web_search"},
-            build_usage_result=MagicMock(),
-            extract_usage_map=lambda _response: {},
-            primary_model="test-model",
-            max_tool_rounds=5,
-        ),
-        ToolRuntime(),
-    )
+    runtime, client, admin_report, request_count = _build_retry_runtime(responses)
 
     with patch("api.providers.runtime.time.sleep") as sleep:
         result = runtime.complete(
@@ -853,12 +902,13 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
 
     assert result is None
     assert len(client.calls) == 5
+    assert request_count.call_count == 5
     assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8]
     admin_report.assert_called_once()
     assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
     report_context = admin_report.call_args.kwargs["extra_context"]
     assert report_context == {
-        "model": "test-model",
+        "model": "deepseek/deepseek-v4-flash",
         "enable_web_search": True,
         "tool_round": 1,
         "response_id": "gen-4",
