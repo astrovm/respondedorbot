@@ -8,7 +8,10 @@ from api.billing.ai import (
 from tests.support import make_ai_message_billing
 from api.billing.credit_units import whole_credits_to_units
 from api.ai.pricing import (
+    CHAT_OUTPUT_TOKEN_LIMIT,
+    REASONING_CHAT_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
+    chat_output_token_limit,
     estimate_vision_reserve_credits,
 )
 
@@ -41,6 +44,16 @@ def test_build_insufficient_credits_message_mentions_group_balances():
     )
     assert "lo tuyo: 2.0" in message
     assert "lo del grupo: 5.0" in message
+
+
+def test_chat_output_token_limit_is_model_specific():
+    assert (
+        chat_output_token_limit("deepseek/deepseek-v4-flash")
+        == REASONING_CHAT_OUTPUT_TOKEN_LIMIT
+        == 8192
+    )
+    assert chat_output_token_limit("deepseek/deepseek-v4-flash:exacto") == 8192
+    assert chat_output_token_limit("other/model") == CHAT_OUTPUT_TOKEN_LIMIT == 1024
 
 
 def test_ai_message_billing_transcribe_success_response_prefixes():

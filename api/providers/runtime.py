@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
-from api.ai.pricing import AIUsageResult, CHAT_OUTPUT_TOKEN_LIMIT, ensure_mapping
+from api.ai.pricing import AIUsageResult, chat_output_token_limit, ensure_mapping
 from api.core.logging import format_log_context, get_logger
 from api.providers.types import (
     EmptyAssistantMessage,
@@ -155,7 +155,7 @@ class ProviderRuntime:
         request_kwargs: Dict[str, Any] = {
             "model": self._deps.primary_model,
             "messages": [system_message] + current_messages,
-            "max_tokens": CHAT_OUTPUT_TOKEN_LIMIT,
+            "max_tokens": chat_output_token_limit(self._deps.primary_model),
         }
 
         tools_list: List[Dict[str, Any]] = []
@@ -169,7 +169,9 @@ class ProviderRuntime:
         try:
             for attempt in range(_MAX_RETRIES):
                 try:
-                    return client.chat.completions.create(**request_kwargs)
+                    if attempt:
+                        self._deps.increment_request_count()
+                    response = client.chat.completions.create(**request_kwargs)
                 except Exception as error:
                     if _is_retryable_provider_error(error) and attempt < _MAX_RETRIES - 1:
                         wait = 2**attempt
@@ -193,6 +195,38 @@ class ProviderRuntime:
                         time.sleep(wait)
                         continue
                     raise
+                choices = getattr(response, "choices", None) or []
+                finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+                if (
+                    choices
+                    and self._is_retryable_finish_response(
+                        response,
+                        choices[0],
+                        finish_reason,
+                    )
+                    and attempt < _MAX_RETRIES - 1
+                ):
+                    wait = 2**attempt
+                    retry_context = dict(tool_context or {})
+                    retry_context.update(
+                        {
+                            "model": self._deps.primary_model,
+                            "tool_round": round_idx + 1,
+                            "finish_reason": finish_reason,
+                            **self._response_diagnostics(response, choices[0]),
+                        }
+                    )
+                    logger.warning(
+                        "openrouter: retryable finish_reason=%r retrying in %ss attempt=%d/%d%s",
+                        finish_reason,
+                        wait,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        format_log_context(retry_context),
+                    )
+                    time.sleep(wait)
+                    continue
+                return response
         except Exception as error:
             error_context = dict(tool_context or {})
             error_context.update(
@@ -217,6 +251,95 @@ class ProviderRuntime:
             )
             return None
         return None
+
+    def _is_retryable_finish_response(
+        self,
+        response: Any,
+        choice: Any,
+        finish_reason: Any,
+    ) -> bool:
+        diagnostics = self._response_diagnostics(response, choice)
+        if (
+            diagnostics["has_content"]
+            or diagnostics["tool_call_count"]
+            or self._response_has_usage(response)
+        ):
+            return False
+        if finish_reason is None:
+            return True
+        if finish_reason != "error":
+            return False
+
+        error = self._response_error(response, choice)
+        code = error.get("code")
+        try:
+            status_code = int(code) if code is not None else 0
+        except (TypeError, ValueError):
+            status_code = 0
+        if status_code in {408, 409, 429} or status_code >= 500:
+            return True
+        error_type = str((ensure_mapping(error.get("metadata")) or {}).get("error_type") or "")
+        return error_type in {
+            "rate_limit_exceeded",
+            "provider_overloaded",
+            "provider_unavailable",
+            "server",
+            "timeout",
+        }
+
+    def _response_has_usage(self, response: Any) -> bool:
+        usage = self._deps.extract_usage_map(response) or {}
+        for key in (
+            "cost",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+        ):
+            try:
+                if float(usage.get(key) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
+        try:
+            return int(server_tool_use.get("web_search_requests") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _response_error(response: Any, choice: Any) -> Dict[str, Any]:
+        return (
+            ensure_mapping(getattr(choice, "error", None))
+            or ensure_mapping(getattr(response, "error", None))
+            or {}
+        )
+
+    @staticmethod
+    def _response_diagnostics(response: Any, choice: Any) -> Dict[str, Any]:
+        diagnostics: Dict[str, Any] = {}
+        fields = {
+            "response_id": getattr(response, "id", None),
+            "request_id": getattr(response, "_request_id", None),
+            "response_model": getattr(response, "model", None),
+            "provider": getattr(response, "provider", None),
+            "native_finish_reason": getattr(choice, "native_finish_reason", None),
+        }
+        diagnostics.update({key: value for key, value in fields.items() if value is not None})
+
+        error = ProviderRuntime._response_error(response, choice)
+        if error:
+            if error.get("code") is not None:
+                diagnostics["provider_error_code"] = error["code"]
+            metadata = ensure_mapping(error.get("metadata")) or {}
+            if metadata.get("error_type") is not None:
+                diagnostics["provider_error_type"] = metadata["error_type"]
+
+        message = getattr(choice, "message", None)
+        diagnostics["has_content"] = bool(str(getattr(message, "content", "") or "").strip())
+        diagnostics["tool_call_count"] = len(getattr(message, "tool_calls", None) or [])
+        return diagnostics
 
     def _filter_known_calls(
         self,
@@ -578,6 +701,8 @@ class ProviderRuntime:
 
     def _report_unexpected_finish(
         self,
+        response: Any,
+        choice: Any,
         finish_reason: Any,
         round_idx: int,
         *,
@@ -586,7 +711,11 @@ class ProviderRuntime:
     ) -> None:
         unexpected_context = dict(tool_context or {})
         unexpected_context.update(
-            {"model": self._deps.primary_model, "tool_round": round_idx + 1}
+            {
+                "model": self._deps.primary_model,
+                "tool_round": round_idx + 1,
+                **self._response_diagnostics(response, choice),
+            }
         )
         logger.warning(
             "provider_runtime: unexpected finish_reason=%r%s",
@@ -598,6 +727,8 @@ class ProviderRuntime:
             extra_context={
                 "model": self._deps.primary_model,
                 "enable_web_search": enable_web_search,
+                "tool_round": round_idx + 1,
+                **self._response_diagnostics(response, choice),
             },
         )
 
@@ -670,6 +801,8 @@ class ProviderRuntime:
                 )
 
             self._report_unexpected_finish(
+                response,
+                choice,
                 finish_reason,
                 round_idx,
                 enable_web_search=enable_web_search,
