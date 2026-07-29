@@ -11,7 +11,7 @@ class LinkReplacementDeps(Protocol):
     @property
     def link_service(self) -> LinkServiceProtocol: ...
 
-    def delete_msg(self, chat_id: str, message_id: str) -> None: ...
+    def delete_msg(self, chat_id: str, message_id: str) -> bool: ...
 
     def send_msg(self, *args: Any, **kwargs: Any) -> Optional[int]: ...
 
@@ -83,8 +83,8 @@ def handle_link_replacement(
         return deps.send_msg(chat_id, fixed_text, buttons=original_links)
 
     if link_mode == "delete":
-        deps.delete_msg(chat_id, message_id)
         sent_message_id = send_replacement(reply_id)
+        deps.delete_msg(chat_id, message_id)
         if sent_message_id is not None:
             deps.save_message_to_redis(
                 chat_id,

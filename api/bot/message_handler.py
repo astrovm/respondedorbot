@@ -124,7 +124,7 @@ class MessageIODeps:
     send_animation: Callable[..., Optional[int]]
     send_photo: Callable[..., Optional[int]]
     send_video: Callable[..., Optional[int]]
-    delete_msg: Callable[[str, str], None]
+    delete_msg: Callable[[str, str], bool]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 
@@ -205,7 +205,7 @@ class MessageHandlerDeps:
     send_animation: Callable[..., Optional[int]]
     send_photo: Callable[..., Optional[int]]
     send_video: Callable[..., Optional[int]]
-    delete_msg: Callable[[str, str], None]
+    delete_msg: Callable[[str, str], bool]
     edit_message: Callable[[str, str, str], None]
     admin_report: Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
     get_bot_message_metadata: Callable[[Any, str, Any], Optional[Dict[str, Any]]]
