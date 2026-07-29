@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from os import environ
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -226,11 +227,13 @@ class TelegramGateway:
         self,
         telegram_request: Callable[..., Tuple[Optional[Dict[str, Any]], Optional[str]]],
         message_has_domain_link: Optional[Callable[[str, str], bool]] = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._telegram_request = telegram_request
         self._message_has_domain_link = (
             message_has_domain_link or _message_has_domain_link
         )
+        self._sleep = sleep
 
     def request(self, endpoint: str, **kwargs: Any) -> Any:
         return self._telegram_request(endpoint, **kwargs)
@@ -386,14 +389,38 @@ class TelegramGateway:
             return True
         return error is None and bool(payload_response)
 
-    def delete_message(self, chat_id: str, msg_id: str) -> None:
-        self._telegram_request(
-            "deleteMessage",
-            method="GET",
-            params={"chat_id": chat_id, "message_id": msg_id},
-            log_errors=False,
-            expect_json=False,
-        )
+    def delete_message(self, chat_id: str, msg_id: str) -> bool:
+        for attempt in range(3):
+            payload, error = self._telegram_request(
+                "deleteMessage",
+                method="GET",
+                params={"chat_id": chat_id, "message_id": msg_id},
+                log_errors=False,
+            )
+            if error is None and payload and payload.get("result") is True:
+                return True
+
+            description = error or "unexpected Telegram response"
+            if "message to delete not found" in description.lower():
+                return True
+
+            error_code = payload.get("error_code") if payload else None
+            transient = payload is None or error_code == 429 or (
+                isinstance(error_code, int) and error_code >= 500
+            )
+            if transient and attempt < 2:
+                retry_after = (payload or {}).get("parameters", {}).get("retry_after")
+                delay = min(float(retry_after), 2.0) if retry_after else 0.25 * 2**attempt
+                self._sleep(delay)
+                continue
+
+            print(
+                f"Telegram deleteMessage failed for chat={chat_id} "
+                f"message={msg_id}: {description}"
+            )
+            return False
+
+        return False
 
     def send_animation(
         self,
