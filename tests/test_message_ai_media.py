@@ -312,6 +312,8 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
     )
 
     assert handled is True
+    method_names = [call_args[0] for call_args in deps.method_calls]
+    assert method_names.index("send_msg") < method_names.index("delete_msg")
     deps.delete_msg.assert_called_once_with("555", "100")
     deps.send_msg.assert_called_once_with(
         "555",

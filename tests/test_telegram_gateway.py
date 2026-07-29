@@ -1,5 +1,7 @@
-from api.bot.telegram import TelegramGateway
 import json
+from unittest.mock import MagicMock
+
+from api.bot.telegram import TelegramGateway
 
 
 class FakeTelegramRequest:
@@ -54,14 +56,47 @@ def test_send_message_enables_html_for_linked_polymarket_title():
 
 
 def test_delete_message_delegates_to_telegram_request():
-    request = FakeTelegramRequest(({"ok": True}, None))
+    request = FakeTelegramRequest(({"ok": True, "result": True}, None))
     gateway = TelegramGateway(telegram_request=request)
 
-    gateway.delete_message("123", "10")
+    result = gateway.delete_message("123", "10")
 
+    assert result is True
     assert request.calls[0][0] == "deleteMessage"
     assert request.calls[0][1]["method"] == "GET"
     assert request.calls[0][1]["params"] == {"chat_id": "123", "message_id": "10"}
+
+
+def test_delete_message_retries_transient_failure():
+    request = MagicMock(
+        side_effect=[
+            (None, "timed out"),
+            ({"ok": False, "error_code": 503}, "temporarily unavailable"),
+            ({"ok": True, "result": True}, None),
+        ]
+    )
+    sleep = MagicMock()
+    gateway = TelegramGateway(telegram_request=request, sleep=sleep)
+
+    assert gateway.delete_message("123", "10") is True
+    assert request.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
+
+
+def test_delete_message_does_not_retry_permanent_failure(capsys):
+    request = MagicMock(
+        return_value=(
+            {"ok": False, "error_code": 400},
+            "Bad Request: message can't be deleted",
+        )
+    )
+    sleep = MagicMock()
+    gateway = TelegramGateway(telegram_request=request, sleep=sleep)
+
+    assert gateway.delete_message("123", "10") is False
+    assert request.call_count == 1
+    sleep.assert_not_called()
+    assert "message can't be deleted" in capsys.readouterr().out
 
 
 def test_send_photo_delegates_to_telegram_request():
