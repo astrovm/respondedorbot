@@ -68,7 +68,7 @@ def test_admin_report_formats_additional_context_in_english():
         index.app_runtime.admin.report(
             "OpenRouter unexpected finish_reason=None",
             extra_context={
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "enable_web_search": True,
             },
         )
@@ -76,7 +76,7 @@ def test_admin_report_formats_additional_context_in_english():
     assert send_msg.call_args.args[1] == (
         "admin report from VPS: OpenRouter unexpected finish_reason=None"
         "\n\nadditional context:"
-        "\nmodel: deepseek/deepseek-v4-flash"
+        "\nmodel: ~deepseek/deepseek-v4-flash-latest"
         "\nenable_web_search: True"
     )
 

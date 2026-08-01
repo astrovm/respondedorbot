@@ -367,7 +367,7 @@ def test_monitor_charges_chat_for_ai_goal_message_and_refunds_unused_reserve():
         response_meta["billing_segments"] = [
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {"prompt_tokens": 100, "completion_tokens": 50},
             }
         ]
