@@ -118,7 +118,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     result = AIUsageResult(
         kind="chat",
         text="respuesta",
-        model="deepseek/deepseek-v4-flash",
+        model="~deepseek/deepseek-v4-flash-latest",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"groq_account": "primary"},
     )
@@ -183,7 +183,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
         return AIUsageResult(
             kind="chat",
             text="respuesta chat",
-            model="deepseek/deepseek-v4-flash",
+            model="~deepseek/deepseek-v4-flash-latest",
             metadata={"groq_account": account},
         )
 
@@ -548,7 +548,7 @@ def test_complete_with_providers_openrouter_success():
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="deepseek/deepseek-v4-flash",
+        model="~deepseek/deepseek-v4-flash-latest",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )
@@ -597,7 +597,7 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="deepseek/deepseek-v4-flash",
+        model="~deepseek/deepseek-v4-flash-latest",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )

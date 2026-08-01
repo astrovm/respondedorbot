@@ -626,7 +626,7 @@ def test_handle_msg_auto_audio_plus_ai_response_charges_three_requests(monkeypat
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,

@@ -325,8 +325,8 @@ BA_TZ = timezone(timedelta(hours=-3))
 
 def make_chat_tz(offset: int = -3) -> timezone:
     return timezone(timedelta(hours=offset))
-PRIMARY_CHAT_MODEL = "deepseek/deepseek-v4-flash"
-SUMMARY_MODEL = "deepseek/deepseek-v4-flash"
+PRIMARY_CHAT_MODEL = "~deepseek/deepseek-v4-flash-latest"
+SUMMARY_MODEL = "~deepseek/deepseek-v4-flash-latest"
 SUMMARY_MAX_TOKENS = 2048
 COMPACTION_THRESHOLD = 40
 COMPACTION_KEEP = 25

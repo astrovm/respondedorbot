@@ -6,10 +6,10 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 
 ## Features
 
-- **AI chat**: configurable personality with web search, powered by Qwen via OpenRouter
+- **AI chat**: configurable personality with web search, powered by DeepSeek via OpenRouter
 - **Streaming responses**: AI replies stream token-by-token to Telegram (when no tools are active)
 - **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
-- **Incremental summaries**: `/resumen` streams conversation summaries using Minimax, with automatic context compaction
+- **Incremental summaries**: `/resumen` streams conversation summaries using DeepSeek, with automatic context compaction
 - **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
 - **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
 - **BCRA economic data**: `/bcra`, `/variables`
@@ -52,10 +52,10 @@ uv run --locked python run_polling.py
 
 | Use | Provider | Model |
 |---|---|---|
-| **Chat** | OpenRouter | `qwen/qwen3.6-plus` |
+| **Chat** | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
 | **Vision** | OpenRouter | `google/gemini-3.1-flash-lite-preview` |
 | **Transcription** | Groq → OpenRouter fallback | `whisper-large-v3` → `google/gemini-3.1-flash-lite-preview` |
-| **Summary** | OpenRouter | `minimax/minimax-m2.7` |
+| **Summary** | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
 
 **Streaming**: token streaming only when no tools/web-search are active. Tool-enabled requests return complete responses.
 

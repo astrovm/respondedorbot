@@ -105,7 +105,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -114,7 +114,7 @@ def test_handle_msg_image_conversation_with_two_provider_requests_reserves_base_
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -175,7 +175,7 @@ def test_handle_msg_image_conversation_settles_in_single_batch(monkeypatch):
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             },
         ],
@@ -416,7 +416,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -425,7 +425,7 @@ def test_handle_msg_ai_flow_settles_with_single_base_reserve_when_usage_is_tiny(
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -524,7 +524,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
         billing_segments=[
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -533,7 +533,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,
@@ -542,7 +542,7 @@ def test_handle_msg_ai_flow_keeps_single_reserve_for_three_tiny_segments(monkeyp
             },
             {
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
                     "input_tokens": 1,
                     "input_non_cached_tokens": 1,

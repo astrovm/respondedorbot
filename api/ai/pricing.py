@@ -30,7 +30,7 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "input_per_million": 250_000,
         "output_per_million": 1_500_000,
     },
-    "deepseek/deepseek-v4-flash": {
+    "~deepseek/deepseek-v4-flash-latest": {
         "input_per_million": 400_000,
         "output_per_million": 1_200_000,
     },
@@ -40,7 +40,7 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 def chat_output_token_limit(model: str) -> int:
     """Return a larger budget only for chat models that use hidden reasoning."""
 
-    if str(model or "").split(":", 1)[0] == "deepseek/deepseek-v4-flash":
+    if str(model or "").split(":", 1)[0] == "~deepseek/deepseek-v4-flash-latest":
         return REASONING_CHAT_OUTPUT_TOKEN_LIMIT
     return CHAT_OUTPUT_TOKEN_LIMIT
 
@@ -137,9 +137,9 @@ def estimate_chat_reserve_credits(
     messages: Sequence[Mapping[str, Any]],
     max_output_tokens: Optional[int] = None,
     extra_input_tokens: int = 0,
-    model: str = "deepseek/deepseek-v4-flash",
+    model: str = "~deepseek/deepseek-v4-flash-latest",
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash"])
+    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["~deepseek/deepseek-v4-flash-latest"])
     output_token_limit = (
         chat_output_token_limit(model)
         if max_output_tokens is None
