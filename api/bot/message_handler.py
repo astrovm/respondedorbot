@@ -1385,11 +1385,11 @@ def _handle_gif_command(
 
 
 def _handle_tasks_command(
+    deps: Any = None,
     *,
     command: str,
     chat_id: str,
     handler_func: Callable[..., str | Tuple[str, Optional[Dict[str, Any]]]],
-    deps: Any = None,
     message: Any = None,
     billing_helper: Any = None,
     redis_client: Any = None,
