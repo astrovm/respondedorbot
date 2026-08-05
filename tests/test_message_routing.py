@@ -341,6 +341,49 @@ def test_handle_non_ai_command_passes_world_cup_country_query():
     handler.assert_called_once_with(timezone_offset=-3, team_query="argentina")
 
 
+def test_handle_non_ai_command_tasks_command():
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_non_ai_command,
+    )
+
+    handler = MagicMock(return_value=("lista de tareas", {"inline_keyboard": []}))
+    commands = {
+        "/tasks": (handler, False, False),
+        "/tareas": (handler, False, False),
+    }
+
+    deps = MagicMock()
+    for cmd in ("/tasks", "/tareas"):
+        response = _handle_non_ai_command(
+            deps,
+            CommandDispatchContext(
+                commands=commands,
+                command=cmd,
+                sanitized_message_text="",
+                message={"message_id": "10"},
+                chat_id="123",
+                chat_type="private",
+                user_id=7,
+                numeric_chat_id=123,
+                prepared_message=PreparedMessage(
+                    message_text=cmd,
+                    photo_file_id=None,
+                    audio_file_id=None,
+                ),
+                billing_helper=MagicMock(),
+                reply_context_text=None,
+                user_identity="Ana (ana)",
+                redis_client=MagicMock(),
+                timezone_offset=-3,
+            ),
+        )
+
+        assert response == ("lista de tareas", {"inline_keyboard": []}, False, cmd)
+        handler.assert_called_with("123")
+
+
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):
     from api.bot.message_handler import handle_msg
 
