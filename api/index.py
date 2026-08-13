@@ -128,7 +128,9 @@ from api.bot.chat_context import (
 )
 from api.ai.pricing import (
     AIUsageResult,
+    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
     MODEL_PRICING_USD_MICROS,
+    SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
     VISION_OUTPUT_TOKEN_LIMIT,
     calculate_billing_for_segments,
     chat_output_token_limit,
@@ -691,35 +693,29 @@ def estimate_ai_base_reserve_credits(
     extra_input_tokens: int = 0,
     timezone_offset: int = -3,
 ) -> Tuple[int, Dict[str, Any]]:
-    system_message: Optional[Dict[str, Any]] = None
-    try:
-        context_data = {
-            "market": get_market_context(),
-            "weather": get_weather_context(),
-            "time": get_time_context(timezone_offset),
-            "hacker_news": get_hacker_news_context(),
-        }
-        system_message = build_system_message(context_data)
-    except Exception as error:
-        print(
-            f"estimate_ai_base_reserve_credits: failed to build system message: {error}"
-        )
-
     reserve = estimate_chat_reserve_credits(
-        system_message=system_message,
+        system_message=None,
         messages=messages,
         max_output_tokens=chat_output_token_limit(PRIMARY_CHAT_MODEL),
-        extra_input_tokens=extra_input_tokens,
+        extra_input_tokens=(
+            extra_input_tokens + SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE
+        ),
         model=PRIMARY_CHAT_MODEL,
     )
 
-    return reserve, {}
+    return reserve, {
+        "estimated_system_context_tokens": SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+        "timezone_offset": timezone_offset,
+    }
 
 
-def estimate_image_context_reserve_credits(image_data: bytes, prompt_text: str) -> int:
+def estimate_image_context_reserve_credits(
+    _image_data: Optional[bytes], prompt_text: str
+) -> int:
     return estimate_vision_reserve_credits(
         prompt_text=prompt_text,
-        image_data=image_data,
+        image_data=None,
+        extra_input_tokens=IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         max_output_tokens=VISION_OUTPUT_TOKEN_LIMIT,
     )
 
