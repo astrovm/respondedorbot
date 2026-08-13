@@ -43,6 +43,38 @@ def test_handle_msg_image_rejects_before_download_or_history(monkeypatch):
     mock_send_msg.assert_called_once()
 
 
+def test_handle_msg_non_ai_command_with_photo_skips_media_billing(monkeypatch):
+    from api.bot.message_handler import handle_msg
+
+    redis_client = MagicMock()
+    mock_send_msg = MagicMock()
+    mock_download = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        download_telegram_file=mock_download,
+        credits_db_service=mock_credits,
+        balance_formatter=MagicMock(
+            format=MagicMock(return_value="balance info")
+        ),
+    )
+    message = _private_photo_message(message_id=20, chat_id=555, user_id=97)
+    message["caption"] = "/balance"
+
+    result = handle_msg(message, deps)
+
+    assert result == "ok"
+    mock_download.assert_not_called()
+    mock_credits.charge_ai_credits.assert_not_called()
+    mock_send_msg.assert_called_once()
+
+
 def test_handle_msg_image_conversation_charges_media_and_response_credits(monkeypatch):
     from api.bot.message_handler import handle_msg
 

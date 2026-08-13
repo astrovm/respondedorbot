@@ -136,6 +136,34 @@ class AIService:
         response = "ok" if request.is_spontaneous else media_charge_error
         return None, (response, False)
 
+    def _estimate_full_conversation_reserve(
+        self,
+        request: AIConversationRequest,
+        messages: List[Dict[str, Any]],
+        *,
+        summary_cost_usd_micros: int,
+    ) -> Tuple[int, Dict[str, Any]]:
+        full_reserve_credits, reserve_meta = (
+            self.estimate_ai_base_reserve_credits(
+                messages,
+                extra_input_tokens=(
+                    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+                    if request.prepared_message.photo_file_id
+                    else 0
+                ),
+                timezone_offset=request.timezone_offset,
+            )
+        )
+        required_credits = full_reserve_credits + credit_units_from_usd_micros(
+            summary_cost_usd_micros
+        )
+        return required_credits, {
+            "estimated_prompt_messages": len(messages),
+            "required_reserve_credits": required_credits,
+            "summary_cost_usd_micros": summary_cost_usd_micros,
+            **reserve_meta,
+        }
+
     def run_conversation(
         self,
         request: AIConversationRequest,
@@ -204,6 +232,33 @@ class AIService:
             )
             raise
 
+        full_reserve_credits, full_reserve_meta = (
+            self._estimate_full_conversation_reserve(
+                request,
+                ai_messages,
+                summary_cost_usd_micros=summary_cost,
+            )
+        )
+        if full_reserve_credits > main_reserve_credits:
+            request.billing_helper.refund_reserved_ai_credits(
+                base_charge_meta, reason="ai_response_reserve_adjustment"
+            )
+            base_charge_meta, base_charge_error = (
+                request.billing_helper.reserve_ai_credits(
+                    "ai_response_base",
+                    full_reserve_credits,
+                    metadata=full_reserve_meta,
+                )
+            )
+            if base_charge_error:
+                self._refund_if_present(
+                    request,
+                    media_charge_meta,
+                    reason="ai_response_reserve_adjustment_failed",
+                )
+                response = "ok" if request.is_spontaneous else base_charge_error
+                return response, False
+
         media_charge_meta, image_error = self._reserve_image_context(
             request, base_charge_meta, media_charge_meta
         )
@@ -234,10 +289,9 @@ class AIService:
             billing_segments.insert(0, _make_summary_billing_segment(summary_cost))
         if bool(ai_response_meta.get("ai_fallback")):
             # The local fallback has no provider usage, so release every reserve.
-            if media_charge_meta:
-                request.billing_helper.refund_reserved_ai_credits(
-                    media_charge_meta, reason="ai_response_fallback"
-                )
+            self._refund_if_present(
+                request, media_charge_meta, reason="ai_response_fallback"
+            )
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_response_fallback"
             )

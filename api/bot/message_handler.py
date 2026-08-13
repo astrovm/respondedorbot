@@ -43,7 +43,7 @@ from api.bot.streaming import (
 
 CommandTuple = Tuple[Callable[..., Any], bool, bool]
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
-UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS = 60.0
+UNKNOWN_AUDIO_ADMISSION_SECONDS = 1.0
 
 
 def _reserve_media_credits(
@@ -71,6 +71,32 @@ def _reserve_media_credits(
     return media_charge_meta, None
 
 
+def _adjust_media_reservation(
+    deps: Any,
+    billing_helper: AIMessageBilling,
+    scope: str,
+    reservation: Optional[Mapping[str, Any]],
+    *,
+    reserved_credits: int,
+    required_credits: int,
+    reason: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    if required_credits <= reserved_credits:
+        return reservation, None
+    billing_helper.refund_reserved_ai_credits(
+        reservation, reason=f"{reason}_reserve_adjustment"
+    )
+    return _reserve_media_credits(
+        deps,
+        billing_helper,
+        scope,
+        required_credits,
+        reason=reason,
+        metadata=metadata,
+    )
+
+
 def _settle_media_result(
     billing_helper: AIMessageBilling,
     media_charge_meta: Optional[Mapping[str, Any]],
@@ -90,6 +116,28 @@ def _settle_media_result(
             list(billing_segments),
             reason=settle_reason,
         )
+
+
+def _media_reserve_error_response(
+    prepared: PreparedMessage,
+    *,
+    message: Mapping[str, Any],
+    deps: MessageHandlerDeps,
+    reserve_error: Optional[str],
+    audio_duration_seconds: float,
+) -> Optional[PreparedMessage]:
+    if not reserve_error:
+        return None
+    if reserve_error == "rate_limited":
+        chat_id = str(
+            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
+        )
+        reserve_error = deps.handle_rate_limit(chat_id, dict(message))
+    return replace(
+        prepared,
+        audio_duration_seconds=audio_duration_seconds,
+        early_response=reserve_error,
+    )
 
 
 @dataclass(frozen=True)
@@ -826,31 +874,26 @@ def _process_audio_media(
         return prepared
 
     duration = _extract_audio_duration_seconds(message)
-    estimated_duration = duration or UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS
+    estimated_duration = duration or UNKNOWN_AUDIO_ADMISSION_SECONDS
+    reserved_credits = estimate_transcribe_reserve_credits(estimated_duration)
 
     media_charge_meta, reserve_error = _reserve_media_credits(
         deps,
         billing_helper,
         "transcribe",
-        estimate_transcribe_reserve_credits(estimated_duration),
+        reserved_credits,
         reason="auto_audio_media",
         metadata={"estimated_audio_seconds": estimated_duration},
     )
-    if reserve_error == "rate_limited":
-        chat_id = str(
-            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
-        )
-        return replace(
-            prepared,
-            audio_duration_seconds=duration,
-            early_response=deps.handle_rate_limit(chat_id, message),
-        )
-    if reserve_error:
-        return replace(
-            prepared,
-            audio_duration_seconds=duration,
-            early_response=reserve_error,
-        )
+    reserve_error_response = _media_reserve_error_response(
+        prepared,
+        message=message,
+        deps=deps,
+        reserve_error=reserve_error,
+        audio_duration_seconds=duration,
+    )
+    if reserve_error_response:
+        return reserve_error_response
 
     if duration <= 0:
         resolved_duration = _resolve_audio_duration_seconds(
@@ -868,6 +911,26 @@ def _process_audio_media(
                 early_response="ok" if not prepared.message_text else None,
             )
         duration = resolved_duration
+        required_credits = estimate_transcribe_reserve_credits(duration)
+        media_charge_meta, reserve_error = _adjust_media_reservation(
+            deps,
+            billing_helper,
+            "transcribe",
+            media_charge_meta,
+            reserved_credits=reserved_credits,
+            required_credits=required_credits,
+            reason="auto_audio_media",
+            metadata={"estimated_audio_seconds": duration},
+        )
+        reserve_error_response = _media_reserve_error_response(
+            prepared,
+            message=message,
+            deps=deps,
+            reserve_error=reserve_error,
+            audio_duration_seconds=duration,
+        )
+        if reserve_error_response:
+            return reserve_error_response
 
     transcription, error, billing_segment = deps._transcribe_audio_file(
         audio_file_id,
@@ -1344,15 +1407,23 @@ def _handle_transcribe_command(
     """Handle /transcribe command for audio and images."""
     reserve_credits = 0
     reserve_scope = "vision"
+    audio_file_id: Optional[str] = None
+    audio_duration_seconds = 0.0
     replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})
     if replied_message.get("voice") or replied_message.get("audio"):
         reserve_scope = "transcribe"
-        audio_duration_seconds = (
-            _extract_audio_duration_seconds(message)
-            or UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS
+        voice = replied_message.get("voice")
+        if isinstance(voice, Mapping):
+            audio_file_id = str(voice.get("file_id") or "") or None
+        audio = replied_message.get("audio")
+        if not audio_file_id and isinstance(audio, Mapping):
+            audio_file_id = str(audio.get("file_id") or "") or None
+        audio_duration_seconds = _extract_audio_duration_seconds(message)
+        admission_duration = (
+            audio_duration_seconds or UNKNOWN_AUDIO_ADMISSION_SECONDS
         )
         reserve_credits = estimate_transcribe_reserve_credits(
-            audio_duration_seconds
+            admission_duration
         )
     else:
         reserve_credits = deps.estimate_image_context_reserve_credits(
@@ -1371,6 +1442,36 @@ def _handle_transcribe_command(
         return deps.handle_rate_limit(chat_id, message), None, False, command
     if media_charge_error:
         return media_charge_error, None, False, command
+
+    if reserve_scope == "transcribe" and audio_duration_seconds <= 0:
+        resolved_duration = _resolve_audio_duration_seconds(
+            message,
+            audio_file_id=audio_file_id,
+            deps=deps,
+        )
+        if resolved_duration is None:
+            billing_helper.refund_reserved_ai_credits(
+                media_charge_meta, reason="transcribe_command_duration_unavailable"
+            )
+            return "ok", None, False, None
+        audio_duration_seconds = resolved_duration
+        required_credits = estimate_transcribe_reserve_credits(
+            audio_duration_seconds
+        )
+        media_charge_meta, media_charge_error = _adjust_media_reservation(
+            deps,
+            billing_helper,
+            reserve_scope,
+            media_charge_meta,
+            reserved_credits=reserve_credits,
+            required_credits=required_credits,
+            reason="transcribe_command_media",
+            metadata={"estimated_audio_seconds": audio_duration_seconds},
+        )
+        if media_charge_error == "rate_limited":
+            return deps.handle_rate_limit(chat_id, message), None, False, command
+        if media_charge_error:
+            return media_charge_error, None, False, command
 
     response_msg, billing_segments = deps.handle_transcribe_with_message_result(
         message
@@ -1620,6 +1721,16 @@ def _handle_known_command(
     return response_msg, response_markup, response_uses_ai, response_command
 
 
+def _route_uses_ai(
+    commands: Mapping[str, CommandTuple], command: str
+) -> bool:
+    if command in _DIRECT_COMMAND_HANDLERS:
+        return False
+    if command in commands:
+        return bool(commands[command][1])
+    return True
+
+
 def _initialize_incoming_message(
     message: Dict[str, Any],
     deps: MessageHandlerDeps,
@@ -1711,7 +1822,10 @@ def _dispatch_message_response(
     prepared_message = _process_message_media(
         runtime.prepared_message,
         message=message,
-        auto_process_media=runtime.auto_process_media,
+        auto_process_media=(
+            runtime.auto_process_media
+            and _route_uses_ai(runtime.commands, intent.command)
+        ),
         deps=deps,
         billing_helper=runtime.billing_helper,
     )
