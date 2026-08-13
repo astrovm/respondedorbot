@@ -19,6 +19,7 @@ CHAT_OUTPUT_TOKEN_LIMIT = 1024
 REASONING_CHAT_OUTPUT_TOKEN_LIMIT = 8192
 VISION_OUTPUT_TOKEN_LIMIT = 512
 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
+SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE = 4_000
 WEB_SEARCH_USD_MICROS_PER_REQUEST = 1_660
 
 
@@ -159,6 +160,7 @@ def estimate_vision_reserve_credits(
     *,
     prompt_text: str,
     image_data: Optional[bytes] = None,
+    extra_input_tokens: int = 0,
     max_output_tokens: int = VISION_OUTPUT_TOKEN_LIMIT,
     model: str = "google/gemini-3.1-flash-lite-preview",
 ) -> int:
@@ -176,7 +178,7 @@ def estimate_vision_reserve_credits(
             ],
         }
     ]
-    input_tokens = estimate_message_tokens(input_payload)
+    input_tokens = estimate_message_tokens(input_payload) + extra_input_tokens
     usd_micros = (
         input_tokens * pricing["input_per_million"]
         + max_output_tokens * pricing["output_per_million"]
