@@ -214,29 +214,41 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     monkeypatch,
 ):
     from api.index import estimate_ai_base_reserve_credits
-    from api.ai.pricing import chat_output_token_limit, estimate_chat_reserve_credits
+    from api.ai.pricing import (
+        SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+        chat_output_token_limit,
+        estimate_chat_reserve_credits,
+    )
 
     messages = [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
 
-    monkeypatch.setattr("api.index.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.get_weather_context", lambda: {})
-    monkeypatch.setattr("api.index.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.get_hacker_news_context", lambda: [])
-    monkeypatch.setattr(
-        "api.index.build_system_message",
-        lambda _context_data, **_kw: {"role": "system", "content": "sys"},
-    )
+    context_loaders = [
+        MagicMock(side_effect=AssertionError("market context must not load")),
+        MagicMock(side_effect=AssertionError("weather context must not load")),
+        MagicMock(side_effect=AssertionError("time context must not load")),
+        MagicMock(side_effect=AssertionError("news context must not load")),
+    ]
+    monkeypatch.setattr("api.index.get_market_context", context_loaders[0])
+    monkeypatch.setattr("api.index.get_weather_context", context_loaders[1])
+    monkeypatch.setattr("api.index.get_time_context", context_loaders[2])
+    monkeypatch.setattr("api.index.get_hacker_news_context", context_loaders[3])
 
     reserve, metadata = estimate_ai_base_reserve_credits(messages)
     expected_reserve = estimate_chat_reserve_credits(
-        system_message={"role": "system", "content": "sys"},
+        system_message=None,
         messages=messages,
         max_output_tokens=chat_output_token_limit(index.PRIMARY_CHAT_MODEL),
+        extra_input_tokens=SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         model=index.PRIMARY_CHAT_MODEL,
     )
 
     assert reserve == expected_reserve
-    assert metadata == {}
+    assert metadata == {
+        "estimated_system_context_tokens": SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+        "timezone_offset": -3,
+    }
+    for loader in context_loaders:
+        loader.assert_not_called()
 
 
 def test_ask_ai_fetches_url_unconditionally(monkeypatch):

@@ -43,6 +43,7 @@ from api.bot.streaming import (
 
 CommandTuple = Tuple[Callable[..., Any], bool, bool]
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
+UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS = 60.0
 
 
 def _reserve_media_credits(
@@ -54,16 +55,19 @@ def _reserve_media_credits(
     reason: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
-    if (
-        not deps.check_provider_available(scope=scope)
-        and not deps.has_openrouter_fallback()
-    ):
-        return None, "rate_limited"
     media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
         reason, reserve_credits, metadata=metadata
     )
     if media_charge_error:
         return None, media_charge_error
+    if (
+        not deps.check_provider_available(scope=scope)
+        and not deps.has_openrouter_fallback()
+    ):
+        billing_helper.refund_reserved_ai_credits(
+            media_charge_meta, reason=f"{reason}_provider_unavailable"
+        )
+        return None, "rate_limited"
     return media_charge_meta, None
 
 
@@ -343,6 +347,7 @@ class PreparedMessage:
     resized_image_data: Optional[bytes] = None
     early_response: Optional[str] = None
     audio_duration_seconds: float = 0.0
+    image_charge_meta: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -820,25 +825,16 @@ def _process_audio_media(
     if not audio_file_id:
         return prepared
 
-    duration = _resolve_audio_duration_seconds(
-        message,
-        audio_file_id=audio_file_id,
-        deps=deps,
-    )
-    if duration is None:
-        return replace(
-            prepared,
-            audio_duration_seconds=0.0,
-            early_response="ok" if not prepared.message_text else None,
-        )
+    duration = _extract_audio_duration_seconds(message)
+    estimated_duration = duration or UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS
 
     media_charge_meta, reserve_error = _reserve_media_credits(
         deps,
         billing_helper,
         "transcribe",
-        estimate_transcribe_reserve_credits(duration),
+        estimate_transcribe_reserve_credits(estimated_duration),
         reason="auto_audio_media",
-        metadata={"audio_seconds": duration},
+        metadata={"estimated_audio_seconds": estimated_duration},
     )
     if reserve_error == "rate_limited":
         chat_id = str(
@@ -855,6 +851,23 @@ def _process_audio_media(
             audio_duration_seconds=duration,
             early_response=reserve_error,
         )
+
+    if duration <= 0:
+        resolved_duration = _resolve_audio_duration_seconds(
+            message,
+            audio_file_id=audio_file_id,
+            deps=deps,
+        )
+        if resolved_duration is None:
+            billing_helper.refund_reserved_ai_credits(
+                media_charge_meta, reason="auto_audio_duration_unavailable"
+            )
+            return replace(
+                prepared,
+                audio_duration_seconds=0.0,
+                early_response="ok" if not prepared.message_text else None,
+            )
+        duration = resolved_duration
 
     transcription, error, billing_segment = deps._transcribe_audio_file(
         audio_file_id,
@@ -886,21 +899,62 @@ def _process_audio_media(
 def _process_photo_media(
     prepared: PreparedMessage,
     *,
+    message: Dict[str, Any],
     deps: MessageHandlerDeps,
+    billing_helper: AIMessageBilling,
 ) -> PreparedMessage:
     if not prepared.photo_file_id:
         return prepared
 
-    image_data = deps.download_telegram_file(prepared.photo_file_id)
-    if image_data:
+    image_prompt = "Describe what you see in this image in detail."
+    media_charge_meta, reserve_error = _reserve_media_credits(
+        deps,
+        billing_helper,
+        "vision",
+        deps.estimate_image_context_reserve_credits(b"", image_prompt),
+        reason="image_context_media",
+        metadata={"photo_file_id": prepared.photo_file_id},
+    )
+    if reserve_error == "rate_limited":
+        chat_id = str(
+            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
+        )
+        return replace(
+            prepared,
+            early_response=deps.handle_rate_limit(chat_id, message),
+        )
+    if reserve_error:
+        return replace(prepared, early_response=reserve_error)
+
+    try:
+        image_data = deps.download_telegram_file(prepared.photo_file_id)
+        resized_image = (
+            deps.resize_image_if_needed(image_data) if image_data else None
+        )
+    except Exception:
+        billing_helper.refund_reserved_ai_credits(
+            media_charge_meta, reason="image_context_preparation_failed"
+        )
+        raise
+
+    if resized_image:
         return replace(
             prepared,
             message_text=prepared.message_text or "que onda con esta foto",
-            resized_image_data=deps.resize_image_if_needed(image_data),
+            resized_image_data=resized_image,
+            image_charge_meta=media_charge_meta,
         )
+
+    billing_helper.refund_reserved_ai_credits(
+        media_charge_meta, reason="image_context_download_failed"
+    )
     if prepared.message_text:
         return prepared
-    return replace(prepared, message_text="no pude ver tu foto, boludo")
+    return replace(
+        prepared,
+        message_text="no pude ver tu foto, boludo",
+        early_response="no pude ver tu foto, boludo",
+    )
 
 
 def _process_message_media(
@@ -923,7 +977,12 @@ def _process_message_media(
     )
     if processed.early_response is not None:
         return processed
-    return _process_photo_media(processed, deps=deps)
+    return _process_photo_media(
+        processed,
+        message=message,
+        deps=deps,
+        billing_helper=billing_helper,
+    )
 
 
 def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
@@ -1284,67 +1343,32 @@ def _handle_transcribe_command(
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
     """Handle /transcribe command for audio and images."""
     reserve_credits = 0
+    reserve_scope = "vision"
     replied_message = cast(Mapping[str, Any], message.get("reply_to_message") or {})
     if replied_message.get("voice") or replied_message.get("audio"):
-        replied_audio_file_id = None
-        voice = replied_message.get("voice")
-        if isinstance(voice, Mapping):
-            replied_audio_file_id = str(voice.get("file_id") or "") or None
-        audio = replied_message.get("audio")
-        if not replied_audio_file_id and isinstance(audio, Mapping):
-            replied_audio_file_id = str(audio.get("file_id") or "") or None
-        audio_duration_seconds = _resolve_audio_duration_seconds(
-            message,
-            audio_file_id=replied_audio_file_id,
-            deps=deps,
+        reserve_scope = "transcribe"
+        audio_duration_seconds = (
+            _extract_audio_duration_seconds(message)
+            or UNKNOWN_AUDIO_DURATION_ESTIMATE_SECONDS
         )
-        if audio_duration_seconds is None:
-            return "ok", None, False, None
-        if (
-            not deps.check_provider_available(
-                scope="transcribe",
-            )
-            and not deps.has_openrouter_fallback()
-        ):
-            return deps.handle_rate_limit(chat_id, message), None, False, command
         reserve_credits = estimate_transcribe_reserve_credits(
             audio_duration_seconds
         )
     else:
-        replied_photo_file_id = deps.extract_message_content(message)[1]
-        replied_image_data = (
-            deps.download_telegram_file(replied_photo_file_id)
-            if replied_photo_file_id
-            else None
+        reserve_credits = deps.estimate_image_context_reserve_credits(
+            b"",
+            "Describe what you see in this image in detail.",
         )
-        if (
-            isinstance(replied_image_data, (bytes, bytearray))
-            and replied_image_data
-        ):
-            resized_image = deps.resize_image_if_needed(bytes(replied_image_data))
-            if (
-                not deps.check_provider_available(
-                    scope="vision",
-                )
-                and not deps.has_openrouter_fallback()
-            ):
-                return (
-                    deps.handle_rate_limit(chat_id, message),
-                    None,
-                    False,
-                    command,
-                )
-            reserve_credits = deps.estimate_image_context_reserve_credits(
-                resized_image,
-                "Describe what you see in this image in detail.",
-            )
-        else:
-            reserve_credits = 1
 
-    media_charge_meta, media_charge_error = billing_helper.reserve_ai_credits(
-        "transcribe_command_media",
+    media_charge_meta, media_charge_error = _reserve_media_credits(
+        deps,
+        billing_helper,
+        reserve_scope,
         reserve_credits,
+        reason="transcribe_command_media",
     )
+    if media_charge_error == "rate_limited":
+        return deps.handle_rate_limit(chat_id, message), None, False, command
     if media_charge_error:
         return media_charge_error, None, False, command
 

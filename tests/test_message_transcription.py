@@ -135,6 +135,9 @@ def test_handle_msg_with_image(monkeypatch):
         ),
         check_provider_available=MagicMock(return_value=True),
         credits_db_service=mock_credits,
+        handle_ai_response=_simulate_streamed_ai_response(
+            mock_send_msg, "A beautiful landscape"
+        ),
     )
     message = _private_photo_message(message_id=1, user_id=11, file_id="photo_123")
 
@@ -378,7 +381,7 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response(
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monkeypatch):
+def test_handle_msg_with_transcribe_command_reserves_before_unknown_duration(monkeypatch):
     from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
@@ -388,6 +391,10 @@ def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monke
     mock_download = MagicMock(return_value=b"audio-bytes")
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
+    mock_credits.charge_ai_credits.return_value = {"ok": True, "source": "user"}
+    mock_handle_transcribe = MagicMock(
+        return_value=("no pude sacar nada de ese audio, probá más tarde", [])
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -395,7 +402,7 @@ def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monke
     deps = make_deps(
         config_redis=lambda: redis_client,
         send_msg=mock_send_msg,
-        handle_transcribe_with_message_result=MagicMock(),
+        handle_transcribe_with_message_result=mock_handle_transcribe,
         download_telegram_file=mock_download,
         measure_audio_duration_seconds=MagicMock(return_value=None),
         credits_db_service=mock_credits,
@@ -411,7 +418,9 @@ def test_handle_msg_with_transcribe_command_rejects_audio_without_duration(monke
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    mock_credits.charge_ai_credits.assert_not_called()
+    mock_credits.charge_ai_credits.assert_called_once()
+    mock_handle_transcribe.assert_called_once_with(message)
+    mock_download.assert_not_called()
 
 
 def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
@@ -458,16 +467,23 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     mock_send_msg.assert_called_once()
 
 
-def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
+def test_handle_msg_auto_audio_reserves_before_measuring_missing_duration(monkeypatch):
     from api.bot.message_handler import handle_msg
 
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     redis_client.lrange.return_value = []
     mock_send_msg = MagicMock()
-    mock_download = MagicMock(return_value=b"audio-bytes")
+    events = []
+    mock_download = MagicMock(
+        side_effect=lambda _file_id: events.append("download") or b"audio-bytes"
+    )
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
+    mock_credits.charge_ai_credits.side_effect = lambda **_kwargs: (
+        events.append("reserve")
+        or {"ok": True, "source": "user"}
+    )
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
@@ -485,7 +501,8 @@ def test_handle_msg_auto_audio_rejects_missing_duration(monkeypatch):
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    mock_credits.charge_ai_credits.assert_not_called()
+    assert events == ["reserve", "download"]
+    mock_credits.refund_ai_charge.assert_called_once()
 
 
 def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeypatch):

@@ -6,6 +6,43 @@ from tests.message_handler_support import (
 )
 
 
+def test_handle_msg_image_rejects_before_download_or_history(monkeypatch):
+    from api.bot.message_handler import handle_msg
+
+    redis_client = MagicMock()
+    mock_send_msg = MagicMock()
+    mock_download = MagicMock()
+    mock_history = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+    mock_credits.charge_ai_credits.return_value = {
+        "ok": False,
+        "user_balance_credit_units": 0,
+        "chat_balance_credit_units": 0,
+    }
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        download_telegram_file=mock_download,
+        should_gordo_respond=MagicMock(return_value=True),
+        credits_db_service=mock_credits,
+        get_chat_history=mock_history,
+    )
+
+    result = handle_msg(
+        _private_photo_message(message_id=21, chat_id=555, user_id=98), deps
+    )
+
+    assert result == "ok"
+    mock_download.assert_not_called()
+    mock_history.assert_not_called()
+    mock_send_msg.assert_called_once()
+
+
 def test_handle_msg_image_conversation_charges_media_and_response_credits(monkeypatch):
     from api.bot.message_handler import handle_msg
 
@@ -625,7 +662,7 @@ def test_handle_msg_transcribe_image_does_not_preprocess_image_or_double_charge(
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    mock_download.assert_called_once_with("img_reply")
+    mock_download.assert_not_called()
     assert mock_charge.call_count == 1
     assert mock_charge.call_args.kwargs["amount"] == 1
     mock_send_msg.assert_called_once()

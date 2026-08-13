@@ -1,6 +1,90 @@
 from tests.support import *
 
 
+def test_run_conversation_rejects_before_history_or_prompt_preparation():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    get_chat_history = MagicMock()
+    prepare_chat_memory = MagicMock()
+    build_ai_messages = MagicMock()
+    check_provider_available = MagicMock()
+    handle_ai_response = MagicMock()
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=get_chat_history,
+        prepare_chat_memory=prepare_chat_memory,
+        build_ai_messages=build_ai_messages,
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=MagicMock(),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=handle_ai_response,
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = MagicMock()
+    billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
+
+    response = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="900",
+            message={"chat": {"id": 900, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage("hola", None, None),
+            billing_helper=billing_helper,
+            prompt_text="hola",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert response == ("sin créditos", False)
+    get_chat_history.assert_not_called()
+    prepare_chat_memory.assert_not_called()
+    build_ai_messages.assert_not_called()
+    check_provider_available.assert_not_called()
+    handle_ai_response.assert_not_called()
+
+
+def test_run_summary_rejects_before_history_or_provider_checks():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    stream_summary_command = MagicMock()
+    check_provider_available = MagicMock()
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=check_provider_available,
+        has_openrouter_fallback=MagicMock(),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=stream_summary_command,
+    )
+    billing_helper = MagicMock()
+    billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
+
+    response = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="resumí",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=MagicMock(),
+    )
+
+    assert response == ("sin créditos", None, True)
+    check_provider_available.assert_not_called()
+    stream_summary_command.assert_not_called()
+
+
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage
@@ -241,5 +325,4 @@ def test_run_conversation_uses_fallback_metadata_not_response_text():
     assert response_msg == fallback_text
     billing_helper.refund_reserved_ai_credits.assert_not_called()
     billing_helper.settle_reserved_ai_credits_batch.assert_called_once()
-
 
