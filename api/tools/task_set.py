@@ -101,8 +101,7 @@ def _execute_task_set(
 
     return ToolResult(
         output=(
-            f"listo, tarea programada "
-            f"{_trigger_description(parsed.trigger)}: {text}"
+            f"listo, tarea programada {_trigger_description(parsed.trigger)}: {text}"
         ),
         metadata={"task_id": task_id},
     )
@@ -110,7 +109,14 @@ def _execute_task_set(
 
 register_tool(
     name="task_set",
-    description="Create a scheduled task. Supports delay_seconds, interval_seconds, or trigger_config (interval/cron).",
+    description=(
+        "Create a scheduled task. Put only the future instruction in text and "
+        "preserve its subject, perspective, and pronouns. Put time or frequency "
+        "only in delay_seconds, interval_seconds, or trigger_config. For example, "
+        "'tomorrow remind me to pay' uses text='remind me to pay' plus a delay; "
+        "'every day at 20:30 tell me the score' uses text='tell me the score' "
+        "plus a cron trigger. Choose a reasonable hour if the user omits one."
+    ),
     parameters={
         "type": "object",
         "properties": {
