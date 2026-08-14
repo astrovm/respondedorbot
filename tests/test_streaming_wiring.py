@@ -39,6 +39,36 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
     assert response_meta["streamed_message_id"] == "777"
 
 
+def test_handle_ai_stream_response_applies_grounding_override():
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
+    response_meta: dict[str, Any] = {"stream_text_override": "grounding warning"}
+
+    with patch(
+        "api.index.app_runtime.ai.stream",
+        return_value=iter([("openrouter", "unsupported claim")]),
+    ):
+        with patch(
+            "api.index.app_runtime.responses._deps.consume_stream",
+            return_value=("unsupported claim", "777"),
+        ):
+            with patch(
+                "api.index.app_runtime.responses._deps.edit_message"
+            ) as edit_stream_message:
+                result = handle_ai_stream_response(
+                    [{"role": "user", "content": "search"}],
+                    response_meta=response_meta,
+                    chat_id="123",
+                    user_id=55,
+                    user_name="@ana",
+                    timezone_offset=-3,
+                )
+
+    assert result == "grounding warning"
+    edit_stream_message.assert_called_once_with("123", 777, "grounding warning")
+    assert response_meta["streamed_text"] == "grounding warning"
+    assert "stream_text_override" not in response_meta
+
+
 def test_finalize_message_response_saves_streamed_text_to_redis():
     from api.bot.message_handler import (
         MessageContext,
@@ -387,6 +417,7 @@ def test_stream_with_providers_forwards_extra_tools_and_tool_context():
                 text="ok",
                 model="test-model",
                 usage={"prompt_tokens": 7, "completion_tokens": 2},
+                metadata={"stream_text_override": "grounding warning"},
             )
         )
         return iter([("openrouter", "ok")])
@@ -417,6 +448,7 @@ def test_stream_with_providers_forwards_extra_tools_and_tool_context():
     assert chain.stream.call_args.kwargs["extra_tools"] == extra_tools
     assert chain.stream.call_args.kwargs["tool_context"] == tool_context
     assert callable(chain.stream.call_args.kwargs["on_usage_result"])
+    assert response_meta["stream_text_override"] == "grounding warning"
     assert response_meta["billing_segments"] == [
         {
             "kind": "chat",

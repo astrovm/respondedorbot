@@ -326,6 +326,9 @@ class ProviderService:
         if response_meta is not None:
 
             def record_usage(result: AIUsageResult) -> None:
+                text_override = result.metadata.pop("stream_text_override", None)
+                if isinstance(text_override, str) and text_override.strip():
+                    response_meta["stream_text_override"] = text_override
                 self.append_billing_segment(response_meta, result)
 
             on_usage_result = record_usage

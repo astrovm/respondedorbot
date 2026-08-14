@@ -168,15 +168,6 @@ class OpenRouterProvider(StreamingAIProvider):
                     usage_response,
                     message,
                 )
-                if on_usage_result is not None:
-                    on_usage_result(
-                        self._runtime._build_round_result(
-                            usage_response,
-                            message,
-                            round_idx,
-                            metadata=web_metadata,
-                        )
-                    )
                 remaining_web_search_uses = self._runtime._remaining_web_search_uses(
                     remaining_web_search_uses,
                     usage_response,
@@ -190,6 +181,13 @@ class OpenRouterProvider(StreamingAIProvider):
                     round_idx,
                 )
                 if known_calls:
+                    self._report_stream_usage(
+                        on_usage_result,
+                        usage_response,
+                        message,
+                        round_idx,
+                        web_metadata,
+                    )
                     if held_text:
                         yield held_text
                     current_messages = self._tool_runtime.apply_tool_calls(
@@ -206,6 +204,13 @@ class OpenRouterProvider(StreamingAIProvider):
                     extra_tools,
                 )
                 if pseudo_call is not None and not text_released:
+                    self._report_stream_usage(
+                        on_usage_result,
+                        usage_response,
+                        message,
+                        round_idx,
+                        web_metadata,
+                    )
                     current_messages = self._tool_runtime.apply_tool_calls(
                         SimpleNamespace(content=""),
                         [pseudo_call],
@@ -213,6 +218,18 @@ class OpenRouterProvider(StreamingAIProvider):
                         tool_context or {},
                     )
                     continue
+
+                text_override = self._runtime._stream_text_override(web_metadata)
+                if text_override is not None:
+                    web_metadata["stream_text_override"] = text_override
+                self._report_stream_usage(
+                    on_usage_result,
+                    usage_response,
+                    message,
+                    round_idx,
+                    web_metadata,
+                    text_override=text_override,
+                )
 
                 if held_text:
                     yield held_text
@@ -229,6 +246,28 @@ class OpenRouterProvider(StreamingAIProvider):
                 {"model": self._primary_model},
             )
             raise
+
+    def _report_stream_usage(
+        self,
+        callback: Optional[Callable[[AIUsageResult], None]],
+        response: Any,
+        message: Any,
+        round_idx: int,
+        metadata: Dict[str, Any],
+        *,
+        text_override: Optional[str] = None,
+    ) -> None:
+        if callback is None:
+            return
+        callback(
+            self._runtime._build_round_result(
+                response,
+                message,
+                round_idx,
+                metadata=metadata,
+                text_override=text_override,
+            )
+        )
 
     def _build_stream_request(
         self,
@@ -267,6 +306,9 @@ class OpenRouterProvider(StreamingAIProvider):
         held_text = ""
         text_released = False
         for chunk in client.chat.completions.create(**request_kwargs):
+            stream_error = self._field(chunk, "error")
+            if stream_error:
+                raise RuntimeError(f"OpenRouter stream failed: {stream_error}")
             streamed_round.last_response = chunk
             if getattr(chunk, "usage", None) is not None:
                 streamed_round.usage_response = chunk
@@ -275,6 +317,11 @@ class OpenRouterProvider(StreamingAIProvider):
                 continue
             choice = choices[0]
             finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason == "error":
+                choice_error = self._field(choice, "error")
+                raise RuntimeError(
+                    f"OpenRouter stream failed: {choice_error or 'unknown provider error'}"
+                )
             if finish_reason is not None:
                 streamed_round.finish_reason = finish_reason
             delta = getattr(choice, "delta", None)

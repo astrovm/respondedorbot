@@ -287,6 +287,7 @@ def test_openrouter_stream_executes_fragmented_tool_call_and_reports_each_round(
         2,
         1,
     ]
+    assert all("stream_text_override" not in result.metadata for result in usage_results)
 
 
 def test_openrouter_stream_uses_web_search_branch_when_enabled():
@@ -296,12 +297,28 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
     from api.providers.openrouter import OpenRouterProvider
 
     create_calls: list[dict[str, Any]] = []
+    usage_results: list[AIUsageResult] = []
 
     def create(**kwargs):
         create_calls.append(kwargs)
         return iter([
             SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="web"))]),
-            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=" answer"))]),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        delta=SimpleNamespace(content=" answer"),
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "server_tool_use": {"web_search_requests": 1},
+                },
+            ),
         ])
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
@@ -314,10 +331,10 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             kind=kwargs["kind"],
             text=kwargs["text"],
             model=kwargs["model"],
-            usage={},
+            usage=kwargs["response"].usage,
             metadata=kwargs.get("metadata") or {},
         ),
-        extract_usage_map=lambda r: {},
+        extract_usage_map=lambda response: response.usage,
         primary_model="test-model",
     )
 
@@ -326,12 +343,74 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
             enable_web_search=True,
+            on_usage_result=usage_results.append,
         )
     )
 
     assert chunks == ["web", " answer"]
     assert_no_raw_tool_syntax("".join(chunks))
     assert create_calls[0]["tools"] == [{"type": "web_search"}]
+    assert usage_results[0].text.startswith("No pude verificar eso con fuentes")
+    assert usage_results[0].metadata["web_search_grounded"] is False
+    assert usage_results[0].metadata["stream_text_override"] == usage_results[0].text
+
+
+def test_openrouter_stream_raises_on_provider_error_chunk():
+    from types import SimpleNamespace
+
+    from api.providers.openrouter import OpenRouterProvider
+
+    admin_report = MagicMock()
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **_kwargs: iter(
+                    [
+                        SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    finish_reason=None,
+                                    delta=SimpleNamespace(content="partial"),
+                                )
+                            ],
+                            error=None,
+                            usage=None,
+                        ),
+                        SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    finish_reason="error",
+                                    delta=SimpleNamespace(content=""),
+                                )
+                            ],
+                            error={"code": 502, "message": "provider disconnected"},
+                            usage=None,
+                        ),
+                    ]
+                )
+            )
+        )
+    )
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=admin_report,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {},
+        build_usage_result=lambda **kwargs: MagicMock(),
+        extract_usage_map=lambda response: {},
+        primary_model="test-model",
+    )
+
+    with pytest.raises(RuntimeError, match="provider disconnected"):
+        list(
+            provider.stream(
+                {"role": "system", "content": "sys"},
+                [{"role": "user", "content": "hola"}],
+                enable_web_search=False,
+            )
+        )
+
+    admin_report.assert_called_once()
 
 
 def test_stream_to_telegram_sends_first_token_without_placeholder():
