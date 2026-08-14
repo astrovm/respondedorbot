@@ -15,6 +15,7 @@ from api.memory.compaction import CompactionPlan
 
 
 _JOBS_KEY = "memory:compaction:jobs"
+_DEAD_JOBS_KEY = "memory:compaction:dead_jobs"
 _LOCK_PREFIX = "memory:compaction:lock:"
 _LOCK_TTL_SECONDS = 60 * 60
 _POLL_SECONDS = 2.0
@@ -75,7 +76,9 @@ class DurableCompactionQueue:
             return False
 
         reserve_units = max(1, self._estimate_reserve(plan))
-        usage_tag = f"memory_compaction:{plan.chat_id}:{plan.target_marker}"
+        usage_tag = (
+            f"memory_compaction:{plan.chat_id}:{plan.target_marker}:{uuid4().hex}"
+        )
         reservation, error_message = billing.reserve_background_ai_credits(
             usage_tag,
             reserve_units,
@@ -153,9 +156,12 @@ class DurableCompactionQueue:
             try:
                 decoded = json.loads(payload)
             except (TypeError, json.JSONDecodeError):
-                # Keep undecodable data. Deleting it could discard the only
-                # copy of a paid reservation that an operator can recover.
-                self._logger.exception("compaction: undecodable job chat_id=%s", chat_id)
+                self._quarantine_job(
+                    client,
+                    chat_id=chat_id,
+                    payload=payload,
+                    reason="undecodable",
+                )
                 continue
             try:
                 job = CompactionJob(**decoded)
@@ -305,6 +311,44 @@ class DurableCompactionQueue:
                 error,
             )
             return False
+
+    def _quarantine_job(
+        self,
+        client: Any,
+        *,
+        chat_id: str,
+        payload: str,
+        reason: str,
+    ) -> bool:
+        """Move an unreadable job out of the active queue without losing it."""
+
+        dead_job_id = f"{chat_id}:{uuid4().hex}"
+        dead_payload = json.dumps(
+            {
+                "chat_id": chat_id,
+                "payload": payload,
+                "reason": reason,
+                "quarantined_at": time.time(),
+            },
+            ensure_ascii=False,
+        )
+        try:
+            client.hset(_DEAD_JOBS_KEY, dead_job_id, dead_payload)
+            client.hdel(_JOBS_KEY, chat_id)
+        except Exception as error:
+            self._logger.warning(
+                "compaction: failed to quarantine job chat_id=%s error=%s",
+                chat_id,
+                error,
+            )
+            return False
+        self._logger.warning(
+            "compaction: quarantined job chat_id=%s reason=%s dead_job_id=%s",
+            chat_id,
+            reason,
+            dead_job_id,
+        )
+        return True
 
     def _run(self) -> None:
         while not self._stop.is_set():

@@ -103,7 +103,19 @@ def test_provider_runtime_executes_tool_calls_until_stop():
     assert client.calls[1]["messages"][-1]["role"] == "tool"
 
 
-def test_provider_runtime_shares_web_search_budget_across_tool_rounds():
+@pytest.mark.parametrize(
+    ("first_usage", "first_annotations", "second_max_uses", "total_requests"),
+    [
+        ({"server_tool_use": {"web_search_requests": 2}}, [], 1, 3),
+        ({}, [{"type": "url_citation"}], 2, 2),
+    ],
+)
+def test_provider_runtime_shares_web_search_budget_across_tool_rounds(
+    first_usage,
+    first_annotations,
+    second_max_uses,
+    total_requests,
+):
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
@@ -118,11 +130,15 @@ def test_provider_runtime_shares_web_search_budget_across_tool_rounds():
         [
             _FakeChoice(
                 "tool_calls",
-                SimpleNamespace(content="", tool_calls=tool_calls, annotations=[]),
+                SimpleNamespace(
+                    content="",
+                    tool_calls=tool_calls,
+                    annotations=first_annotations,
+                ),
             )
         ]
     )
-    first_response.usage = {"server_tool_use": {"web_search_requests": 2}}
+    first_response.usage = first_usage
     second_response = _FakeResponse(
         [
             _FakeChoice(
@@ -178,10 +194,15 @@ def test_provider_runtime_shares_web_search_budget_across_tool_rounds():
     )
 
     assert result is not None
-    assert result.metadata["web_search_requests"] == 3
+    assert result.metadata["web_search_requests"] == total_requests
     assert client.calls[0]["tools"][0]["parameters"]["max_uses"] == 3
-    assert client.calls[1]["tools"][0]["parameters"]["max_uses"] == 1
-    assert client.calls[1]["extra_body"] == {"max_tool_calls": 1}
+    assert (
+        client.calls[1]["tools"][0]["parameters"]["max_uses"]
+        == second_max_uses
+    )
+    assert client.calls[1]["extra_body"] == {
+        "max_tool_calls": second_max_uses
+    }
 
 
 def test_provider_runtime_returns_text_when_tool_calls_are_unknown():

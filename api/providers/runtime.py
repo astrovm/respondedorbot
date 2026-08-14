@@ -568,12 +568,13 @@ class ProviderRuntime:
             if round_response is None:
                 return None
             response, choice = round_response
+            message = choice.message
             remaining_web_search_uses = self._remaining_web_search_uses(
                 remaining_web_search_uses,
                 response,
+                message,
             )
             finish_reason = choice.finish_reason
-            message = choice.message
 
             if finish_reason == "tool_calls":
                 decision = self._handle_stream_structured_calls(
@@ -744,22 +745,42 @@ class ProviderRuntime:
                 max_results * limited,
             )
 
-    def _web_search_request_count(self, response: Any) -> int:
+    def _web_search_request_count(self, response: Any, message: Any = None) -> int:
         usage_map = self._deps.extract_usage_map(response) or {}
         server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
         try:
-            return max(0, int(server_tool_use.get("web_search_requests") or 0))
+            request_count = max(
+                0,
+                int(server_tool_use.get("web_search_requests") or 0),
+            )
         except (TypeError, ValueError):
-            return 0
+            request_count = 0
+        if request_count:
+            return request_count
+        annotations = getattr(message, "annotations", None) or []
+        if any(
+            getattr(annotation, "type", None) == "url_citation"
+            or (
+                isinstance(annotation, Mapping)
+                and str(annotation.get("type") or "") == "url_citation"
+            )
+            for annotation in annotations
+        ):
+            return 1
+        return 0
 
     def _remaining_web_search_uses(
         self,
         remaining: Optional[int],
         response: Any,
+        message: Any = None,
     ) -> Optional[int]:
         if remaining is None:
             return None
-        return max(0, remaining - self._web_search_request_count(response))
+        return max(
+            0,
+            remaining - self._web_search_request_count(response, message),
+        )
 
     @classmethod
     def _apply_web_search_limits(
@@ -897,14 +918,18 @@ class ProviderRuntime:
             if round_response is None:
                 return None
             response, choice = round_response
-            round_web_search_requests = self._web_search_request_count(response)
+            message = choice.message
+            round_web_search_requests = self._web_search_request_count(
+                response,
+                message,
+            )
             total_web_search_requests += round_web_search_requests
             remaining_web_search_uses = self._remaining_web_search_uses(
                 remaining_web_search_uses,
                 response,
+                message,
             )
             finish_reason = choice.finish_reason
-            message = choice.message
 
             if finish_reason == "tool_calls":
                 decision = self._handle_structured_tool_calls(
