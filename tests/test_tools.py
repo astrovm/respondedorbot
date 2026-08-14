@@ -103,23 +103,23 @@ class TestWebFetchTool:
     @patch("api.utils.links.fetch_tweet_via_oembed")
     def test_web_fetch_reads_tweet_with_oembed(self, mock_oembed):
         mock_oembed.return_value = {
-            "author_name": "OSINTdefender",
+            "author_name": "Example User",
             "html": (
-                "<blockquote><p>Reports of shots fired were unfounded.</p>"
-                "<a href='https://x.com/sentdefender/status/2048202539770802483'>"
-                "Apr 26, 2026</a></blockquote>"
+                "<blockquote><p>This is an example status update.</p>"
+                "<a href='https://x.com/test_user/status/1234567890123456789'>"
+                "Jan 1, 2020</a></blockquote>"
             ),
         }
 
         result = execute_tool(
             "web_fetch",
-            {"url": "https://x.com/sentdefender/status/2048202539770802483"},
+            {"url": "https://x.com/test_user/status/1234567890123456789"},
             {},
         )
 
-        assert "OSINTdefender" in result.output
-        assert "Reports of shots fired" in result.output
-        assert result.metadata["url"] == "https://x.com/sentdefender/status/2048202539770802483"
+        assert "Example User" in result.output
+        assert "example status update" in result.output
+        assert result.metadata["url"] == "https://x.com/test_user/status/1234567890123456789"
 
     @patch("api.utils.links.request_with_ssl_fallback")
     @patch("api.utils.links.fetch_tweet_via_oembed")
@@ -129,27 +129,27 @@ class TestWebFetchTool:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = {"Content-Type": "text/html"}
-        mock_response.url = "https://fixupx.com/status/2048202539770802483"
+        mock_response.url = "https://fixupx.com/status/1234567890123456789"
         mock_response.text = (
-            "<meta property='og:url' content='https://x.com/sentdefender/status/2048202539770802483'>"
-            "<meta property='og:title' content='OSINTdefender (@sentdefender)'>"
+            "<meta property='og:url' content='https://x.com/test_user/status/1234567890123456789'>"
+            "<meta property='og:title' content='Example User (@test_user)'>"
             "<meta property='og:description' content='Following reports'>"
             "<meta property='og:image' content='https://example.com/image.jpg'>"
         )
         mock_request.return_value = mock_response
         mock_oembed.return_value = {
-            "author_name": "OSINTdefender",
+            "author_name": "Example User",
             "html": "<blockquote><p>All clear.</p></blockquote>",
         }
 
         result = execute_tool(
             "web_fetch",
-            {"url": "https://fixupx.com/status/2048202539770802483"},
+            {"url": "https://fixupx.com/status/1234567890123456789"},
             {},
         )
 
         assert "All clear" in result.output
-        assert result.metadata["url"] == "https://x.com/sentdefender/status/2048202539770802483"
+        assert result.metadata["url"] == "https://x.com/test_user/status/1234567890123456789"
 
     @patch("api.links.agent_tools.fetch_url_content")
     def test_web_fetch_rejects_x_error_page(self, mock_fetch):

@@ -11,37 +11,37 @@ from api.utils.youtube_transcript import (
 class TestExtractVideoId:
     def test_standard_watch_url(self):
         assert (
-            extract_youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-            == "dQw4w9WgXcQ"
+            extract_youtube_video_id("https://www.youtube.com/watch?v=EXAMPLE1234")
+            == "EXAMPLE1234"
         )
 
     def test_short_youtu_be_url(self):
-        assert extract_youtube_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+        assert extract_youtube_video_id("https://youtu.be/EXAMPLE1234") == "EXAMPLE1234"
 
     def test_embedded_url(self):
         assert (
-            extract_youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ")
-            == "dQw4w9WgXcQ"
+            extract_youtube_video_id("https://www.youtube.com/embed/EXAMPLE1234")
+            == "EXAMPLE1234"
         )
 
     def test_short_url(self):
         assert (
-            extract_youtube_video_id("https://youtube.com/shorts/dQw4w9WgXcQ")
-            == "dQw4w9WgXcQ"
+            extract_youtube_video_id("https://youtube.com/shorts/EXAMPLE1234")
+            == "EXAMPLE1234"
         )
 
     def test_youtube_url_with_extra_params(self):
         assert (
             extract_youtube_video_id(
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+                "https://www.youtube.com/watch?v=EXAMPLE1234&list=PLAYLIST_EXAMPLE"
             )
-            == "dQw4w9WgXcQ"
+            == "EXAMPLE1234"
         )
 
     def test_mobile_url(self):
         assert (
-            extract_youtube_video_id("https://m.youtube.com/watch?v=dQw4w9WgXcQ")
-            == "dQw4w9WgXcQ"
+            extract_youtube_video_id("https://m.youtube.com/watch?v=EXAMPLE1234")
+            == "EXAMPLE1234"
         )
 
     def test_no_url_returns_none(self):
@@ -111,12 +111,12 @@ class TestFetchYouTubeTranscript:
         mock_transcript_list.find_transcript.return_value = mock_transcript
         mock_yta_instance.list.return_value = mock_transcript_list
 
-        transcript, error = fetch_youtube_transcript("dQw4w9WgXcQ")
+        transcript, error = fetch_youtube_transcript("EXAMPLE1234")
 
         assert transcript is not None
         assert len(transcript) == 2
         assert error is None
-        mock_yta_instance.list.assert_called_once_with("dQw4w9WgXcQ")
+        mock_yta_instance.list.assert_called_once_with("EXAMPLE1234")
 
     @patch("api.utils.youtube_transcript.YouTubeTranscriptApi")
     def test_no_transcript_found(self, mock_yta):
@@ -126,18 +126,18 @@ class TestFetchYouTubeTranscript:
         mock_yta.return_value = mock_yta_instance
         mock_list = MagicMock()
         mock_list.find_transcript.side_effect = NoTranscriptFound(
-            "dQw4w9WgXcQ",
+            "EXAMPLE1234",
             ["en", "es"],
             mock_list,
         )
         mock_list.find_generated_transcript.side_effect = NoTranscriptFound(
-            "dQw4w9WgXcQ",
+            "EXAMPLE1234",
             ["en", "es"],
             mock_list,
         )
         mock_yta_instance.list.return_value = mock_list
 
-        transcript, error = fetch_youtube_transcript("dQw4w9WgXcQ")
+        transcript, error = fetch_youtube_transcript("EXAMPLE1234")
 
         assert transcript is None
         assert error == "no transcript found"
@@ -167,7 +167,7 @@ class TestGetYouTubeTranscriptContext:
             None,
         )
 
-        result = get_youtube_transcript_context("dQw4w9WgXcQ")
+        result = get_youtube_transcript_context("EXAMPLE1234")
 
         assert "TRANSCRIPCION DEL VIDEO:" in result
         assert "[00:00] Hello world" in result
@@ -177,7 +177,7 @@ class TestGetYouTubeTranscriptContext:
     def test_returns_empty_on_error(self, mock_fetch):
         mock_fetch.return_value = (None, "no transcript found")
 
-        result = get_youtube_transcript_context("dQw4w9WgXcQ")
+        result = get_youtube_transcript_context("EXAMPLE1234")
 
         assert result == ""
 
@@ -185,6 +185,6 @@ class TestGetYouTubeTranscriptContext:
     def test_returns_empty_on_empty_transcript(self, mock_fetch):
         mock_fetch.return_value = ([], None)
 
-        result = get_youtube_transcript_context("dQw4w9WgXcQ")
+        result = get_youtube_transcript_context("EXAMPLE1234")
 
         assert result == ""

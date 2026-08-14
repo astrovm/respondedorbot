@@ -557,8 +557,8 @@ def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeyp
     [
         (
             "private",
-            "https://www.instagram.com/reel/DYcbT4OBtyZ/",
-            "Ana: https://www.instagram.com/reel/DYcbT4OBtyZ/",
+            "https://www.instagram.com/reel/EXAMPLE_REEL/",
+            "Ana: https://www.instagram.com/reel/EXAMPLE_REEL/",
         ),
         (
             "group",
@@ -687,9 +687,9 @@ def test_message_handler_replaces_plain_link_reply_to_bot(monkeypatch):
     make_deps, redis_client = _build_message_handler_deps()
     link_service = MagicMock()
     link_service.replace.return_value = (
-        "https://fixupx.com/status/2071194631480414436",
+        "https://fixupx.com/status/1234567890123456789",
         True,
-        ["https://x.com/i/status/2071194631480414436"],
+        ["https://x.com/i/status/1234567890123456789"],
     )
     link_service.build_context.return_value = ""
     link_service.download_oversized_instagram_video.return_value = None
@@ -699,31 +699,31 @@ def test_message_handler_replaces_plain_link_reply_to_bot(monkeypatch):
     message = {
         "message_id": 506,
         "chat": {"id": 562, "type": "group"},
-        "from": {"id": 1008, "first_name": "Profe", "username": "profe"},
+        "from": {"id": 1008, "first_name": "Test", "username": "test_user"},
         "reply_to_message": {
             "message_id": 405,
             "from": {"username": "testbot"},
-            "text": "https://kkinstagram.com/reel/DaHY1E7Ar9d/?tg=495182",
+            "text": "https://kkinstagram.com/reel/EXAMPLE_REEL/?tg=123456",
         },
-        "text": "https://x.com/i/status/2071194631480414436",
+        "text": "https://x.com/i/status/1234567890123456789",
     }
 
     result = handle_msg(message, deps)
 
     assert result == "ok"
     link_service.replace.assert_called_once_with(
-        "https://x.com/i/status/2071194631480414436"
+        "https://x.com/i/status/1234567890123456789"
     )
     deps.send_msg.assert_called_once_with(
         "562",
-        "https://fixupx.com/status/2071194631480414436\n\ncompartido por @profe",
+        "https://fixupx.com/status/1234567890123456789\n\ncompartido por @test_user",
         "405",
-        ["https://x.com/i/status/2071194631480414436"],
+        ["https://x.com/i/status/1234567890123456789"],
     )
     deps.save_message_to_redis.assert_called_once_with(
         "562",
         "bot_999",
-        "https://fixupx.com/status/2071194631480414436\n\ncompartido por @profe",
+        "https://fixupx.com/status/1234567890123456789\n\ncompartido por @test_user",
         redis_client,
     )
     deps.handle_ai_stream.assert_not_called()

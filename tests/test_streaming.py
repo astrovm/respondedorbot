@@ -374,20 +374,20 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
     ),
     [
         (
-            "Perfil: https://example.com/pablo",
-            '{"results":[{"title":"Pablo Wasserman",'
-            '"url":"https://example.com/pablo"}]}',
-            ["Perfil: https://example.com/pablo"],
+            "Perfil: https://example.com/profile",
+            '{"results":[{"title":"Persona Ejemplo",'
+            '"url":"https://example.com/profile"}]}',
+            ["Perfil: https://example.com/profile"],
             True,
             1,
         ),
         (
             "La búsqueda falló y no encontré nada.",
-            '{"results":[{"title":"Pablo Wasserman",'
-            '"url":"https://example.com/pablo"}]}',
+            '{"results":[{"title":"Persona Ejemplo",'
+            '"url":"https://example.com/profile"}]}',
             [
                 "La búsqueda falló y no encontré nada.\n\n"
-                "fuentes: https://example.com/pablo"
+                "fuentes: https://example.com/profile"
             ],
             True,
             1,
@@ -403,12 +403,12 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             0,
         ),
         (
-            "encontré su perfil en https://www.instagram.com/realjuanruocco/",
-            '{"results":[{"title":"Juan Ruocco",'
-            '"url":"https://www.instagram.com/realjuanruocco/?hl=en"}]}',
+            "encontré su perfil en https://social.example/perfil/",
+            '{"results":[{"title":"Persona Ejemplo",'
+            '"url":"https://social.example/perfil/?lang=es"}]}',
             [
-                "encontré su perfil en https://www.instagram.com/realjuanruocco/\n\n"
-                "fuentes: https://www.instagram.com/realjuanruocco/?hl=en"
+                "encontré su perfil en https://social.example/perfil/\n\n"
+                "fuentes: https://social.example/perfil/?lang=es"
             ],
             True,
             1,
@@ -429,7 +429,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
         ),
         (
             "",
-            '{"results":[{"url":"https://example.com/pablo"}]}',
+            '{"results":[{"url":"https://example.com/profile"}]}',
             [
                 "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
                 "resultados citables; probá de nuevo en un momento."
@@ -469,7 +469,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
                                     type="function",
                                     function=SimpleNamespace(
                                         name="web_search",
-                                        arguments='{"query":"Pablo Wasserman"}',
+                                        arguments='{"query":"Persona Ejemplo"}',
                                     ),
                                 )
                             ],
@@ -541,7 +541,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     chunks = list(
         provider.stream(
             {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "buscá a Pablo Wasserman"}],
+            [{"role": "user", "content": "buscá a Persona Ejemplo"}],
             enable_web_search=True,
             extra_tools=[search_schema],
             on_usage_result=usage_results.append,
@@ -551,7 +551,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     assert chunks == expected_chunks
     execute_tool.assert_called_once_with(
         "web_search",
-        {"query": "Pablo Wasserman"},
+        {"query": "Persona Ejemplo"},
         {},
     )
     assert create_calls[0]["tools"] == [search_schema]

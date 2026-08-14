@@ -291,7 +291,7 @@ def test_search_chat_history_escapes_negative_group_chat_id():
 def test_escape_search_text_escapes_at_sign():
     from api.memory.state import _escape_search_text
 
-    assert _escape_search_text("@playtimbabot") == "\\@playtimbabot"
+    assert _escape_search_text("@test_bot") == "\\@test_bot"
     assert _escape_search_text("hello @user world") == "hello \\@user world"
     assert _escape_search_text("no at sign here") == "no at sign here"
 
@@ -306,14 +306,14 @@ def test_search_chat_history_escapes_at_sign_in_query():
 
     search_chat_history(
         redis_client,
-        chat_id="-1002201300982",
-        query_text="explica que es el trading de futuros y porque esa chica dice que perdió sus ahorros por no saber operar sin medir el riesgo, y porque eso no tiene nada que ver con perder la guita en el coinflip de @playtimbabot",
+        chat_id="-1001234567890",
+        query_text="explica que es el trading de futuros y porque esa chica dice que perdió sus ahorros por no saber operar sin medir el riesgo, y porque eso no tiene nada que ver con perder la guita en el coinflip de @test_bot",
         limit=5,
     )
 
     query = redis_client.execute_command.call_args_list[1].args[2]
-    assert "\\@playtimbabot" in query
-    assert "@chat_id:{\\-1002201300982}" in query
+    assert "\\@test_bot" in query
+    assert "@chat_id:{\\-1001234567890}" in query
 
 
 def test_truncate_text_more_edge_cases():

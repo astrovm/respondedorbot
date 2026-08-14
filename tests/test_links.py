@@ -48,7 +48,7 @@ def test_replace_links(mock_get, _mock_time):
     text = (
         "Check https://twitter.com/foo?utm_source=share and http://x.com/bar?s=20 and https://bsky.app/baz?share=1 and "
         "https://www.instagram.com/qux?igsh=abc123 and https://www.reddit.com/r/foo?st=abc and https://old.reddit.com/r/bar?utm_name=bar and "
-        "https://www.tiktok.com/@bar?lang=en and https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/?share=copy"
+        "https://www.tiktok.com/@bar?lang=en and https://vm.tiktok.com/EXAMPLE_VIDEO/?share=copy"
     )
     fixed, changed, originals = replace_links(text)
     assert changed
@@ -59,7 +59,7 @@ def test_replace_links(mock_get, _mock_time):
     assert "https://www.rxddit.com/r/foo" in fixed
     assert "https://old.rxddit.com/r/bar" in fixed
     assert "https://www.tiktok.com/@bar" in fixed
-    assert "https://vm.tiktok.com/ZMHGacxknMW5J-gEiNC/" in fixed
+    assert "https://vm.tiktok.com/EXAMPLE_VIDEO/" in fixed
     assert "fxtwitter.com" not in fixed
     assert "fixupx.com" not in fixed
     assert "utm_" not in fixed
@@ -504,13 +504,13 @@ def test_replace_links_strips_xcom_i_status():
 
     mock_can = MagicMock(return_value=True)
     text, changed, originals = links_replace_links(
-        "https://x.com/i/status/1848434048944783554",
+        "https://x.com/i/status/1234567890123456789",
         embed_checker=mock_can,
     )
-    assert text == "https://fixupx.com/status/1848434048944783554"
+    assert text == "https://fixupx.com/status/1234567890123456789"
     assert changed is True
-    assert originals == ["https://x.com/i/status/1848434048944783554"]
-    mock_can.assert_called_once_with("https://fixupx.com/status/1848434048944783554")
+    assert originals == ["https://x.com/i/status/1234567890123456789"]
+    mock_can.assert_called_once_with("https://fixupx.com/status/1234567890123456789")
 
 
 def test_replace_links_skips_twitter_user_profiles():
@@ -628,14 +628,14 @@ def test_can_embed_url_allows_twitter_card_text_preview(monkeypatch):
     mock_response.headers = {"Content-Type": "text/html"}
     mock_response.text = (
         "<meta name='twitter:card' content='tweet'>"
-        "<meta name='twitter:title' content='Agustin Cortes (@agucortes)'>"
+        "<meta name='twitter:title' content='Example User (@test_user)'>"
         "<meta property='og:description' content='Texto del post'>"
     )
     monkeypatch.setattr(
         "api.utils.links.request_with_ssl_fallback", lambda *a, **kw: mock_response
     )
 
-    assert can_embed_url("https://fixupx.com/status/2032173338240467235") is True
+    assert can_embed_url("https://fixupx.com/status/1234567890123456789") is True
 
 
 def test_can_embed_url_rejects_twitter_card_only(monkeypatch):
@@ -680,7 +680,7 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_not_allowed(monke
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_REEL/") is True
 
 
 def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
@@ -708,7 +708,7 @@ def test_can_embed_url_allows_eeinstagram_image_only_metadata(monkeypatch):
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert can_embed_url("https://eeinstagram.com/p/DVUqOBgDEor/") is True
+    assert can_embed_url("https://eeinstagram.com/p/EXAMPLE_POST/") is True
 
 
 def test_can_embed_url_retries_eeinstagram_get_transient_status(monkeypatch):
@@ -745,7 +745,7 @@ def test_can_embed_url_retries_eeinstagram_get_transient_status(monkeypatch):
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_REEL/") is True
     assert sleep_calls == [0.25]
 
 
@@ -773,7 +773,7 @@ def test_can_embed_url_retries_eeinstagram_head_exception(monkeypatch):
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_REEL/") is True
     assert calls["head"] == 2
     assert sleep_calls == [0.25]
 
@@ -808,7 +808,7 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_retries_exhausted
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_REEL/") is True
     assert calls == {"head": 3, "get": 2}
     assert sleep_calls == [0.25, 0.5]
 
@@ -845,7 +845,7 @@ def test_can_embed_url_falls_back_to_get_when_eeinstagram_head_5xx_exhausted(
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
     monkeypatch.setattr("api.utils.links.time.sleep", sleep_calls.append)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DUEZt-wEXNw/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_REEL/") is True
     assert calls == {"head": 3, "get": 2}
     assert sleep_calls == [0.25, 0.5]
 
@@ -866,7 +866,7 @@ def test_can_embed_url_allows_eeinstagram_redirect(monkeypatch):
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert can_embed_url("https://eeinstagram.com/reel/DOmco1zjuVi/") is True
+    assert can_embed_url("https://eeinstagram.com/reel/EXAMPLE_ALT/") is True
 
 
 def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
@@ -885,7 +885,7 @@ def test_can_embed_url_allows_eeinstagram_post_redirect(monkeypatch):
 
     monkeypatch.setattr("api.utils.links.request_with_ssl_fallback", fake_request)
 
-    assert can_embed_url("https://eeinstagram.com/p/DQ5RaKnjE8J/") is True
+    assert can_embed_url("https://eeinstagram.com/p/EXAMPLE_ALT/") is True
 
 
 @patch("api.utils.links.request_with_ssl_fallback")

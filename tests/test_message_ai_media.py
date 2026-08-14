@@ -339,7 +339,7 @@ def test_handle_msg_command_reply_to_link_fix_message_is_not_blocked(monkeypatch
         "reply_to_message": {
             "message_id": 200,
             "from": {"username": "testbot"},
-            "text": "https://fixupx.com/status/2032173338240467235",
+            "text": "https://fixupx.com/status/1234567890123456789",
         },
     }
 
