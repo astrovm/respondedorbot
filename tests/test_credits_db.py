@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 from api.billing.credit_units import CREDIT_SCALE, whole_credits_to_units
@@ -305,6 +306,65 @@ def test_refund_ai_charge_chat_source_locks_user_before_chat():
 
     assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
     assert result == {"user_balance": 11, "chat_balance": 52}
+
+
+def test_settle_ai_reservation_once_is_idempotent():
+    class SettlementCursor(_FakeCursor):
+        def __init__(self):
+            super().__init__(hourly_count=0, daily_count=0, insert_granted=False)
+            self.balance = 10
+            self.settled_usage_tags = set()
+
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split())
+            if (
+                "FROM credit_ledger" in normalized
+                and "memory_compaction_settlement" in normalized
+            ):
+                self.fetchone_result = (
+                    (1,) if str(params[0]) in self.settled_usage_tags else None
+                )
+                return
+            if (
+                "INSERT INTO credit_ledger" in normalized
+                and params
+                and params[0] == "memory_compaction_settlement"
+            ):
+                metadata = json.loads(params[5])
+                self.settled_usage_tags.add(metadata["usage_tag"])
+                self.executed.append((normalized, params))
+                self.fetchone_result = None
+                return
+            super().execute(query, params)
+
+    cursor = SettlementCursor()
+    connection = _FakeConnection(cursor)
+    kwargs = {
+        "user_id": 42,
+        "chat_id": None,
+        "source": "user",
+        "reserved_credit_units": 5,
+        "actual_credit_units": 2,
+        "usage_tag": "memory_compaction:123:m1",
+    }
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        first = credits_db.settle_ai_reservation_once(**kwargs)
+        second = credits_db.settle_ai_reservation_once(**kwargs)
+
+    assert first["applied"] is True
+    assert second["applied"] is False
+    assert cursor.balance == 13
+    settlement_rows = [
+        params
+        for query, params in cursor.executed
+        if "INSERT INTO credit_ledger" in query
+        and params[0] == "memory_compaction_settlement"
+    ]
+    assert len(settlement_rows) == 1
 
 
 def test_apply_ai_debt_chat_source_locks_user_before_chat():

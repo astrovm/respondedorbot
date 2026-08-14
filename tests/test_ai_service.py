@@ -299,7 +299,7 @@ def test_run_conversation_passes_summary_and_retrieval_into_prompt_builder():
     assert build_ai_messages.call_args.kwargs["retrieved_messages"] == [{"text": "old hit"}]
 
 
-def test_run_conversation_bills_summary_compaction_as_billing_segment():
+def test_run_conversation_schedules_compaction_after_answer_settlement():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage
 
@@ -307,7 +307,9 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
     ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
-        prepare_chat_memory=MagicMock(return_value=([], "summary abc", [], 1234)),
+        prepare_chat_memory=MagicMock(
+            return_value=([], "summary abc", [], 0, "compaction-plan")
+        ),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=True),
         has_openrouter_fallback=MagicMock(return_value=False),
@@ -315,6 +317,7 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
         handle_ai_response=handle_ai_response,
         estimate_ai_base_reserve_credits=MagicMock(return_value=(1, {})),
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        schedule_compaction=(schedule_compaction := MagicMock()),
     )
 
     billing_helper = MagicMock()
@@ -342,7 +345,8 @@ def test_run_conversation_bills_summary_compaction_as_billing_segment():
 
     settle_args = billing_helper.settle_reserved_ai_credits_batch.call_args.args
     billing_segments = settle_args[1]
-    assert any(segment.get("kind") == "summary" for segment in billing_segments)
+    assert not any(segment.get("kind") == "summary" for segment in billing_segments)
+    schedule_compaction.assert_called_once_with("compaction-plan", billing_helper)
 
 
 def test_run_conversation_uses_fallback_metadata_not_response_text():

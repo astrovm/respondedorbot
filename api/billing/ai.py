@@ -400,6 +400,38 @@ class AIMessageBilling:
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Reserve a worst-case number of credits for a billable interaction."""
 
+        return self._reserve_ai_credits(
+            usage_tag,
+            estimated_credit_units,
+            metadata=metadata,
+            enforce_message_cap=True,
+        )
+
+    def reserve_background_ai_credits(
+        self,
+        usage_tag: str,
+        estimated_credit_units: int,
+        *,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Reserve maintenance work without counting another user message."""
+
+        return self._reserve_ai_credits(
+            usage_tag,
+            estimated_credit_units,
+            metadata=metadata,
+            enforce_message_cap=False,
+        )
+
+    def _reserve_ai_credits(
+        self,
+        usage_tag: str,
+        estimated_credit_units: int,
+        *,
+        metadata: Optional[Mapping[str, Any]],
+        enforce_message_cap: bool,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+
         chat_scope_id, context_error = self._resolve_ai_charge_context()
         if context_error:
             return None, context_error
@@ -462,7 +494,7 @@ class AIMessageBilling:
             "metadata": reserve_metadata,
         }
 
-        if source == "chat":
+        if source == "chat" and enforce_message_cap:
             cap_error = self._check_creditless_cap(
                 chat_scope_id=chat_scope_id,
                 reserve_amount=reserve_amount,

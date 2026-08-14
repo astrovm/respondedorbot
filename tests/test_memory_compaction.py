@@ -119,27 +119,20 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
         "api.index.app_runtime.state.search_history",
         lambda *_args, **_kwargs: [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}],
     )
-    monkeypatch.setattr(
-        "api.index.app_runtime.summary.compact_memory",
-        lambda *_args, **_kwargs: (
-            "summary from full history",
-            full_history[-5:],
-            "m95",
-            1,
-        ),
-    )
-
-    visible_history, summary_text, retrieved_messages, summary_cost = prepare_chat_memory(
+    visible_history, summary_text, retrieved_messages, summary_cost, plan = prepare_chat_memory(
         MagicMock(),
         "123",
         recent_history,
         "que paso hoy",
     )
 
-    assert summary_text == "summary from full history"
-    assert [msg["id"] for msg in visible_history] == ["m96", "m97", "m98", "m99", "m100"]
+    assert summary_text is None
+    assert [msg["id"] for msg in visible_history] == [f"m{i}" for i in range(1, 101)]
     assert retrieved_messages == [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}]
-    assert summary_cost == 1
+    assert summary_cost == 0
+    assert plan is not None
+    assert plan.target_marker == "m75"
+    assert [msg["id"] for msg in plan.messages] == [f"m{i}" for i in range(1, 76)]
 
 
 def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch):
@@ -149,20 +142,6 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
         {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
         for i in range(1, 101)
     ]
-    captured = {}
-
-    def fake_compact_chat_memory(
-        _redis_client,
-        _chat_id,
-        messages,
-        existing_summary,
-        compacted_until,
-        **_kwargs,
-    ):
-        captured["existing_summary"] = existing_summary
-        captured["compacted_until"] = compacted_until
-        return existing_summary, messages, compacted_until, 0
-
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_compacted_until", lambda *_: "m80")
     monkeypatch.setattr(
@@ -170,12 +149,12 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
         lambda *_args, **_kwargs: chat_history,
     )
     monkeypatch.setattr("api.index.app_runtime.state.search_history", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("api.index.app_runtime.summary.compact_memory", fake_compact_chat_memory)
+    prepared = prepare_chat_memory(MagicMock(), "123", chat_history, "que paso")
 
-    prepare_chat_memory(MagicMock(), "123", chat_history, "que paso")
-
-    assert captured["existing_summary"] is None
-    assert captured["compacted_until"] is None
+    plan = prepared[4]
+    assert plan is not None
+    assert plan.expected_marker is None
+    assert plan.prior_summary is None
 
 
 def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):

@@ -103,6 +103,108 @@ def test_provider_runtime_executes_tool_calls_until_stop():
     assert client.calls[1]["messages"][-1]["role"] == "tool"
 
 
+@pytest.mark.parametrize(
+    ("first_usage", "first_annotations", "second_max_uses", "total_requests"),
+    [
+        ({"server_tool_use": {"web_search_requests": 2}}, [], 1, 3),
+        ({}, [{"type": "url_citation"}], 2, 2),
+    ],
+)
+def test_provider_runtime_shares_web_search_budget_across_tool_rounds(
+    first_usage,
+    first_annotations,
+    second_max_uses,
+    total_requests,
+):
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    tool_calls = [
+        SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(name="calc", arguments='{"x": 1}'),
+        )
+    ]
+    first_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "tool_calls",
+                SimpleNamespace(
+                    content="",
+                    tool_calls=tool_calls,
+                    annotations=first_annotations,
+                ),
+            )
+        ]
+    )
+    first_response.usage = first_usage
+    second_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(
+                    content="done",
+                    tool_calls=[],
+                    annotations=[{"type": "url_citation"}],
+                ),
+            )
+        ]
+    )
+    second_response.usage = {"server_tool_use": {"web_search_requests": 1}}
+    client = _FakeClient([first_response, second_response])
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": "firecrawl",
+                    "max_results": 10,
+                    "max_uses": 3,
+                    "max_total_results": 30,
+                },
+            },
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda response: response.usage,
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=SimpleNamespace(output="2")),
+            parse_tool_call_arguments_fn=lambda args: json.loads(args),
+            tool_registry={"calc": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "search and calculate"}],
+        enable_web_search=True,
+        extra_tools=[{"type": "function", "function": {"name": "calc"}}],
+    )
+
+    assert result is not None
+    assert result.metadata["web_search_requests"] == total_requests
+    assert client.calls[0]["tools"][0]["parameters"]["max_uses"] == 3
+    assert (
+        client.calls[1]["tools"][0]["parameters"]["max_uses"]
+        == second_max_uses
+    )
+    assert client.calls[1]["extra_body"] == {
+        "max_tool_calls": second_max_uses
+    }
+
+
 def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -901,9 +1003,9 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
         )
 
     assert result is None
-    assert len(client.calls) == 5
-    assert request_count.call_count == 5
-    assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8]
+    assert len(client.calls) == 2
+    assert request_count.call_count == 2
+    assert [call.args[0] for call in sleep.call_args_list] == [1]
     admin_report.assert_called_once()
     assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
     report_context = admin_report.call_args.kwargs["extra_context"]
@@ -911,8 +1013,8 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
         "model": "~deepseek/deepseek-v4-flash-latest",
         "enable_web_search": True,
         "tool_round": 1,
-        "response_id": "gen-4",
-        "request_id": "req-4",
+        "response_id": "gen-1",
+        "request_id": "req-1",
         "response_model": "upstream-model",
         "provider": "upstream-provider",
         "native_finish_reason": "upstream_null",
@@ -1024,7 +1126,7 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
         )
 
     assert result is None
-    assert len(client.calls) == 5
+    assert len(client.calls) == 2
     assert all("tools" in call for call in client.calls)
     admin_report.assert_called_once()
     assert admin_report.call_args.args[2]["provider_error_body"] == (

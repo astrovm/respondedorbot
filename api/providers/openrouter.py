@@ -111,13 +111,18 @@ class OpenRouterProvider(StreamingAIProvider):
 
             if enable_web_search and not extra_tools:
                 self._increment_request_count()
+                web_search_tool = self._build_web_search_tool()
                 request_kwargs = {
                     "model": self._primary_model,
                     "messages": [system_message] + list(messages),
                     "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
                     "stream": True,
-                    "tools": [self._build_web_search_tool()],
+                    "tools": [web_search_tool],
                 }
+                self._runtime._apply_web_search_limits(
+                    request_kwargs,
+                    web_search_tool,
+                )
 
                 has_tool_calls = False
                 for chunk in client.chat.completions.create(**request_kwargs):

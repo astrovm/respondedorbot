@@ -21,6 +21,7 @@ def _build_provider_runtime(*, client, tool_runtime=None):
                 "parameters": {
                     "engine": "firecrawl",
                     "max_results": 10,
+                    "max_uses": 3,
                     "max_total_results": 30,
                 },
             },
