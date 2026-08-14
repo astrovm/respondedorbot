@@ -66,7 +66,7 @@ def test_web_search_sources_ignore_urls_from_other_tools():
     assert ProviderRuntime._web_search_source_urls(messages) == []
 
 
-def test_provider_runtime_appends_sources_to_direct_search_answer():
+def test_provider_runtime_keeps_direct_search_answer_unchanged():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
@@ -154,12 +154,10 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
     )
 
     assert result is not None
-    assert result.text == (
-        "autor ejemplo es escritor y guionista\n\nfuentes: "
-        "https://example.com/profile https://example.com/interview"
-    )
+    assert result.text == "autor ejemplo es escritor y guionista"
     assert result.metadata["web_search_grounded"] is True
     assert result.metadata["web_search_source_count"] == 2
+    assert result.metadata["web_search_citation_count"] == 0
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():

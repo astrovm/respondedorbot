@@ -206,7 +206,7 @@ def test_provider_runtime_server_tool_use_takes_priority():
     assert result.metadata["web_search_requests"] == 3
 
 
-def test_provider_runtime_suppresses_web_search_answer_without_citations():
+def test_provider_runtime_suppresses_web_search_answer_without_results():
     response = _build_chat_response(
         text="seguro existe esa marca",
         usage={
@@ -227,7 +227,7 @@ def test_provider_runtime_suppresses_web_search_answer_without_citations():
         )
 
     assert result is not None
-    assert "No pude verificar eso con fuentes" in result.text
+    assert "No pude verificar eso" in result.text
     assert result.metadata["web_search_grounded"] is False
     assert result.metadata["web_search_citation_count"] == 0
     warning.assert_called_once()

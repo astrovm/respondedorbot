@@ -25,10 +25,9 @@ from api.tools.runtime import ToolRuntime
 logger = get_logger(__name__)
 _MAX_RETRIES = 2
 _UNGROUNDED_SEARCH_MESSAGE = (
-    "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
-    "resultados citables; probá de nuevo en un momento."
+    "No pude verificar eso. La búsqueda web falló o no devolvió resultados útiles; "
+    "probá de nuevo en un momento."
 )
-_MAX_WEB_SEARCH_SOURCES = 3
 _MAX_LOGGED_SEARCH_ANSWER_CHARS = 4_000
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
@@ -846,13 +845,8 @@ class ProviderRuntime:
         metadata["web_search_source_count"] = len(source_urls)
         clean_text = text.strip()
         if source_urls and clean_text:
-            selected_sources = source_urls[:_MAX_WEB_SEARCH_SOURCES]
-            missing_sources = [url for url in selected_sources if url not in text]
             metadata["web_search_grounded"] = True
-            metadata["web_search_citation_count"] = len(selected_sources)
-            if not missing_sources:
-                return None
-            return f"{text.rstrip()}\n\nfuentes: {' '.join(missing_sources)}"
+            return None
 
         if metadata.get("web_search_citation_count") and clean_text:
             metadata["web_search_grounded"] = True
