@@ -73,7 +73,7 @@ def test_tasks_command_shows_cron_frequency():
             {
                 "id": "63dce153",
                 "text": "decime cuanta aura farmeaste hoy",
-                "user_name": "@astrolince",
+                "user_name": "@test_user",
                 "interval_seconds": None,
                 "trigger_config": {"type": "cron", "hour": 20, "minute": 30},
                 "next_run": "17/04 20:30",

@@ -75,7 +75,7 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
         id="search_1",
         function=SimpleNamespace(
             name="web_search",
-            arguments='{"query":"Juan Ruocco"}',
+            arguments='{"query":"Autor Ejemplo"}',
         ),
     )
     responses = [
@@ -96,7 +96,7 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
                 _FakeChoice(
                     "stop",
                     SimpleNamespace(
-                        content="juan ruocco es escritor y guionista",
+                        content="autor ejemplo es escritor y guionista",
                         tool_calls=[],
                         annotations=[],
                     ),
@@ -110,8 +110,8 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
             return_value=SimpleNamespace(
                 output=(
                     '{"results":['
-                    '{"url":"https://example.com/juan"},'
-                    '{"url":"https://example.com/entrevista"}]}'
+                    '{"url":"https://example.com/profile"},'
+                    '{"url":"https://example.com/interview"}]}'
                 )
             )
         ),
@@ -147,7 +147,7 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
 
     result = runtime.complete(
         {"role": "system", "content": "sys"},
-        [{"role": "user", "content": "buscá a Juan Ruocco"}],
+        [{"role": "user", "content": "buscá a Autor Ejemplo"}],
         enable_web_search=True,
         extra_tools=[search_schema],
         tool_context={"web_search_enabled": True},
@@ -155,8 +155,8 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
 
     assert result is not None
     assert result.text == (
-        "juan ruocco es escritor y guionista\n\nfuentes: "
-        "https://example.com/juan https://example.com/entrevista"
+        "autor ejemplo es escritor y guionista\n\nfuentes: "
+        "https://example.com/profile https://example.com/interview"
     )
     assert result.metadata["web_search_grounded"] is True
     assert result.metadata["web_search_source_count"] == 2
@@ -613,7 +613,7 @@ def test_provider_runtime_executes_dsml_pseudo_web_fetch_call():
                         "<｜｜DSML｜｜tool_calls>\n"
                         '<｜｜DSML｜｜invoke name="web_fetch">\n'
                         '<｜｜DSML｜｜parameter name="url" string="true">'
-                        "https://nitter.net/deptofwar/status/2052723504336736284"
+                        "https://nitter.net/test_account/status/1234567890123456789"
                         "</｜｜DSML｜｜parameter>\n"
                         "</｜｜DSML｜｜invoke>\n"
                         "</｜｜DSML｜｜tool_calls>"
@@ -671,7 +671,7 @@ def test_provider_runtime_executes_dsml_pseudo_web_fetch_call():
     assert_no_raw_tool_syntax(result.text)
     execute_tool_fn.assert_called_once_with(
         "web_fetch",
-        {"url": "https://nitter.net/deptofwar/status/2052723504336736284"},
+        {"url": "https://nitter.net/test_account/status/1234567890123456789"},
         {"chat_id": "123"},
     )
 

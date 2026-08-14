@@ -28,9 +28,9 @@ def test_web_search_returns_compact_citable_results(monkeypatch):
                 "data": {
                     "web": [
                         {
-                            "title": "Pablo Wasserman",
-                            "url": "https://example.com/pablo",
-                            "description": "Perfil público de Pablo Wasserman.",
+                            "title": "Persona Ejemplo",
+                            "url": "https://example.com/profile",
+                            "description": "Perfil público de Persona Ejemplo.",
                             "markdown": "contenido largo que no debe enviarse",
                         }
                     ]
@@ -40,20 +40,20 @@ def test_web_search_returns_compact_citable_results(monkeypatch):
     )
     monkeypatch.setattr(web_search.requests, "post", post)
 
-    result = execute_tool("web_search", {"query": "Pablo Wasserman"})
+    result = execute_tool("web_search", {"query": "Persona Ejemplo"})
 
     payload = json.loads(result.output)
     assert payload["results"] == [
         {
-            "title": "Pablo Wasserman",
-            "url": "https://example.com/pablo",
-            "description": "Perfil público de Pablo Wasserman.",
+            "title": "Persona Ejemplo",
+            "url": "https://example.com/profile",
+            "description": "Perfil público de Persona Ejemplo.",
         }
     ]
     assert "markdown" not in result.output
     assert result.metadata["result_count"] == 1
     assert post.call_args.kwargs["json"] == {
-        "query": "Pablo Wasserman",
+        "query": "Persona Ejemplo",
         "limit": 5,
         "sources": ["web"],
         "timeout": 60_000,

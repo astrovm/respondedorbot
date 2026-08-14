@@ -42,7 +42,7 @@ def test_index_tasks_command_formats_real_runtime_task_rows(monkeypatch):
             {
                 "id": "abc123",
                 "text": "recordame algo",
-                "user_name": "@astro",
+                "user_name": "@test_admin",
                 "interval_seconds": None,
                 "trigger_config": None,
                 "next_run": "17/04 22:04",
