@@ -219,16 +219,19 @@ def test_provider_runtime_suppresses_web_search_answer_without_citations():
     client.chat.completions.create.return_value = response
     runtime = _build_provider_runtime(client=client)
 
-    result = runtime.complete(
-        {"role": "system", "content": "sys"},
-        [{"role": "user", "content": "busca la marca Oaaa"}],
-        enable_web_search=True,
-    )
+    with patch("api.providers.runtime.logger.warning") as warning:
+        result = runtime.complete(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "busca la marca Oaaa"}],
+            enable_web_search=True,
+        )
 
     assert result is not None
     assert "No pude verificar eso con fuentes" in result.text
     assert result.metadata["web_search_grounded"] is False
     assert result.metadata["web_search_citation_count"] == 0
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == "seguro existe esa marca"
 
 
 def test_provider_runtime_detects_pydantic_annotation():

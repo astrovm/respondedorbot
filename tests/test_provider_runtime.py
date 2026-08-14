@@ -32,7 +32,7 @@ class _FakeClient:
         return self._responses.pop(0)
 
 
-def test_web_search_grounding_ignores_urls_from_other_tools():
+def test_web_search_sources_ignore_urls_from_other_tools():
     from api.providers.runtime import ProviderRuntime
 
     messages = [
@@ -63,10 +63,103 @@ def test_web_search_grounding_ignores_urls_from_other_tools():
         },
     ]
 
-    assert not ProviderRuntime._answer_cites_web_search_source(
-        "Fuente: https://example.com/not-a-search-result",
-        messages,
+    assert ProviderRuntime._web_search_source_urls(messages) == []
+
+
+def test_provider_runtime_appends_sources_to_direct_search_answer():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    search_call = SimpleNamespace(
+        id="search_1",
+        function=SimpleNamespace(
+            name="web_search",
+            arguments='{"query":"Juan Ruocco"}',
+        ),
     )
+    responses = [
+        _FakeResponse(
+            [
+                _FakeChoice(
+                    "tool_calls",
+                    SimpleNamespace(
+                        content="",
+                        tool_calls=[search_call],
+                        annotations=[],
+                    ),
+                )
+            ]
+        ),
+        _FakeResponse(
+            [
+                _FakeChoice(
+                    "stop",
+                    SimpleNamespace(
+                        content="juan ruocco es escritor y guionista",
+                        tool_calls=[],
+                        annotations=[],
+                    ),
+                )
+            ]
+        ),
+    ]
+    client = _FakeClient(responses)
+    tool_runtime = ToolRuntime(
+        execute_tool_fn=MagicMock(
+            return_value=SimpleNamespace(
+                output=(
+                    '{"results":['
+                    '{"url":"https://example.com/juan"},'
+                    '{"url":"https://example.com/entrevista"}]}'
+                )
+            )
+        ),
+        tool_registry={"web_search": object()},
+        print_fn=lambda *_args: None,
+    )
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {
+                "type": "openrouter:web_search",
+                "parameters": {"max_uses": 3},
+            },
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda _response: {},
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        tool_runtime,
+    )
+    search_schema = {
+        "type": "function",
+        "function": {"name": "web_search", "parameters": {"type": "object"}},
+    }
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "buscá a Juan Ruocco"}],
+        enable_web_search=True,
+        extra_tools=[search_schema],
+        tool_context={"web_search_enabled": True},
+    )
+
+    assert result is not None
+    assert result.text == (
+        "juan ruocco es escritor y guionista\n\nfuentes: "
+        "https://example.com/juan https://example.com/entrevista"
+    )
+    assert result.metadata["web_search_grounded"] is True
+    assert result.metadata["web_search_source_count"] == 2
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():
