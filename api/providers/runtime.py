@@ -913,11 +913,12 @@ class ProviderRuntime:
             self._deps.increment_request_count()
             return ToolRoundDecision(updated_messages, continue_rounds=True)
 
+        text = str(getattr(message, "content", "") or "")
         web_metadata = self._web_search_metadata(response, message)
         if total_web_search_requests > 0:
             web_metadata["web_search_requests"] = total_web_search_requests
             self._record_web_search_outcome(
-                str(getattr(message, "content", "") or ""),
+                text,
                 current_messages,
                 web_metadata,
                 tool_context=tool_context,
@@ -926,11 +927,15 @@ class ProviderRuntime:
 
         return ToolRoundDecision(
             current_messages,
-            result=self._build_round_result(
-                response,
-                message,
-                round_idx,
-                metadata=web_metadata,
+            result=(
+                self._build_round_result(
+                    response,
+                    message,
+                    round_idx,
+                    metadata=web_metadata,
+                )
+                if text.strip()
+                else None
             ),
         )
 

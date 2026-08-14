@@ -1012,6 +1012,33 @@ def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
     return runtime, client, admin_report, request_count
 
 
+def test_provider_runtime_returns_none_for_billable_empty_stop():
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    runtime, client, admin_report, request_count = _build_retry_runtime(
+        [response],
+        extract_usage=lambda _response: {"prompt_tokens": 10},
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "research this"}],
+        enable_web_search=True,
+        tool_context={"chat_id": "123"},
+    )
+
+    assert result is None
+    assert len(client.calls) == 1
+    assert request_count.call_count == 1
+    admin_report.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("retryable_finish_reason", "error"),
     [
