@@ -68,6 +68,7 @@ def main() -> int:
     setup_logging()
 
     from api import index
+    from api.bot.general_commands import gen_random
     from api.bot.ptb import run_polling
     from api.markets.world_cup_goals import (
         WorldCupGoalMonitor,
@@ -75,33 +76,36 @@ def main() -> int:
     )
     from api.tasks.scheduler import get_scheduler, init_scheduler
 
+    runtime = index.app_runtime
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
-    index.app_runtime.summary.start_background_worker()
+    runtime.summary.start_background_worker()
     start_world_cup_goal_monitor(
         WorldCupGoalMonitor(
             list_chat_ids=index.list_world_cup_goal_chat_ids,
-            ask_ai=index.app_runtime.ai.ask,
-            send_message=index.app_runtime.telegram.send_message,
-            credits_db_service=index.credits_db_service,
-            estimate_ai_base_reserve_credits=index.estimate_ai_base_reserve_credits,
+            ask_ai=runtime.ai.ask,
+            send_message=runtime.telegram.send_message,
+            credits_db_service=runtime.billing.credits,
+            estimate_ai_base_reserve_credits=(
+                runtime.estimate_ai_base_reserve_credits
+            ),
             scoreboard=index._world_cup_scoreboard,
         )
     )
 
     try:
         init_scheduler(
-            redis_factory=index.config_redis,
+            redis_factory=runtime.config.redis,
             task_executor_deps={
-                "ask_ai": index.ask_ai,
-                "send_msg": index.send_msg,
-                "admin_report": index.admin_report,
-                "credits_db_service": index.credits_db_service,
-                "gen_random_fn": index.gen_random,
+                "ask_ai": runtime.ai.ask,
+                "send_msg": runtime.telegram.send_message,
+                "admin_report": runtime.admin.report,
+                "credits_db_service": runtime.billing.credits,
+                "gen_random_fn": gen_random,
                 "build_insufficient_credits_message_fn": (
-                    index.build_insufficient_credits_message
+                    runtime.billing.build_insufficient_message
                 ),
                 "estimate_ai_base_reserve_credits": (
-                    index.estimate_ai_base_reserve_credits
+                    runtime.estimate_ai_base_reserve_credits
                 ),
             },
         )
