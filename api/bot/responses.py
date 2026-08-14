@@ -184,6 +184,7 @@ def handle_ai_stream_response(
         user_name=user_name,
         user_id=user_id,
         timezone_offset=timezone_offset,
+        response_meta=response_meta,
     )
     try:
         # The consumer creates one Telegram message, then edits it as tokens arrive.

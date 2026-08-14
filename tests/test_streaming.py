@@ -95,10 +95,198 @@ def test_openrouter_stream_uses_streaming_path_when_tools_present():
         )
     )
 
-    assert chunks == ["hola final"]
+    assert chunks == ["hola", " final"]
     assert len(create_calls) == 1
     assert create_calls[0]["tools"]
-    assert "stream" not in create_calls[0]
+    assert create_calls[0]["stream"] is True
+
+
+def test_openrouter_stream_executes_fragmented_tool_call_and_reports_each_round():
+    from types import SimpleNamespace
+
+    from api.ai.pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+    from api.tools.runtime import ToolRuntime
+
+    create_calls: list[dict[str, Any]] = []
+    responses = [
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason=None,
+                        delta=SimpleNamespace(
+                            content=None,
+                            annotations=[{"type": "url_citation"}],
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_1",
+                                    type="function",
+                                    function=SimpleNamespace(
+                                        name="calculate",
+                                        arguments='{"expression":"1',
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="tool_calls",
+                        delta=SimpleNamespace(
+                            content=None,
+                            annotations=[],
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    type=None,
+                                    function=SimpleNamespace(
+                                        name=None,
+                                        arguments='+1"}',
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "server_tool_use": {"web_search_requests": 2},
+                },
+            ),
+        ],
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason=None,
+                        delta=SimpleNamespace(
+                            content="resultado ",
+                            annotations=[{"type": "url_citation"}],
+                            tool_calls=[],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        delta=SimpleNamespace(
+                            content="final",
+                            annotations=[],
+                            tool_calls=[],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage={
+                    "prompt_tokens": 20,
+                    "completion_tokens": 4,
+                    "server_tool_use": {"web_search_requests": 1},
+                },
+            ),
+        ],
+    ]
+
+    def create(**kwargs):
+        create_calls.append(kwargs)
+        return iter(responses.pop(0))
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    execute_tool = MagicMock(return_value=SimpleNamespace(output="2"))
+    usage_results: list[AIUsageResult] = []
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=lambda *a, **k: None,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "firecrawl",
+                "max_results": 10,
+                "max_uses": 3,
+                "max_total_results": 30,
+            },
+        },
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage=kwargs["response"].usage,
+            metadata=kwargs.get("metadata") or {},
+        ),
+        extract_usage_map=lambda response: response.usage,
+        primary_model="test-model",
+        tool_runtime=ToolRuntime(
+            execute_tool_fn=execute_tool,
+            tool_registry={"calculate": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    chunks = list(
+        provider.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "busca y calcula"}],
+            enable_web_search=True,
+            extra_tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "calculate"},
+                }
+            ],
+            tool_context={"chat_id": "123"},
+            on_usage_result=usage_results.append,
+        )
+    )
+
+    assert chunks == ["resultado ", "final"]
+    assert_no_raw_tool_syntax("".join(chunks))
+    execute_tool.assert_called_once_with(
+        "calculate",
+        {"expression": "1+1"},
+        {"chat_id": "123"},
+    )
+    assert create_calls[0]["stream"] is True
+    assert create_calls[1]["stream"] is True
+    assert create_calls[1]["tools"][0]["parameters"]["max_uses"] == 1
+    assert create_calls[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "2",
+    }
+    assert [result.usage for result in usage_results] == [
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "server_tool_use": {"web_search_requests": 2},
+        },
+        {
+            "prompt_tokens": 20,
+            "completion_tokens": 4,
+            "server_tool_use": {"web_search_requests": 1},
+        },
+    ]
+    assert [result.metadata["web_search_requests"] for result in usage_results] == [
+        2,
+        1,
+    ]
 
 
 def test_openrouter_stream_uses_web_search_branch_when_enabled():

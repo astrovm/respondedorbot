@@ -2,12 +2,56 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional
 
 from api.ai.pricing import AIUsageResult, chat_output_token_limit
 from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.tools.runtime import ToolRuntime
 from api.providers.base import StreamingAIProvider
+
+
+@dataclass
+class _StreamToolCall:
+    index: int
+    id: str = ""
+    type: str = "function"
+    name: str = ""
+    arguments: str = ""
+
+    def as_message_value(self) -> Any:
+        return SimpleNamespace(
+            id=self.id,
+            type=self.type,
+            function=SimpleNamespace(
+                name=self.name,
+                arguments=self.arguments,
+            ),
+        )
+
+
+@dataclass
+class _StreamRound:
+    text_parts: list[str] = field(default_factory=list)
+    annotations: list[Any] = field(default_factory=list)
+    tool_calls: dict[int, _StreamToolCall] = field(default_factory=dict)
+    finish_reason: Any = None
+    usage_response: Any = None
+    last_response: Any = None
+
+    @property
+    def text(self) -> str:
+        return "".join(self.text_parts)
+
+    def message(self) -> Any:
+        calls = [item.as_message_value() for _, item in sorted(self.tool_calls.items())]
+        return SimpleNamespace(
+            content=self.text,
+            annotations=self.annotations,
+            tool_calls=calls,
+        )
 
 
 class OpenRouterProvider(StreamingAIProvider):
@@ -83,92 +127,101 @@ class OpenRouterProvider(StreamingAIProvider):
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Iterator[str]:
         client = self._get_client()
         if client is None:
             return
 
-        has_tools = bool(extra_tools) or enable_web_search
         output_token_limit = chat_output_token_limit(self._primary_model)
+        current_messages = list(messages)
+        remaining_web_search_uses = self._runtime._configured_web_search_max_uses(enable_web_search)
+        possible_pseudo_tools = self._extra_tool_names(extra_tools)
 
         try:
-            if not has_tools:
+            for round_idx in range(self._max_tool_rounds):
                 self._increment_request_count()
-                request_kwargs: Dict[str, Any] = {
-                    "model": self._primary_model,
-                    "messages": [system_message] + list(messages),
-                    "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
-                    "stream": True,
-                }
-
-                for chunk in client.chat.completions.create(**request_kwargs):
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        yield delta.content
-                return
-
-            if enable_web_search and not extra_tools:
-                self._increment_request_count()
-                web_search_tool = self._build_web_search_tool()
-                request_kwargs = {
-                    "model": self._primary_model,
-                    "messages": [system_message] + list(messages),
-                    "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
-                    "stream": True,
-                    "tools": [web_search_tool],
-                }
-                self._runtime._apply_web_search_limits(
-                    request_kwargs,
-                    web_search_tool,
+                request_kwargs = self._build_stream_request(
+                    system_message,
+                    current_messages,
+                    output_token_limit=output_token_limit,
+                    max_tokens=max_tokens,
+                    enable_web_search=enable_web_search,
+                    extra_tools=extra_tools,
+                    web_search_max_uses=remaining_web_search_uses,
+                )
+                streamed_round, held_text, text_released = yield from (
+                    self._consume_stream_round(
+                        client,
+                        request_kwargs,
+                        possible_pseudo_tools,
+                    )
                 )
 
-                has_tool_calls = False
-                for chunk in client.chat.completions.create(**request_kwargs):
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    delta = choice.delta
-                    if getattr(choice, "finish_reason", None) == "tool_calls":
-                        has_tool_calls = True
-                        break
-                    if delta and delta.content:
-                        yield delta.content
-                if has_tool_calls:
-                    final_messages = self._runtime._execute_tool_rounds(
-                        current_messages=list(messages),
-                        system_message=system_message,
-                        enable_web_search=enable_web_search,
-                        extra_tools=extra_tools,
-                        tool_context=tool_context,
+                message = streamed_round.message()
+                usage_response = (
+                    streamed_round.usage_response
+                    or streamed_round.last_response
+                    or SimpleNamespace(usage={})
+                )
+                web_metadata = self._runtime._web_search_metadata(
+                    usage_response,
+                    message,
+                )
+                if on_usage_result is not None:
+                    on_usage_result(
+                        self._runtime._build_round_result(
+                            usage_response,
+                            message,
+                            round_idx,
+                            metadata=web_metadata,
+                        )
                     )
-                    if final_messages is None:
-                        return
-                    self._increment_request_count()
-                    request_kwargs = {
-                        "model": self._primary_model,
-                        "messages": [system_message] + final_messages,
-                        "max_tokens": max_tokens if max_tokens is not None else output_token_limit,
-                        "stream": True,
-                    }
-                    for chunk in client.chat.completions.create(**request_kwargs):
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if delta and delta.content:
-                            yield delta.content
-                return
+                remaining_web_search_uses = self._runtime._remaining_web_search_uses(
+                    remaining_web_search_uses,
+                    usage_response,
+                    message,
+                )
 
-            result = self._runtime.complete(
-                system_message,
-                list(messages),
-                enable_web_search=enable_web_search,
-                extra_tools=extra_tools,
-                tool_context=tool_context,
-            )
-            if result and result.text:
-                yield result.text
+                tool_calls = getattr(message, "tool_calls", None) or []
+                known_calls = self._runtime._filter_known_calls(
+                    tool_calls,
+                    tool_context,
+                    round_idx,
+                )
+                if known_calls:
+                    if held_text:
+                        yield held_text
+                    current_messages = self._tool_runtime.apply_tool_calls(
+                        message,
+                        known_calls,
+                        current_messages,
+                        tool_context or {},
+                    )
+                    continue
+
+                pseudo_call = self._runtime._parse_pseudo_tool_call(
+                    streamed_round.text,
+                    round_idx,
+                    extra_tools,
+                )
+                if pseudo_call is not None and not text_released:
+                    current_messages = self._tool_runtime.apply_tool_calls(
+                        SimpleNamespace(content=""),
+                        [pseudo_call],
+                        current_messages,
+                        tool_context or {},
+                    )
+                    continue
+
+                if held_text:
+                    yield held_text
+
+                if streamed_round.finish_reason in {"stop", "length", None}:
+                    return
+
+                return
+            return
         except Exception as error:
             self._admin_report(
                 f"OpenRouter stream error model={self._primary_model}",
@@ -176,3 +229,135 @@ class OpenRouterProvider(StreamingAIProvider):
                 {"model": self._primary_model},
             )
             raise
+
+    def _build_stream_request(
+        self,
+        system_message: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        *,
+        output_token_limit: int,
+        max_tokens: Optional[int],
+        enable_web_search: bool,
+        extra_tools: Optional[List[Dict[str, Any]]],
+        web_search_max_uses: Optional[int],
+    ) -> Dict[str, Any]:
+        request_kwargs: Dict[str, Any] = {
+            "model": self._primary_model,
+            "messages": [system_message] + messages,
+            "max_tokens": (max_tokens if max_tokens is not None else output_token_limit),
+            "stream": True,
+        }
+        request_tools = self._runtime._build_request_tools(
+            enable_web_search=enable_web_search,
+            extra_tools=extra_tools,
+            web_search_max_uses=web_search_max_uses,
+            request_kwargs=request_kwargs,
+        )
+        if request_tools:
+            request_kwargs["tools"] = request_tools
+        return request_kwargs
+
+    def _consume_stream_round(
+        self,
+        client: Any,
+        request_kwargs: Dict[str, Any],
+        possible_pseudo_tools: set[str],
+    ) -> Generator[str, None, tuple[_StreamRound, str, bool]]:
+        streamed_round = _StreamRound()
+        held_text = ""
+        text_released = False
+        for chunk in client.chat.completions.create(**request_kwargs):
+            streamed_round.last_response = chunk
+            if getattr(chunk, "usage", None) is not None:
+                streamed_round.usage_response = chunk
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason is not None:
+                streamed_round.finish_reason = finish_reason
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            self._accumulate_stream_delta(streamed_round, delta)
+            content = str(self._field(delta, "content") or "")
+            if not content:
+                continue
+            if text_released:
+                yield content
+                continue
+            held_text += content
+            if not self._could_be_pseudo_tool_call(
+                held_text,
+                possible_pseudo_tools,
+            ):
+                yield held_text
+                held_text = ""
+                text_released = True
+        return streamed_round, held_text, text_released
+
+    @staticmethod
+    def _field(value: Any, name: str, default: Any = None) -> Any:
+        if isinstance(value, Mapping):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @classmethod
+    def _accumulate_stream_delta(
+        cls,
+        streamed_round: _StreamRound,
+        delta: Any,
+    ) -> None:
+        content = cls._field(delta, "content")
+        if content:
+            streamed_round.text_parts.append(str(content))
+
+        annotations = cls._field(delta, "annotations") or []
+        streamed_round.annotations.extend(annotations)
+
+        for position, fragment in enumerate(cls._field(delta, "tool_calls") or []):
+            try:
+                index = int(cls._field(fragment, "index", position))
+            except TypeError, ValueError:
+                index = position
+            accumulated = streamed_round.tool_calls.setdefault(
+                index,
+                _StreamToolCall(index=index),
+            )
+            call_id = cls._field(fragment, "id")
+            call_type = cls._field(fragment, "type")
+            function = cls._field(fragment, "function")
+            if call_id:
+                accumulated.id += str(call_id)
+            if call_type:
+                accumulated.type = str(call_type)
+            if function is not None:
+                name = cls._field(function, "name")
+                arguments = cls._field(function, "arguments")
+                if name:
+                    accumulated.name += str(name)
+                if arguments:
+                    accumulated.arguments += str(arguments)
+
+    @staticmethod
+    def _extra_tool_names(
+        extra_tools: Optional[List[Dict[str, Any]]],
+    ) -> set[str]:
+        names: set[str] = set()
+        for tool in extra_tools or []:
+            function = tool.get("function")
+            if isinstance(function, Mapping):
+                name = str(function.get("name") or "")
+                if name:
+                    names.add(name)
+        return names
+
+    @staticmethod
+    def _could_be_pseudo_tool_call(text: str, tool_names: set[str]) -> bool:
+        stripped = text.lstrip()
+        if not stripped:
+            return bool(tool_names)
+        return any(
+            name.startswith(stripped) or stripped.startswith(f"{name}(") for name in tool_names
+        )

@@ -663,27 +663,37 @@ def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call(
     from api.providers.openrouter import OpenRouterProvider
     from api.tools.runtime import ToolRuntime
 
-    pseudo_call_response = _FakeResponse(
-        [
-            _FakeChoice(
-                "stop",
+    def stream_chunk(content, finish_reason=None):
+        return SimpleNamespace(
+            choices=[
                 SimpleNamespace(
-                    content='web_fetch("https://example.com/bts")',
-                    tool_calls=[],
-                    annotations=[],
-                ),
-            )
-        ]
-    )
-    final_response = _FakeResponse(
+                    finish_reason=finish_reason,
+                    delta=SimpleNamespace(
+                        content=content,
+                        tool_calls=[],
+                        annotations=[],
+                    ),
+                )
+            ],
+            usage=None,
+        )
+
+    client = _FakeClient(
         [
-            _FakeChoice(
-                "stop",
-                SimpleNamespace(content="respuesta final", tool_calls=[], annotations=[]),
-            )
+            iter(
+                [
+                    stream_chunk('web_fetch("https://example.com/bts")'),
+                    stream_chunk(None, "stop"),
+                ]
+            ),
+            iter(
+                [
+                    stream_chunk("respuesta "),
+                    stream_chunk("final", "stop"),
+                ]
+            ),
         ]
     )
-    client = _FakeClient([pseudo_call_response, final_response])
     execute_tool_fn = MagicMock(return_value=SimpleNamespace(output="contenido bts"))
     provider = OpenRouterProvider(
         get_client=lambda: client,
@@ -716,7 +726,7 @@ def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call(
         )
     )
 
-    assert chunks == ["respuesta final"]
+    assert chunks == ["respuesta ", "final"]
     assert_no_raw_tool_syntax("".join(chunks))
     execute_tool_fn.assert_called_once_with(
         "web_fetch", {"url": "https://example.com/bts"}, {"chat_id": "123"}

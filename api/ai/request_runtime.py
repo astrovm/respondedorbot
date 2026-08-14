@@ -176,10 +176,10 @@ def ask_ai(
     timezone_offset: int,
     task_mode: bool,
     build_request: Callable[..., tuple[
-        dict[str, Any],
-        list[dict[str, Any]],
-        list[dict[str, Any]] | None,
-        dict[str, Any],
+            dict[str, Any],
+            list[dict[str, Any]],
+            list[dict[str, Any]] | None,
+            dict[str, Any],
     ]],
     inject_image: Callable[..., None],
     complete: Callable[..., str | None],
@@ -245,11 +245,12 @@ def ask_ai_stream(
     user_name: str | None,
     user_id: int | None,
     timezone_offset: int,
+    response_meta: dict[str, Any] | None,
     build_request: Callable[..., tuple[
-        dict[str, Any],
-        list[dict[str, Any]],
-        list[dict[str, Any]] | None,
-        dict[str, Any],
+            dict[str, Any],
+            list[dict[str, Any]],
+            list[dict[str, Any]] | None,
+            dict[str, Any],
     ]],
     stream: Callable[..., Iterator[tuple[str, str]]],
 ) -> Iterator[tuple[str, str]]:
@@ -262,12 +263,17 @@ def ask_ai_stream(
         task_mode=False,
         enable_web_search=enable_web_search,
     )
+    stream_kwargs: dict[str, Any] = {
+        "enable_web_search": enable_web_search,
+        "extra_tools": extra_tools,
+        "tool_context": tool_context,
+    }
+    if response_meta is not None:
+        stream_kwargs["response_meta"] = response_meta
     return stream(
         system_message,
         messages,
-        enable_web_search=enable_web_search,
-        extra_tools=extra_tools,
-        tool_context=tool_context,
+        **stream_kwargs,
     )
 
 
@@ -412,6 +418,7 @@ class AIRequestService:
         user_name: str | None = None,
         user_id: int | None = None,
         timezone_offset: int = -3,
+        response_meta: dict[str, Any] | None = None,
     ) -> Iterator[tuple[str, str]]:
         return ask_ai_stream(
             messages,
@@ -420,6 +427,7 @@ class AIRequestService:
             user_name=user_name,
             user_id=user_id,
             timezone_offset=timezone_offset,
+            response_meta=response_meta,
             build_request=self.build_request,
             stream=self._deps.stream,
         )
