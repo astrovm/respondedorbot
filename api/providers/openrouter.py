@@ -224,29 +224,23 @@ class OpenRouterProvider(StreamingAIProvider):
                     )
                     continue
 
-                text_override = None
                 if total_web_search_requests > 0:
-                    text_override = self._runtime._finalize_web_search_answer(
+                    self._runtime._record_web_search_outcome(
                         streamed_round.text,
                         current_messages,
                         web_metadata,
                         tool_context=tool_context,
                         round_idx=round_idx,
                     )
-                if text_override is not None:
-                    web_metadata["stream_text_override"] = text_override
                 self._report_stream_usage(
                     on_usage_result,
                     usage_response,
                     message,
                     round_idx,
                     web_metadata,
-                    text_override=text_override,
                 )
 
-                if text_override is not None and not text_released:
-                    yield text_override
-                elif held_text:
+                if held_text:
                     yield held_text
 
                 if streamed_round.finish_reason in {"stop", "length", None}:

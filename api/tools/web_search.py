@@ -148,7 +148,6 @@ def _parse_search_response(response: requests.Response, query: str) -> ToolResul
             {
                 "query": query,
                 "results": results,
-                "instruction": "Usá estas fuentes para responder y citá sus URLs.",
             },
             ensure_ascii=False,
         ),
@@ -186,7 +185,7 @@ register_tool(
     name="web_search",
     description=(
         "Search the public web with Firecrawl. Use it for current facts or when the user "
-        "asks you to search. The result contains source URLs that you must cite."
+        "asks you to search. The result contains source URLs and descriptions."
     ),
     parameters={
         "type": "object",

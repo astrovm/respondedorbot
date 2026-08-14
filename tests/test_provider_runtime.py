@@ -66,7 +66,7 @@ def test_web_search_sources_ignore_urls_from_other_tools():
     assert ProviderRuntime._web_search_source_urls(messages) == []
 
 
-def test_provider_runtime_appends_sources_to_direct_search_answer():
+def test_provider_runtime_keeps_direct_search_answer_unchanged():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
@@ -154,12 +154,10 @@ def test_provider_runtime_appends_sources_to_direct_search_answer():
     )
 
     assert result is not None
-    assert result.text == (
-        "autor ejemplo es escritor y guionista\n\nfuentes: "
-        "https://example.com/profile https://example.com/interview"
-    )
+    assert result.text == "autor ejemplo es escritor y guionista"
     assert result.metadata["web_search_grounded"] is True
     assert result.metadata["web_search_source_count"] == 2
+    assert result.metadata["web_search_citation_count"] == 0
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():
@@ -1012,6 +1010,33 @@ def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
         ToolRuntime(),
     )
     return runtime, client, admin_report, request_count
+
+
+def test_provider_runtime_returns_none_for_billable_empty_stop():
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    runtime, client, admin_report, request_count = _build_retry_runtime(
+        [response],
+        extract_usage=lambda _response: {"prompt_tokens": 10},
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "research this"}],
+        enable_web_search=True,
+        tool_context={"chat_id": "123"},
+    )
+
+    assert result is None
+    assert len(client.calls) == 1
+    assert request_count.call_count == 1
+    admin_report.assert_not_called()
 
 
 @pytest.mark.parametrize(
