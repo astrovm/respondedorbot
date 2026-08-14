@@ -46,6 +46,7 @@ def build_openrouter_client(
     environment: Mapping[str, str],
     client_factory: Callable[..., Any],
     default_headers: Mapping[str, str] | None = None,
+    timeout: float = 60.0,
 ) -> Any | None:
     api_key = get_api_key()
     base_url = get_base_url()
@@ -58,7 +59,10 @@ def build_openrouter_client(
     kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": base_url,
-        "timeout": 60.0,
+        "timeout": timeout,
+        # ProviderRuntime owns retries. Keeping one retry layer prevents the
+        # SDK and the application from multiplying slow server-tool attempts.
+        "max_retries": 0,
     }
     if headers:
         kwargs["default_headers"] = headers
@@ -111,6 +115,7 @@ def build_web_search_tool(max_results: int, max_queries: int) -> dict[str, Any]:
         "parameters": {
             "engine": "firecrawl",
             "max_results": max_results,
+            "max_uses": max_queries,
             "max_total_results": max_results * max_queries,
         },
     }

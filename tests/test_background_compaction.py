@@ -1,0 +1,239 @@
+import json
+
+from tests.support import *
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.hashes = {}
+        self.values = {}
+
+    def hexists(self, name, field):
+        return field in self.hashes.get(name, {})
+
+    def hsetnx(self, name, field, value):
+        bucket = self.hashes.setdefault(name, {})
+        if field in bucket:
+            return 0
+        bucket[field] = value
+        return 1
+
+    def hset(self, name, field, value):
+        self.hashes.setdefault(name, {})[field] = value
+        return 1
+
+    def hgetall(self, name):
+        return dict(self.hashes.get(name, {}))
+
+    def hdel(self, name, field):
+        return int(self.hashes.get(name, {}).pop(field, None) is not None)
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def delete(self, key):
+        return int(self.values.pop(key, None) is not None)
+
+
+def _build_queue(redis_client, *, compact, save_result, settle_reservation):
+    from api.memory.background import DurableCompactionQueue
+
+    return DurableCompactionQueue(
+        redis_factory=lambda: redis_client,
+        compact=compact,
+        get_summary=lambda _client, _chat_id: None,
+        get_marker=lambda _client, _chat_id: None,
+        save_result=save_result,
+        estimate_reserve=lambda _plan: 3,
+        settle_reservation=settle_reservation,
+        logger=MagicMock(),
+    )
+
+
+def test_compaction_is_persisted_before_the_model_runs_and_survives_queue_restart():
+    from api.memory.compaction import CompactionPlan
+
+    redis_client = _FakeRedis()
+    compact = MagicMock(return_value=("[contexto anterior: resumen]", 100))
+    save_result = MagicMock()
+    settle_reservation = MagicMock(return_value={"applied": True})
+    billing = MagicMock(
+        user_id=42,
+        message={"message_id": 99},
+    )
+    billing.reserve_background_ai_credits.return_value = (
+        {
+            "reserved_credit_units": 3,
+            "chat_scope_id": None,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m2",
+        },
+        None,
+    )
+    plan = CompactionPlan(
+        chat_id="123",
+        messages=[{"id": "m1", "role": "user", "text": "hola"}],
+        prior_summary=None,
+        expected_marker=None,
+        target_marker="m1",
+    )
+
+    first_process = _build_queue(
+        redis_client,
+        compact=compact,
+        save_result=save_result,
+        settle_reservation=settle_reservation,
+    )
+    assert first_process.enqueue(plan, billing) is True
+    compact.assert_not_called()
+
+    restarted_process = _build_queue(
+        redis_client,
+        compact=compact,
+        save_result=save_result,
+        settle_reservation=settle_reservation,
+    )
+    assert restarted_process.run_pending_once() == 1
+
+    compact.assert_called_once_with(plan.messages, None)
+    save_result.assert_called_once_with(
+        redis_client,
+        "123",
+        "[contexto anterior: resumen]",
+        "m1",
+    )
+    assert redis_client.hgetall("memory:compaction:jobs") == {}
+    settle_reservation.assert_called_once()
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 1
+
+
+def test_compaction_skips_reservation_when_a_chat_already_has_a_job():
+    from api.memory.compaction import CompactionPlan
+
+    redis_client = _FakeRedis()
+    redis_client.hset("memory:compaction:jobs", "123", "{}")
+    billing = MagicMock()
+    queue = _build_queue(
+        redis_client,
+        compact=MagicMock(),
+        save_result=MagicMock(),
+        settle_reservation=MagicMock(),
+    )
+
+    result = queue.enqueue(
+        CompactionPlan("123", [], None, None, "m1"),
+        billing,
+    )
+
+    assert result is False
+    billing.reserve_background_ai_credits.assert_not_called()
+
+
+def test_enqueue_race_uses_distinct_settlement_ids_and_refunds_loser():
+    from api.memory.compaction import CompactionPlan
+
+    redis_client = _FakeRedis()
+    redis_client.hexists = MagicMock(return_value=False)
+    settle_reservation = MagicMock(return_value={"applied": True})
+
+    def build_billing(message_id):
+        billing = MagicMock(user_id=42, message={"message_id": message_id})
+
+        def reserve(usage_tag, _amount, *, metadata):
+            return (
+                {
+                    "reserved_credit_units": 3,
+                    "chat_scope_id": 100,
+                    "source": "chat",
+                    "usage_tag": usage_tag,
+                    "metadata": metadata,
+                },
+                None,
+            )
+
+        billing.reserve_background_ai_credits.side_effect = reserve
+        return billing
+
+    winner_billing = build_billing(99)
+    loser_billing = build_billing(100)
+    queue = _build_queue(
+        redis_client,
+        compact=MagicMock(),
+        save_result=MagicMock(),
+        settle_reservation=settle_reservation,
+    )
+
+    plan = CompactionPlan("123", [{"id": "m1"}], None, None, "m1")
+    assert queue.enqueue(plan, winner_billing) is True
+    stored_job = json.loads(redis_client.hgetall("memory:compaction:jobs")["123"])
+
+    assert queue.enqueue(plan, loser_billing) is False
+
+    settle_reservation.assert_called_once()
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 0
+    loser_usage_tag = settle_reservation.call_args.kwargs["usage_tag"]
+    assert loser_usage_tag != stored_job["reservation"]["usage_tag"]
+    assert loser_usage_tag.startswith("memory_compaction:123:m1:")
+    winner_billing.refund_reserved_ai_credits.assert_not_called()
+    loser_billing.refund_reserved_ai_credits.assert_not_called()
+
+
+def test_incompatible_job_refunds_reservation_before_deletion():
+    redis_client = _FakeRedis()
+    redis_client.hset(
+        "memory:compaction:jobs",
+        "123",
+        json.dumps(
+            {
+                "chat_id": "123",
+                "removed_schema_field": True,
+                "user_id": 42,
+                "reservation": {
+                    "reserved_credit_units": 3,
+                    "chat_scope_id": None,
+                    "source": "user",
+                    "usage_tag": "memory_compaction:123:m1",
+                },
+            }
+        ),
+    )
+    settle_reservation = MagicMock(return_value={"applied": True})
+    queue = _build_queue(
+        redis_client,
+        compact=MagicMock(),
+        save_result=MagicMock(),
+        settle_reservation=settle_reservation,
+    )
+
+    queue.run_pending_once()
+
+    settle_reservation.assert_called_once()
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 0
+    assert redis_client.hgetall("memory:compaction:jobs") == {}
+
+
+def test_undecodable_job_is_quarantined_for_manual_recovery():
+    redis_client = _FakeRedis()
+    redis_client.hset("memory:compaction:jobs", "123", "not-json")
+    queue = _build_queue(
+        redis_client,
+        compact=MagicMock(),
+        save_result=MagicMock(),
+        settle_reservation=MagicMock(),
+    )
+
+    queue.run_pending_once()
+
+    assert redis_client.hgetall("memory:compaction:jobs") == {}
+    dead_jobs = redis_client.hgetall("memory:compaction:dead_jobs")
+    assert len(dead_jobs) == 1
+    dead_job = json.loads(next(iter(dead_jobs.values())))
+    assert dead_job["chat_id"] == "123"
+    assert dead_job["payload"] == "not-json"
+    assert dead_job["reason"] == "undecodable"

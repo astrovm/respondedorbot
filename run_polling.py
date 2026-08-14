@@ -76,6 +76,7 @@ def main() -> int:
     from api.tasks.scheduler import get_scheduler, init_scheduler
 
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
+    index.app_runtime.summary.start_background_worker()
     start_world_cup_goal_monitor(
         WorldCupGoalMonitor(
             list_chat_ids=index.list_world_cup_goal_chat_ids,
@@ -121,8 +122,10 @@ def main() -> int:
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
+        index.app_runtime.summary.stop_background_worker()
         return 0
     except Exception as error:
+        index.app_runtime.summary.stop_background_worker()
         print(f"FATAL: {error}", file=sys.stderr)
         return 1
 

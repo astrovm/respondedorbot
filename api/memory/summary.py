@@ -13,7 +13,9 @@ from typing import Any
 import redis
 
 from api.memory import compaction as memory_compaction
-from api.memory.compaction import IncrementalSummarySource
+from api.ai.pricing import credit_units_from_usd_micros
+from api.memory.background import DurableCompactionQueue
+from api.memory.compaction import CompactionPlan, IncrementalSummarySource
 
 
 def call_summary_model(
@@ -185,12 +187,7 @@ def stream_summary_command(
     prompt_text: str,
     *,
     get_history: Callable[[str, redis.Redis], list[dict[str, Any]]],
-    prepare_memory: Callable[..., tuple[
-        list[dict[str, Any]],
-        str | None,
-        list[dict[str, Any]],
-        int,
-    ]],
+    prepare_memory: Callable[..., Any],
     load_personality: Callable[[], str],
     build_provider: Callable[[], Any],
     sanitize_text: Callable[[str], str],
@@ -213,14 +210,13 @@ def stream_summary_command(
 
         return empty(), None
 
-    visible_history, summary_text, _retrieved_messages, summary_cost = (
-        prepare_memory(
-            redis_client,
-            chat_id,
-            history,
-            prompt_text,
-        )
+    prepared = prepare_memory(
+        redis_client,
+        chat_id,
+        history,
+        prompt_text,
     )
+    visible_history, summary_text, _retrieved_messages, summary_cost = prepared[:4]
     source = IncrementalSummarySource(
         prior_summary=summary_text,
         delta_messages=visible_history,
@@ -309,6 +305,9 @@ class SummaryServiceDeps:
     truncate_lines: int
     no_markdown_prompt: str
     pricing_by_model: Mapping[str, Mapping[str, int]]
+    redis_factory: Callable[[], Any]
+    credits: Any
+    compaction_timeout_seconds: float
 
 
 class SummaryService:
@@ -316,6 +315,16 @@ class SummaryService:
 
     def __init__(self, deps: SummaryServiceDeps) -> None:
         self._deps = deps
+        self._background = DurableCompactionQueue(
+            redis_factory=deps.redis_factory,
+            compact=self.compact_conversation,
+            get_summary=deps.state.get_chat_summary,
+            get_marker=deps.state.get_chat_compacted_until,
+            save_result=deps.state.save_chat_compaction_result,
+            estimate_reserve=self.estimate_compaction_reserve,
+            settle_reservation=deps.credits.settle_ai_reservation_once,
+            logger=deps.logger,
+        )
 
     def estimate_cost(self, input_tokens: int, output_tokens: int, model: str) -> int:
         return estimate_summary_cost_usd_micros(
@@ -331,7 +340,9 @@ class SummaryService:
     ) -> tuple[str | None, int]:
         return call_summary_model(
             messages,
-            get_client=self._deps.provider.get_openrouter_client,
+            get_client=lambda: self._deps.provider.get_openrouter_client(
+                timeout=self._deps.compaction_timeout_seconds
+            ),
             estimate_tokens=self._deps.estimate_tokens,
             estimate_cost=self.estimate_cost,
             model=self._deps.model,
@@ -361,6 +372,31 @@ class SummaryService:
             max_summary_messages=self._deps.max_summary_messages,
             truncate_lines=self._deps.truncate_lines,
         )
+
+    def estimate_compaction_reserve(self, plan: CompactionPlan) -> int:
+        api_messages = build_chat_messages(
+            self.load_personality(),
+            plan.messages,
+            "actualiza el resumen previo con los mensajes nuevos",
+            prior_summary=plan.prior_summary,
+        )
+        input_tokens = self._deps.estimate_tokens(api_messages)
+        cost = self.estimate_cost(input_tokens, self._deps.max_tokens, self._deps.model)
+        return credit_units_from_usd_micros(cost)
+
+    def schedule_compaction(self, plan: CompactionPlan | None, billing: Any) -> bool:
+        if plan is None:
+            return False
+        return self._background.enqueue(plan, billing)
+
+    def start_background_worker(self) -> None:
+        self._background.start()
+
+    def stop_background_worker(self) -> None:
+        self._background.stop()
+
+    def run_pending_compactions_once(self) -> int:
+        return self._background.run_pending_once()
 
     def build_messages(
         self,
@@ -457,7 +493,13 @@ class SummaryService:
         reply_to_message_id: str | None = None,
         compaction_threshold: int | None = None,
         compaction_keep: int | None = None,
-    ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], int]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        str | None,
+        list[dict[str, Any]],
+        int,
+        CompactionPlan | None,
+    ]:
         """Prepare the smallest useful memory package for the next AI request.
 
         The result separates recent visible history, the compact summary, and
@@ -479,6 +521,5 @@ class SummaryService:
             get_summary=self._deps.state.get_chat_summary,
             get_marker=self._deps.state.get_chat_compacted_until,
             fetch_full_history=self._deps.state.fetch_for_compaction,
-            compact_memory=self.compact_memory,
             search_history=self._deps.state.search_history,
         )

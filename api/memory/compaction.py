@@ -15,6 +15,17 @@ class IncrementalSummarySource:
     next_marker: str | None
 
 
+@dataclass(frozen=True)
+class CompactionPlan:
+    """A durable unit of compaction work that can run after the answer."""
+
+    chat_id: str
+    messages: list[dict[str, Any]]
+    prior_summary: str | None
+    expected_marker: str | None
+    target_marker: str
+
+
 def build_incremental_summary_source(
     history: list[dict[str, Any]],
     existing_summary: str | None,
@@ -110,14 +121,14 @@ def prepare_chat_memory(
     get_summary: Callable[[redis.Redis, str], str | None],
     get_marker: Callable[[redis.Redis, str], str | None],
     fetch_full_history: Callable[..., list[dict[str, Any]]],
-    compact_memory: Callable[..., tuple[
-        str | None,
-        list[dict[str, Any]],
-        str | None,
-        int,
-    ]],
     search_history: Callable[..., list[dict[str, Any]]],
-) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], int]:
+) -> tuple[
+    list[dict[str, Any]],
+    str | None,
+    list[dict[str, Any]],
+    int,
+    CompactionPlan | None,
+]:
     summary = (
         get_summary(redis_client, chat_id)
         if redis_client is not None and chat_id
@@ -137,15 +148,30 @@ def prepare_chat_memory(
         if redis_client is not None and chat_id and summary
         else None
     )
-    summary, visible, _marker, cost = compact_memory(
-        redis_client,
-        chat_id,
-        base_history,
-        summary,
-        marker,
-        compaction_threshold=compaction_threshold,
-        compaction_keep=compaction_keep,
-    )
+    source = build_incremental_summary_source(base_history, summary, marker)
+    visible = source.delta_messages
+    plan = None
+    if (
+        chat_id
+        and not source.is_zero_delta
+        and len(source.delta_messages) > compaction_threshold
+    ):
+        dropped = source.delta_messages[:-compaction_keep]
+        if dropped:
+            target_marker = str(dropped[-1].get("id") or "")
+            if target_marker:
+                plan = CompactionPlan(
+                    chat_id=chat_id,
+                    messages=dropped,
+                    prior_summary=source.prior_summary,
+                    expected_marker=marker,
+                    target_marker=target_marker,
+                )
+                # The first compaction has no summary yet. Keep the full
+                # history in this request so moving work to the background
+                # does not remove context from the current answer.
+                if summary:
+                    visible = source.delta_messages[-compaction_keep:]
     recent_ids = {
         str(message.get("id"))
         for message in visible
@@ -163,4 +189,4 @@ def prepare_chat_memory(
         if redis_client is not None and chat_id and query_text.strip()
         else []
     )
-    return visible, summary, retrieved, cost
+    return visible, summary, retrieved, 0, plan

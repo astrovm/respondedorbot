@@ -330,6 +330,7 @@ def make_chat_tz(offset: int = -3) -> timezone:
 PRIMARY_CHAT_MODEL = "~deepseek/deepseek-v4-flash-latest"
 SUMMARY_MODEL = "~deepseek/deepseek-v4-flash-latest"
 SUMMARY_MAX_TOKENS = 2048
+COMPACTION_TIMEOUT_SECONDS = 600.0
 COMPACTION_THRESHOLD = 40
 COMPACTION_KEEP = 25
 COMPACTION_TRUNCATE_LINES = 25
@@ -1014,6 +1015,9 @@ _summary_service = SummaryService(
         truncate_lines=COMPACTION_TRUNCATE_LINES,
         no_markdown_prompt=PROMPT_NO_MARKDOWN,
         pricing_by_model=MODEL_PRICING_USD_MICROS,
+        redis_factory=_config_runtime.redis,
+        credits=credits_db_service,
+        compaction_timeout_seconds=COMPACTION_TIMEOUT_SECONDS,
     )
 )
 _ai_request_service = AIRequestService(
@@ -1225,6 +1229,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
         stream_summary_command=_summary_service.stream_command,
+        schedule_compaction=_summary_service.schedule_compaction,
     )
     return build_message_handler_deps(
         chat=MessageChatDeps(

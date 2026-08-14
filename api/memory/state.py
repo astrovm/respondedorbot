@@ -239,6 +239,20 @@ def save_chat_compacted_until(redis_client: redis.Redis, chat_id: str, marker: s
     redis_client.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
 
 
+def save_chat_compaction_result(
+    redis_client: redis.Redis,
+    chat_id: str,
+    summary: str,
+    marker: str,
+) -> None:
+    """Save a summary and its marker in one Redis transaction."""
+
+    pipeline = redis_client.pipeline(transaction=True)
+    pipeline.setex(_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
+    pipeline.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
+    pipeline.execute()
+
+
 def fetch_chat_messages_for_compaction(
     redis_client: redis.Redis,
     chat_id: str,
@@ -681,6 +695,7 @@ class MessageStateService:
     save_user_chat_compacted_until = staticmethod(save_user_chat_compacted_until)
     get_chat_compacted_until = staticmethod(get_chat_compacted_until)
     save_chat_compacted_until = staticmethod(save_chat_compacted_until)
+    save_chat_compaction_result = staticmethod(save_chat_compaction_result)
     save_chat_member = staticmethod(save_chat_member)
     get_chat_members = staticmethod(get_chat_members)
 
@@ -797,6 +812,7 @@ __all__ = [
     "get_user_chat_compacted_until",
     "get_user_chat_summary",
     "save_chat_compacted_until",
+    "save_chat_compaction_result",
     "save_chat_member",
     "save_chat_summary",
     "save_user_chat_compacted_until",

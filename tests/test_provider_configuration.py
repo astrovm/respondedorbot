@@ -22,6 +22,7 @@ def test_openrouter_client_uses_explicit_timeout(monkeypatch):
 
     assert client is not None
     assert captured_kwargs["timeout"] == 60.0
+    assert captured_kwargs["max_retries"] == 0
 
 
 def test_strip_markdown_formatting_removes_bold_markers():
@@ -166,10 +167,14 @@ def test_provider_runtime_enables_firecrawl_web_search():
             "parameters": {
                 "engine": "firecrawl",
                 "max_results": 10,
+                "max_uses": 3,
                 "max_total_results": 30,
             },
         }
     ]
+    assert client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "max_tool_calls": 3
+    }
 
 
 def test_provider_runtime_ignores_invalid_web_search_requests():
@@ -220,6 +225,31 @@ def test_provider_runtime_server_tool_use_takes_priority():
 
     assert result is not None
     assert result.metadata["web_search_requests"] == 3
+
+
+def test_provider_runtime_suppresses_web_search_answer_without_citations():
+    response = _build_chat_response(
+        text="seguro existe esa marca",
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "server_tool_use": {"web_search_requests": 1},
+        },
+    )
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+    runtime = _build_provider_runtime(client=client)
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "busca la marca Oaaa"}],
+        enable_web_search=True,
+    )
+
+    assert result is not None
+    assert "No pude verificar eso con fuentes" in result.text
+    assert result.metadata["web_search_grounded"] is False
+    assert result.metadata["web_search_citation_count"] == 0
 
 
 def test_provider_runtime_detects_pydantic_annotation():
@@ -275,10 +305,14 @@ def test_provider_runtime_sets_explicit_web_search_limits():
             "parameters": {
                 "engine": "firecrawl",
                 "max_results": 10,
+                "max_uses": 3,
                 "max_total_results": 30,
             },
         }
     ]
+    assert client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "max_tool_calls": 3
+    }
 
 
 def test_provider_runtime_includes_web_search_by_default():

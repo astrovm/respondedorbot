@@ -10,29 +10,17 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE, credit_units_from_usd_micros
+from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
 
 
 _summary_logger = logging.getLogger(__name__)
-
-
-def _make_summary_billing_segment(cost_usd_micros: int) -> Dict[str, Any]:
-    return {
-        "kind": "summary",
-        "text": "context compaction",
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-        "billing": {
-            "raw_usd_micros": cost_usd_micros,
-            "charged_credit_units": credit_units_from_usd_micros(cost_usd_micros),
-        },
-    }
 
 
 @dataclass(frozen=True)
 class AIService:
     credits_db_service: Any
     get_chat_history: Callable[[str, Any], List[Dict[str, Any]]]
-    prepare_chat_memory: Callable[..., Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]]
+    prepare_chat_memory: Callable[..., Any]
     build_ai_messages: Callable[..., List[Dict[str, Any]]]
     check_provider_available: Callable[..., bool]
     has_openrouter_fallback: Callable[[], bool]
@@ -41,6 +29,7 @@ class AIService:
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
     stream_summary_command: Callable[[str, Any, str], Any]
+    schedule_compaction: Callable[[Any, Any], bool]
 
     @staticmethod
     def _refund_if_present(
@@ -56,7 +45,7 @@ class AIService:
 
     def _prepare_conversation_messages(
         self, request: AIConversationRequest
-    ) -> Tuple[List[Dict[str, Any]], int]:
+    ) -> Tuple[List[Dict[str, Any]], Any]:
         chat_history = self.get_chat_history(request.chat_id, request.redis_client)
         reply_to_message = (
             request.message.get("reply_to_message") if request.message else None
@@ -66,17 +55,17 @@ class AIService:
             raw_reply_to_id = reply_to_message.get("message_id")
             if raw_reply_to_id is not None:
                 reply_to_message_id = str(raw_reply_to_id)
-        visible_history, summary_text, retrieved_messages, summary_cost = (
-            self.prepare_chat_memory(
-                request.redis_client,
-                request.chat_id,
-                chat_history,
-                request.prompt_text,
-                reply_to_message_id=reply_to_message_id,
-                compaction_threshold=request.compaction_threshold,
-                compaction_keep=request.compaction_keep,
-            )
+        prepared = self.prepare_chat_memory(
+            request.redis_client,
+            request.chat_id,
+            chat_history,
+            request.prompt_text,
+            reply_to_message_id=reply_to_message_id,
+            compaction_threshold=request.compaction_threshold,
+            compaction_keep=request.compaction_keep,
         )
+        visible_history, summary_text, retrieved_messages = prepared[:3]
+        compaction_plan = prepared[4] if len(prepared) > 4 else None
         messages = self.build_ai_messages(
             request.message,
             visible_history,
@@ -86,7 +75,7 @@ class AIService:
             retrieved_messages=retrieved_messages,
             timezone_offset=request.timezone_offset,
         )
-        return messages, summary_cost
+        return messages, compaction_plan
 
     def _reserve_image_context(
         self,
@@ -140,8 +129,6 @@ class AIService:
         self,
         request: AIConversationRequest,
         messages: List[Dict[str, Any]],
-        *,
-        summary_cost_usd_micros: int,
     ) -> Tuple[int, Dict[str, Any]]:
         full_reserve_credits, reserve_meta = (
             self.estimate_ai_base_reserve_credits(
@@ -154,13 +141,9 @@ class AIService:
                 timezone_offset=request.timezone_offset,
             )
         )
-        required_credits = full_reserve_credits + credit_units_from_usd_micros(
-            summary_cost_usd_micros
-        )
-        return required_credits, {
+        return full_reserve_credits, {
             "estimated_prompt_messages": len(messages),
-            "required_reserve_credits": required_credits,
-            "summary_cost_usd_micros": summary_cost_usd_micros,
+            "required_reserve_credits": full_reserve_credits,
             **reserve_meta,
         }
 
@@ -222,7 +205,7 @@ class AIService:
             return ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
 
         try:
-            ai_messages, summary_cost = self._prepare_conversation_messages(request)
+            ai_messages, compaction_plan = self._prepare_conversation_messages(request)
         except Exception:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_request_preparation_failed"
@@ -236,7 +219,6 @@ class AIService:
             self._estimate_full_conversation_reserve(
                 request,
                 ai_messages,
-                summary_cost_usd_micros=summary_cost,
             )
         )
         if full_reserve_credits > main_reserve_credits:
@@ -285,8 +267,6 @@ class AIService:
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
-        if summary_cost > 0:
-            billing_segments.insert(0, _make_summary_billing_segment(summary_cost))
         if bool(ai_response_meta.get("ai_fallback")):
             # The local fallback has no provider usage, so release every reserve.
             self._refund_if_present(
@@ -306,6 +286,16 @@ class AIService:
             billing_segments,
             reason="ai_response_success",
         )
+
+        try:
+            self.schedule_compaction(compaction_plan, request.billing_helper)
+        except Exception:
+            # Compaction is maintenance. It must not turn a successful answer
+            # into an error or add a model call to the foreground path.
+            _summary_logger.exception(
+                "compaction: failed to schedule chat_id=%s",
+                request.chat_id,
+            )
 
         return response_msg, True
 
@@ -412,7 +402,7 @@ def build_ai_service(
     *,
     credits_db_service: Any,
     get_chat_history: Callable[[str, Any], List[Dict[str, Any]]],
-    prepare_chat_memory: Callable[..., Tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, Any]], int]],
+    prepare_chat_memory: Callable[..., Any],
     build_ai_messages: Callable[..., List[Dict[str, Any]]],
     check_provider_available: Callable[..., bool],
     has_openrouter_fallback: Callable[[], bool],
@@ -421,6 +411,7 @@ def build_ai_service(
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     estimate_image_context_reserve_credits: Callable[[bytes, str], int],
     stream_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: (iter([]), None),
+    schedule_compaction: Callable[[Any, Any], bool] = lambda _plan, _billing: False,
 ) -> AIService:
     return AIService(
         credits_db_service=credits_db_service,
@@ -434,4 +425,5 @@ def build_ai_service(
         estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
         estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
         stream_summary_command=stream_summary_command,
+        schedule_compaction=schedule_compaction,
     )

@@ -1015,6 +1015,21 @@ def test_creditless_cap_allows_under_limit():
     mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 3600)
 
 
+def test_background_reservation_does_not_consume_message_cap():
+    mock_redis = MagicMock()
+    billing = _make_group_billing(limit=0, redis_client=mock_redis)
+
+    result, error = billing.reserve_background_ai_credits(
+        "memory_compaction:-100:m1",
+        10,
+    )
+
+    assert error is None
+    assert result is not None
+    assert result["source"] == "chat"
+    mock_redis.incr.assert_not_called()
+
+
 def test_creditless_cap_blocks_over_limit_and_refunds():
     mock_redis = MagicMock()
     mock_redis.incr.return_value = 4  # over limit=3

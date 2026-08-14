@@ -37,6 +37,7 @@ AI_LEDGER_EVENT_TYPES = (
     "ai_settlement_charge",
     "ai_settlement_debt",
     "ai_settlement_result",
+    "memory_compaction_settlement",
 )
 CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_002
 CREDIT_UNITS_MIGRATION_NAME = "credit_amounts_scaled_to_tenths_v1"
@@ -167,6 +168,12 @@ def ensure_schema() -> None:
                         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
+                    """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_compaction_usage_tag
+                    ON credit_ledger ((metadata->>'usage_tag'))
+                    WHERE event_type = 'memory_compaction_settlement'
                     """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_schema_migrations (
@@ -744,6 +751,101 @@ def refund_ai_charge(
         )
         return {
             "user_balance": int(updated_user_balance),
+            "chat_balance": int(chat_balance),
+        }
+
+    return _run_credit_transaction(operation)
+
+
+def settle_ai_reservation_once(
+    user_id: int,
+    chat_id: Optional[int],
+    source: ScopeType,
+    reserved_credit_units: int,
+    actual_credit_units: int,
+    usage_tag: str,
+    *,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Settle one reservation exactly once in the credits transaction.
+
+    Locking the payer account serializes concurrent attempts. The settlement
+    ledger row is the durable idempotency record, so a worker restart cannot
+    apply the same refund or extra charge twice.
+    """
+
+    reserved = max(0, int(reserved_credit_units or 0))
+    actual = max(0, int(actual_credit_units or 0))
+    normalized_source: ScopeType = "chat" if source == "chat" else "user"
+    metadata_dict = dict(metadata or {})
+
+    if normalized_source == "chat" and chat_id is None:
+        raise CreditsDBError("chat-funded settlement requires chat_id")
+    normalized_chat_id = int(chat_id) if chat_id is not None else None
+
+    def operation(cur: Any) -> Dict[str, Any]:
+        user_balance, chat_balance = _get_user_and_chat_balances_for_update(
+            cur, user_id, chat_id
+        )
+        cur.execute(
+            """
+            SELECT 1
+            FROM credit_ledger
+            WHERE event_type = 'memory_compaction_settlement'
+              AND metadata->>'usage_tag' = %s
+            LIMIT 1
+            """,
+            (str(usage_tag),),
+        )
+        if cur.fetchone() is not None:
+            return {
+                "applied": False,
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
+
+        adjustment = reserved - actual
+        if normalized_source == "chat":
+            assert normalized_chat_id is not None
+            chat_balance += adjustment
+            _set_balance(cur, "chat", normalized_chat_id, chat_balance)
+        else:
+            user_balance += adjustment
+            _set_balance(cur, "user", user_id, user_balance)
+
+        settlement_metadata = {
+            "source": normalized_source,
+            "usage_tag": str(usage_tag),
+            "reserved_credit_units": reserved,
+            "actual_credit_units": actual,
+            "adjustment_credit_units": adjustment,
+            **metadata_dict,
+        }
+        cur.execute(
+            """
+            INSERT INTO credit_ledger (
+                event_type,
+                actor_user_id,
+                user_id,
+                chat_id,
+                amount,
+                metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                "memory_compaction_settlement",
+                int(user_id),
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                int(adjustment),
+                json.dumps(settlement_metadata),
+            ),
+        )
+        return {
+            "applied": True,
+            "adjustment_credit_units": int(adjustment),
+            "user_balance": int(user_balance),
             "chat_balance": int(chat_balance),
         }
 
