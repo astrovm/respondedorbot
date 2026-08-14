@@ -197,36 +197,20 @@ def get_stock_prices(
         queries = [part.strip() for part in raw_query.split(",") if part.strip()]
     else:
         parts = [part for part in raw_query.split() if part]
-        looks_like_symbol_list = all(
-            part == part.upper() or part == part.lower() for part in parts
-        )
-        queries = parts if len(parts) <= 1 or looks_like_symbol_list else [raw_query]
+        queries = parts
         full_query_fallback = len(queries) > 1
     if not queries:
         queries = fetch_top_stocks()
         if not queries:
             return "no pude traer el top de acciones, probá de nuevo"
 
-    quotes: list[tuple[str, StockQuote | None]] = []
-    for query in queries[:20]:
-        normalized = query.upper()
-        is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
-        quote = fetch_quote(normalized) if is_symbol else None
-        quotes.append((query, quote))
-
-    if full_query_fallback and not any(quote for _, quote in quotes):
-        resolved = resolve_symbol(raw_query)
-        quote = fetch_quote(resolved) if resolved else None
-        quotes = [(raw_query, quote)]
-    else:
-        resolved_quotes: list[tuple[str, StockQuote | None]] = []
-        for query, quote in quotes:
-            resolved_quote = quote
-            if resolved_quote is None:
-                resolved = resolve_symbol(query)
-                resolved_quote = fetch_quote(resolved) if resolved else None
-            resolved_quotes.append((query, resolved_quote))
-        quotes = resolved_quotes
+    quotes = _lookup_stock_quotes(
+        raw_query,
+        queries[:20],
+        full_query_fallback=full_query_fallback,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
 
     lines: list[str] = []
     for query, quote in quotes:
@@ -241,6 +225,63 @@ def get_stock_prices(
         else:
             lines.append(f"{query}: no se pudo encontrar")
     return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+
+
+def _lookup_stock_quotes(
+    raw_query: str,
+    queries: list[str],
+    *,
+    full_query_fallback: bool,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+) -> list[tuple[str, StockQuote | None]]:
+    quotes: list[tuple[str, StockQuote | None]] = []
+    for query in queries:
+        normalized = query.upper()
+        is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
+        quote = fetch_quote(normalized) if is_symbol else None
+        quotes.append((query, quote))
+
+    direct_quotes = [quote for _, quote in quotes if quote]
+    if not full_query_fallback or len(direct_quotes) == len(quotes):
+        return _resolve_missing_stock_quotes(
+            quotes,
+            fetch_quote=fetch_quote,
+            resolve_symbol=resolve_symbol,
+        )
+
+    resolved = resolve_symbol(raw_query)
+    direct_by_symbol = {quote.symbol.upper(): quote for quote in direct_quotes}
+    full_quote = direct_by_symbol.get(str(resolved or "").upper())
+    if full_quote is None and resolved:
+        full_quote = fetch_quote(resolved)
+    if full_quote and (
+        not direct_quotes or full_quote.symbol.upper() not in direct_by_symbol
+    ):
+        return [(raw_query, full_quote)]
+    if not direct_quotes:
+        return [(raw_query, None)]
+    return _resolve_missing_stock_quotes(
+        quotes,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
+
+
+def _resolve_missing_stock_quotes(
+    quotes: list[tuple[str, StockQuote | None]],
+    *,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+) -> list[tuple[str, StockQuote | None]]:
+    resolved_quotes: list[tuple[str, StockQuote | None]] = []
+    for query, quote in quotes:
+        resolved_quote = quote
+        if resolved_quote is None:
+            resolved = resolve_symbol(query)
+            resolved_quote = fetch_quote(resolved) if resolved else None
+        resolved_quotes.append((query, resolved_quote))
+    return resolved_quotes
 
 
 class StockService:

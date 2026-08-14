@@ -65,7 +65,7 @@ def get_prices(
         convert_parameter=convert_parameter,
         fetch_quotes=fetch_quotes,
     )
-    if selection_error:
+    if selection_error and not price_rows:
         return selection_error
     display = PriceDisplay(
         convert_to=convert_to,
@@ -76,7 +76,8 @@ def get_prices(
         ),
         timeframe_label=timeframe or "24h",
     )
-    return _format_price_rows(price_rows[:prices_number], display)
+    formatted = _format_price_rows(price_rows[:prices_number], display)
+    return f"{formatted}\n{selection_error}" if selection_error else formatted
 
 
 def _unsupported_timeframe_error(
@@ -168,14 +169,12 @@ def _select_price_rows(
     if not msg_text.upper().isupper():
         return listed, prices_number or 10, None
 
-    coins = expand_price_tokens(re.split(r"[,\s]+", msg_text))
+    raw_tokens = [token for token in re.split(r"[,\s]+", msg_text) if token]
+    coins = expand_price_tokens(raw_tokens)
+    explicit_requested = _fallback_quote_tokens(coins[:len(raw_tokens)])
     selected = _select_listed_coins(listed, coins, prices_number)
     requested = _fallback_quote_tokens(coins)
-    matched_tokens = {
-        str(coin.get(field) or "").upper().replace(" ", "")
-        for coin in selected
-        for field in ("symbol", "name", "slug")
-    }
+    matched_tokens = _matched_price_tokens(selected)
     missing = [token for token in requested if token not in matched_tokens]
     if missing:
         selected.extend(
@@ -186,10 +185,16 @@ def _select_price_rows(
             )
         )
         selected = _unique_price_rows(selected)
+    unresolved = [
+        token
+        for token in explicit_requested
+        if token not in _matched_price_tokens(selected)
+    ]
     if selected:
-        return selected, len(selected), None
-    if requested:
-        return [], 0, f"no encontre esos ponzis: {', '.join(requested)}"
+        error = f"no encontre esos ponzis: {', '.join(unresolved)}" if unresolved else None
+        return selected, len(selected), error
+    if explicit_requested:
+        return [], 0, f"no encontre esos ponzis: {', '.join(explicit_requested)}"
     return [], 0, "no pude traer precios de crypto boludo"
 
 
@@ -274,6 +279,14 @@ def _has_price(coin: dict[str, Any], convert_parameter: str) -> bool:
         .get("price")
         is not None
     )
+
+
+def _matched_price_tokens(rows: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(coin.get(field) or "").upper().replace(" ", "")
+        for coin in rows
+        for field in ("symbol", "name", "slug")
+    }
 
 
 def _unique_price_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

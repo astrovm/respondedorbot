@@ -268,7 +268,9 @@ def test_stock_prices_resolve_company_name_and_preserve_currency():
         exchange="Synthetic Exchange",
         variation=1.25,
     )
-    fetch_quote = MagicMock(return_value=quote)
+    fetch_quote = MagicMock(
+        side_effect=lambda symbol: quote if symbol == "EXM" else None
+    )
     resolve_symbol = MagicMock(return_value="EXM")
 
     result = get_stock_prices(
@@ -300,6 +302,27 @@ def test_stock_prices_preserve_space_separated_exchange_symbols():
     assert "EXM.BA: 10.00 ARS" in result
     assert "ALT: 20.00 USD" in result
     assert fetch_quote.call_args_list == [call("EXM.BA"), call("ALT")]
+
+
+def test_stock_prices_preserve_mixed_case_symbol_lists():
+    quotes = {
+        "EXM": StockQuote("EXM", "", 10, "USD", "Synthetic Exchange", 1),
+        "ALT": StockQuote("ALT", "", 20, "USD", "Synthetic Exchange", -1),
+    }
+    fetch_quote = MagicMock(side_effect=quotes.get)
+    resolve_symbol = MagicMock()
+
+    result = get_stock_prices(
+        "Exm Alt",
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert "EXM: 10.00 USD" in result
+    assert "ALT: 20.00 USD" in result
+    assert fetch_quote.call_args_list == [call("EXM"), call("ALT")]
+    resolve_symbol.assert_not_called()
 
 
 def test_stock_symbol_search_retries_compact_company_name():

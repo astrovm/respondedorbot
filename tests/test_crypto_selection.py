@@ -77,6 +77,26 @@ def test_missing_asset_is_fetched_when_another_asset_is_listed():
     fetch_quotes.assert_called_once_with(["ZZZ"], "USD")
 
 
+def test_unresolved_asset_is_reported_with_partial_results():
+    listed = [_coin("AAA", 1.0, coin_id=1)]
+    fetch_quotes = MagicMock(return_value={})
+
+    result = get_prices(
+        "aaa zzz",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": listed}),
+        fetch_quotes=fetch_quotes,
+    )
+
+    assert result is not None
+    assert "AAA:" in result
+    assert "no encontre esos ponzis: ZZZ" in result
+    assert fetch_quotes.call_args_list == [
+        call(["ZZZ"], "USD"),
+        call(["zzz"], "USD", by_slug=True),
+    ]
+
+
 def test_satoshi_formatting_does_not_mutate_cached_quote():
     coin = _coin("BTC", 1.0, coin_id=1)
 
