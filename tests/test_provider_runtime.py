@@ -103,6 +103,87 @@ def test_provider_runtime_executes_tool_calls_until_stop():
     assert client.calls[1]["messages"][-1]["role"] == "tool"
 
 
+def test_provider_runtime_shares_web_search_budget_across_tool_rounds():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    tool_calls = [
+        SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(name="calc", arguments='{"x": 1}'),
+        )
+    ]
+    first_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "tool_calls",
+                SimpleNamespace(content="", tool_calls=tool_calls, annotations=[]),
+            )
+        ]
+    )
+    first_response.usage = {"server_tool_use": {"web_search_requests": 2}}
+    second_response = _FakeResponse(
+        [
+            _FakeChoice(
+                "stop",
+                SimpleNamespace(
+                    content="done",
+                    tool_calls=[],
+                    annotations=[{"type": "url_citation"}],
+                ),
+            )
+        ]
+    )
+    second_response.usage = {"server_tool_use": {"web_search_requests": 1}}
+    client = _FakeClient([first_response, second_response])
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: client,
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": "firecrawl",
+                    "max_results": 10,
+                    "max_uses": 3,
+                    "max_total_results": 30,
+                },
+            },
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage={},
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda response: response.usage,
+            primary_model="test-model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=SimpleNamespace(output="2")),
+            parse_tool_call_arguments_fn=lambda args: json.loads(args),
+            tool_registry={"calc": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "search and calculate"}],
+        enable_web_search=True,
+        extra_tools=[{"type": "function", "function": {"name": "calc"}}],
+    )
+
+    assert result is not None
+    assert result.metadata["web_search_requests"] == 3
+    assert client.calls[0]["tools"][0]["parameters"]["max_uses"] == 3
+    assert client.calls[1]["tools"][0]["parameters"]["max_uses"] == 1
+    assert client.calls[1]["extra_body"] == {"max_tool_calls": 1}
+
+
 def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 from uuid import uuid4
@@ -48,7 +49,7 @@ class DurableCompactionQueue:
         get_marker: Callable[[Any, str], str | None],
         save_result: Callable[[Any, str, str, str], None],
         estimate_reserve: Callable[[CompactionPlan], int],
-        credits: Any,
+        settle_reservation: Callable[..., Mapping[str, Any]],
         logger: Any,
     ) -> None:
         self._redis_factory = redis_factory
@@ -57,7 +58,7 @@ class DurableCompactionQueue:
         self._get_marker = get_marker
         self._save_result = save_result
         self._estimate_reserve = estimate_reserve
-        self._credits = credits
+        self._settle_reservation = settle_reservation
         self._logger = logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -75,7 +76,7 @@ class DurableCompactionQueue:
 
         reserve_units = max(1, self._estimate_reserve(plan))
         usage_tag = f"memory_compaction:{plan.chat_id}:{plan.target_marker}"
-        reservation, error_message = billing.reserve_ai_credits(
+        reservation, error_message = billing.reserve_background_ai_credits(
             usage_tag,
             reserve_units,
             metadata={
@@ -111,9 +112,16 @@ class DurableCompactionQueue:
             self._logger.warning("compaction: failed to persist job: %s", error)
             stored = False
         if not stored:
-            billing.refund_reserved_ai_credits(
-                reservation,
-                reason="memory_compaction_enqueue_failed",
+            self._settle_reservation(
+                user_id=int(billing.user_id),
+                chat_id=reservation.get("chat_scope_id"),
+                source=str(reservation.get("source") or "user"),
+                reserved_credit_units=int(
+                    reservation.get("reserved_credit_units") or 0
+                ),
+                actual_credit_units=0,
+                usage_tag=str(reservation.get("usage_tag") or usage_tag),
+                metadata={"reason": "memory_compaction_enqueue_failed"},
             )
         return stored
 
@@ -143,10 +151,18 @@ class DurableCompactionQueue:
             if not chat_id or not payload:
                 continue
             try:
-                job = CompactionJob(**json.loads(payload))
-            except Exception:
-                self._logger.exception("compaction: invalid job chat_id=%s", chat_id)
-                client.hdel(_JOBS_KEY, chat_id)
+                decoded = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                # Keep undecodable data. Deleting it could discard the only
+                # copy of a paid reservation that an operator can recover.
+                self._logger.exception("compaction: undecodable job chat_id=%s", chat_id)
+                continue
+            try:
+                job = CompactionJob(**decoded)
+            except (TypeError, ValueError):
+                self._logger.exception("compaction: incompatible job chat_id=%s", chat_id)
+                if self._settle_invalid_job(decoded, chat_id=chat_id):
+                    client.hdel(_JOBS_KEY, chat_id)
                 continue
             if job.next_attempt_at > time.time():
                 continue
@@ -177,10 +193,10 @@ class DurableCompactionQueue:
         ):
             # The process stopped after saving memory but before deleting the
             # durable job. Finish its billing instead of refunding it.
-            self._settle(job)
+            self._settle(job, reason="memory_compaction_success")
             return
         if current_summary != job.prior_summary or current_marker != job.expected_marker:
-            self._refund(job, reason="memory_compaction_obsolete")
+            self._settle(job, actual_credit_units=0, reason="memory_compaction_obsolete")
             return
 
         if not job.result_summary:
@@ -201,7 +217,7 @@ class DurableCompactionQueue:
             job.result_summary,
             job.target_marker,
         )
-        self._settle(job)
+        self._settle(job, reason="memory_compaction_success")
         self._logger.info(
             "compaction: completed chat_id=%s target=%s attempts=%d cost_usd_micros=%d",
             job.chat_id,
@@ -220,7 +236,7 @@ class DurableCompactionQueue:
             error,
         )
         if job.attempts >= _MAX_ATTEMPTS:
-            self._refund(job, reason="memory_compaction_failed")
+            self._settle(job, actual_credit_units=0, reason="memory_compaction_failed")
             client.hdel(_JOBS_KEY, job.chat_id)
             return
         job.next_attempt_at = time.time() + 30 * (2 ** (job.attempts - 1))
@@ -230,46 +246,65 @@ class DurableCompactionQueue:
             json.dumps(asdict(job), ensure_ascii=False),
         )
 
-    def _settle(self, job: CompactionJob) -> None:
-        reserved = int(job.reservation.get("reserved_credit_units") or 0)
-        actual = credit_units_from_usd_micros(job.result_cost_usd_micros)
-        if actual < reserved:
-            self._refund(job, amount=reserved - actual, reason="memory_compaction_success")
-        elif actual > reserved:
-            self._credits.charge_ai_credits(
-                user_id=job.user_id,
-                chat_id=job.reservation.get("chat_scope_id"),
-                amount=actual - reserved,
-                event_type="ai_settlement_charge",
-                metadata={"usage_tag": job.reservation.get("usage_tag")},
-            )
-
-    def _refund(
+    def _settle(
         self,
         job: CompactionJob,
         *,
         reason: str,
-        amount: int | None = None,
+        actual_credit_units: int | None = None,
     ) -> None:
-        refund_amount = (
-            int(job.reservation.get("reserved_credit_units") or 0)
-            if amount is None
-            else max(0, int(amount))
+        actual = (
+            credit_units_from_usd_micros(job.result_cost_usd_micros)
+            if actual_credit_units is None
+            else max(0, int(actual_credit_units))
         )
-        if refund_amount <= 0:
-            return
-        self._credits.refund_ai_charge(
+        self._settle_reservation(
             user_id=job.user_id,
             chat_id=job.reservation.get("chat_scope_id"),
-            amount=refund_amount,
             source=str(job.reservation.get("source") or "user"),
-            event_type="ai_refund",
+            reserved_credit_units=int(
+                job.reservation.get("reserved_credit_units") or 0
+            ),
+            actual_credit_units=actual,
+            usage_tag=str(job.reservation.get("usage_tag") or ""),
             metadata={
-                "usage_tag": job.reservation.get("usage_tag"),
                 "reason": reason,
                 "message_id": job.message_id,
             },
         )
+
+    def _settle_invalid_job(self, decoded: Any, *, chat_id: str) -> bool:
+        if not isinstance(decoded, Mapping):
+            return False
+        reservation = decoded.get("reservation")
+        if not isinstance(reservation, Mapping) or decoded.get("user_id") is None:
+            return False
+        usage_tag = str(reservation.get("usage_tag") or "")
+        if not usage_tag:
+            return False
+        try:
+            self._settle_reservation(
+                user_id=int(decoded["user_id"]),
+                chat_id=reservation.get("chat_scope_id"),
+                source=str(reservation.get("source") or "user"),
+                reserved_credit_units=int(
+                    reservation.get("reserved_credit_units") or 0
+                ),
+                actual_credit_units=0,
+                usage_tag=usage_tag,
+                metadata={
+                    "reason": "memory_compaction_incompatible_job",
+                    "chat_id": chat_id,
+                },
+            )
+            return True
+        except Exception as error:
+            self._logger.warning(
+                "compaction: failed to settle incompatible job chat_id=%s error=%s",
+                chat_id,
+                error,
+            )
+            return False
 
     def _run(self) -> None:
         while not self._stop.is_set():

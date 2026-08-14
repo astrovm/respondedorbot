@@ -322,7 +322,7 @@ class SummaryService:
             get_marker=deps.state.get_chat_compacted_until,
             save_result=deps.state.save_chat_compaction_result,
             estimate_reserve=self.estimate_compaction_reserve,
-            credits=deps.credits,
+            settle_reservation=deps.credits.settle_ai_reservation_once,
             logger=deps.logger,
         )
 

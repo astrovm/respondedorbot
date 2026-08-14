@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import re
 import time
@@ -154,6 +155,7 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
+        web_search_max_uses: Optional[int] = None,
     ) -> Optional[Any]:
         """Build request, retry on transient errors, and return the response."""
         request_kwargs: Dict[str, Any] = {
@@ -162,13 +164,12 @@ class ProviderRuntime:
             "max_tokens": chat_output_token_limit(self._deps.primary_model),
         }
 
-        tools_list: List[Dict[str, Any]] = []
-        if enable_web_search:
-            web_search_tool = self._deps.build_web_search_tool()
-            tools_list.append(web_search_tool)
-            self._apply_web_search_limits(request_kwargs, web_search_tool)
-        if extra_tools:
-            tools_list.extend(extra_tools)
+        tools_list = self._build_request_tools(
+            enable_web_search=enable_web_search,
+            extra_tools=extra_tools,
+            web_search_max_uses=web_search_max_uses,
+            request_kwargs=request_kwargs,
+        )
         if tools_list:
             request_kwargs["tools"] = tools_list
 
@@ -386,6 +387,7 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
+        web_search_max_uses: Optional[int] = None,
     ) -> Optional[tuple[Any, Any]]:
         response = self._run_chat_completion(
             client=client,
@@ -395,6 +397,7 @@ class ProviderRuntime:
             extra_tools=extra_tools,
             tool_context=tool_context,
             round_idx=round_idx,
+            web_search_max_uses=web_search_max_uses,
         )
         choices = getattr(response, "choices", None) if response is not None else None
         return (response, choices[0]) if choices else None
@@ -548,6 +551,9 @@ class ProviderRuntime:
             return None
 
         self._deps.increment_request_count()
+        remaining_web_search_uses = self._configured_web_search_max_uses(
+            enable_web_search
+        )
         for round_idx in range(self._deps.max_tool_rounds):
             round_response = self._run_round_choice(
                 client=client,
@@ -557,10 +563,15 @@ class ProviderRuntime:
                 extra_tools=extra_tools,
                 tool_context=tool_context,
                 round_idx=round_idx,
+                web_search_max_uses=remaining_web_search_uses,
             )
             if round_response is None:
                 return None
-            _response, choice = round_response
+            response, choice = round_response
+            remaining_web_search_uses = self._remaining_web_search_uses(
+                remaining_web_search_uses,
+                response,
+            )
             finish_reason = choice.finish_reason
             message = choice.message
 
@@ -624,6 +635,7 @@ class ProviderRuntime:
         current_messages: List[Dict[str, Any]],
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
+        total_web_search_requests: int = 0,
     ) -> ToolRoundDecision:
         tool_calls = getattr(message, "tool_calls", None) or []
         known_calls = (
@@ -634,7 +646,12 @@ class ProviderRuntime:
         if not known_calls:
             text = str(getattr(message, "content", "") or "").strip()
             result = (
-                self._build_round_result(response, message, round_idx)
+                self._build_round_result(
+                    response,
+                    message,
+                    round_idx,
+                    metadata={"web_search_requests": total_web_search_requests},
+                )
                 if text
                 else None
             )
@@ -686,6 +703,64 @@ class ProviderRuntime:
         except (TypeError, ValueError):
             return 0
 
+    def _configured_web_search_max_uses(self, enabled: bool) -> Optional[int]:
+        if not enabled:
+            return 0
+        configured = self._web_search_max_uses(self._deps.build_web_search_tool())
+        return configured or None
+
+    def _build_request_tools(
+        self,
+        *,
+        enable_web_search: bool,
+        extra_tools: Optional[List[Dict[str, Any]]],
+        web_search_max_uses: Optional[int],
+        request_kwargs: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        tools = list(extra_tools or [])
+        if not enable_web_search or web_search_max_uses == 0:
+            return tools
+        web_search_tool = copy.deepcopy(self._deps.build_web_search_tool())
+        if web_search_max_uses is not None:
+            self._limit_web_search_tool(web_search_tool, web_search_max_uses)
+        self._apply_web_search_limits(request_kwargs, web_search_tool)
+        return [web_search_tool, *tools]
+
+    @staticmethod
+    def _limit_web_search_tool(tool: Dict[str, Any], remaining: int) -> None:
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, dict):
+            return
+        limited = max(0, int(remaining))
+        parameters["max_uses"] = limited
+        try:
+            max_results = max(0, int(parameters.get("max_results") or 0))
+            current_total = max(0, int(parameters.get("max_total_results") or 0))
+        except (TypeError, ValueError):
+            return
+        if max_results and current_total:
+            parameters["max_total_results"] = min(
+                current_total,
+                max_results * limited,
+            )
+
+    def _web_search_request_count(self, response: Any) -> int:
+        usage_map = self._deps.extract_usage_map(response) or {}
+        server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
+        try:
+            return max(0, int(server_tool_use.get("web_search_requests") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _remaining_web_search_uses(
+        self,
+        remaining: Optional[int],
+        response: Any,
+    ) -> Optional[int]:
+        if remaining is None:
+            return None
+        return max(0, remaining - self._web_search_request_count(response))
+
     @classmethod
     def _apply_web_search_limits(
         cls,
@@ -707,6 +782,7 @@ class ProviderRuntime:
         current_messages: List[Dict[str, Any]],
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
+        total_web_search_requests: int = 0,
     ) -> ToolRoundDecision:
         pseudo_call = self._parse_pseudo_tool_call(
             str(getattr(message, "content", "") or ""),
@@ -724,6 +800,11 @@ class ProviderRuntime:
             return ToolRoundDecision(updated_messages, continue_rounds=True)
 
         web_metadata = self._web_search_metadata(response, message)
+        if total_web_search_requests > 0:
+            web_metadata["web_search_requests"] = total_web_search_requests
+            web_metadata["web_search_grounded"] = bool(
+                web_metadata.get("web_search_citation_count")
+            )
         text_override = None
         if web_metadata.get("web_search_grounded") is False:
             warning_context = dict(tool_context or {})
@@ -798,6 +879,10 @@ class ProviderRuntime:
             return None
 
         self._deps.increment_request_count()
+        remaining_web_search_uses = self._configured_web_search_max_uses(
+            enable_web_search
+        )
+        total_web_search_requests = 0
         for round_idx in range(self._deps.max_tool_rounds):
             round_response = self._run_round_choice(
                 client=client,
@@ -807,10 +892,17 @@ class ProviderRuntime:
                 extra_tools=extra_tools,
                 tool_context=tool_context,
                 round_idx=round_idx,
+                web_search_max_uses=remaining_web_search_uses,
             )
             if round_response is None:
                 return None
             response, choice = round_response
+            round_web_search_requests = self._web_search_request_count(response)
+            total_web_search_requests += round_web_search_requests
+            remaining_web_search_uses = self._remaining_web_search_uses(
+                remaining_web_search_uses,
+                response,
+            )
             finish_reason = choice.finish_reason
             message = choice.message
 
@@ -822,6 +914,7 @@ class ProviderRuntime:
                     current_messages=current_messages,
                     extra_tools=extra_tools,
                     tool_context=tool_context,
+                    total_web_search_requests=total_web_search_requests,
                 )
                 if decision.result is not None:
                     return decision.result
@@ -838,6 +931,7 @@ class ProviderRuntime:
                     current_messages=current_messages,
                     extra_tools=extra_tools,
                     tool_context=tool_context,
+                    total_web_search_requests=total_web_search_requests,
                 )
                 if decision.continue_rounds:
                     current_messages = decision.messages
@@ -849,7 +943,10 @@ class ProviderRuntime:
                     response,
                     message,
                     round_idx,
-                    metadata={"truncated": True},
+                    metadata={
+                        "truncated": True,
+                        "web_search_requests": total_web_search_requests,
+                    },
                 )
 
             self._report_unexpected_finish(
