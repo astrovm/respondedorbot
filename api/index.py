@@ -152,6 +152,7 @@ import api.tools.task_list
 import api.tools.task_cancel
 import api.tools.get_chat_members
 import api.tools.stock_prices
+import api.tools.random_choice
 import api.tools.dollar_rates
 import api.tools.weather
 import api.tools.hacker_news
@@ -634,8 +635,9 @@ def get_help() -> str:
     return render_help_text()
 
 
-def get_weather() -> dict[str, Any]:
+def get_weather(location: str = "Buenos Aires") -> dict[str, Any]:
     return weather_context.get_weather(
+        location,
         cached_request=_cache_service.request,
         cache_ttl=TTL_WEATHER,
         local_timezone=BA_TZ,
@@ -681,12 +683,21 @@ def get_market_context() -> Dict[str, Any]:
     return market_data
 
 
-def get_weather_context() -> Optional[Dict[str, Any]]:
+def get_weather_context(location: str = "Buenos Aires") -> Optional[Dict[str, Any]]:
     return weather_context.get_weather_context(
+        location,
         get_weather_data=get_weather,
         get_description=get_weather_description,
         logger=_logger,
     )
+
+
+def get_weather_command(location: str) -> str:
+    requested_location = location or "Buenos Aires"
+    weather = get_weather_context(requested_location)
+    if not weather:
+        return f"no se pudo obtener el clima de {requested_location}"
+    return format_weather_info(weather)
 
 
 def get_time_context(timezone_offset: int = -3) -> Dict[str, Any]:
@@ -846,6 +857,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
             "convert_base": convert_base,
             "select_random": select_random,
             "get_prices": _price_service.get_prices,
+            "get_weather": get_weather_command,
             "get_dollar_rates": _dollar_service.get_rates,
             "get_oil_price": _stock_service.get_oil_price,
             "get_stock_prices": _stock_service.get_stock_prices,
@@ -1029,6 +1041,8 @@ _ai_request_service = AIRequestService(
         get_time_context=get_time_context,
         get_hacker_news_context=get_hacker_news_context,
         get_prices=_price_service.get_prices,
+        get_stock_prices=_stock_service.get_stock_prices,
+        select_random=select_random,
         get_dollar_rates=_dollar_service.get_rates,
         get_bot_capabilities=render_ai_capabilities_prompt,
         config_redis=_config_runtime.redis,
