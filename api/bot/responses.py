@@ -184,6 +184,7 @@ def handle_ai_stream_response(
         user_name=user_name,
         user_id=user_id,
         timezone_offset=timezone_offset,
+        response_meta=response_meta,
     )
     try:
         # The consumer creates one Telegram message, then edits it as tokens arrive.
@@ -194,7 +195,18 @@ def handle_ai_stream_response(
             edit_stream_message,
             reply_to_message_id=reply_to_message_id,
         )
+        text_override = (
+            response_meta.pop("stream_text_override", None)
+            if response_meta is not None
+            else None
+        )
+        if isinstance(text_override, str) and text_override.strip():
+            final_text = text_override
+            edit_stream_message(chat_id, final_text, str(message_id))
+            set_stream_metadata(str(message_id), final_text)
     except RuntimeError:
+        if response_meta is not None:
+            response_meta.pop("stream_text_override", None)
         # Telegram editing can fail. Generate the same answer normally and send it
         # as one message so the user still receives a response.
         final_text = ask_ai(

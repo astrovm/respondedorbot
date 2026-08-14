@@ -697,6 +697,12 @@ class ProviderRuntime:
         return metadata
 
     @staticmethod
+    def _stream_text_override(metadata: Mapping[str, Any]) -> Optional[str]:
+        if metadata.get("web_search_grounded") is False:
+            return _UNGROUNDED_SEARCH_MESSAGE
+        return None
+
+    @staticmethod
     def _web_search_max_uses(tool: Mapping[str, Any]) -> int:
         parameters = ensure_mapping(tool.get("parameters")) or {}
         try:

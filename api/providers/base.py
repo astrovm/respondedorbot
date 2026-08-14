@@ -5,7 +5,7 @@ with support for both completion and streaming modes.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from api.ai.pricing import AIUsageResult
 
@@ -46,6 +46,7 @@ class StreamingAIProvider(AIProvider, Protocol):
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Iterator[str]:
         """Stream response tokens."""
         ...
@@ -119,6 +120,7 @@ class ProviderChain:
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Iterator[Tuple[str, str]]:
         """Stream from the first available provider.
 
@@ -129,12 +131,17 @@ class ProviderChain:
             try:
                 if not isinstance(provider, StreamingAIProvider):
                     continue
+                stream_kwargs: Dict[str, Any] = {
+                    "enable_web_search": enable_web_search,
+                    "extra_tools": extra_tools,
+                    "tool_context": tool_context,
+                }
+                if on_usage_result is not None:
+                    stream_kwargs["on_usage_result"] = on_usage_result
                 token_iterator = provider.stream(
                     system_message,
                     messages,
-                    enable_web_search=enable_web_search,
-                    extra_tools=extra_tools,
-                    tool_context=tool_context,
+                    **stream_kwargs,
                 )
                 try:
                     first_token = next(token_iterator)

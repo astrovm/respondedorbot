@@ -25,16 +25,48 @@ def test_handle_ai_stream_response_returns_final_text_and_stores_stream_metadata
 
     assert result == "hola"
     assert_no_raw_tool_syntax(result)
-    ask_stream.assert_called_once_with(
-        [{"role": "user", "content": "hola"}],
-        chat_id="123",
-        user_name="@ana",
-        user_id=55,
-        timezone_offset=-3,
-    )
+    ask_stream.assert_called_once()
+    assert ask_stream.call_args.args == ([{"role": "user", "content": "hola"}],)
+    assert ask_stream.call_args.kwargs == {
+        "chat_id": "123",
+        "user_name": "@ana",
+        "user_id": 55,
+        "timezone_offset": -3,
+        "response_meta": response_meta,
+    }
     consume_stream_to_telegram.assert_called_once()
     assert response_meta["streamed_text"] == "hola"
     assert response_meta["streamed_message_id"] == "777"
+
+
+def test_handle_ai_stream_response_applies_grounding_override():
+    handle_ai_stream_response = index.app_runtime.responses.stream_handler
+    response_meta: dict[str, Any] = {"stream_text_override": "grounding warning"}
+
+    with patch(
+        "api.index.app_runtime.ai.stream",
+        return_value=iter([("openrouter", "unsupported claim")]),
+    ):
+        with patch(
+            "api.index.app_runtime.responses._deps.consume_stream",
+            return_value=("unsupported claim", "777"),
+        ):
+            with patch(
+                "api.index.app_runtime.responses._deps.edit_message"
+            ) as edit_stream_message:
+                result = handle_ai_stream_response(
+                    [{"role": "user", "content": "search"}],
+                    response_meta=response_meta,
+                    chat_id="123",
+                    user_id=55,
+                    user_name="@ana",
+                    timezone_offset=-3,
+                )
+
+    assert result == "grounding warning"
+    edit_stream_message.assert_called_once_with("123", 777, "grounding warning")
+    assert response_meta["streamed_text"] == "grounding warning"
+    assert "stream_text_override" not in response_meta
 
 
 def test_finalize_message_response_saves_streamed_text_to_redis():
@@ -224,6 +256,7 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
 
 def test_ask_ai_stream_end_to_end_with_internal_tool():
     from api.ai.pricing import AIUsageResult
+
     ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
@@ -288,6 +321,7 @@ def test_ask_ai_stream_end_to_end_with_internal_tool():
 
 def test_ask_ai_stream_end_to_end_with_web_search():
     from api.ai.pricing import AIUsageResult
+
     ask_ai_stream = index.app_runtime.ai.stream
     from api.providers.base import ProviderChain
 
@@ -372,10 +406,26 @@ def test_handle_ai_stream_response_end_to_end_no_tool_leak():
 
 
 def test_stream_with_providers_forwards_extra_tools_and_tool_context():
+    from api.ai.pricing import AIUsageResult
+
     chain = MagicMock()
-    chain.stream.return_value = iter([("openrouter", "ok")])
+
+    def stream(*_args, **kwargs):
+        kwargs["on_usage_result"](
+            AIUsageResult(
+                kind="chat",
+                text="ok",
+                model="test-model",
+                usage={"prompt_tokens": 7, "completion_tokens": 2},
+                metadata={"stream_text_override": "grounding warning"},
+            )
+        )
+        return iter([("openrouter", "ok")])
+
+    chain.stream.side_effect = stream
     extra_tools = [{"type": "function", "function": {"name": "echo"}}]
     tool_context = {"chat_id": "123"}
+    response_meta: dict[str, Any] = {}
 
     with patch("api.index.app_runtime.providers.get_chain", return_value=chain):
         result = index.app_runtime.providers.stream(
@@ -384,17 +434,33 @@ def test_stream_with_providers_forwards_extra_tools_and_tool_context():
             enable_web_search=False,
             extra_tools=extra_tools,
             tool_context=tool_context,
+            response_meta=response_meta,
         )
         tokens = list(result)
 
     assert tokens == [("openrouter", "ok")]
-    chain.stream.assert_called_once_with(
+    chain.stream.assert_called_once()
+    assert chain.stream.call_args.args == (
         {"role": "system", "content": "sys"},
         [{"role": "user", "content": "hola"}],
-        enable_web_search=False,
-        extra_tools=extra_tools,
-        tool_context=tool_context,
     )
+    assert chain.stream.call_args.kwargs["enable_web_search"] is False
+    assert chain.stream.call_args.kwargs["extra_tools"] == extra_tools
+    assert chain.stream.call_args.kwargs["tool_context"] == tool_context
+    assert callable(chain.stream.call_args.kwargs["on_usage_result"])
+    assert response_meta["stream_text_override"] == "grounding warning"
+    assert response_meta["billing_segments"] == [
+        {
+            "kind": "chat",
+            "text": "ok",
+            "model": "test-model",
+            "usage": {"prompt_tokens": 7, "completion_tokens": 2},
+            "audio_seconds": None,
+            "cached": False,
+            "source": "groq",
+            "metadata": {},
+        }
+    ]
 
 
 def test_provider_chain_stream_uses_complete_fallback_for_tool_requests():
