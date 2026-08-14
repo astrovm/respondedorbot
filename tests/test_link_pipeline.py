@@ -104,12 +104,12 @@ def test_extract_message_urls_prefers_entities_and_limits_to_three():
 
 def test_extract_message_urls_detects_bare_domains_without_scheme():
     message = {
-        "text": "mirá fixupx.com/status/2032173338240467235, después vemos",
+        "text": "mirá fixupx.com/status/1234567890123456789, después vemos",
         "entities": [],
     }
 
     assert link_service.extract_message_urls(message) == [
-        "https://fixupx.com/status/2032173338240467235"
+        "https://fixupx.com/status/1234567890123456789"
     ]
 
 
@@ -142,17 +142,17 @@ def test_build_message_links_context_keeps_full_youtube_transcript():
         patch.object(
             link_service,
             "extract_message_urls",
-            return_value=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            return_value=["https://www.youtube.com/watch?v=EXAMPLE1234"],
         ),
         patch.object(
             link_service,
             "fetch_metadata",
-            return_value={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+            return_value={"url": "https://www.youtube.com/watch?v=EXAMPLE1234"},
         ),
         patch.object(link_service, "fetch_transcript", return_value=transcript),
     ):
         context = link_service.build_context(
-            {"text": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
+            {"text": "https://www.youtube.com/watch?v=EXAMPLE1234"}
         )
 
     assert transcript in context
@@ -244,7 +244,7 @@ def test_fetch_link_metadata_uses_ttl_constant():
 def test_can_embed_url_primes_link_metadata_cache():
     html_body = (
         "<html><head>"
-        '<meta property="og:title" content="Agustin Cortes (@agucortes)" />'
+        '<meta property="og:title" content="Example User (@test_user)" />'
         '<meta property="og:description" content="Texto del post" />'
         '<meta name="twitter:card" content="tweet" />'
         "</head></html>"
@@ -253,7 +253,7 @@ def test_can_embed_url_primes_link_metadata_cache():
     embed_response.status_code = 200
     embed_response.headers = {"Content-Type": "text/html; charset=utf-8"}
     embed_response.text = html_body
-    embed_response.url = "https://fixupx.com/status/2032173338240467235"
+    embed_response.url = "https://fixupx.com/status/1234567890123456789"
 
     class R:
         def __init__(self):
@@ -277,14 +277,14 @@ def test_can_embed_url_primes_link_metadata_cache():
         return_value=embed_response,
     ):
         assert service.can_embed(
-            "https://fixupx.com/status/2032173338240467235"
+            "https://fixupx.com/status/1234567890123456789"
         ) is True
 
     result = service.fetch_metadata(
-        "https://fixupx.com/status/2032173338240467235"
+        "https://fixupx.com/status/1234567890123456789"
     )
 
-    assert result["title"] == "Agustin Cortes (@agucortes)"
+    assert result["title"] == "Example User (@test_user)"
     assert result["description"] == "Texto del post"
     service.request_fn.assert_not_called()
 
@@ -295,20 +295,20 @@ def test_build_message_links_context_uses_tweet_content_before_generic_metadata(
             link_service,
             "fetch_tweet_content",
             return_value={
-                "url": "https://x.com/sentdefender/status/2048202539770802483",
-                "author": "OSINTdefender",
-                "date": "Apr 26, 2026",
-                "text": "Reports of shots fired were unfounded.",
+                "url": "https://x.com/test_user/status/1234567890123456789",
+                "author": "Example User",
+                "date": "Jan 1, 2020",
+                "text": "This is an example status update.",
             },
         ) as mock_tweet,
         patch.object(link_service, "fetch_metadata") as mock_metadata,
     ):
         context = link_service.build_context(
-            {"text": "https://fixupx.com/status/2048202539770802483"}
+            {"text": "https://fixupx.com/status/1234567890123456789"}
         )
 
-    assert "https://x.com/sentdefender/status/2048202539770802483" in context
-    assert "autor: OSINTdefender" in context
-    assert "tweet: Reports of shots fired were unfounded." in context
-    mock_tweet.assert_called_once_with("https://fixupx.com/status/2048202539770802483")
+    assert "https://x.com/test_user/status/1234567890123456789" in context
+    assert "autor: Example User" in context
+    assert "tweet: This is an example status update." in context
+    mock_tweet.assert_called_once_with("https://fixupx.com/status/1234567890123456789")
     mock_metadata.assert_not_called()

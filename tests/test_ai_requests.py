@@ -88,7 +88,7 @@ def test_build_ai_messages_includes_links_context():
     message = {
         "from": {"first_name": "Ana", "username": "ana"},
         "chat": {"type": "private", "title": None},
-        "text": "mirá fixupx.com/status/2032173338240467235",
+        "text": "mirá fixupx.com/status/1234567890123456789",
     }
 
     with (
@@ -97,7 +97,7 @@ def test_build_ai_messages_includes_links_context():
             index._link_service,
             "fetch_metadata",
             return_value={
-                "url": "https://fixupx.com/status/2032173338240467235",
+                "url": "https://fixupx.com/status/1234567890123456789",
                 "title": "tweet",
                 "description": "contenido",
             },
@@ -107,7 +107,7 @@ def test_build_ai_messages_includes_links_context():
 
     content = messages[0]["content"]
     assert "LINKS DEL MENSAJE:" in content
-    assert "https://fixupx.com/status/2032173338240467235" in content
+    assert "https://fixupx.com/status/1234567890123456789" in content
     assert "titulo: tweet" in content
     assert "descripcion: contenido" in content
 

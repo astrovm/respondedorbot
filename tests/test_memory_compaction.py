@@ -210,10 +210,10 @@ def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     redis_client = MagicMock()
     redis_client.execute_command.side_effect = [[0], [0]]
 
-    fetch_chat_messages_for_compaction(redis_client, "5162530")
+    fetch_chat_messages_for_compaction(redis_client, "123456789")
 
     query = redis_client.execute_command.call_args.args[2]
-    assert query == "@chat_id:{5162530}"
+    assert query == "@chat_id:{123456789}"
     assert "*" not in query
 
 

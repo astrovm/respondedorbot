@@ -222,7 +222,7 @@ def test_provider_runtime_suppresses_web_search_answer_without_citations():
     with patch("api.providers.runtime.logger.warning") as warning:
         result = runtime.complete(
             {"role": "system", "content": "sys"},
-            [{"role": "user", "content": "busca la marca Oaaa"}],
+            [{"role": "user", "content": "busca la marca Ejemplo"}],
             enable_web_search=True,
         )
 
