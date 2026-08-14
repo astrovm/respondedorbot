@@ -101,6 +101,7 @@ def test_get_weather_context_success():
         assert result["temperature"] == 25.0
         assert result["weather_code"] == 0
         assert result["description"] == "cielo despejado"
+        mock_weather.assert_called_once_with("Buenos Aires")
         mock_description.assert_called_once_with(0)
 
 

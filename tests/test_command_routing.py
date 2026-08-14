@@ -678,6 +678,8 @@ def test_initialize_commands():
     assert "/random" in commands
     assert "/prices" in commands
     assert "/price" in commands
+    assert "/clima" in commands
+    assert "/weather" in commands
     assert "/bresio" in commands
     assert "/bresios" in commands
     assert "/brecio" in commands
@@ -702,6 +704,7 @@ def test_initialize_commands():
     assert commands["/random"][1] == False
     assert commands["/prices"][1] == False
     assert commands["/price"][1] == False
+    assert commands["/clima"][1] == False
     assert commands["/dolar"][1] == False
     assert commands["/usd"][1] == False
 

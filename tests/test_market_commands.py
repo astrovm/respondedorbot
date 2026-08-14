@@ -1,4 +1,9 @@
+from unittest.mock import call
+
 from tests.support import *
+
+from api.markets.stocks import StockQuote, get_stock_prices, search_yahoo_symbol
+from api.markets.weather import get_weather as get_weather_for_location
 
 
 def test_get_rulo():
@@ -183,6 +188,168 @@ def test_get_weather():
         # Test failed weather fetch
         mock_cached_requests.return_value = None
         assert get_weather() == {}
+
+
+def test_get_weather_resolves_requested_location():
+    responses = [
+        {
+            "data": {
+                "results": [
+                    {
+                        "name": "Example City",
+                        "country": "Otherland",
+                        "latitude": 1.2,
+                        "longitude": 3.4,
+                    },
+                    {
+                        "name": "Example City",
+                        "country": "Exampleland",
+                        "latitude": 12.3,
+                        "longitude": 45.6,
+                    },
+                ]
+            }
+        },
+        {
+            "data": {
+                "current": {"time": "2026-01-02T10:00"},
+                "hourly": {
+                    "time": ["2026-01-02T10:00"],
+                    "apparent_temperature": [19.5],
+                    "precipitation_probability": [20],
+                    "weather_code": [1],
+                    "cloud_cover": [30],
+                    "visibility": [15000],
+                },
+            }
+        },
+    ]
+    cached_request = MagicMock(side_effect=responses)
+
+    result = get_weather_for_location(
+        "Example City, Exampleland",
+        cached_request=cached_request,
+        cache_ttl=300,
+        local_timezone=timezone.utc,
+        datetime_type=datetime,
+        logger=MagicMock(),
+    )
+
+    assert result["location"] == "Example City, Exampleland"
+    assert result["apparent_temperature"] == 19.5
+    assert cached_request.call_count == 2
+    assert cached_request.call_args_list[0].args[1]["name"] == "Example City"
+
+
+def test_weather_command_uses_requested_location():
+    with patch("api.index.get_weather_context") as get_context:
+        get_context.return_value = {
+            "location": "Example City, Exampleland",
+            "apparent_temperature": 19.5,
+            "precipitation_probability": 20,
+            "description": "synthetic clear sky",
+            "cloud_cover": 30,
+            "visibility": 15000,
+        }
+
+        result = index.get_weather_command("Example City, Exampleland")
+
+    assert "Example City, Exampleland" in result
+    assert "synthetic clear sky" in result
+    get_context.assert_called_once_with("Example City, Exampleland")
+
+
+def test_stock_prices_resolve_company_name_and_preserve_currency():
+    quote = StockQuote(
+        symbol="EXM",
+        name="Example Holdings",
+        price=123.45,
+        currency="EUR",
+        exchange="Synthetic Exchange",
+        variation=1.25,
+    )
+    fetch_quote = MagicMock(
+        side_effect=lambda symbol: quote if symbol == "EXM" else None
+    )
+    resolve_symbol = MagicMock(return_value="EXM")
+
+    result = get_stock_prices(
+        "Example Holdings",
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert "EXM (Example Holdings): 123.45 EUR" in result
+    assert "+1.25% 24h, Synthetic Exchange" in result
+    resolve_symbol.assert_called_once_with("Example Holdings")
+
+
+def test_stock_prices_preserve_space_separated_exchange_symbols():
+    quotes = {
+        "EXM.BA": StockQuote("EXM.BA", "", 10, "ARS", "Synthetic Exchange", 1),
+        "ALT": StockQuote("ALT", "", 20, "USD", "Synthetic Exchange", -1),
+    }
+    fetch_quote = MagicMock(side_effect=quotes.get)
+
+    result = get_stock_prices(
+        "EXM.BA ALT",
+        fetch_quote=fetch_quote,
+        resolve_symbol=MagicMock(),
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert "EXM.BA: 10.00 ARS" in result
+    assert "ALT: 20.00 USD" in result
+    assert fetch_quote.call_args_list == [call("EXM.BA"), call("ALT")]
+
+
+def test_stock_prices_preserve_mixed_case_symbol_lists():
+    quotes = {
+        "EXM": StockQuote("EXM", "", 10, "USD", "Synthetic Exchange", 1),
+        "ALT": StockQuote("ALT", "", 20, "USD", "Synthetic Exchange", -1),
+    }
+    fetch_quote = MagicMock(side_effect=quotes.get)
+    resolve_symbol = MagicMock()
+
+    result = get_stock_prices(
+        "Exm Alt",
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert "EXM: 10.00 USD" in result
+    assert "ALT: 20.00 USD" in result
+    assert fetch_quote.call_args_list == [call("EXM"), call("ALT")]
+    resolve_symbol.assert_not_called()
+
+
+def test_stock_symbol_search_retries_compact_company_name():
+    cached_request = MagicMock(
+        side_effect=[
+            {"data": {"quotes": []}},
+            {
+                "data": {
+                    "quotes": [
+                        {
+                            "symbol": "EXM",
+                            "quoteType": "EQUITY",
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+
+    result = search_yahoo_symbol(
+        "Example Holdings",
+        cached_request=cached_request,
+        cache_ttl=300,
+    )
+
+    assert result == "EXM"
+    assert cached_request.call_args_list[1].args[1]["q"] == "ExampleHoldings"
 
 
 def test_get_prices_basic():

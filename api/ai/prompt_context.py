@@ -118,7 +118,10 @@ def format_weather_info(weather: dict[str, Any]) -> str:
         if visibility_km is not None
         else "sin datos"
     )
+    location = weather.get("location")
+    location_line = f"- Lugar: {location}\n" if location else ""
     return (
+        f"{location_line}"
         f"- Temperatura aparente: {weather.get('apparent_temperature', '?')}°C\n"
         f"- Probabilidad de lluvia: {weather.get('precipitation_probability', '?')}%\n"
         f"- Estado: {weather.get('description', 'sin datos')}\n"

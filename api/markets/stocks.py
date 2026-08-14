@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import redis
@@ -15,6 +16,8 @@ from api.utils import fmt_num
 
 CachedRequest = Callable[..., dict[str, Any] | None]
 StockFetcher = Callable[[str], tuple[float, float] | None]
+StockQuoteFetcher = Callable[[str], "StockQuote | None"]
+StockSymbolResolver = Callable[[str], str | None]
 StockListFetcher = Callable[[], list[str]]
 RedisFactory = Callable[[], redis.Redis | None]
 RedisJsonGetter = Callable[[redis.Redis, str], Any]
@@ -22,15 +25,26 @@ RedisJsonSetter = Callable[..., bool]
 HttpGetter = Callable[..., Any]
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
 
 
-def fetch_yahoo_stock_price(
+@dataclass(frozen=True, slots=True)
+class StockQuote:
+    symbol: str
+    name: str
+    price: float
+    currency: str
+    exchange: str
+    variation: float
+
+
+def fetch_yahoo_stock_quote(
     symbol: str,
     *,
     cached_request: CachedRequest,
     cache_ttl: int,
-) -> tuple[float, float] | None:
+) -> StockQuote | None:
     try:
         response = cached_request(
             YAHOO_CHART_URL.format(symbol=symbol),
@@ -40,17 +54,76 @@ def fetch_yahoo_stock_price(
         )
         if not response or "data" not in response:
             return None
-        result = response["data"].get("chart", {}).get("result", [{}])[0]
+        results = response["data"].get("chart", {}).get("result") or []
+        if not results:
+            return None
+        result = results[0]
+        meta = result.get("meta", {})
         quotes = result.get("indicators", {}).get("quote", [{}])[0]
         closes = [close for close in quotes.get("close", []) if close is not None]
-        if len(closes) < 2:
+        current = meta.get("regularMarketPrice")
+        previous_close = meta.get("chartPreviousClose")
+        if current is None and closes:
+            current = closes[-1]
+        if previous_close is None and len(closes) >= 2:
+            previous_close = closes[-2]
+        if current is None or previous_close in (None, 0):
             return None
-        previous_close, current = closes[-2:]
-        if previous_close == 0:
-            return None
-        return current, ((current - previous_close) / previous_close) * 100
+        variation = ((float(current) - float(previous_close)) / float(previous_close)) * 100
+        return StockQuote(
+            symbol=str(meta.get("symbol") or symbol).upper(),
+            name=str(meta.get("shortName") or meta.get("longName") or ""),
+            price=float(current),
+            currency=str(meta.get("currency") or "USD").upper(),
+            exchange=str(meta.get("exchangeName") or ""),
+            variation=variation,
+        )
     except Exception:
         return None
+
+
+def fetch_yahoo_stock_price(
+    symbol: str,
+    *,
+    cached_request: CachedRequest,
+    cache_ttl: int,
+) -> tuple[float, float] | None:
+    quote = fetch_yahoo_stock_quote(
+        symbol,
+        cached_request=cached_request,
+        cache_ttl=cache_ttl,
+    )
+    return (quote.price, quote.variation) if quote else None
+
+
+def search_yahoo_symbol(
+    query: str,
+    *,
+    cached_request: CachedRequest,
+    cache_ttl: int,
+) -> str | None:
+    try:
+        search_queries = list(dict.fromkeys((query, query.replace(" ", ""))))
+        for search_query in search_queries:
+            response = cached_request(
+                YAHOO_SEARCH_URL,
+                {"q": search_query, "quotesCount": 5, "newsCount": 0},
+                {"User-Agent": "Mozilla/5.0"},
+                cache_ttl,
+            )
+            quotes = response.get("data", {}).get("quotes", []) if response else []
+            for quote in quotes:
+                if quote.get("quoteType") in {
+                    "EQUITY",
+                    "ETF",
+                    "MUTUALFUND",
+                    "INDEX",
+                    "FUTURE",
+                } and quote.get("symbol"):
+                    return str(quote["symbol"])
+    except Exception:
+        return None
+    return None
 
 
 def fetch_top_stocks_by_market_cap(
@@ -72,9 +145,7 @@ def fetch_top_stocks_by_market_cap(
         response = http_get(
             FINVIZ_SCREENER_URL,
             params={"v": "152", "f": "cap_mega", "o": "-marketcap"},
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-            },
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
             timeout=10,
         )
         response.raise_for_status()
@@ -109,38 +180,108 @@ def get_oil_price(*, fetch_stock: StockFetcher) -> str:
             continue
         price, variation = prices[name]
         sign = "+" if variation >= 0 else ""
-        lines.append(
-            f"{name}: {fmt_num(price, 2)} USD "
-            f"({sign}{fmt_num(variation, 2)}% 24hs)"
-        )
+        lines.append(f"{name}: {fmt_num(price, 2)} USD ({sign}{fmt_num(variation, 2)}% 24hs)")
     return "\n".join(lines)
 
 
 def get_stock_prices(
     msg_text: str,
     *,
-    fetch_stock: StockFetcher,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
     fetch_top_stocks: StockListFetcher,
 ) -> str:
-    symbols = [symbol.strip() for symbol in str(msg_text or "").split() if symbol.strip()]
-    if not symbols:
-        symbols = fetch_top_stocks()
-        if not symbols:
+    raw_query = str(msg_text or "").strip()
+    full_query_fallback = False
+    if "," in raw_query:
+        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
+    else:
+        parts = [part for part in raw_query.split() if part]
+        queries = parts
+        full_query_fallback = len(queries) > 1
+    if not queries:
+        queries = fetch_top_stocks()
+        if not queries:
             return "no pude traer el top de acciones, probá de nuevo"
 
+    quotes = _lookup_stock_quotes(
+        raw_query,
+        queries[:20],
+        full_query_fallback=full_query_fallback,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
+
     lines: list[str] = []
-    for symbol in symbols:
-        normalized = symbol.upper()
-        parsed = fetch_stock(normalized)
-        if parsed:
-            price, variation = parsed
-            sign = "+" if variation >= 0 else ""
+    for query, quote in quotes:
+        if quote:
+            sign = "+" if quote.variation >= 0 else ""
+            name = f" ({quote.name})" if quote.name else ""
+            exchange = f", {quote.exchange}" if quote.exchange else ""
             lines.append(
-                f"{normalized}: {price:.2f} USD ({sign}{variation:.2f}% 24h)"
+                f"{quote.symbol}{name}: {quote.price:.2f} {quote.currency} "
+                f"({sign}{quote.variation:.2f}% 24h{exchange})"
             )
         else:
-            lines.append(f"{normalized}: no se pudo obtener")
+            lines.append(f"{query}: no se pudo encontrar")
     return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+
+
+def _lookup_stock_quotes(
+    raw_query: str,
+    queries: list[str],
+    *,
+    full_query_fallback: bool,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+) -> list[tuple[str, StockQuote | None]]:
+    quotes: list[tuple[str, StockQuote | None]] = []
+    for query in queries:
+        normalized = query.upper()
+        is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
+        quote = fetch_quote(normalized) if is_symbol else None
+        quotes.append((query, quote))
+
+    direct_quotes = [quote for _, quote in quotes if quote]
+    if not full_query_fallback or len(direct_quotes) == len(quotes):
+        return _resolve_missing_stock_quotes(
+            quotes,
+            fetch_quote=fetch_quote,
+            resolve_symbol=resolve_symbol,
+        )
+
+    resolved = resolve_symbol(raw_query)
+    direct_by_symbol = {quote.symbol.upper(): quote for quote in direct_quotes}
+    full_quote = direct_by_symbol.get(str(resolved or "").upper())
+    if full_quote is None and resolved:
+        full_quote = fetch_quote(resolved)
+    if full_quote and (
+        not direct_quotes or full_quote.symbol.upper() not in direct_by_symbol
+    ):
+        return [(raw_query, full_quote)]
+    if not direct_quotes:
+        return [(raw_query, None)]
+    return _resolve_missing_stock_quotes(
+        quotes,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
+
+
+def _resolve_missing_stock_quotes(
+    quotes: list[tuple[str, StockQuote | None]],
+    *,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+) -> list[tuple[str, StockQuote | None]]:
+    resolved_quotes: list[tuple[str, StockQuote | None]] = []
+    for query, quote in quotes:
+        resolved_quote = quote
+        if resolved_quote is None:
+            resolved = resolve_symbol(query)
+            resolved_quote = fetch_quote(resolved) if resolved else None
+        resolved_quotes.append((query, resolved_quote))
+    return resolved_quotes
 
 
 class StockService:
@@ -164,6 +305,20 @@ class StockService:
             cache_ttl=self._price_cache_ttl,
         )
 
+    def fetch_quote(self, symbol: str) -> StockQuote | None:
+        return fetch_yahoo_stock_quote(
+            symbol,
+            cached_request=self._cache.request,
+            cache_ttl=self._price_cache_ttl,
+        )
+
+    def resolve_symbol(self, query: str) -> str | None:
+        return search_yahoo_symbol(
+            query,
+            cached_request=self._cache.request,
+            cache_ttl=self._price_cache_ttl,
+        )
+
     def fetch_top_stocks(self) -> list[str]:
         return fetch_top_stocks_by_market_cap(
             redis_factory=self._config.optional_redis,
@@ -179,9 +334,10 @@ class StockService:
     def get_stock_prices(self, msg_text: str) -> str:
         return get_stock_prices(
             msg_text,
-            fetch_stock=self.fetch_price,
+            fetch_quote=self.fetch_quote,
+            resolve_symbol=self.resolve_symbol,
             fetch_top_stocks=self.fetch_top_stocks,
         )
 
 
-__all__ = ["StockService"]
+__all__ = ["StockQuote", "StockService"]

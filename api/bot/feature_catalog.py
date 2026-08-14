@@ -59,6 +59,14 @@ FEATURES: tuple[FeatureEntry, ...] = (
         telegram_visible=True,
     ),
     FeatureEntry(
+        "clima",
+        "clima actual para cualquier ciudad o ubicación",
+        aliases_for("get_weather"),
+        ("/clima Córdoba, Argentina",),
+        "general",
+        telegram_visible=True,
+    ),
+    FeatureEntry(
         "token cards",
         "si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones",
         examples=("J8PS...pump", "$GLORP"),
@@ -75,9 +83,9 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "acciones",
-        "precios de acciones desde Yahoo Finance",
+        "precios de acciones por símbolo o empresa desde Yahoo Finance",
         aliases_for("get_stock_prices"),
-        ("/acciones aapl tsla googl",),
+        ("/acciones aapl tsla", "/acciones Mercado Libre"),
         "mercado",
         telegram_visible=True,
     ),

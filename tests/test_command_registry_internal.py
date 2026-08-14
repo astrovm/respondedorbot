@@ -12,6 +12,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "convert_base": prices,
             "select_random": prices,
             "get_prices": prices,
+            "get_weather": prices,
             "get_dollar_rates": lambda: "usd",
             "get_oil_price": lambda: "oil",
             "get_stock_prices": prices,
