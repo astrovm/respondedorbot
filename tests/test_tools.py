@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
-from api.tools.registry import execute_tool
+from api.tools.registry import execute_tool, get_all_tool_schemas
+from api.tools.runtime import ToolRuntime
 
 
 class TestCalculateTool:
@@ -76,6 +78,139 @@ class TestCryptoPricesTool:
             {"get_prices": mock_gp},
         )
         assert "no se pudieron" in result.output
+
+
+class TestOnDemandContextTools:
+    def test_dollar_rates_uses_injected_service(self):
+        get_rates = MagicMock(return_value="synthetic dollar rates")
+
+        result = execute_tool(
+            "dollar_rates",
+            {"timeframe": "6h"},
+            {"get_dollar_rates": get_rates},
+        )
+
+        assert result.output == "synthetic dollar rates"
+        get_rates.assert_called_once_with("6h")
+
+    def test_weather_uses_injected_service(self):
+        get_weather = MagicMock(
+            return_value={
+                "apparent_temperature": 21,
+                "precipitation_probability": 15,
+                "description": "synthetic clear sky",
+                "cloud_cover": 10,
+                "visibility": 12000,
+            }
+        )
+
+        result = execute_tool(
+            "weather",
+            {},
+            {"get_weather_context": get_weather},
+        )
+
+        assert "synthetic clear sky" in result.output
+        assert "12.0km" in result.output
+        get_weather.assert_called_once_with()
+
+    def test_hacker_news_uses_injected_service(self):
+        get_news = MagicMock(
+            return_value=[
+                {
+                    "title": "Synthetic technology story",
+                    "url": "https://example.test/story",
+                    "points": 42,
+                    "comments": 7,
+                }
+            ]
+        )
+
+        result = execute_tool(
+            "hacker_news",
+            {"limit": 3},
+            {"get_hacker_news_context": get_news},
+        )
+
+        assert "Synthetic technology story" in result.output
+        assert "https://example.test/story" in result.output
+        get_news.assert_called_once_with(3)
+
+    def test_bot_capabilities_uses_injected_renderer(self):
+        get_capabilities = MagicMock(return_value="synthetic capability catalog")
+
+        result = execute_tool(
+            "bot_capabilities",
+            {},
+            {"get_bot_capabilities": get_capabilities},
+        )
+
+        assert result.output == "synthetic capability catalog"
+        get_capabilities.assert_called_once_with()
+
+
+def test_production_tool_registry_exposes_all_context_tools():
+    context = {
+        "chat_id": "synthetic-chat",
+        "user_id": 123,
+        "web_search_enabled": True,
+        "get_prices": MagicMock(),
+        "get_dollar_rates": MagicMock(),
+        "get_weather_context": MagicMock(),
+        "get_hacker_news_context": MagicMock(),
+        "get_bot_capabilities": MagicMock(),
+        "config_redis": MagicMock(),
+    }
+
+    names = {schema["function"]["name"] for schema in get_all_tool_schemas(context)}
+
+    assert {
+        "stock_prices",
+        "task_list",
+        "task_cancel",
+        "dollar_rates",
+        "weather",
+        "hacker_news",
+        "bot_capabilities",
+    } <= names
+
+
+def test_task_set_schema_contains_scheduling_argument_guidance():
+    task_schema = next(
+        schema["function"]
+        for schema in get_all_tool_schemas()
+        if schema["function"]["name"] == "task_set"
+    )
+
+    assert "only the future instruction" in task_schema["description"]
+    assert "preserve its subject" in task_schema["description"]
+
+
+def test_tool_runtime_executes_on_demand_weather_service():
+    get_weather = MagicMock(
+        return_value={
+            "apparent_temperature": 18,
+            "precipitation_probability": 5,
+            "description": "synthetic mild weather",
+            "cloud_cover": 20,
+            "visibility": 9000,
+        }
+    )
+    tool_call = SimpleNamespace(
+        id="synthetic-call",
+        function=SimpleNamespace(name="weather", arguments="{}"),
+    )
+
+    messages = ToolRuntime(print_fn=lambda _message: None).apply_tool_calls(
+        SimpleNamespace(content=""),
+        [tool_call],
+        [],
+        {"get_weather_context": get_weather},
+    )
+
+    assert messages[-1]["role"] == "tool"
+    assert "synthetic mild weather" in messages[-1]["content"]
+    get_weather.assert_called_once_with()
 
 
 class TestWebFetchTool:

@@ -148,7 +148,14 @@ import api.tools.calculate
 import api.tools.web_fetch
 import api.tools.web_search
 import api.tools.task_set
+import api.tools.task_list
+import api.tools.task_cancel
 import api.tools.get_chat_members
+import api.tools.stock_prices
+import api.tools.dollar_rates
+import api.tools.weather
+import api.tools.hacker_news
+import api.tools.bot_capabilities
 from api.tools import get_all_tool_schemas
 from api.tools.runtime import ToolRuntime
 from api.tasks.scheduler import (
@@ -251,7 +258,6 @@ TTL_MEDIA_CACHE = 7 * 24 * 60 * 60
 TTL_HACKER_NEWS = 600
 TTL_STOCK_SCREENER = 3600
 DOLLAR_FORMATTED_STALE_GRACE = 30 * 60
-STABLE_AI_CONTEXT_TTL = 60
 
 _logger = get_logger(__name__)
 _config_runtime = ConfigRuntime(_logger)
@@ -794,10 +800,6 @@ def build_system_message(
         tool_schemas=tool_schemas,
         task_mode=task_mode,
         load_config=_config_runtime.load_bot_config,
-        format_market=format_market_info,
-        format_weather=format_weather_info,
-        format_news=format_hacker_news_info,
-        render_capabilities=render_ai_capabilities_prompt,
     )
 
 
@@ -1023,11 +1025,12 @@ _summary_service = SummaryService(
 )
 _ai_request_service = AIRequestService(
     AIRequestServiceDeps(
-        get_market_context=get_market_context,
         get_weather_context=get_weather_context,
         get_time_context=get_time_context,
         get_hacker_news_context=get_hacker_news_context,
         get_prices=_price_service.get_prices,
+        get_dollar_rates=_dollar_service.get_rates,
+        get_bot_capabilities=render_ai_capabilities_prompt,
         config_redis=_config_runtime.redis,
         get_tool_schemas=get_all_tool_schemas,
         build_system_message=build_system_message,
@@ -1039,8 +1042,6 @@ _ai_request_service = AIRequestService(
         fallback=get_fallback_response,
         admin_report=_admin_service.report,
         logger=_logger,
-        stable_context_ttl=STABLE_AI_CONTEXT_TTL,
-        now=time.time,
     )
 )
 _ROUTING_POLICY = build_routing_policy()

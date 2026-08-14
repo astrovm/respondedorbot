@@ -289,10 +289,11 @@ def test_build_system_message():
         content_text = result["content"][0]["text"]
         assert "argentin" in content_text.lower()
         assert "gordo" in content_text.lower()
-        assert "hacker news" in content_text.lower()
-        assert "CAPACIDADES DEL BOT" in content_text
-        assert "$ticker" in content_text
-        assert "/buscar y /search no existen" in content_text
+        assert "Monday 15/01/2024" in content_text
+        assert "50000" not in content_text
+        assert "cielo despejado" not in content_text
+        assert "Nueva feature" not in content_text
+        assert "CAPACIDADES DEL BOT" not in content_text
 
 
 def test_build_system_message_empty_context():
@@ -324,12 +325,12 @@ def test_build_system_message_empty_context():
         assert result["role"] == "system"
         assert "content" in result
         assert isinstance(result["content"], list)
-        # Should still have base personality
         content_text = result["content"][0]["text"]
-        assert len(content_text) > 100
+        assert "You are a test bot assistant." in content_text
+        assert "Monday" in content_text
 
 
-def test_build_system_message_task_tool_instructions_preserve_perspective():
+def test_build_system_message_does_not_duplicate_tool_schemas():
     from api.index import build_system_message
 
     context = {
@@ -353,11 +354,6 @@ def test_build_system_message_task_tool_instructions_preserve_perspective():
     result = build_system_message(context, tools_active=True, tool_schemas=tool_schemas)
 
     content_text = result["content"][0]["text"]
-    assert (
-        "task_set.text debe contener solo el contenido a ejecutar despues"
-        in content_text
-    )
-    assert "no reescribas pronombres ni cambies sujeto" in content_text
-    assert "no incluyas tiempo ni frecuencia en text" in content_text
-    assert 'text="decime cuanta aura farmeaste hoy"' in content_text
-    assert 'text="deci fumareeemooss"' in content_text
+    assert "HERRAMIENTAS:" in content_text
+    assert "Create a scheduled task." not in content_text
+    assert "task_set" not in content_text
