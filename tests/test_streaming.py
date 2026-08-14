@@ -385,20 +385,14 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             "La búsqueda falló y no encontré nada.",
             '{"results":[{"title":"Persona Ejemplo",'
             '"url":"https://example.com/profile"}]}',
-            [
-                "La búsqueda falló y no encontré nada.\n\n"
-                "fuentes: https://example.com/profile"
-            ],
+            ["La búsqueda falló y no encontré nada."],
             True,
             1,
         ),
         (
             "Consulté https://example.com/not-a-result",
             '{"query":"https://example.com/not-a-result","results":[]}',
-            [
-                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
-                "resultados citables; probá de nuevo en un momento."
-            ],
+            ["Consulté https://example.com/not-a-result"],
             False,
             0,
         ),
@@ -406,10 +400,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             "encontré su perfil en https://social.example/perfil/",
             '{"results":[{"title":"Persona Ejemplo",'
             '"url":"https://social.example/perfil/?lang=es"}]}',
-            [
-                "encontré su perfil en https://social.example/perfil/\n\n"
-                "fuentes: https://social.example/perfil/?lang=es"
-            ],
+            ["encontré su perfil en https://social.example/perfil/"],
             True,
             1,
         ),
@@ -420,26 +411,20 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             '{"url":"https://example.com/2"},'
             '{"url":"https://example.com/3"},'
             '{"url":"https://example.com/4"}]}',
-            [
-                "respuesta basada en los resultados\n\nfuentes: "
-                "https://example.com/1 https://example.com/2 https://example.com/3"
-            ],
+            ["respuesta basada en los resultados"],
             True,
             4,
         ),
         (
             "",
             '{"results":[{"url":"https://example.com/profile"}]}',
-            [
-                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
-                "resultados citables; probá de nuevo en un momento."
-            ],
+            [],
             False,
             1,
         ),
     ],
 )
-def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
+def test_openrouter_stream_executes_direct_web_search_and_validates_results(
     final_text,
     search_output,
     expected_chunks,

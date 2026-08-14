@@ -16,7 +16,7 @@ def _response(status_code, payload):
     return response
 
 
-def test_web_search_returns_compact_citable_results(monkeypatch):
+def test_web_search_returns_compact_results_without_response_instructions(monkeypatch):
     monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
     post = MagicMock(
         return_value=_response(
@@ -50,6 +50,7 @@ def test_web_search_returns_compact_citable_results(monkeypatch):
             "description": "Perfil público de Persona Ejemplo.",
         }
     ]
+    assert "instruction" not in payload
     assert "markdown" not in result.output
     assert result.metadata["result_count"] == 1
     assert post.call_args.kwargs["json"] == {
