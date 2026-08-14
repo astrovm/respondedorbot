@@ -7,7 +7,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 ## Features
 
 - **AI chat**: configurable personality with web search, powered by DeepSeek via OpenRouter
-- **Streaming responses**: AI replies stream token-by-token to Telegram (when no tools are active)
+- **Streaming responses**: AI replies stream token-by-token to Telegram, including tool-enabled conversations
 - **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
 - **Incremental summaries**: `/resumen` streams conversation summaries using DeepSeek, with automatic context compaction
 - **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
@@ -17,7 +17,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Scheduled tasks**: `/tareas`, `/tasks` — create, list, and delete one-shot or recurring reminders via AI or inline buttons
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context; social links auto-replaced (fxTwitter, fixupx, etc.)
-- **Context injection**: market data, weather, Hacker News top stories, and Buenos Aires time in every system prompt
+- **On-demand AI context**: market data, weather, Hacker News stories, and bot capabilities are available through tools; local time stays in every system prompt
 - **Response cleanup**: deduplication, prefix stripping, identity leak prevention
 
 ## Quick Start
@@ -57,7 +57,7 @@ uv run --locked python run_polling.py
 | **Transcription** | Groq → OpenRouter fallback | `whisper-large-v3` → `google/gemini-3.1-flash-lite-preview` |
 | **Summary** | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
 
-**Streaming**: token streaming only when no tools/web-search are active. Tool-enabled requests return complete responses.
+**Streaming**: ordinary text streams immediately. Tool-call arguments accumulate during the stream, tools execute when each call completes, and the final response continues streaming afterward.
 
 ## Commands
 
@@ -100,7 +100,7 @@ uv run --locked python run_polling.py
 - `OpenRouterProvider` — streaming + completion, primary chat model
 ### Streaming (`api/bot/streaming.py`)
 
-`TelegramMessageStreamer` edits Telegram messages every 400ms or 15+ new chars. Token streaming from `OpenRouterProvider.stream()` when no tools active. Falls back to complete response for tool-enabled requests.
+`TelegramMessageStreamer` edits Telegram messages every 400ms or 15+ new chars. `OpenRouterProvider.stream()` accumulates streamed tool calls, executes them when complete, and streams the final model response.
 
 ### AI service (`api/ai/service.py`)
 
@@ -133,13 +133,14 @@ Sequential cleanup:
 3. Remove identity leak prefixes (`@user:`)
 4. Deduplicate consecutive lines/sentences
 
-### Context injection
+### AI context and tools
 
-Every system prompt includes:
-- **Market**: top 3 cryptos + dollar rates (oficial, blue, mep, tarjeta, usdt)
-- **Weather**: Buenos Aires temp, rain probability, cloud cover
-- **Hacker News**: top 5 stories (title, points, comments)
-- **Time**: current Buenos Aires datetime
+Every system prompt includes the current local time. The AI can request other
+context only when needed:
+- **Market**: crypto prices, stock prices, and Argentine dollar rates
+- **Weather**: Buenos Aires temperature, rain probability, and cloud cover
+- **Hacker News**: up to 10 stories with titles, points, and comments
+- **Bot capabilities**: the authoritative feature and command catalog
 
 ## Project layout
 

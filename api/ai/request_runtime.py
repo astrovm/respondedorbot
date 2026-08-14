@@ -41,33 +41,11 @@ def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
 def get_stable_ai_context(
     timezone_offset: int,
     *,
-    cache: dict[int, tuple[int, dict[str, Any]]],
-    ttl: int,
-    now: Callable[[], float],
-    get_market_context: Callable[[], dict[str, Any]],
-    get_weather_context: Callable[[], dict[str, Any] | None],
     get_time_context: Callable[[int], dict[str, Any]],
-    get_hacker_news_context: Callable[[], list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Reuse slow-changing prompt context for a short period.
+    """Build the small local context included in every request."""
 
-    Market, weather, time, and news data do not need to be fetched again for
-    every message that arrives in the same minute.
-    """
-
-    timestamp = int(now())
-    cached = cache.get(timezone_offset)
-    if cached and timestamp - cached[0] <= ttl:
-        return cached[1]
-
-    context = {
-        "market": get_market_context(),
-        "weather": get_weather_context(),
-        "time": get_time_context(timezone_offset),
-        "hacker_news": get_hacker_news_context(),
-    }
-    cache[timezone_offset] = (timestamp, context)
-    return context
+    return {"time": get_time_context(timezone_offset)}
 
 
 def build_ai_request(
@@ -82,6 +60,10 @@ def build_ai_request(
     sanitize_message: Callable[[dict[str, Any]], dict[str, Any]],
     get_context: Callable[[int], dict[str, Any]],
     get_prices: Callable[..., Any],
+    get_dollar_rates: Callable[[str], str | None],
+    get_weather_context: Callable[[], dict[str, Any] | None],
+    get_hacker_news_context: Callable[[int], list[dict[str, Any]]],
+    get_bot_capabilities: Callable[[], str],
     config_redis: Callable[..., Any],
     get_tool_schemas: Callable[..., list[dict[str, Any]]],
     build_system_message: Callable[..., dict[str, Any]],
@@ -101,6 +83,10 @@ def build_ai_request(
     # Tool functions receive this dictionary when the model calls them.
     tool_context: dict[str, Any] = {
         "get_prices": get_prices,
+        "get_dollar_rates": get_dollar_rates,
+        "get_weather_context": get_weather_context,
+        "get_hacker_news_context": get_hacker_news_context,
+        "get_bot_capabilities": get_bot_capabilities,
         "config_redis": config_redis,
         "timezone_offset": timezone_offset,
     }
@@ -177,12 +163,15 @@ def ask_ai(
     user_id: int | None,
     timezone_offset: int,
     task_mode: bool,
-    build_request: Callable[..., tuple[
+    build_request: Callable[
+        ...,
+        tuple[
             dict[str, Any],
             list[dict[str, Any]],
             list[dict[str, Any]] | None,
             dict[str, Any],
-    ]],
+        ],
+    ],
     inject_image: Callable[..., None],
     complete: Callable[..., str | None],
     fallback: Callable[[list[dict[str, Any]]], str],
@@ -248,12 +237,15 @@ def ask_ai_stream(
     user_id: int | None,
     timezone_offset: int,
     response_meta: dict[str, Any] | None,
-    build_request: Callable[..., tuple[
+    build_request: Callable[
+        ...,
+        tuple[
             dict[str, Any],
             list[dict[str, Any]],
             list[dict[str, Any]] | None,
             dict[str, Any],
-    ]],
+        ],
+    ],
     stream: Callable[..., Iterator[tuple[str, str]]],
 ) -> Iterator[tuple[str, str]]:
     system_message, messages, extra_tools, tool_context = build_request(
@@ -287,11 +279,12 @@ class AIRequestServiceDeps:
     network, Redis, or real provider clients.
     """
 
-    get_market_context: Callable[[], dict[str, Any]]
     get_weather_context: Callable[[], dict[str, Any] | None]
     get_time_context: Callable[[int], dict[str, Any]]
-    get_hacker_news_context: Callable[[], list[dict[str, Any]]]
+    get_hacker_news_context: Callable[[int], list[dict[str, Any]]]
     get_prices: Callable[..., Any]
+    get_dollar_rates: Callable[[str], str | None]
+    get_bot_capabilities: Callable[[], str]
     config_redis: Callable[..., Any]
     get_tool_schemas: Callable[..., list[dict[str, Any]]]
     build_system_message: Callable[..., dict[str, Any]]
@@ -303,8 +296,6 @@ class AIRequestServiceDeps:
     fallback: Callable[[list[dict[str, Any]]], str]
     admin_report: Callable[..., None]
     logger: Any
-    stable_context_ttl: int
-    now: Callable[[], float]
 
 
 class AIRequestService:
@@ -312,21 +303,11 @@ class AIRequestService:
 
     def __init__(self, deps: AIRequestServiceDeps) -> None:
         self._deps = deps
-        self._stable_context_cache: dict[
-            int,
-            tuple[int, dict[str, Any]],
-        ] = {}
 
     def get_stable_context(self, timezone_offset: int = -3) -> dict[str, Any]:
         return get_stable_ai_context(
             timezone_offset,
-            cache=self._stable_context_cache,
-            ttl=self._deps.stable_context_ttl,
-            now=self._deps.now,
-            get_market_context=self._deps.get_market_context,
-            get_weather_context=self._deps.get_weather_context,
             get_time_context=self._deps.get_time_context,
-            get_hacker_news_context=self._deps.get_hacker_news_context,
         )
 
     def build_request(
@@ -356,6 +337,10 @@ class AIRequestService:
             sanitize_message=sanitize_bot_message,
             get_context=self.get_stable_context,
             get_prices=self._deps.get_prices,
+            get_dollar_rates=self._deps.get_dollar_rates,
+            get_weather_context=self._deps.get_weather_context,
+            get_hacker_news_context=self._deps.get_hacker_news_context,
+            get_bot_capabilities=self._deps.get_bot_capabilities,
             config_redis=self._deps.config_redis,
             get_tool_schemas=self._deps.get_tool_schemas,
             build_system_message=self._deps.build_system_message,

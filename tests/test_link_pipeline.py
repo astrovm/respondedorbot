@@ -159,34 +159,33 @@ def test_build_message_links_context_keeps_full_youtube_transcript():
     assert context.count(transcript) == 1
 
 
-def test_build_ai_request_reuses_stable_context(monkeypatch):
+def test_build_ai_request_only_loads_time_context(monkeypatch):
     from api import index
 
-    calls = {"market": 0, "weather": 0, "hn": 0}
+    time_context = MagicMock(return_value={"formatted": "Monday 12:00"})
+    weather_context = MagicMock(side_effect=AssertionError("weather must be on demand"))
+    hacker_news_context = MagicMock(
+        side_effect=AssertionError("news must be on demand")
+    )
+    dollar_rates = MagicMock(side_effect=AssertionError("rates must be on demand"))
+    bot_capabilities = MagicMock(
+        side_effect=AssertionError("capabilities must be on demand")
+    )
 
-    def market_context():
-        calls["market"] += 1
-        return {}
-
-    def weather_context():
-        calls["weather"] += 1
-        return {}
-
-    def hacker_news_context():
-        calls["hn"] += 1
-        return []
-
-    monkeypatch.setattr(index.app_runtime.ai._deps, "get_market_context", market_context)
-    monkeypatch.setattr(index.app_runtime.ai._deps, "get_weather_context", weather_context)
     monkeypatch.setattr(
-        index.app_runtime.ai._deps,
-        "get_hacker_news_context",
-        hacker_news_context,
+        index.app_runtime.ai._deps, "get_weather_context", weather_context
+    )
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps, "get_hacker_news_context", hacker_news_context
+    )
+    monkeypatch.setattr(index.app_runtime.ai._deps, "get_dollar_rates", dollar_rates)
+    monkeypatch.setattr(
+        index.app_runtime.ai._deps, "get_bot_capabilities", bot_capabilities
     )
     monkeypatch.setattr(
         index.app_runtime.ai._deps,
         "get_time_context",
-        lambda _offset=-3: {"formatted": "Monday 12:00"},
+        time_context,
     )
     monkeypatch.setattr(
         index.app_runtime.ai._deps,
@@ -199,12 +198,18 @@ def test_build_ai_request_reuses_stable_context(monkeypatch):
         lambda *_args, **_kwargs: [],
     )
 
-    index.app_runtime.ai._stable_context_cache.clear()
+    index.app_runtime.ai.build_request(
+        [{"role": "user", "content": "hola"}], enable_web_search=False
+    )
+    index.app_runtime.ai.build_request(
+        [{"role": "user", "content": "chau"}], enable_web_search=False
+    )
 
-    index.app_runtime.ai.build_request([{"role": "user", "content": "hola"}], enable_web_search=False)
-    index.app_runtime.ai.build_request([{"role": "user", "content": "chau"}], enable_web_search=False)
-
-    assert calls == {"market": 1, "weather": 1, "hn": 1}
+    assert time_context.call_count == 2
+    weather_context.assert_not_called()
+    hacker_news_context.assert_not_called()
+    dollar_rates.assert_not_called()
+    bot_capabilities.assert_not_called()
 
 
 def test_fetch_link_metadata_uses_ttl_constant():

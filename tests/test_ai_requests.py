@@ -223,15 +223,13 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
     messages = [{"role": "user", "content": "CONTEXTO:\nMENSAJE:\nbuscá bitcoin hoy"}]
 
     context_loaders = [
-        MagicMock(side_effect=AssertionError("market context must not load")),
         MagicMock(side_effect=AssertionError("weather context must not load")),
         MagicMock(side_effect=AssertionError("time context must not load")),
         MagicMock(side_effect=AssertionError("news context must not load")),
     ]
-    monkeypatch.setattr("api.index.get_market_context", context_loaders[0])
-    monkeypatch.setattr("api.index.get_weather_context", context_loaders[1])
-    monkeypatch.setattr("api.index.get_time_context", context_loaders[2])
-    monkeypatch.setattr("api.index.get_hacker_news_context", context_loaders[3])
+    monkeypatch.setattr("api.index.get_weather_context", context_loaders[0])
+    monkeypatch.setattr("api.index.get_time_context", context_loaders[1])
+    monkeypatch.setattr("api.index.get_hacker_news_context", context_loaders[2])
 
     reserve, metadata = estimate_ai_base_reserve_credits(messages)
     expected_reserve = estimate_chat_reserve_credits(
@@ -254,10 +252,7 @@ def test_estimate_ai_base_reserve_credits_uses_standard_chat_without_forced_sear
 def test_ask_ai_fetches_url_unconditionally(monkeypatch):
     ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
@@ -291,10 +286,7 @@ def test_ask_ai_fetches_url_unconditionally(monkeypatch):
 def test_ask_ai_fetches_multiple_urls(monkeypatch):
     ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
@@ -330,10 +322,7 @@ def test_ask_ai_fetches_multiple_urls(monkeypatch):
 def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
     ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
@@ -365,10 +354,7 @@ def test_ask_ai_skips_inject_on_fetch_error(monkeypatch):
 def test_ask_ai_uses_single_provider_call_after_url_prefetch(monkeypatch):
     ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
@@ -404,16 +390,10 @@ def test_ask_ai_with_provider_success():
 
     # Simplified test - just verify the function runs without crashing
     with (
-        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
-        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
-        patch("api.index.app_runtime.ai._deps.get_hacker_news_context") as mock_get_hn_context,
         patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
-        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
-        mock_get_weather_context.return_value = {"temperature": 25}
-        mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
@@ -430,16 +410,10 @@ def test_ask_ai_with_all_failures():
 
     # Simplified test - just verify the function runs without crashing
     with (
-        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
-        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
-        patch("api.index.app_runtime.ai._deps.get_hacker_news_context") as mock_get_hn_context,
         patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
-        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
-        mock_get_weather_context.return_value = {"temperature": 25}
-        mock_get_hn_context.return_value = []
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
 
@@ -456,15 +430,11 @@ def test_ask_ai_with_image():
 
     # Simplified test - just verify the function runs without crashing when given an image
     with (
-        patch("api.index.app_runtime.ai._deps.get_market_context") as mock_get_market_context,
-        patch("api.index.app_runtime.ai._deps.get_weather_context") as mock_get_weather_context,
         patch("api.index.app_runtime.ai._deps.get_time_context") as mock_get_time_context,
         patch("api.index.app_runtime.media.describe_image") as mock_describe_image,
         patch("os.environ.get") as mock_env,
     ):
         # Setup basic mocks
-        mock_get_market_context.return_value = {"crypto": [], "dollar": {}}
-        mock_get_weather_context.return_value = {"temperature": 25}
         mock_get_time_context.return_value = {"formatted": "Monday"}
         mock_describe_image.return_value = "A beautiful landscape"
         mock_env.side_effect = lambda key: {"GROQ_API_KEY": "test_key"}.get(key)
@@ -481,10 +451,7 @@ def test_ask_ai_with_image():
 def test_ask_ai_skips_image_injection_when_image_data_is_none(monkeypatch):
     ask_ai = index.app_runtime.ai.ask
 
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_market_context", lambda: {})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_weather_context", lambda: {})
     monkeypatch.setattr("api.index.app_runtime.ai._deps.get_time_context", lambda _offset=-3: {"formatted": "Friday"})
-    monkeypatch.setattr("api.index.app_runtime.ai._deps.get_hacker_news_context", lambda: [])
     monkeypatch.setattr(
         "api.index.app_runtime.ai._deps.build_system_message",
         lambda _context_data, **_kw: {"role": "system", "content": "sys"},
@@ -526,9 +493,6 @@ def test_ask_ai_does_not_force_search_for_news_queries():
     )
 
     with (
-        patch("api.index.app_runtime.ai._deps.get_market_context", return_value={}),
-        patch("api.index.app_runtime.ai._deps.get_weather_context", return_value={}),
-        patch("api.index.app_runtime.ai._deps.get_hacker_news_context", return_value=[]),
         patch("api.index.app_runtime.ai._deps.get_time_context", return_value={}),
         patch(
             "api.index.app_runtime.ai._deps.build_system_message",
