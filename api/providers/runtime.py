@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import copy
 import json
 import re
 import time
@@ -677,6 +676,9 @@ class ProviderRuntime:
                 metadata["web_search_requests"] = int(web_search_requests)
             except (TypeError, ValueError):
                 pass
+        direct_search_requests = self._direct_web_search_request_count(message)
+        if direct_search_requests:
+            metadata["web_search_requests"] = direct_search_requests
         annotations = getattr(message, "annotations", None) or []
         citation_count = sum(
             1
@@ -724,14 +726,17 @@ class ProviderRuntime:
         web_search_max_uses: Optional[int],
         request_kwargs: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
+        # Web search is an application-managed Firecrawl function in
+        # extra_tools. Do not add OpenRouter's opaque server-managed tool.
         tools = list(extra_tools or [])
-        if not enable_web_search or web_search_max_uses == 0:
+        if enable_web_search and web_search_max_uses != 0:
             return tools
-        web_search_tool = copy.deepcopy(self._deps.build_web_search_tool())
-        if web_search_max_uses is not None:
-            self._limit_web_search_tool(web_search_tool, web_search_max_uses)
-        self._apply_web_search_limits(request_kwargs, web_search_tool)
-        return [web_search_tool, *tools]
+        return [
+            tool
+            for tool in tools
+            if str((ensure_mapping(tool.get("function")) or {}).get("name") or "")
+            != "web_search"
+        ]
 
     @staticmethod
     def _limit_web_search_tool(tool: Dict[str, Any], remaining: int) -> None:
@@ -763,6 +768,9 @@ class ProviderRuntime:
             request_count = 0
         if request_count:
             return request_count
+        direct_search_requests = self._direct_web_search_request_count(message)
+        if direct_search_requests:
+            return direct_search_requests
         annotations = getattr(message, "annotations", None) or []
         if any(
             getattr(annotation, "type", None) == "url_citation"
@@ -774,6 +782,30 @@ class ProviderRuntime:
         ):
             return 1
         return 0
+
+    @staticmethod
+    def _direct_web_search_request_count(message: Any) -> int:
+        count = 0
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            function = getattr(tool_call, "function", None)
+            if str(getattr(function, "name", "") or "") == "web_search":
+                count += 1
+        return count
+
+    @staticmethod
+    def _answer_cites_tool_source(
+        text: str,
+        current_messages: List[Dict[str, Any]],
+    ) -> bool:
+        if not text:
+            return False
+        for item in current_messages:
+            if str(item.get("role") or "") != "tool":
+                continue
+            for url in re.findall(r"https?://[^\s\"<>]+", str(item.get("content") or "")):
+                if url.rstrip(".,);]") in text:
+                    return True
+        return False
 
     def _remaining_web_search_uses(
         self,
@@ -829,8 +861,12 @@ class ProviderRuntime:
         web_metadata = self._web_search_metadata(response, message)
         if total_web_search_requests > 0:
             web_metadata["web_search_requests"] = total_web_search_requests
-            web_metadata["web_search_grounded"] = bool(
-                web_metadata.get("web_search_citation_count")
+            web_metadata["web_search_grounded"] = (
+                bool(web_metadata.get("web_search_citation_count"))
+                or self._answer_cites_tool_source(
+                    str(getattr(message, "content", "") or ""),
+                    current_messages,
+                )
             )
         text_override = None
         if web_metadata.get("web_search_grounded") is False:

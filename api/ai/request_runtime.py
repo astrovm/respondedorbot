@@ -104,6 +104,8 @@ def build_ai_request(
         "config_redis": config_redis,
         "timezone_offset": timezone_offset,
     }
+    if enable_web_search:
+        tool_context["web_search_enabled"] = True
     if chat_id:
         tool_context["chat_id"] = chat_id
     if user_name:

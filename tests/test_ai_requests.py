@@ -602,9 +602,6 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
     response_meta = {}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
 
     openrouter_result = AIUsageResult(
         kind="chat",
@@ -645,9 +642,6 @@ def test_describe_image_result_returns_none_when_provider_raises(
     monkeypatch,
 ):
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
-    )
 
     failing_client = MagicMock()
     failing_client.chat.completions.create.side_effect = Exception("boom")
@@ -665,9 +659,6 @@ def test_describe_image_result_skips_provider_when_image_is_invalid(
     monkeypatch,
 ):
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
-    )
 
     client = MagicMock()
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import urlparse, urlunparse
 
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
@@ -26,24 +25,14 @@ def get_openrouter_api_key(*, environment: Mapping[str, str]) -> str | None:
     return _clean_value(environment.get("OPENROUTER_API_KEY"))
 
 
-def get_openrouter_base_url(*, environment: Mapping[str, str]) -> str:
-    value = _clean_value(environment.get("CF_AIG_BASE_URL"))
-    if not value or "gateway.ai.cloudflare.com" not in value:
-        return DEFAULT_OPENROUTER_URL
-    parsed = urlparse(value)
-    path = parsed.path.rstrip("/")
-    if not path:
-        return DEFAULT_OPENROUTER_URL
-    base_path = path.rsplit("/", 1)[0]
-    openrouter_path = f"{base_path}/openrouter" if base_path else "/openrouter"
-    return urlunparse(parsed._replace(path=openrouter_path))
+def get_openrouter_base_url() -> str:
+    return DEFAULT_OPENROUTER_URL
 
 
 def build_openrouter_client(
     *,
     get_api_key: Callable[[], str | None],
     get_base_url: Callable[[], str | None],
-    environment: Mapping[str, str],
     client_factory: Callable[..., Any],
     default_headers: Mapping[str, str] | None = None,
     timeout: float = 60.0,
@@ -52,10 +41,6 @@ def build_openrouter_client(
     base_url = get_base_url()
     if not api_key or not base_url:
         return None
-    headers = dict(default_headers or {})
-    gateway_token = environment.get("CF_AIG_TOKEN")
-    if gateway_token:
-        headers["cf-aig-authorization"] = f"Bearer {gateway_token}"
     kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": base_url,
@@ -64,8 +49,8 @@ def build_openrouter_client(
         # SDK and the application from multiplying slow server-tool attempts.
         "max_retries": 0,
     }
-    if headers:
-        kwargs["default_headers"] = headers
+    if default_headers:
+        kwargs["default_headers"] = dict(default_headers)
     return client_factory(**kwargs)
 
 
@@ -73,7 +58,6 @@ def build_groq_openai_client(
     account: str,
     *,
     get_api_key: Callable[[str], str | None],
-    environment: Mapping[str, str],
     client_factory: Callable[..., Any],
     default_headers: Mapping[str, str] | None = None,
 ) -> Any | None:
@@ -81,18 +65,12 @@ def build_groq_openai_client(
     if not api_key:
         print(f"Groq API key not configured for account={account}")
         return None
-    headers = dict(default_headers or {})
-    gateway_token = environment.get("CF_AIG_TOKEN")
-    if gateway_token:
-        headers["cf-aig-authorization"] = f"Bearer {gateway_token}"
     kwargs: dict[str, Any] = {
         "api_key": api_key,
-        "base_url": environment.get(
-            "CF_AIG_BASE_URL", "https://api.groq.com/openai/v1"
-        ),
+        "base_url": "https://api.groq.com/openai/v1",
     }
-    if headers:
-        kwargs["default_headers"] = headers
+    if default_headers:
+        kwargs["default_headers"] = dict(default_headers)
     return client_factory(**kwargs)
 
 

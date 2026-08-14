@@ -136,6 +136,7 @@ class OpenRouterProvider(StreamingAIProvider):
         output_token_limit = chat_output_token_limit(self._primary_model)
         current_messages = list(messages)
         remaining_web_search_uses = self._runtime._configured_web_search_max_uses(enable_web_search)
+        total_web_search_requests = 0
         possible_pseudo_tools = self._extra_tool_names(extra_tools)
 
         try:
@@ -155,6 +156,7 @@ class OpenRouterProvider(StreamingAIProvider):
                         client,
                         request_kwargs,
                         possible_pseudo_tools,
+                        hold_all_text=total_web_search_requests > 0,
                     )
                 )
 
@@ -168,6 +170,11 @@ class OpenRouterProvider(StreamingAIProvider):
                     usage_response,
                     message,
                 )
+                round_web_search_requests = self._runtime._web_search_request_count(
+                    usage_response,
+                    message,
+                )
+                total_web_search_requests += round_web_search_requests
                 remaining_web_search_uses = self._runtime._remaining_web_search_uses(
                     remaining_web_search_uses,
                     usage_response,
@@ -188,8 +195,6 @@ class OpenRouterProvider(StreamingAIProvider):
                         round_idx,
                         web_metadata,
                     )
-                    if held_text:
-                        yield held_text
                     current_messages = self._tool_runtime.apply_tool_calls(
                         message,
                         known_calls,
@@ -219,6 +224,14 @@ class OpenRouterProvider(StreamingAIProvider):
                     )
                     continue
 
+                if total_web_search_requests > 0:
+                    web_metadata["web_search_grounded"] = (
+                        bool(web_metadata.get("web_search_citation_count"))
+                        or self._runtime._answer_cites_tool_source(
+                            streamed_round.text,
+                            current_messages,
+                        )
+                    )
                 text_override = self._runtime._stream_text_override(web_metadata)
                 if text_override is not None:
                     web_metadata["stream_text_override"] = text_override
@@ -231,7 +244,9 @@ class OpenRouterProvider(StreamingAIProvider):
                     text_override=text_override,
                 )
 
-                if held_text:
+                if text_override is not None and not text_released:
+                    yield text_override
+                elif held_text:
                     yield held_text
 
                 if streamed_round.finish_reason in {"stop", "length", None}:
@@ -301,6 +316,8 @@ class OpenRouterProvider(StreamingAIProvider):
         client: Any,
         request_kwargs: Dict[str, Any],
         possible_pseudo_tools: set[str],
+        *,
+        hold_all_text: bool = False,
     ) -> Generator[str, None, tuple[_StreamRound, str, bool]]:
         streamed_round = _StreamRound()
         held_text = ""
@@ -330,6 +347,9 @@ class OpenRouterProvider(StreamingAIProvider):
             self._accumulate_stream_delta(streamed_round, delta)
             content = str(self._field(delta, "content") or "")
             if not content:
+                continue
+            if hold_all_text:
+                held_text += content
                 continue
             if text_released:
                 yield content

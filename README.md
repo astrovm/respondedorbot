@@ -43,7 +43,7 @@ uv run --locked python run_polling.py
 | `GROQ_API_KEY` | Paid Groq API key for transcription |
 | `GROQ_FREE_API_KEY` | Optional free-tier Groq key for transcription |
 | `OPENROUTER_API_KEY` | OpenRouter API key for chat/vision |
-| `CF_AIG_TOKEN` | Cloudflare AI Gateway token forwarded to OpenRouter requests |
+| `FIRECRAWL_API_KEY` | Firecrawl API key for direct web search |
 | `GIPHY_API_KEY` | Giphy API key for `/gm` and `/gn` |
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
