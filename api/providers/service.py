@@ -113,7 +113,7 @@ class ProviderService:
         return provider_config.get_openrouter_api_key(environment=self.environment)
 
     def get_openrouter_base_url(self) -> str | None:
-        return provider_config.get_openrouter_base_url(environment=self.environment)
+        return provider_config.get_openrouter_base_url()
 
     def get_openrouter_client(
         self,
@@ -124,7 +124,6 @@ class ProviderService:
         return provider_config.build_openrouter_client(
             get_api_key=self.get_openrouter_api_key,
             get_base_url=self.get_openrouter_base_url,
-            environment=self.environment,
             client_factory=self.openai_client_factory,
             default_headers=default_headers,
             timeout=timeout,
@@ -139,7 +138,6 @@ class ProviderService:
         return provider_config.build_groq_openai_client(
             account,
             get_api_key=self.get_groq_api_key,
-            environment=self.environment,
             client_factory=self.openai_client_factory,
             default_headers=default_headers,
         )

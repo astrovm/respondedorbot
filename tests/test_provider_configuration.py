@@ -16,7 +16,6 @@ def test_openrouter_client_uses_explicit_timeout(monkeypatch):
 
     monkeypatch.setattr(index.app_runtime.providers, "openai_client_factory", FakeOpenAI)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
 
     client = index.app_runtime.providers.get_openrouter_client()
 
@@ -97,10 +96,6 @@ def test_get_groq_accounts_for_scope_returns_all_configured_accounts(monkeypatch
 
 def test_openrouter_config_helpers(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
-    monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
 
     with patch("api.index.app_runtime.providers.openai_client_factory") as mock_openai:
         client = index.app_runtime.providers.get_openrouter_client(
@@ -108,20 +103,11 @@ def test_openrouter_config_helpers(monkeypatch):
         )
 
     assert index.app_runtime.providers.get_openrouter_api_key() == "openrouter_key"
-    assert (
-        index.app_runtime.providers.get_openrouter_base_url()
-        == "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
-    )
+    assert index.app_runtime.providers.get_openrouter_base_url() == "https://openrouter.ai/api/v1"
     assert client is mock_openai.return_value
     assert mock_openai.call_args.kwargs["api_key"] == "openrouter_key"
-    assert (
-        mock_openai.call_args.kwargs["base_url"]
-        == "https://gateway.ai.cloudflare.com/v1/acct/gw/openrouter"
-    )
-    assert (
-        mock_openai.call_args.kwargs["default_headers"]["cf-aig-authorization"]
-        == "Bearer cf-token"
-    )
+    assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    assert mock_openai.call_args.kwargs["default_headers"] == {"x-test": "1"}
 
 
 def test_api_index_does_not_expose_unused_agent_limits():
@@ -150,31 +136,24 @@ def test_provider_runtime_enables_firecrawl_web_search():
     client = MagicMock()
     client.chat.completions.create.return_value = response
     runtime = _build_provider_runtime(client=client)
+    search_tool = {
+        "type": "function",
+        "function": {"name": "web_search", "parameters": {"type": "object"}},
+    }
 
     result = runtime.complete(
         {"role": "system", "content": "sys"},
         [{"role": "user", "content": "btc news"}],
         enable_web_search=True,
+        extra_tools=[search_tool],
     )
 
     assert result is not None
     assert result.text == "respuesta con busqueda"
     assert result.metadata["provider"] == "openrouter"
     assert result.metadata["web_search_requests"] == 1
-    assert client.chat.completions.create.call_args.kwargs["tools"] == [
-        {
-            "type": "openrouter:web_search",
-            "parameters": {
-                "engine": "firecrawl",
-                "max_results": 10,
-                "max_uses": 3,
-                "max_total_results": 30,
-            },
-        }
-    ]
-    assert client.chat.completions.create.call_args.kwargs["extra_body"] == {
-        "max_tool_calls": 3
-    }
+    assert client.chat.completions.create.call_args.kwargs["tools"] == [search_tool]
+    assert "extra_body" not in client.chat.completions.create.call_args.kwargs
 
 
 def test_provider_runtime_ignores_invalid_web_search_requests():
@@ -278,7 +257,7 @@ def test_provider_runtime_detects_pydantic_annotation():
     assert result.metadata["web_search_requests"] == 1
 
 
-def test_provider_runtime_sets_explicit_web_search_limits():
+def test_provider_runtime_does_not_add_openrouter_native_web_search():
     response = _build_chat_response(
         text="respuesta con busqueda",
         annotations=[
@@ -299,23 +278,11 @@ def test_provider_runtime_sets_explicit_web_search_limits():
         enable_web_search=True,
     )
 
-    assert client.chat.completions.create.call_args.kwargs["tools"] == [
-        {
-            "type": "openrouter:web_search",
-            "parameters": {
-                "engine": "firecrawl",
-                "max_results": 10,
-                "max_uses": 3,
-                "max_total_results": 30,
-            },
-        }
-    ]
-    assert client.chat.completions.create.call_args.kwargs["extra_body"] == {
-        "max_tool_calls": 3
-    }
+    assert "tools" not in client.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in client.chat.completions.create.call_args.kwargs
 
 
-def test_provider_runtime_includes_web_search_by_default():
+def test_provider_runtime_requires_application_web_search_tool():
     response = _build_chat_response(
         text="respuesta normal",
         usage={"prompt_tokens": 10, "completion_tokens": 5},
@@ -330,7 +297,7 @@ def test_provider_runtime_includes_web_search_by_default():
     )
 
     assert result is not None
-    assert "tools" in client.chat.completions.create.call_args.kwargs
+    assert "tools" not in client.chat.completions.create.call_args.kwargs
 
 
 def test_check_provider_available_returns_true_by_default(monkeypatch):
@@ -344,12 +311,7 @@ def test_check_provider_available_returns_true_by_default(monkeypatch):
 
 def test_has_openrouter_fallback_requires_openrouter_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("CF_AIG_BASE_URL", raising=False)
     assert index.app_runtime.providers.has_openrouter_fallback() is False
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter_key")
-    monkeypatch.setenv(
-        "CF_AIG_BASE_URL", "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
-    )
-    monkeypatch.setenv("CF_AIG_TOKEN", "cf-token")
     assert index.app_runtime.providers.has_openrouter_fallback() is True

@@ -146,6 +146,7 @@ from api.providers import OpenRouterProvider, ProviderChain
 import api.tools.crypto_prices
 import api.tools.calculate
 import api.tools.web_fetch
+import api.tools.web_search
 import api.tools.task_set
 import api.tools.get_chat_members
 from api.tools import get_all_tool_schemas
@@ -339,7 +340,7 @@ VISION_MODEL = "google/gemini-3.1-flash-lite-preview"
 GROQ_TRANSCRIBE_MODEL = "groq/whisper-large-v3"
 OPENROUTER_TRANSCRIBE_MODEL = "google/gemini-3.1-flash-lite-preview"
 
-OPENROUTER_WEB_SEARCH_MAX_RESULTS = 10
+OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
 OPENROUTER_WEB_SEARCH_MAX_QUERIES = 3
 _MAX_TOOL_ROUNDS = 5
 _TOOL_RUNTIME = ToolRuntime()
