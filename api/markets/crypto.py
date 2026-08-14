@@ -168,7 +168,7 @@ def _select_price_rows(
     if not msg_text.upper().isupper():
         return listed, prices_number or 10, None
 
-    coins = expand_price_tokens(msg_text.split(","))
+    coins = expand_price_tokens(re.split(r"[,\s]+", msg_text))
     selected = _select_listed_coins(listed, coins, prices_number)
     requested = _fallback_quote_tokens(coins)
     if not selected:

@@ -60,21 +60,21 @@ class TestCryptoPricesTool:
         mock_gp = MagicMock(return_value="BTC: $50000")
         result = execute_tool(
             "crypto_prices",
-            {"symbols": "BTC"},
+            {"assets": ["BTC"]},
             {"get_prices": mock_gp},
         )
         assert result.output == "BTC: $50000"
-        mock_gp.assert_called_once_with("BTC")
+        mock_gp.assert_called_once_with("BTC in USD 24h")
 
     def test_crypto_prices_no_context(self):
-        result = execute_tool("crypto_prices", {"symbols": "ETH"}, {})
+        result = execute_tool("crypto_prices", {"assets": ["ETH"]}, {})
         assert "not available" in result.output
 
     def test_crypto_prices_none_result(self):
         mock_gp = MagicMock(return_value=None)
         result = execute_tool(
             "crypto_prices",
-            {"symbols": "BTC"},
+            {"assets": ["BTC"]},
             {"get_prices": mock_gp},
         )
         assert "no se pudieron" in result.output
@@ -106,13 +106,25 @@ class TestOnDemandContextTools:
 
         result = execute_tool(
             "weather",
-            {},
+            {"location": "Example City, Exampleland"},
             {"get_weather_context": get_weather},
         )
 
         assert "synthetic clear sky" in result.output
         assert "12.0km" in result.output
-        get_weather.assert_called_once_with()
+        get_weather.assert_called_once_with("Example City, Exampleland")
+
+    def test_stock_prices_uses_shared_service(self):
+        get_stock_prices = MagicMock(return_value="EXM: 123.45 USD")
+
+        result = execute_tool(
+            "stock_prices",
+            {"queries": ["Example Holdings", "EXM"]},
+            {"get_stock_prices": get_stock_prices},
+        )
+
+        assert result.output == "EXM: 123.45 USD"
+        get_stock_prices.assert_called_once_with("Example Holdings,EXM")
 
     def test_hacker_news_uses_injected_service(self):
         get_news = MagicMock(
@@ -155,6 +167,7 @@ def test_production_tool_registry_exposes_all_context_tools():
         "user_id": 123,
         "web_search_enabled": True,
         "get_prices": MagicMock(),
+        "get_stock_prices": MagicMock(),
         "get_dollar_rates": MagicMock(),
         "get_weather_context": MagicMock(),
         "get_hacker_news_context": MagicMock(),
@@ -198,7 +211,10 @@ def test_tool_runtime_executes_on_demand_weather_service():
     )
     tool_call = SimpleNamespace(
         id="synthetic-call",
-        function=SimpleNamespace(name="weather", arguments="{}"),
+        function=SimpleNamespace(
+            name="weather",
+            arguments='{"location":"Example City, Exampleland"}',
+        ),
     )
 
     messages = ToolRuntime(print_fn=lambda _message: None).apply_tool_calls(
@@ -210,7 +226,7 @@ def test_tool_runtime_executes_on_demand_weather_service():
 
     assert messages[-1]["role"] == "tool"
     assert "synthetic mild weather" in messages[-1]["content"]
-    get_weather.assert_called_once_with()
+    get_weather.assert_called_once_with("Example City, Exampleland")
 
 
 class TestWebFetchTool:

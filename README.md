@@ -11,7 +11,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
 - **Incremental summaries**: `/resumen` streams conversation summaries using DeepSeek, with automatic context compaction
 - **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
-- **Market data**: `/prices`, `/usd`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
+- **Market data and weather**: `/prices`, `/acciones`, `/usd`, `/clima`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
 - **BCRA economic data**: `/bcra`, `/variables`
 - **Media**: audio transcription (Whisper via Groq, with OpenRouter fallback) and image description (OpenRouter)
 - **Scheduled tasks**: `/tareas`, `/tasks` — create, list, and delete one-shot or recurring reminders via AI or inline buttons
@@ -67,6 +67,7 @@ uv run --locked python run_polling.py
 | `/resumen` | `/summary` | Stream conversation summary |
 | `/transcribe` | `/describe` | Transcribe audio / describe image |
 | `/prices` | `/price`, `/precios`, `/precio`, `/presio(s)`, `/bresio(s)`, `/brecio(s)`, `/crypto`, `/criptos` | Crypto prices |
+| `/clima` | `/weather` | Current weather for a city or location |
 | `/dolar` | `/dollar`, `/usd` | Dollar rates (CriptoYa) |
 | `/petroleo` | `/oil` | Oil prices |
 | `/acciones` | `/stocks` | Stock prices |

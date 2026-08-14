@@ -60,8 +60,9 @@ def build_ai_request(
     sanitize_message: Callable[[dict[str, Any]], dict[str, Any]],
     get_context: Callable[[int], dict[str, Any]],
     get_prices: Callable[..., Any],
+    get_stock_prices: Callable[[str], str],
     get_dollar_rates: Callable[[str], str | None],
-    get_weather_context: Callable[[], dict[str, Any] | None],
+    get_weather_context: Callable[[str], dict[str, Any] | None],
     get_hacker_news_context: Callable[[int], list[dict[str, Any]]],
     get_bot_capabilities: Callable[[], str],
     config_redis: Callable[..., Any],
@@ -83,6 +84,7 @@ def build_ai_request(
     # Tool functions receive this dictionary when the model calls them.
     tool_context: dict[str, Any] = {
         "get_prices": get_prices,
+        "get_stock_prices": get_stock_prices,
         "get_dollar_rates": get_dollar_rates,
         "get_weather_context": get_weather_context,
         "get_hacker_news_context": get_hacker_news_context,
@@ -279,10 +281,11 @@ class AIRequestServiceDeps:
     network, Redis, or real provider clients.
     """
 
-    get_weather_context: Callable[[], dict[str, Any] | None]
+    get_weather_context: Callable[[str], dict[str, Any] | None]
     get_time_context: Callable[[int], dict[str, Any]]
     get_hacker_news_context: Callable[[int], list[dict[str, Any]]]
     get_prices: Callable[..., Any]
+    get_stock_prices: Callable[[str], str]
     get_dollar_rates: Callable[[str], str | None]
     get_bot_capabilities: Callable[[], str]
     config_redis: Callable[..., Any]
@@ -337,6 +340,7 @@ class AIRequestService:
             sanitize_message=sanitize_bot_message,
             get_context=self.get_stable_context,
             get_prices=self._deps.get_prices,
+            get_stock_prices=self._deps.get_stock_prices,
             get_dollar_rates=self._deps.get_dollar_rates,
             get_weather_context=self._deps.get_weather_context,
             get_hacker_news_context=self._deps.get_hacker_news_context,

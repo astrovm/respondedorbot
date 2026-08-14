@@ -44,6 +44,21 @@ def test_missing_quotes_are_fetched_in_two_batches():
     ]
 
 
+def test_space_separated_symbols_select_multiple_assets():
+    coins = [_coin("AAA", 1.0, coin_id=1), _coin("BBB", 2.0, coin_id=2)]
+
+    result = get_prices(
+        "aaa bbb",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": coins}),
+        fetch_quotes=MagicMock(),
+    )
+
+    assert result is not None
+    assert "AAA:" in result
+    assert "BBB:" in result
+
+
 def test_satoshi_formatting_does_not_mutate_cached_quote():
     coin = _coin("BTC", 1.0, coin_id=1)
 
