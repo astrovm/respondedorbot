@@ -225,6 +225,31 @@ def test_get_hacker_news_context_uses_cache():
     mock_get.assert_not_called()
 
 
+def test_get_hacker_news_context_can_return_ten_items():
+    from api.index import get_hacker_news_context
+
+    cached_items = [
+        {
+            "title": f"Synthetic story {index}",
+            "url": f"https://example.test/story-{index}",
+            "points": index,
+            "comments": index,
+            "comments_url": f"https://example.test/comments-{index}",
+        }
+        for index in range(10)
+    ]
+
+    with (
+        patch("api.index.app_runtime.config.redis", return_value=object()),
+        patch("api.index.redis_get_json", return_value=cached_items),
+        patch("api.index.http_client.get") as mock_get,
+    ):
+        items = get_hacker_news_context(limit=10)
+
+    assert items == cached_items
+    mock_get.assert_not_called()
+
+
 def test_get_fallback_response():
     from api.index import get_fallback_response
 

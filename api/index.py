@@ -409,7 +409,7 @@ GROQ_ACCOUNT_ORDER: Tuple[str, ...] = (GROQ_FREE_ACCOUNT, GROQ_PAID_ACCOUNT)
 HACKER_NEWS_RSS_URL = "https://hnrss.org/best"
 HACKER_NEWS_RSS_FALLBACK_URL = "https://news.ycombinator.com/rss"
 HACKER_NEWS_CACHE_KEY = "context:hacker_news:best"
-HACKER_NEWS_MAX_ITEMS = 5
+HACKER_NEWS_MAX_ITEMS = 10
 
 
 _provider_service = ProviderService(
