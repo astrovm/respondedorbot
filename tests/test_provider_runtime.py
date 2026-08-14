@@ -32,6 +32,43 @@ class _FakeClient:
         return self._responses.pop(0)
 
 
+def test_web_search_grounding_ignores_urls_from_other_tools():
+    from api.providers.runtime import ProviderRuntime
+
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "search_1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{}"},
+                },
+                {
+                    "id": "fetch_1",
+                    "type": "function",
+                    "function": {"name": "web_fetch", "arguments": "{}"},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "search_1",
+            "content": '{"results":[]}',
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "fetch_1",
+            "content": '{"url":"https://example.com/not-a-search-result"}',
+        },
+    ]
+
+    assert not ProviderRuntime._answer_cites_web_search_source(
+        "Fuente: https://example.com/not-a-search-result",
+        messages,
+    )
+
+
 def test_provider_runtime_executes_tool_calls_until_stop():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -195,14 +232,14 @@ def test_provider_runtime_shares_web_search_budget_across_tool_rounds(
 
     assert result is not None
     assert result.metadata["web_search_requests"] == total_requests
-    assert client.calls[0]["tools"][0]["parameters"]["max_uses"] == 3
-    assert (
-        client.calls[1]["tools"][0]["parameters"]["max_uses"]
-        == second_max_uses
-    )
-    assert client.calls[1]["extra_body"] == {
-        "max_tool_calls": second_max_uses
-    }
+    assert client.calls[0]["tools"] == [
+        {"type": "function", "function": {"name": "calc"}}
+    ]
+    assert client.calls[1]["tools"] == [
+        {"type": "function", "function": {"name": "calc"}}
+    ]
+    assert "extra_body" not in client.calls[0]
+    assert "extra_body" not in client.calls[1]
 
 
 def test_provider_runtime_returns_text_when_tool_calls_are_unknown():
@@ -321,7 +358,7 @@ def test_provider_runtime_returns_plain_text_when_tools_never_called():
     assert result is not None
     assert result.text == "plain answer"
     assert_no_raw_tool_syntax(result.text)
-    assert client.calls[0]["tools"] == [{"type": "web_search"}, {"name": "calc"}]
+    assert client.calls[0]["tools"] == [{"name": "calc"}]
     execute_tool_fn.assert_not_called()
 
 

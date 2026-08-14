@@ -256,7 +256,7 @@ def test_openrouter_stream_executes_fragmented_tool_call_and_reports_each_round(
         )
     )
 
-    assert chunks == ["resultado ", "final"]
+    assert chunks == ["resultado final"]
     assert_no_raw_tool_syntax("".join(chunks))
     execute_tool.assert_called_once_with(
         "calculate",
@@ -265,7 +265,13 @@ def test_openrouter_stream_executes_fragmented_tool_call_and_reports_each_round(
     )
     assert create_calls[0]["stream"] is True
     assert create_calls[1]["stream"] is True
-    assert create_calls[1]["tools"][0]["parameters"]["max_uses"] == 1
+    assert create_calls[0]["tools"] == [
+        {"type": "function", "function": {"name": "calculate"}}
+    ]
+    assert create_calls[1]["tools"] == [
+        {"type": "function", "function": {"name": "calculate"}}
+    ]
+    assert "extra_body" not in create_calls[1]
     assert create_calls[1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_1",
@@ -316,7 +322,6 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
                 usage={
                     "prompt_tokens": 10,
                     "completion_tokens": 2,
-                    "server_tool_use": {"web_search_requests": 1},
                 },
             ),
         ])
@@ -343,16 +348,177 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "hola"}],
             enable_web_search=True,
+            extra_tools=[
+                {"type": "function", "function": {"name": "web_search"}}
+            ],
             on_usage_result=usage_results.append,
         )
     )
 
-    assert chunks == ["web", " answer"]
+    assert chunks == ["web answer"]
     assert_no_raw_tool_syntax("".join(chunks))
-    assert create_calls[0]["tools"] == [{"type": "web_search"}]
-    assert usage_results[0].text.startswith("No pude verificar eso con fuentes")
-    assert usage_results[0].metadata["web_search_grounded"] is False
-    assert usage_results[0].metadata["stream_text_override"] == usage_results[0].text
+    assert create_calls[0]["tools"] == [
+        {"type": "function", "function": {"name": "web_search"}}
+    ]
+    assert usage_results[0].text == "web answer"
+    assert "web_search_grounded" not in usage_results[0].metadata
+
+
+@pytest.mark.parametrize(
+    ("final_text", "search_output", "expected_chunks", "grounded"),
+    [
+        (
+            "Perfil: https://example.com/pablo",
+            '{"results":[{"title":"Pablo Wasserman",'
+            '"url":"https://example.com/pablo"}]}',
+            ["Perfil: https://example.com/pablo"],
+            True,
+        ),
+        (
+            "La búsqueda falló y no encontré nada.",
+            '{"results":[{"title":"Pablo Wasserman",'
+            '"url":"https://example.com/pablo"}]}',
+            [
+                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
+                "resultados citables; probá de nuevo en un momento."
+            ],
+            False,
+        ),
+        (
+            "Consulté https://example.com/not-a-result",
+            '{"query":"https://example.com/not-a-result","results":[]}',
+            [
+                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
+                "resultados citables; probá de nuevo en un momento."
+            ],
+            False,
+        ),
+    ],
+)
+def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
+    final_text,
+    search_output,
+    expected_chunks,
+    grounded,
+):
+    from types import SimpleNamespace
+
+    from api.ai.pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+    from api.tools.runtime import ToolRuntime
+
+    create_calls = []
+    responses = [
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="tool_calls",
+                        delta=SimpleNamespace(
+                            content=None,
+                            annotations=[],
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="search_1",
+                                    type="function",
+                                    function=SimpleNamespace(
+                                        name="web_search",
+                                        arguments='{"query":"Pablo Wasserman"}',
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+            ),
+        ],
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        delta=SimpleNamespace(
+                            content=final_text,
+                            annotations=[],
+                            tool_calls=[],
+                        ),
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage={"prompt_tokens": 20, "completion_tokens": 4},
+            ),
+        ],
+    ]
+
+    def create(**kwargs):
+        create_calls.append(kwargs)
+        return iter(responses.pop(0))
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    execute_tool = MagicMock(
+        return_value=SimpleNamespace(output=search_output)
+    )
+    usage_results = []
+    search_schema = {
+        "type": "function",
+        "function": {"name": "web_search", "parameters": {"type": "object"}},
+    }
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=lambda *a, **k: None,
+        increment_request_count=lambda: None,
+        build_web_search_tool=lambda: {"type": "openrouter:web_search"},
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage=kwargs["response"].usage,
+            metadata=kwargs.get("metadata") or {},
+        ),
+        extract_usage_map=lambda response: response.usage,
+        primary_model="test-model",
+        tool_runtime=ToolRuntime(
+            execute_tool_fn=execute_tool,
+            tool_registry={"web_search": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+
+    chunks = list(
+        provider.stream(
+            {"role": "system", "content": "sys"},
+            [{"role": "user", "content": "buscá a Pablo Wasserman"}],
+            enable_web_search=True,
+            extra_tools=[search_schema],
+            on_usage_result=usage_results.append,
+        )
+    )
+
+    assert chunks == expected_chunks
+    execute_tool.assert_called_once_with(
+        "web_search",
+        {"query": "Pablo Wasserman"},
+        {},
+    )
+    assert create_calls[0]["tools"] == [search_schema]
+    assert create_calls[1]["tools"] == [search_schema]
+    assert create_calls[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "search_1",
+        "content": search_output,
+    }
+    assert usage_results[0].metadata["web_search_requests"] == 1
+    assert usage_results[-1].metadata["web_search_grounded"] is grounded
+    assert "web_search_requests" not in usage_results[-1].metadata
 
 
 def test_openrouter_stream_raises_on_provider_error_chunk():
