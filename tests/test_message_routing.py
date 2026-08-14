@@ -474,7 +474,7 @@ def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
     )
 
 
-def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypatch):
+def test_message_handler_private_message_is_not_spontaneous(monkeypatch):
     from api.ai.service import AIConversationRequest
     from api.bot.message_handler import handle_msg
     from api.bot.streaming import set_streamed_response_metadata
@@ -483,8 +483,8 @@ def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypa
 
     ai_service = MagicMock()
     def run_conversation(_request):
-        set_streamed_response_metadata("999", "respuesta espontanea")
-        return ("respuesta espontanea", True)
+        set_streamed_response_metadata("999", "synthetic response")
+        return ("synthetic response", True)
 
     ai_service.run_conversation.side_effect = run_conversation
 
@@ -501,8 +501,12 @@ def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypa
     message = {
         "message_id": 502,
         "chat": {"id": 558, "type": "private"},
-        "from": {"id": 1004, "first_name": "Ana", "username": "ana"},
-        "text": "hola gordo",
+        "from": {
+            "id": 1004,
+            "first_name": "Test User",
+            "username": "synthetic_user",
+        },
+        "text": "synthetic request",
     }
 
     result = handle_msg(message, deps)
@@ -512,13 +516,88 @@ def test_message_handler_spontaneous_reply_passes_single_request_object(monkeypa
     request = ai_service.run_conversation.call_args.args[0]
     assert isinstance(request, AIConversationRequest)
     assert request.chat_id == "558"
-    assert request.prompt_text == "hola gordo"
+    assert request.prompt_text == "synthetic request"
     assert request.handler_func is deps.handle_ai_stream
-    assert request.is_spontaneous is True
+    assert request.is_spontaneous is False
     mock_send_msg.assert_not_called()
     mock_save_message.assert_any_call(
-        "558", "bot_999", "respuesta espontanea", ANY, role="assistant"
+        "558", "bot_999", "synthetic response", ANY, role="assistant"
     )
+
+
+def test_message_handler_direct_bot_reply_is_not_spontaneous(monkeypatch):
+    from api.bot.message_handler import handle_msg
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    ai_service = MagicMock()
+    ai_service.run_conversation.side_effect = lambda request: (
+        "insufficient credits" if not request.is_spontaneous else "ok",
+        False,
+    )
+
+    make_deps, _ = _build_message_handler_deps()
+    mock_send_msg = MagicMock(return_value=999)
+    deps = make_deps(
+        ai_service=ai_service,
+        send_msg=mock_send_msg,
+        should_gordo_respond=MagicMock(return_value=True),
+    )
+    message = {
+        "message_id": 503,
+        "chat": {"id": -100123, "type": "supergroup"},
+        "from": {
+            "id": 1005,
+            "first_name": "Test User",
+            "username": "synthetic_user",
+        },
+        "text": "synthetic reply",
+        "reply_to_message": {
+            "message_id": 502,
+            "from": {"username": "testbot"},
+            "text": "synthetic bot message",
+        },
+    }
+
+    assert handle_msg(message, deps) == "ok"
+    request = ai_service.run_conversation.call_args.args[0]
+    assert request.is_spontaneous is False
+    mock_send_msg.assert_called_once_with(
+        "-100123", "insufficient credits", "503", reply_markup=None
+    )
+
+
+def test_message_handler_random_group_reply_remains_spontaneous(monkeypatch):
+    from api.bot.message_handler import handle_msg
+
+    monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
+    ai_service = MagicMock()
+    ai_service.run_conversation.side_effect = lambda request: (
+        "ok" if request.is_spontaneous else "unexpected",
+        False,
+    )
+
+    make_deps, _ = _build_message_handler_deps()
+    mock_send_msg = MagicMock(return_value=999)
+    deps = make_deps(
+        ai_service=ai_service,
+        send_msg=mock_send_msg,
+        should_gordo_respond=MagicMock(return_value=True),
+    )
+    message = {
+        "message_id": 504,
+        "chat": {"id": -100123, "type": "supergroup"},
+        "from": {
+            "id": 1006,
+            "first_name": "Test User",
+            "username": "synthetic_user",
+        },
+        "text": "synthetic random trigger",
+    }
+
+    assert handle_msg(message, deps) == "ok"
+    request = ai_service.run_conversation.call_args.args[0]
+    assert request.is_spontaneous is True
+    mock_send_msg.assert_not_called()
 
 
 def test_message_handler_stores_user_message_when_bot_should_not_respond(monkeypatch):

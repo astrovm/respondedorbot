@@ -1716,9 +1716,26 @@ def _handle_known_command(
         handler_func=deps.handle_ai_stream,
         redis_client=context.redis_client,
         timezone_offset=context.timezone_offset,
-        is_spontaneous=True,
+        is_spontaneous=_is_spontaneous_ai_message(context),
     )
     return response_msg, response_markup, response_uses_ai, response_command
+
+
+def _is_spontaneous_ai_message(context: CommandDispatchContext) -> bool:
+    if context.chat_type == "private":
+        return False
+
+    bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip().lower()
+    if bot_username and f"@{bot_username}" in context.prepared_message.message_text.lower():
+        return False
+
+    reply = context.message.get("reply_to_message") or {}
+    if isinstance(reply, Mapping):
+        reply_username = str((reply.get("from") or {}).get("username") or "").lower()
+        if bot_username and reply_username == bot_username:
+            return False
+
+    return True
 
 
 def _route_uses_ai(
