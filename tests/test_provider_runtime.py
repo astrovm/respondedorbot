@@ -32,6 +32,43 @@ class _FakeClient:
         return self._responses.pop(0)
 
 
+def test_web_search_grounding_ignores_urls_from_other_tools():
+    from api.providers.runtime import ProviderRuntime
+
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "search_1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{}"},
+                },
+                {
+                    "id": "fetch_1",
+                    "type": "function",
+                    "function": {"name": "web_fetch", "arguments": "{}"},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "search_1",
+            "content": '{"results":[]}',
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "fetch_1",
+            "content": '{"url":"https://example.com/not-a-search-result"}',
+        },
+    ]
+
+    assert not ProviderRuntime._answer_cites_web_search_source(
+        "Fuente: https://example.com/not-a-search-result",
+        messages,
+    )
+
+
 def test_provider_runtime_executes_tool_calls_until_stop():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps

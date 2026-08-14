@@ -49,7 +49,6 @@ def _search_request(query: str, api_key: str) -> requests.Response:
         "limit": _MAX_RESULTS,
         "sources": ["web"],
         "timeout": _API_TIMEOUT_MS,
-        "ignoreInvalidURLs": True,
     }
     last_response: requests.Response | None = None
     started = time.monotonic()

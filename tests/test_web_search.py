@@ -57,7 +57,6 @@ def test_web_search_returns_compact_citable_results(monkeypatch):
         "limit": 5,
         "sources": ["web"],
         "timeout": 60_000,
-        "ignoreInvalidURLs": True,
     }
     assert post.call_args.kwargs["timeout"] == (10.0, 75.0)
 

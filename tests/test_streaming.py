@@ -365,15 +365,28 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
 
 
 @pytest.mark.parametrize(
-    ("final_text", "expected_chunks", "grounded"),
+    ("final_text", "search_output", "expected_chunks", "grounded"),
     [
         (
             "Perfil: https://example.com/pablo",
+            '{"results":[{"title":"Pablo Wasserman",'
+            '"url":"https://example.com/pablo"}]}',
             ["Perfil: https://example.com/pablo"],
             True,
         ),
         (
             "La búsqueda falló y no encontré nada.",
+            '{"results":[{"title":"Pablo Wasserman",'
+            '"url":"https://example.com/pablo"}]}',
+            [
+                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
+                "resultados citables; probá de nuevo en un momento."
+            ],
+            False,
+        ),
+        (
+            "Consulté https://example.com/not-a-result",
+            '{"query":"https://example.com/not-a-result","results":[]}',
             [
                 "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
                 "resultados citables; probá de nuevo en un momento."
@@ -384,6 +397,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
 )
 def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     final_text,
+    search_output,
     expected_chunks,
     grounded,
 ):
@@ -451,12 +465,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     execute_tool = MagicMock(
-        return_value=SimpleNamespace(
-            output=(
-                '{"results":[{"title":"Pablo Wasserman",'
-                '"url":"https://example.com/pablo"}]}'
-            )
-        )
+        return_value=SimpleNamespace(output=search_output)
     )
     usage_results = []
     search_schema = {
@@ -505,10 +514,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     assert create_calls[1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "search_1",
-        "content": (
-            '{"results":[{"title":"Pablo Wasserman",'
-            '"url":"https://example.com/pablo"}]}'
-        ),
+        "content": search_output,
     }
     assert usage_results[0].metadata["web_search_requests"] == 1
     assert usage_results[-1].metadata["web_search_grounded"] is grounded

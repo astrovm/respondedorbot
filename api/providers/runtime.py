@@ -793,19 +793,61 @@ class ProviderRuntime:
         return count
 
     @staticmethod
-    def _answer_cites_tool_source(
+    def _web_search_call_ids(
+        current_messages: List[Dict[str, Any]],
+    ) -> set[str]:
+        web_search_call_ids: set[str] = set()
+        for item in current_messages:
+            if str(item.get("role") or "") != "assistant":
+                continue
+            for tool_call in item.get("tool_calls") or []:
+                call = ensure_mapping(tool_call) or {}
+                function = ensure_mapping(call.get("function")) or {}
+                if str(function.get("name") or "") != "web_search":
+                    continue
+                call_id = str(call.get("id") or "")
+                if call_id:
+                    web_search_call_ids.add(call_id)
+        return web_search_call_ids
+
+    @classmethod
+    def _web_search_source_urls(
+        cls,
+        current_messages: List[Dict[str, Any]],
+    ) -> set[str]:
+        web_search_call_ids = cls._web_search_call_ids(current_messages)
+        source_urls: set[str] = set()
+        for item in current_messages:
+            if (
+                str(item.get("role") or "") != "tool"
+                or str(item.get("tool_call_id") or "") not in web_search_call_ids
+            ):
+                continue
+            try:
+                payload = json.loads(str(item.get("content") or ""))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            result_items = (ensure_mapping(payload) or {}).get("results")
+            if not isinstance(result_items, list):
+                continue
+            for result_item in result_items:
+                result = ensure_mapping(result_item) or {}
+                source_url = str(result.get("url") or "").rstrip(".,);]")
+                if source_url:
+                    source_urls.add(source_url)
+        return source_urls
+
+    @classmethod
+    def _answer_cites_web_search_source(
+        cls,
         text: str,
         current_messages: List[Dict[str, Any]],
     ) -> bool:
-        if not text:
-            return False
-        for item in current_messages:
-            if str(item.get("role") or "") != "tool":
-                continue
-            for url in re.findall(r"https?://[^\s\"<>]+", str(item.get("content") or "")):
-                if url.rstrip(".,);]") in text:
-                    return True
-        return False
+        cited_urls = {
+            url.rstrip(".,);]")
+            for url in re.findall(r"https?://[^\s\"<>]+", text)
+        }
+        return bool(cited_urls & cls._web_search_source_urls(current_messages))
 
     def _remaining_web_search_uses(
         self,
@@ -863,7 +905,7 @@ class ProviderRuntime:
             web_metadata["web_search_requests"] = total_web_search_requests
             web_metadata["web_search_grounded"] = (
                 bool(web_metadata.get("web_search_citation_count"))
-                or self._answer_cites_tool_source(
+                or self._answer_cites_web_search_source(
                     str(getattr(message, "content", "") or ""),
                     current_messages,
                 )

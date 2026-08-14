@@ -227,7 +227,7 @@ class OpenRouterProvider(StreamingAIProvider):
                 if total_web_search_requests > 0:
                     web_metadata["web_search_grounded"] = (
                         bool(web_metadata.get("web_search_citation_count"))
-                        or self._runtime._answer_cites_tool_source(
+                        or self._runtime._answer_cites_web_search_source(
                             streamed_round.text,
                             current_messages,
                         )
