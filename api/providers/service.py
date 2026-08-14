@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar, Token
 from logging import Logger
-from typing import Any
+from typing import Any, Callable
 
 from groq import Groq
 from openai import OpenAI
@@ -320,13 +320,29 @@ class ProviderService:
         enable_web_search: bool = True,
         extra_tools: list[dict[str, Any]] | None = None,
         tool_context: dict[str, Any] | None = None,
+        response_meta: dict[str, Any] | None = None,
     ) -> Iterator[tuple[str, str]]:
+        on_usage_result: Callable[[AIUsageResult], None] | None = None
+        if response_meta is not None:
+
+            def record_usage(result: AIUsageResult) -> None:
+                text_override = result.metadata.pop("stream_text_override", None)
+                if isinstance(text_override, str) and text_override.strip():
+                    response_meta["stream_text_override"] = text_override
+                self.append_billing_segment(response_meta, result)
+
+            on_usage_result = record_usage
+        stream_kwargs: dict[str, Any] = {
+            "enable_web_search": enable_web_search,
+            "extra_tools": extra_tools,
+            "tool_context": tool_context,
+        }
+        if on_usage_result is not None:
+            stream_kwargs["on_usage_result"] = on_usage_result
         return self.get_chain().stream(
             system_message,
             messages,
-            enable_web_search=enable_web_search,
-            extra_tools=extra_tools,
-            tool_context=tool_context,
+            **stream_kwargs,
         )
 
     def is_scope_available(self, scope: str) -> bool:
