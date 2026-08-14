@@ -200,7 +200,10 @@ class PollingEntrypointTests(unittest.TestCase):
                 clear=True,
             ),
             patch("run_polling._load_dotenv"),
+            patch("run_polling.threading.Thread"),
             patch("api.bot.ptb.run_polling") as mock_run_polling,
+            patch("api.tasks.scheduler.init_scheduler") as mock_init_scheduler,
+            patch("api.tasks.scheduler.get_scheduler") as mock_get_scheduler,
         ):
             import importlib
             import run_polling
@@ -212,6 +215,37 @@ class PollingEntrypointTests(unittest.TestCase):
             token="abc",
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query", "pre_checkout_query"],
+        )
+        mock_get_scheduler.assert_called_once_with()
+
+        from api import index
+
+        scheduler_kwargs = mock_init_scheduler.call_args.kwargs
+        self.assertEqual(
+            scheduler_kwargs["redis_factory"],
+            index.app_runtime.config.redis,
+        )
+        task_deps = scheduler_kwargs["task_executor_deps"]
+        self.assertEqual(task_deps["ask_ai"], index.app_runtime.ai.ask)
+        self.assertEqual(
+            task_deps["send_msg"],
+            index.app_runtime.telegram.send_message,
+        )
+        self.assertEqual(task_deps["admin_report"], index.app_runtime.admin.report)
+        self.assertIs(
+            task_deps["credits_db_service"],
+            index.app_runtime.billing.credits,
+        )
+        from api.bot.general_commands import gen_random
+
+        self.assertEqual(task_deps["gen_random_fn"], gen_random)
+        self.assertEqual(
+            task_deps["build_insufficient_credits_message_fn"],
+            index.app_runtime.billing.build_insufficient_message,
+        )
+        self.assertEqual(
+            task_deps["estimate_ai_base_reserve_credits"],
+            index.app_runtime.estimate_ai_base_reserve_credits,
         )
 
     def test_main_requires_token(self):
