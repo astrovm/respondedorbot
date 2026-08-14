@@ -61,6 +61,7 @@ def build_ai_request(
     get_context: Callable[[int], dict[str, Any]],
     get_prices: Callable[..., Any],
     get_stock_prices: Callable[[str], str],
+    select_random: Callable[[str], str],
     get_dollar_rates: Callable[[str], str | None],
     get_weather_context: Callable[[str], dict[str, Any] | None],
     get_hacker_news_context: Callable[[int], list[dict[str, Any]]],
@@ -85,6 +86,7 @@ def build_ai_request(
     tool_context: dict[str, Any] = {
         "get_prices": get_prices,
         "get_stock_prices": get_stock_prices,
+        "select_random": select_random,
         "get_dollar_rates": get_dollar_rates,
         "get_weather_context": get_weather_context,
         "get_hacker_news_context": get_hacker_news_context,
@@ -286,6 +288,7 @@ class AIRequestServiceDeps:
     get_hacker_news_context: Callable[[int], list[dict[str, Any]]]
     get_prices: Callable[..., Any]
     get_stock_prices: Callable[[str], str]
+    select_random: Callable[[str], str]
     get_dollar_rates: Callable[[str], str | None]
     get_bot_capabilities: Callable[[], str]
     config_redis: Callable[..., Any]
@@ -341,6 +344,7 @@ class AIRequestService:
             get_context=self.get_stable_context,
             get_prices=self._deps.get_prices,
             get_stock_prices=self._deps.get_stock_prices,
+            select_random=self._deps.select_random,
             get_dollar_rates=self._deps.get_dollar_rates,
             get_weather_context=self._deps.get_weather_context,
             get_hacker_news_context=self._deps.get_hacker_news_context,

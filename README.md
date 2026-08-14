@@ -139,7 +139,8 @@ Sequential cleanup:
 Every system prompt includes the current local time. The AI can request other
 context only when needed:
 - **Market**: crypto prices, stock prices, and Argentine dollar rates
-- **Weather**: Buenos Aires temperature, rain probability, and cloud cover
+- **Weather**: current conditions for any city or location
+- **Random choice**: choose from comma-separated options or an inclusive integer range
 - **Hacker News**: up to 10 stories with titles, points, and comments
 - **Bot capabilities**: the authoritative feature and command catalog
 

@@ -152,6 +152,7 @@ import api.tools.task_list
 import api.tools.task_cancel
 import api.tools.get_chat_members
 import api.tools.stock_prices
+import api.tools.random_choice
 import api.tools.dollar_rates
 import api.tools.weather
 import api.tools.hacker_news
@@ -1041,6 +1042,7 @@ _ai_request_service = AIRequestService(
         get_hacker_news_context=get_hacker_news_context,
         get_prices=_price_service.get_prices,
         get_stock_prices=_stock_service.get_stock_prices,
+        select_random=select_random,
         get_dollar_rates=_dollar_service.get_rates,
         get_bot_capabilities=render_ai_capabilities_prompt,
         config_redis=_config_runtime.redis,

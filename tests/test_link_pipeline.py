@@ -212,6 +212,21 @@ def test_build_ai_request_only_loads_time_context(monkeypatch):
     bot_capabilities.assert_not_called()
 
 
+def test_build_ai_request_exposes_shared_random_command():
+    from api import index
+
+    _, _, tool_schemas, tool_context = index.app_runtime.ai.build_request(
+        [{"role": "user", "content": "choose an option"}],
+        enable_web_search=False,
+    )
+
+    assert tool_context["select_random"] is index.select_random
+    assert tool_schemas is not None
+    assert "random_choice" in {
+        schema["function"]["name"] for schema in tool_schemas
+    }
+
+
 def test_fetch_link_metadata_uses_ttl_constant():
     html_body = '<html><head><meta property="og:title" content="A" /></head></html>'
     mock_response = MagicMock()

@@ -1,3 +1,5 @@
+from unittest.mock import call
+
 from tests.support import *
 
 from api.markets.stocks import StockQuote, get_stock_prices, search_yahoo_symbol
@@ -279,6 +281,25 @@ def test_stock_prices_resolve_company_name_and_preserve_currency():
     assert "EXM (Example Holdings): 123.45 EUR" in result
     assert "+1.25% 24h, Synthetic Exchange" in result
     resolve_symbol.assert_called_once_with("Example Holdings")
+
+
+def test_stock_prices_preserve_space_separated_exchange_symbols():
+    quotes = {
+        "EXM.BA": StockQuote("EXM.BA", "", 10, "ARS", "Synthetic Exchange", 1),
+        "ALT": StockQuote("ALT", "", 20, "USD", "Synthetic Exchange", -1),
+    }
+    fetch_quote = MagicMock(side_effect=quotes.get)
+
+    result = get_stock_prices(
+        "EXM.BA ALT",
+        fetch_quote=fetch_quote,
+        resolve_symbol=MagicMock(),
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert "EXM.BA: 10.00 ARS" in result
+    assert "ALT: 20.00 USD" in result
+    assert fetch_quote.call_args_list == [call("EXM.BA"), call("ALT")]
 
 
 def test_stock_symbol_search_retries_compact_company_name():

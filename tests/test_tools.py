@@ -126,6 +126,18 @@ class TestOnDemandContextTools:
         assert result.output == "EXM: 123.45 USD"
         get_stock_prices.assert_called_once_with("Example Holdings,EXM")
 
+    def test_random_choice_uses_shared_command(self):
+        select_random = MagicMock(return_value="option-beta")
+
+        result = execute_tool(
+            "random_choice",
+            {"request": "option-alpha, option-beta"},
+            {"select_random": select_random},
+        )
+
+        assert result.output == "option-beta"
+        select_random.assert_called_once_with("option-alpha, option-beta")
+
     def test_hacker_news_uses_injected_service(self):
         get_news = MagicMock(
             return_value=[
@@ -168,6 +180,7 @@ def test_production_tool_registry_exposes_all_context_tools():
         "web_search_enabled": True,
         "get_prices": MagicMock(),
         "get_stock_prices": MagicMock(),
+        "select_random": MagicMock(),
         "get_dollar_rates": MagicMock(),
         "get_weather_context": MagicMock(),
         "get_hacker_news_context": MagicMock(),
@@ -179,6 +192,7 @@ def test_production_tool_registry_exposes_all_context_tools():
 
     assert {
         "stock_prices",
+        "random_choice",
         "task_list",
         "task_cancel",
         "dollar_rates",

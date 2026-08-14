@@ -192,24 +192,44 @@ def get_stock_prices(
     fetch_top_stocks: StockListFetcher,
 ) -> str:
     raw_query = str(msg_text or "").strip()
+    full_query_fallback = False
     if "," in raw_query:
         queries = [part.strip() for part in raw_query.split(",") if part.strip()]
     else:
         parts = [part for part in raw_query.split() if part]
-        queries = [raw_query] if len(parts) > 1 and any(len(part) > 5 for part in parts) else parts
+        looks_like_symbol_list = all(
+            part == part.upper() or part == part.lower() for part in parts
+        )
+        queries = parts if len(parts) <= 1 or looks_like_symbol_list else [raw_query]
+        full_query_fallback = len(queries) > 1
     if not queries:
         queries = fetch_top_stocks()
         if not queries:
             return "no pude traer el top de acciones, probá de nuevo"
 
-    lines: list[str] = []
+    quotes: list[tuple[str, StockQuote | None]] = []
     for query in queries[:20]:
         normalized = query.upper()
         is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
         quote = fetch_quote(normalized) if is_symbol else None
-        if quote is None:
-            resolved = resolve_symbol(query)
-            quote = fetch_quote(resolved) if resolved else None
+        quotes.append((query, quote))
+
+    if full_query_fallback and not any(quote for _, quote in quotes):
+        resolved = resolve_symbol(raw_query)
+        quote = fetch_quote(resolved) if resolved else None
+        quotes = [(raw_query, quote)]
+    else:
+        resolved_quotes: list[tuple[str, StockQuote | None]] = []
+        for query, quote in quotes:
+            resolved_quote = quote
+            if resolved_quote is None:
+                resolved = resolve_symbol(query)
+                resolved_quote = fetch_quote(resolved) if resolved else None
+            resolved_quotes.append((query, resolved_quote))
+        quotes = resolved_quotes
+
+    lines: list[str] = []
+    for query, quote in quotes:
         if quote:
             sign = "+" if quote.variation >= 0 else ""
             name = f" ({quote.name})" if quote.name else ""
