@@ -23,7 +23,11 @@ from api.tools.runtime import ToolRuntime
 
 
 logger = get_logger(__name__)
-_MAX_RETRIES = 5
+_MAX_RETRIES = 2
+_UNGROUNDED_SEARCH_MESSAGE = (
+    "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
+    "resultados citables; probá de nuevo en un momento."
+)
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
     re.DOTALL,
@@ -160,7 +164,9 @@ class ProviderRuntime:
 
         tools_list: List[Dict[str, Any]] = []
         if enable_web_search:
-            tools_list.append(self._deps.build_web_search_tool())
+            web_search_tool = self._deps.build_web_search_tool()
+            tools_list.append(web_search_tool)
+            self._apply_web_search_limits(request_kwargs, web_search_tool)
         if extra_tools:
             tools_list.extend(extra_tools)
         if tools_list:
@@ -590,6 +596,7 @@ class ProviderRuntime:
         round_idx: int,
         *,
         metadata: Optional[Dict[str, Any]] = None,
+        text_override: Optional[str] = None,
     ) -> AIUsageResult:
         result_metadata = {
             "provider": "openrouter",
@@ -598,7 +605,11 @@ class ProviderRuntime:
         }
         return self._deps.build_usage_result(
             kind="chat",
-            text=str(getattr(message, "content", "") or ""),
+            text=(
+                text_override
+                if text_override is not None
+                else str(getattr(message, "content", "") or "")
+            ),
             model=self._deps.primary_model,
             response=response,
             metadata=result_metadata,
@@ -648,21 +659,44 @@ class ProviderRuntime:
                 metadata["web_search_requests"] = int(web_search_requests)
             except (TypeError, ValueError):
                 pass
-        if "web_search_requests" in metadata:
-            return metadata
-
         annotations = getattr(message, "annotations", None) or []
-        has_url_citation = any(
+        citation_count = sum(
+            1
+            for annotation in annotations
+            if (
             getattr(annotation, "type", None) == "url_citation"
             or (
                 isinstance(annotation, Mapping)
                 and str(annotation.get("type") or "") == "url_citation"
             )
-            for annotation in annotations
+            )
         )
-        if has_url_citation:
+        metadata["web_search_citation_count"] = citation_count
+        if "web_search_requests" not in metadata and citation_count:
             metadata["web_search_requests"] = 1
+        if int(metadata.get("web_search_requests") or 0) > 0:
+            metadata["web_search_grounded"] = citation_count > 0
         return metadata
+
+    @staticmethod
+    def _web_search_max_uses(tool: Mapping[str, Any]) -> int:
+        parameters = ensure_mapping(tool.get("parameters")) or {}
+        try:
+            return max(0, int(parameters.get("max_uses") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _apply_web_search_limits(
+        cls,
+        request_kwargs: Dict[str, Any],
+        tool: Mapping[str, Any],
+    ) -> None:
+        max_uses = cls._web_search_max_uses(tool)
+        if max_uses:
+            # OpenRouter applies this cap to all server-tool calls in the
+            # request. It is a second guard in addition to max_uses.
+            request_kwargs["extra_body"] = {"max_tool_calls": max_uses}
 
     def _handle_stop_response(
         self,
@@ -689,13 +723,31 @@ class ProviderRuntime:
             self._deps.increment_request_count()
             return ToolRoundDecision(updated_messages, continue_rounds=True)
 
+        web_metadata = self._web_search_metadata(response, message)
+        text_override = None
+        if web_metadata.get("web_search_grounded") is False:
+            warning_context = dict(tool_context or {})
+            warning_context.update(
+                {
+                    "model": self._deps.primary_model,
+                    "tool_round": round_idx + 1,
+                    **web_metadata,
+                }
+            )
+            logger.warning(
+                "openrouter: suppressing ungrounded web-search answer%s",
+                format_log_context(warning_context),
+            )
+            text_override = _UNGROUNDED_SEARCH_MESSAGE
+
         return ToolRoundDecision(
             current_messages,
             result=self._build_round_result(
                 response,
                 message,
                 round_idx,
-                metadata=self._web_search_metadata(response, message),
+                metadata=web_metadata,
+                text_override=text_override,
             ),
         )
 

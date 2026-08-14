@@ -119,6 +119,7 @@ class ProviderService:
         self,
         *,
         default_headers: Mapping[str, str] | None = None,
+        timeout: float = 60.0,
     ) -> Any | None:
         return provider_config.build_openrouter_client(
             get_api_key=self.get_openrouter_api_key,
@@ -126,6 +127,7 @@ class ProviderService:
             environment=self.environment,
             client_factory=self.openai_client_factory,
             default_headers=default_headers,
+            timeout=timeout,
         )
 
     def get_groq_client(

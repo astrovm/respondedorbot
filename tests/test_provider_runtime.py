@@ -901,9 +901,9 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
         )
 
     assert result is None
-    assert len(client.calls) == 5
-    assert request_count.call_count == 5
-    assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8]
+    assert len(client.calls) == 2
+    assert request_count.call_count == 2
+    assert [call.args[0] for call in sleep.call_args_list] == [1]
     admin_report.assert_called_once()
     assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
     report_context = admin_report.call_args.kwargs["extra_context"]
@@ -911,8 +911,8 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
         "model": "~deepseek/deepseek-v4-flash-latest",
         "enable_web_search": True,
         "tool_round": 1,
-        "response_id": "gen-4",
-        "request_id": "req-4",
+        "response_id": "gen-1",
+        "request_id": "req-1",
         "response_model": "upstream-model",
         "provider": "upstream-provider",
         "native_finish_reason": "upstream_null",
@@ -1024,7 +1024,7 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
         )
 
     assert result is None
-    assert len(client.calls) == 5
+    assert len(client.calls) == 2
     assert all("tools" in call for call in client.calls)
     admin_report.assert_called_once()
     assert admin_report.call_args.args[2]["provider_error_body"] == (
