@@ -365,7 +365,13 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
 
 
 @pytest.mark.parametrize(
-    ("final_text", "search_output", "expected_chunks", "grounded"),
+    (
+        "final_text",
+        "search_output",
+        "expected_chunks",
+        "grounded",
+        "source_count",
+    ),
     [
         (
             "Perfil: https://example.com/pablo",
@@ -373,16 +379,18 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
             '"url":"https://example.com/pablo"}]}',
             ["Perfil: https://example.com/pablo"],
             True,
+            1,
         ),
         (
             "La búsqueda falló y no encontré nada.",
             '{"results":[{"title":"Pablo Wasserman",'
             '"url":"https://example.com/pablo"}]}',
             [
-                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
-                "resultados citables; probá de nuevo en un momento."
+                "La búsqueda falló y no encontré nada.\n\n"
+                "fuentes: https://example.com/pablo"
             ],
-            False,
+            True,
+            1,
         ),
         (
             "Consulté https://example.com/not-a-result",
@@ -392,6 +400,42 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
                 "resultados citables; probá de nuevo en un momento."
             ],
             False,
+            0,
+        ),
+        (
+            "encontré su perfil en https://www.instagram.com/realjuanruocco/",
+            '{"results":[{"title":"Juan Ruocco",'
+            '"url":"https://www.instagram.com/realjuanruocco/?hl=en"}]}',
+            [
+                "encontré su perfil en https://www.instagram.com/realjuanruocco/\n\n"
+                "fuentes: https://www.instagram.com/realjuanruocco/?hl=en"
+            ],
+            True,
+            1,
+        ),
+        (
+            "respuesta basada en los resultados",
+            '{"results":['
+            '{"url":"https://example.com/1"},'
+            '{"url":"https://example.com/2"},'
+            '{"url":"https://example.com/3"},'
+            '{"url":"https://example.com/4"}]}',
+            [
+                "respuesta basada en los resultados\n\nfuentes: "
+                "https://example.com/1 https://example.com/2 https://example.com/3"
+            ],
+            True,
+            4,
+        ),
+        (
+            "",
+            '{"results":[{"url":"https://example.com/pablo"}]}',
+            [
+                "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
+                "resultados citables; probá de nuevo en un momento."
+            ],
+            False,
+            1,
         ),
     ],
 )
@@ -400,6 +444,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     search_output,
     expected_chunks,
     grounded,
+    source_count,
 ):
     from types import SimpleNamespace
 
@@ -518,6 +563,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_citations(
     }
     assert usage_results[0].metadata["web_search_requests"] == 1
     assert usage_results[-1].metadata["web_search_grounded"] is grounded
+    assert usage_results[-1].metadata["web_search_source_count"] == source_count
     assert "web_search_requests" not in usage_results[-1].metadata
 
 

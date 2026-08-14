@@ -28,6 +28,8 @@ _UNGROUNDED_SEARCH_MESSAGE = (
     "No pude verificar eso con fuentes. La búsqueda web falló o no devolvió "
     "resultados citables; probá de nuevo en un momento."
 )
+_MAX_WEB_SEARCH_SOURCES = 3
+_MAX_LOGGED_SEARCH_ANSWER_CHARS = 4_000
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
     re.DOTALL,
@@ -699,12 +701,6 @@ class ProviderRuntime:
         return metadata
 
     @staticmethod
-    def _stream_text_override(metadata: Mapping[str, Any]) -> Optional[str]:
-        if metadata.get("web_search_grounded") is False:
-            return _UNGROUNDED_SEARCH_MESSAGE
-        return None
-
-    @staticmethod
     def _web_search_max_uses(tool: Mapping[str, Any]) -> int:
         parameters = ensure_mapping(tool.get("parameters")) or {}
         try:
@@ -814,9 +810,9 @@ class ProviderRuntime:
     def _web_search_source_urls(
         cls,
         current_messages: List[Dict[str, Any]],
-    ) -> set[str]:
+    ) -> list[str]:
         web_search_call_ids = cls._web_search_call_ids(current_messages)
-        source_urls: set[str] = set()
+        source_urls: list[str] = []
         for item in current_messages:
             if (
                 str(item.get("role") or "") != "tool"
@@ -833,21 +829,51 @@ class ProviderRuntime:
             for result_item in result_items:
                 result = ensure_mapping(result_item) or {}
                 source_url = str(result.get("url") or "").rstrip(".,);]")
-                if source_url:
-                    source_urls.add(source_url)
+                if source_url and source_url not in source_urls:
+                    source_urls.append(source_url)
         return source_urls
 
-    @classmethod
-    def _answer_cites_web_search_source(
-        cls,
+    def _finalize_web_search_answer(
+        self,
         text: str,
         current_messages: List[Dict[str, Any]],
-    ) -> bool:
-        cited_urls = {
-            url.rstrip(".,);]")
-            for url in re.findall(r"https?://[^\s\"<>]+", text)
-        }
-        return bool(cited_urls & cls._web_search_source_urls(current_messages))
+        metadata: Dict[str, Any],
+        *,
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+    ) -> Optional[str]:
+        source_urls = self._web_search_source_urls(current_messages)
+        metadata["web_search_source_count"] = len(source_urls)
+        clean_text = text.strip()
+        if source_urls and clean_text:
+            selected_sources = source_urls[:_MAX_WEB_SEARCH_SOURCES]
+            missing_sources = [url for url in selected_sources if url not in text]
+            metadata["web_search_grounded"] = True
+            metadata["web_search_citation_count"] = len(selected_sources)
+            if not missing_sources:
+                return None
+            return f"{text.rstrip()}\n\nfuentes: {' '.join(missing_sources)}"
+
+        if metadata.get("web_search_citation_count") and clean_text:
+            metadata["web_search_grounded"] = True
+            return None
+
+        metadata["web_search_grounded"] = False
+        warning_context = dict(tool_context or {})
+        warning_context.update(
+            {
+                "model": self._deps.primary_model,
+                "tool_round": round_idx + 1,
+                "raw_answer_length": len(text),
+                **metadata,
+            }
+        )
+        logger.warning(
+            "openrouter: rejecting web-search answer raw_answer=%r%s",
+            text[:_MAX_LOGGED_SEARCH_ANSWER_CHARS],
+            format_log_context(warning_context),
+        )
+        return _UNGROUNDED_SEARCH_MESSAGE
 
     def _remaining_web_search_uses(
         self,
@@ -901,30 +927,16 @@ class ProviderRuntime:
             return ToolRoundDecision(updated_messages, continue_rounds=True)
 
         web_metadata = self._web_search_metadata(response, message)
+        text_override = None
         if total_web_search_requests > 0:
             web_metadata["web_search_requests"] = total_web_search_requests
-            web_metadata["web_search_grounded"] = (
-                bool(web_metadata.get("web_search_citation_count"))
-                or self._answer_cites_web_search_source(
-                    str(getattr(message, "content", "") or ""),
-                    current_messages,
-                )
+            text_override = self._finalize_web_search_answer(
+                str(getattr(message, "content", "") or ""),
+                current_messages,
+                web_metadata,
+                tool_context=tool_context,
+                round_idx=round_idx,
             )
-        text_override = None
-        if web_metadata.get("web_search_grounded") is False:
-            warning_context = dict(tool_context or {})
-            warning_context.update(
-                {
-                    "model": self._deps.primary_model,
-                    "tool_round": round_idx + 1,
-                    **web_metadata,
-                }
-            )
-            logger.warning(
-                "openrouter: suppressing ungrounded web-search answer%s",
-                format_log_context(warning_context),
-            )
-            text_override = _UNGROUNDED_SEARCH_MESSAGE
 
         return ToolRoundDecision(
             current_messages,

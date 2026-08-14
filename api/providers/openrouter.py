@@ -224,15 +224,15 @@ class OpenRouterProvider(StreamingAIProvider):
                     )
                     continue
 
+                text_override = None
                 if total_web_search_requests > 0:
-                    web_metadata["web_search_grounded"] = (
-                        bool(web_metadata.get("web_search_citation_count"))
-                        or self._runtime._answer_cites_web_search_source(
-                            streamed_round.text,
-                            current_messages,
-                        )
+                    text_override = self._runtime._finalize_web_search_answer(
+                        streamed_round.text,
+                        current_messages,
+                        web_metadata,
+                        tool_context=tool_context,
+                        round_idx=round_idx,
                     )
-                text_override = self._runtime._stream_text_override(web_metadata)
                 if text_override is not None:
                     web_metadata["stream_text_override"] = text_override
                 self._report_stream_usage(
