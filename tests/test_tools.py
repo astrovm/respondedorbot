@@ -640,15 +640,35 @@ class TestTaskListTool:
 
 
 class TestTaskCancelTool:
+    @patch("api.tools.task_cancel.list_tasks")
     @patch("api.tools.task_cancel.cancel_task")
-    def test_cancel_success(self, mock_cancel):
+    def test_cancel_success(self, mock_cancel, mock_list):
+        mock_list.return_value = [{"id": "synthetic-task"}]
         mock_cancel.return_value = True
-        result = execute_tool("task_cancel", {"task_id": "abc123"}, {})
+        result = execute_tool(
+            "task_cancel",
+            {"task_id": "synthetic-task"},
+            {"chat_id": "synthetic-chat"},
+        )
         assert "cancelada" in result.output
+        mock_list.assert_called_once_with("synthetic-chat")
+        mock_cancel.assert_called_once_with("synthetic-task")
 
     def test_cancel_no_id(self):
         result = execute_tool("task_cancel", {}, {})
         assert "id" in result.output.lower()
+
+    @patch("api.tools.task_cancel.cancel_task")
+    @patch("api.tools.task_cancel.list_tasks", return_value=[])
+    def test_rejects_task_from_another_chat(self, _mock_list, mock_cancel):
+        result = execute_tool(
+            "task_cancel",
+            {"task_id": "synthetic-task"},
+            {"chat_id": "synthetic-chat"},
+        )
+
+        assert "no existe en este chat" in result.output
+        mock_cancel.assert_not_called()
 
 
 class TestGetChatMembersTool:
