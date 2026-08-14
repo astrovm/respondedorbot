@@ -392,10 +392,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
         (
             "Consulté https://example.com/not-a-result",
             '{"query":"https://example.com/not-a-result","results":[]}',
-            [
-                "No pude verificar eso. La búsqueda web falló o no devolvió resultados "
-                "útiles; probá de nuevo en un momento."
-            ],
+            ["Consulté https://example.com/not-a-result"],
             False,
             0,
         ),
@@ -421,10 +418,7 @@ def test_openrouter_stream_uses_web_search_branch_when_enabled():
         (
             "",
             '{"results":[{"url":"https://example.com/profile"}]}',
-            [
-                "No pude verificar eso. La búsqueda web falló o no devolvió resultados "
-                "útiles; probá de nuevo en un momento."
-            ],
+            [],
             False,
             1,
         ),

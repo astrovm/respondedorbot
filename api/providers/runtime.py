@@ -24,11 +24,6 @@ from api.tools.runtime import ToolRuntime
 
 logger = get_logger(__name__)
 _MAX_RETRIES = 2
-_UNGROUNDED_SEARCH_MESSAGE = (
-    "No pude verificar eso. La búsqueda web falló o no devolvió resultados útiles; "
-    "probá de nuevo en un momento."
-)
-_MAX_LOGGED_SEARCH_ANSWER_CHARS = 4_000
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
     re.DOTALL,
@@ -832,7 +827,7 @@ class ProviderRuntime:
                     source_urls.append(source_url)
         return source_urls
 
-    def _finalize_web_search_answer(
+    def _record_web_search_outcome(
         self,
         text: str,
         current_messages: List[Dict[str, Any]],
@@ -840,17 +835,17 @@ class ProviderRuntime:
         *,
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
-    ) -> Optional[str]:
+    ) -> None:
         source_urls = self._web_search_source_urls(current_messages)
         metadata["web_search_source_count"] = len(source_urls)
         clean_text = text.strip()
         if source_urls and clean_text:
             metadata["web_search_grounded"] = True
-            return None
+            return
 
         if metadata.get("web_search_citation_count") and clean_text:
             metadata["web_search_grounded"] = True
-            return None
+            return
 
         metadata["web_search_grounded"] = False
         warning_context = dict(tool_context or {})
@@ -863,11 +858,9 @@ class ProviderRuntime:
             }
         )
         logger.warning(
-            "openrouter: rejecting web-search answer raw_answer=%r%s",
-            text[:_MAX_LOGGED_SEARCH_ANSWER_CHARS],
+            "openrouter: web-search answer has no supporting results%s",
             format_log_context(warning_context),
         )
-        return _UNGROUNDED_SEARCH_MESSAGE
 
     def _remaining_web_search_uses(
         self,
@@ -921,10 +914,9 @@ class ProviderRuntime:
             return ToolRoundDecision(updated_messages, continue_rounds=True)
 
         web_metadata = self._web_search_metadata(response, message)
-        text_override = None
         if total_web_search_requests > 0:
             web_metadata["web_search_requests"] = total_web_search_requests
-            text_override = self._finalize_web_search_answer(
+            self._record_web_search_outcome(
                 str(getattr(message, "content", "") or ""),
                 current_messages,
                 web_metadata,
@@ -939,7 +931,6 @@ class ProviderRuntime:
                 message,
                 round_idx,
                 metadata=web_metadata,
-                text_override=text_override,
             ),
         )
 
