@@ -84,14 +84,15 @@ def handle_link_replacement(
 
     if link_mode == "delete":
         sent_message_id = send_replacement(reply_id)
+        if sent_message_id is None:
+            return True
         deps.delete_msg(chat_id, message_id)
-        if sent_message_id is not None:
-            deps.save_message_to_redis(
-                chat_id,
-                f"bot_{sent_message_id}",
-                stored_bot_message,
-                redis_client,
-            )
+        deps.save_message_to_redis(
+            chat_id,
+            f"bot_{sent_message_id}",
+            stored_bot_message,
+            redis_client,
+        )
         return True
 
     sent_message_id = send_replacement(reply_id or message_id)
