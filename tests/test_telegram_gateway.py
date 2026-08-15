@@ -55,6 +55,57 @@ def test_send_message_enables_html_for_linked_polymarket_title():
     assert payload["disable_web_page_preview"] is True
 
 
+def test_send_message_retries_rate_limit_response():
+    request = MagicMock(
+        side_effect=[
+            (
+                {
+                    "ok": False,
+                    "error_code": 429,
+                    "parameters": {"retry_after": 1},
+                },
+                "Too Many Requests",
+            ),
+            ({"ok": True, "result": {"message_id": 42}}, None),
+        ]
+    )
+    sleep = MagicMock()
+    gateway = TelegramGateway(telegram_request=request, sleep=sleep)
+
+    assert gateway.send_message("123", "hola") == 42
+    assert request.call_count == 2
+    sleep.assert_called_once_with(1.0)
+
+
+def test_send_message_stops_after_three_rate_limit_responses():
+    request = MagicMock(
+        return_value=(
+            {"ok": False, "error_code": 429},
+            "Too Many Requests",
+        )
+    )
+    sleep = MagicMock()
+    gateway = TelegramGateway(telegram_request=request, sleep=sleep)
+
+    assert gateway.send_message("123", "hola") is None
+    assert request.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
+
+
+def test_send_message_does_not_retry_ambiguous_failure():
+    for response in (
+        (None, "timed out"),
+        ({"ok": False, "error_code": 503}, "temporarily unavailable"),
+    ):
+        request = MagicMock(return_value=response)
+        sleep = MagicMock()
+        gateway = TelegramGateway(telegram_request=request, sleep=sleep)
+
+        assert gateway.send_message("123", "hola") is None
+        request.assert_called_once()
+        sleep.assert_not_called()
+
+
 def test_delete_message_delegates_to_telegram_request():
     request = FakeTelegramRequest(({"ok": True, "result": True}, None))
     gateway = TelegramGateway(telegram_request=request)

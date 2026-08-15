@@ -241,6 +241,27 @@ class TelegramGateway:
     def redact_tokens(self, value: str) -> str:
         return _redact_telegram_tokens(value)
 
+    def _send_message_request(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for attempt in range(3):
+            payload_response, error = self._telegram_request(
+                "sendMessage", method="POST", json_payload=payload
+            )
+            if error is None and payload_response:
+                return payload_response
+
+            if (
+                not payload_response
+                or payload_response.get("error_code") != 429
+                or attempt == 2
+            ):
+                return None
+
+            retry_after = payload_response.get("parameters", {}).get("retry_after")
+            delay = min(float(retry_after), 2.0) if retry_after else 0.25 * 2**attempt
+            self._sleep(delay)
+
+        return None
+
     def send_message(
         self,
         chat_id: str,
@@ -265,10 +286,8 @@ class TelegramGateway:
         if markup is not None:
             payload["reply_markup"] = markup
 
-        payload_response, error = self._telegram_request(
-            "sendMessage", method="POST", json_payload=payload
-        )
-        if error or not payload_response:
+        payload_response = self._send_message_request(payload)
+        if not payload_response:
             return None
 
         result = payload_response.get("result")
