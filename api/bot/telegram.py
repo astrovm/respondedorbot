@@ -249,8 +249,11 @@ class TelegramGateway:
             if error is None and payload_response:
                 return payload_response
 
-            error_code = payload_response.get("error_code") if payload_response else None
-            if error_code != 429 or attempt == 2:
+            if (
+                not payload_response
+                or payload_response.get("error_code") != 429
+                or attempt == 2
+            ):
                 return None
 
             retry_after = payload_response.get("parameters", {}).get("retry_after")
