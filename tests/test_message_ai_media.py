@@ -398,6 +398,34 @@ def test_message_links_handle_link_replacement_delete_mode_stores_fixed_context(
     )
 
 
+def test_message_links_delete_mode_keeps_original_when_replacement_send_fails():
+    from api.bot.message_links import handle_link_replacement
+
+    deps = MagicMock()
+    deps.link_service.replace.return_value = (
+        "https://fixupx.com/user/status/1",
+        True,
+        ["https://x.com/user/status/1"],
+    )
+    deps.link_service.build_context.return_value = ""
+    deps.link_service.download_oversized_instagram_video.return_value = None
+    deps.send_msg.return_value = None
+
+    handled = handle_link_replacement(
+        deps,
+        chat_config={"link_mode": "delete"},
+        message={"from": {}},
+        message_text="https://x.com/user/status/1",
+        chat_id="555",
+        message_id="100",
+        redis_client=MagicMock(),
+    )
+
+    assert handled is True
+    deps.delete_msg.assert_not_called()
+    deps.save_message_to_redis.assert_not_called()
+
+
 def test_message_links_uploads_oversized_instagram_video():
     from api.bot.message_links import handle_link_replacement
 
