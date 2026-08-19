@@ -216,11 +216,9 @@ def get_stock_prices(
     for query, quote in quotes:
         if quote:
             sign = "+" if quote.variation >= 0 else ""
-            name = f" ({quote.name})" if quote.name else ""
-            exchange = f", {quote.exchange}" if quote.exchange else ""
             lines.append(
-                f"{quote.symbol}{name}: {quote.price:.2f} {quote.currency} "
-                f"({sign}{quote.variation:.2f}% 24h{exchange})"
+                f"{quote.symbol}: {quote.price:.2f} {quote.currency} "
+                f"({sign}{quote.variation:.2f}% 24h)"
             )
         else:
             lines.append(f"{query}: no se pudo encontrar")
