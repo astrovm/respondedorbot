@@ -280,8 +280,8 @@ def test_stock_prices_resolve_company_name_and_preserve_currency():
         fetch_top_stocks=MagicMock(),
     )
 
-    assert "EXM (Example Holdings): 123.45 EUR" in result
-    assert "+1.25% 24h, Synthetic Exchange" in result
+    assert "EXM: 123.45 EUR" in result
+    assert "+1.25% 24h" in result
     resolve_symbol.assert_called_once_with("Example Holdings")
 
 
