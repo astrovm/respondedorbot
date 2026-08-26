@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from api.billing.credit_units import format_credit_units
 
-PRICING_VERSION = "2026-04-12"
+PRICING_VERSION = "2026-08-26"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.0
 CREDIT_CEIL_DIVISOR_USD_MICROS = int(CREDIT_USD_MICROS / BILLING_MARKUP_MULTIPLIER)
@@ -20,20 +20,31 @@ REASONING_CHAT_OUTPUT_TOKEN_LIMIT = 8192
 VISION_OUTPUT_TOKEN_LIMIT = 512
 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
 SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE = 4_000
-WEB_SEARCH_USD_MICROS_PER_REQUEST = 1_660
+WEB_SEARCH_USD_MICROS_PER_REQUEST = 5_000
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
     "whisper-large-v3": {
         "audio_per_hour": 111_000,
     },
+    "groq/whisper-large-v3": {
+        "audio_per_hour": 111_000,
+    },
     "google/gemini-3.1-flash-lite-preview": {
         "input_per_million": 250_000,
+        "cached_input_per_million": 25_000,
+        "cache_write_per_million": 83_333,
+        "audio_input_per_million": 500_000,
         "output_per_million": 1_500_000,
     },
     "~deepseek/deepseek-v4-flash-latest": {
-        "input_per_million": 400_000,
-        "output_per_million": 1_200_000,
+        "input_per_million": 30_000,
+        "cached_input_per_million": 7_000,
+        "output_per_million": 75_000,
+    },
+    "openai/gpt-oss-120b": {
+        "input_per_million": 150_000,
+        "output_per_million": 600_000,
     },
 }
 
@@ -249,22 +260,40 @@ def _calculate_model_token_cost(
         }
 
     tokens = _extract_token_usage(usage)
+    prompt_token_details = ensure_mapping(usage.get("prompt_tokens_details")) or {}
+    audio_input_tokens = max(0, int(prompt_token_details.get("audio_tokens") or 0))
+    cache_write_tokens = max(
+        0, int(prompt_token_details.get("cache_write_tokens") or 0)
+    )
+    non_cached_tokens = tokens["input_non_cached_tokens"]
+    audio_input_tokens = min(non_cached_tokens, audio_input_tokens)
+    cache_write_tokens = min(
+        non_cached_tokens - audio_input_tokens,
+        cache_write_tokens,
+    )
+    regular_input_tokens = max(
+        0, non_cached_tokens - audio_input_tokens - cache_write_tokens
+    )
     cached_input_per_million = pricing.get(
         "cached_input_per_million",
         pricing.get("input_per_million", 0),
     )
     usd_micros = (
-        tokens["input_non_cached_tokens"] * pricing.get("input_per_million", 0)
+        regular_input_tokens * pricing.get("input_per_million", 0)
         + tokens["input_cached_tokens"] * cached_input_per_million
+        + audio_input_tokens
+        * pricing.get(
+            "audio_input_per_million", pricing.get("input_per_million", 0)
+        )
+        + cache_write_tokens
+        * pricing.get(
+            "cache_write_per_million", pricing.get("input_per_million", 0)
+        )
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
     ) // 1_000_000
-    try:
-        gateway_cost_usd = float(usage.get("cost") or 0)
-        gateway_usd_micros = int(gateway_cost_usd * 1_000_000)
-        if gateway_usd_micros > usd_micros:
-            usd_micros = gateway_usd_micros
-    except (TypeError, ValueError):
-        pass
+    reported_cost = _reported_cost_usd_micros(usage)
+    if reported_cost is not None:
+        usd_micros = reported_cost
     return {
         "model": model,
         "usd_micros": int(usd_micros),
@@ -272,10 +301,21 @@ def _calculate_model_token_cost(
     }
 
 
+def _reported_cost_usd_micros(usage: Mapping[str, Any]) -> Optional[int]:
+    """Return the provider's complete request cost when it is reported."""
+
+    if "cost" not in usage or usage.get("cost") is None:
+        return None
+    try:
+        return max(0, round(float(usage["cost"]) * 1_000_000))
+    except (TypeError, ValueError):
+        return None
+
+
 def calculate_billing_for_segments(
     segments: Iterable[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Calculate raw and marked-up billing totals for Groq usage segments."""
+    """Calculate raw and marked-up billing totals for AI usage segments."""
 
     total_usd_micros = 0
     model_breakdown: List[Dict[str, Any]] = []
@@ -291,7 +331,8 @@ def calculate_billing_for_segments(
         usage = ensure_mapping(segment.get("usage")) or {}
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
 
-        if kind == "transcribe":
+        pricing = MODEL_PRICING_USD_MICROS.get(model) or {}
+        if kind == "transcribe" and "audio_per_hour" in pricing:
             usd_micros = _calculate_transcription_usd_micros(audio_seconds)
             total_usd_micros += usd_micros
             model_breakdown.append(
@@ -312,7 +353,7 @@ def calculate_billing_for_segments(
             web_search_requests = int(metadata.get("web_search_requests") or 0)
         except (TypeError, ValueError):
             web_search_requests = 0
-        if web_search_requests > 0:
+        if web_search_requests > 0 and _reported_cost_usd_micros(usage) is None:
             search_usd_micros = web_search_requests * WEB_SEARCH_USD_MICROS_PER_REQUEST
             total_usd_micros += search_usd_micros
             tool_breakdown.append(

@@ -25,7 +25,7 @@ class GroqChatProvider(AIProvider):
         increment_request_count: Callable[[], Any],
         build_usage_result: Callable[..., AIUsageResult],
         extract_usage_map: Callable[[Any], Optional[Dict[str, Any]]],
-        primary_model: str = "llama-3.1-70b-versatile",
+        primary_model: str = "openai/gpt-oss-120b",
         max_tool_rounds: int = 5,
         backoff_key: str = "groq:chat",
         backoff_seconds: int = 60,

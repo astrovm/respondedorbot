@@ -502,7 +502,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
     assert "reservado=2.0 cobrado=1.0 refund=1.0 extra=0.0 deuda=0.0" in sent_text
     assert "requests: chat=3" in sent_text
     assert "cache_hits: chat=1" in sent_text
-    assert "cacheados=900 ahorro_cache=0" in sent_text
+    assert "cacheados=900 ahorro_cache=20" in sent_text
     assert "~deepseek/deepseek-v4-flash-latest=390" in sent_text
     assert "web_search=8000 (2x)" in sent_text
     assert "python=500 (1x)" in sent_text
