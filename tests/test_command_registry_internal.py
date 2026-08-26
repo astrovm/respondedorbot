@@ -37,7 +37,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "transfer_command": prices,
             "get_good_morning": lambda: "gm",
             "get_good_night": lambda: "gn",
-            "tasks_command": lambda _: "tareas",
+            "task_command": lambda _: "tareas",
         }
     )
 
@@ -49,6 +49,9 @@ def test_build_command_registry_reuses_alias_metadata():
     assert registry["/eleccion"] == registry["/election"]
     assert registry["/eleccion"] == registry["/elections"]
     assert registry["/mundial"] == registry["/worldcup"]
+    assert registry["/tarea"] == registry["/tareas"]
+    assert registry["/tarea"] == registry["/task"]
+    assert registry["/tarea"] == registry["/tasks"]
     assert "/purgeailog" not in registry
     assert "/updatecommands" not in registry
 

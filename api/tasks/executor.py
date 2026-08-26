@@ -35,6 +35,12 @@ _TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
 )
 
 
+def build_task_messages(text: str) -> List[Dict[str, str]]:
+    """Build the exact prompt payload used to estimate and execute a task."""
+
+    return [{"role": "user", "content": str(text) + _TASK_FORMATTING_INSTRUCTIONS}]
+
+
 def _restore_task_spacing(original: str, cleaned: str) -> str:
     if "\n\n" not in original:
         return cleaned
@@ -88,6 +94,12 @@ class TaskExecutor:
             thread_name_prefix="task",
         )
 
+    def estimate_required_credits(self, text: str) -> int:
+        reserve_credits, _reserve_meta = self._estimate_ai_base_reserve_credits(
+            messages=build_task_messages(text),
+        )
+        return int(reserve_credits)
+
     def execute(self, task: Mapping[str, Any]) -> bool:
         task_id = str(task.get("id", ""))
         chat_id = str(task.get("chat_id", ""))
@@ -122,7 +134,7 @@ class TaskExecutor:
             message=task_message,
         )
 
-        messages = [{"role": "user", "content": text + _TASK_FORMATTING_INSTRUCTIONS}]
+        messages = build_task_messages(text)
         response_meta: dict[str, Any] = {}
 
         reserve_credits, reserve_meta = self._estimate_ai_base_reserve_credits(

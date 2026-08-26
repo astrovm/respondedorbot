@@ -885,7 +885,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
             "transfer_command": _noop_param_command,
             "get_good_morning": _giphy_service.get_good_morning,
             "get_good_night": _giphy_service.get_good_night,
-            "tasks_command": tasks_command,
+            "task_command": tasks_command,
             "summary_command": _noop_command,
         }
     )

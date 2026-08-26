@@ -40,6 +40,8 @@ from api.bot.streaming import (
     consume_stream_to_telegram,
     extract_stream_metadata,
 )
+from api.tasks.credits import task_credit_precondition_error
+from api.tasks.executor import build_task_messages
 
 CommandTuple = Tuple[Callable[..., Any], bool, bool]
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
@@ -1509,27 +1511,6 @@ def _handle_gif_command(
     return gif_url, None, False, command
 
 
-def _handle_tasks_command(
-    deps: Any = None,
-    *,
-    command: str,
-    chat_id: str,
-    handler_func: Callable[..., str | Tuple[str, Optional[Dict[str, Any]]]],
-    message: Any = None,
-    billing_helper: Any = None,
-    redis_client: Any = None,
-    sanitized_message_text: str = "",
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    """Handle /tareas and /tasks commands."""
-    result = handler_func(chat_id)
-    response_markup = None
-    if isinstance(result, tuple):
-        response_msg, response_markup = result
-    else:
-        response_msg = result
-    return response_msg, response_markup, False, command
-
-
 # Registry for commands that need custom handling beyond the generic pattern.
 _SPECIAL_COMMAND_HANDLERS: Dict[
     str,
@@ -1541,8 +1522,6 @@ _SPECIAL_COMMAND_HANDLERS: Dict[
     "/transcribe": _handle_transcribe_command,
     "/gm": _handle_gif_command,
     "/gn": _handle_gif_command,
-    "/tareas": _handle_tasks_command,
-    "/tasks": _handle_tasks_command,
 }
 
 
@@ -1681,10 +1660,38 @@ def _handle_known_command(
     response_markup: Optional[Dict[str, Any]] = None
     response_command: Optional[str] = None
     if context.command in context.commands:
-        _handler_func, uses_ai, _ = context.commands[context.command]
+        handler_func, uses_ai, _ = context.commands[context.command]
         response_command = context.command
 
         if uses_ai:
+            prompt_text = context.sanitized_message_text
+            if context.command in {"/tarea", "/tareas", "/task", "/tasks"}:
+                if not prompt_text:
+                    result = handler_func(context.chat_id)
+                    if isinstance(result, tuple):
+                        response_msg, response_markup = result
+                    else:
+                        response_msg = result
+                    return response_msg, response_markup, False, response_command
+
+                required_credits, _reserve_meta = (
+                    deps.estimate_ai_base_reserve_credits(
+                        messages=build_task_messages(prompt_text),
+                        timezone_offset=context.timezone_offset,
+                    )
+                )
+                credit_error = task_credit_precondition_error(
+                    credits_db_service=deps.credits_db_service,
+                    user_id=context.user_id,
+                    required_credit_units=required_credits,
+                )
+                if credit_error:
+                    return credit_error, response_markup, False, response_command
+                prompt_text = (
+                    "creá una tarea programada para esta solicitud usando la "
+                    f"herramienta task_set: {prompt_text}"
+                )
+
             response_msg, response_uses_ai = _run_ai_flow(
                 deps,
                 chat_id=context.chat_id,
@@ -1692,7 +1699,7 @@ def _handle_known_command(
                 user_id=context.user_id,
                 prepared_message=context.prepared_message,
                 billing_helper=context.billing_helper,
-                prompt_text=context.sanitized_message_text,
+                prompt_text=prompt_text,
                 reply_context_text=context.reply_context_text,
                 user_identity=context.user_identity,
                 handler_func=deps.handle_ai_stream,

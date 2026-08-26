@@ -348,13 +348,28 @@ class TestWebFetchTool:
 
 
 class TestTaskSetTool:
+    def setup_method(self):
+        self._credits_patcher = patch("api.tools.task_set.credits_db")
+        self._estimate_patcher = patch(
+            "api.tools.task_set.estimate_task_reserve_credits",
+            return_value=10,
+        )
+        self.mock_credits = self._credits_patcher.start()
+        self.mock_credits.is_configured.return_value = True
+        self.mock_credits.get_balance.return_value = 100
+        self.mock_estimate = self._estimate_patcher.start()
+
+    def teardown_method(self):
+        self._estimate_patcher.stop()
+        self._credits_patcher.stop()
+
     @patch("api.tools.task_set.schedule_task")
     def test_one_shot(self, mock_schedule):
         mock_schedule.return_value = "abc123"
         result = execute_tool(
             "task_set",
             {"text": "comprar pizza", "delay_seconds": 1800},
-            {"chat_id": "123", "user_name": "u"},
+            {"chat_id": "123", "user_name": "u", "user_id": 42},
         )
         assert "listo" in result.output
         assert result.metadata["task_id"] == "abc123"
@@ -365,7 +380,7 @@ class TestTaskSetTool:
         result = execute_tool(
             "task_set",
             {"text": "noticias de sonic", "interval_seconds": 86400},
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "listo" in result.output
         assert result.metadata["task_id"] == "def456"
@@ -386,7 +401,7 @@ class TestTaskSetTool:
         result = execute_tool(
             "task_set",
             {"text": "algo", "delay_seconds": 86400 * 3651},
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "maximo" in result.output.lower()
 
@@ -412,7 +427,7 @@ class TestTaskSetTool:
         result = execute_tool(
             "task_set",
             {"text": "algo", "delay_seconds": 1800},
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "no se pudo" in result.output
 
@@ -425,8 +440,22 @@ class TestTaskSetTool:
             {"text": "algo", "delay_seconds": 1800},
             {"chat_id": "123", "user_id": 42},
         )
-        assert "creditos" in result.output
+        assert "créditos personales suficientes" in result.output
         mock_credits.get_balance.assert_called_once_with("user", 42)
+
+    @patch("api.tools.task_set.schedule_task")
+    def test_positive_balance_below_required_reserve_is_rejected(self, mock_schedule):
+        self.mock_credits.get_balance.return_value = 9
+
+        result = execute_tool(
+            "task_set",
+            {"text": "recordame algo", "delay_seconds": 1800},
+            {"chat_id": "123", "user_id": 42},
+        )
+
+        assert "tenés: 0.9" in result.output
+        assert "necesitás: 1.0" in result.output
+        mock_schedule.assert_not_called()
 
     @patch("api.tools.task_set.schedule_task")
     def test_trigger_config_interval(self, mock_schedule):
@@ -437,7 +466,7 @@ class TestTaskSetTool:
                 "text": "cada 3 dias",
                 "trigger_config": {"type": "interval", "days": 3},
             },
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "listo" in result.output
         assert "cada 3 dias" in result.output
@@ -455,7 +484,7 @@ class TestTaskSetTool:
                 "text": "a las 4:20",
                 "trigger_config": {"type": "cron", "hour": 4, "minute": 20},
             },
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "listo" in result.output
         assert "04:20" in result.output
@@ -479,7 +508,7 @@ class TestTaskSetTool:
                     "day_of_week": "mon",
                 },
             },
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "listo" in result.output
         mock_schedule.assert_called_once()
@@ -498,7 +527,7 @@ class TestTaskSetTool:
                     "day_of_week": "lun,mie",
                 },
             },
-            {"chat_id": "123"},
+            {"chat_id": "123", "user_id": 42},
         )
         assert "listo" in result.output
         mock_schedule.assert_called_once()

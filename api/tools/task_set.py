@@ -7,10 +7,12 @@ from typing import Any, Dict
 from api.tools.registry import ToolResult, register_tool
 from api.tasks.scheduler import (
     describe_task_trigger,
+    estimate_task_reserve_credits,
     format_interval,
     get_scheduler_runtime_status,
     schedule_task,
 )
+from api.tasks.credits import task_credit_precondition_error
 from api.tasks.models import (
     DelayTrigger,
     IntervalTrigger,
@@ -25,7 +27,6 @@ def _task_set_precondition_error(
     *,
     text: Any,
     chat_id: str,
-    user_id: Any,
 ) -> str | None:
     if not text:
         return "no se que tarea crear, pasame el texto"
@@ -37,15 +38,6 @@ def _task_set_precondition_error(
         reason = runtime_status.get("reason", "runtime unavailable")
         return f"no se pudo crear la tarea: {reason}"
 
-    if user_id:
-        try:
-            if (
-                credits_db.is_configured()
-                and credits_db.get_balance("user", int(user_id)) <= 0
-            ):
-                return "no tenes creditos, recargá primero"
-        except Exception:
-            pass
     return None
 
 
@@ -73,7 +65,6 @@ def _execute_task_set(
     precondition_error = _task_set_precondition_error(
         text=text,
         chat_id=chat_id,
-        user_id=user_id,
     )
     if precondition_error:
         return ToolResult(output=precondition_error)
@@ -85,6 +76,17 @@ def _execute_task_set(
     )
     if parsed.error or parsed.trigger is None:
         return ToolResult(output=parsed.error or "trigger invalido")
+
+    required_credits = estimate_task_reserve_credits(str(text))
+    if required_credits is None:
+        return ToolResult(output="no se pudo calcular el costo de la tarea, probá de nuevo")
+    credit_error = task_credit_precondition_error(
+        credits_db_service=credits_db,
+        user_id=user_id,
+        required_credit_units=required_credits,
+    )
+    if credit_error:
+        return ToolResult(output=credit_error)
 
     task_id = schedule_task(
         ScheduledTaskRequest(
