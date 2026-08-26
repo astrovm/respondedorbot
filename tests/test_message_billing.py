@@ -175,14 +175,14 @@ def test_handle_msg_balance_private_uses_balance_formatter_object(monkeypatch):
     assert "42.0" in mock_send_msg.call_args[0][1]
 
 
-def test_handle_msg_transfer_group_moves_credits():
+def test_handle_msg_transfer_group_moves_fractional_credits():
     from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12",
         "chat": {"id": "202", "type": "group"},
         "from": {"id": 55, "first_name": "Ana", "username": "ana"},
-        "text": "/transfer 1.5",
+        "text": "/transfer 0.1",
     }
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -203,8 +203,12 @@ def test_handle_msg_transfer_group_moves_credits():
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    mock_transfer.assert_called_once_with(user_id=55, chat_id=202, amount=15)
-    assert "le pasé 1.5 créditos al grupo" in mock_send_msg.call_args[0][1]
+    mock_transfer.assert_called_once_with(
+        user_id=55,
+        chat_id=202,
+        amount=1,
+    )
+    assert "le pasé 0.1 créditos al grupo" in mock_send_msg.call_args[0][1]
 
 
 def test_handle_msg_transfer_group_rejects_more_than_one_decimal():

@@ -136,6 +136,10 @@ class TaskExecutor:
         )
         if charge_error:
             logger.info("task %s no credits, skipping: %s", task_id, charge_error)
+            self._send_msg(
+                chat_id,
+                f"{display}, no pude ejecutar la tarea «{text}»:\n{charge_error}",
+            )
             return should_delete
 
         fallback_retries = 0
