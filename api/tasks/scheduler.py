@@ -102,6 +102,15 @@ def _get_task_executor() -> Any:
     return _task_executor
 
 
+def estimate_task_reserve_credits(text: str) -> Optional[int]:
+    """Estimate the personal credits required for a future task execution."""
+
+    executor = _get_task_executor()
+    if executor is None:
+        return None
+    return int(executor.estimate_required_credits(text))
+
+
 def set_task_executor(executor: Any) -> None:
     global _task_executor
     _task_executor = executor

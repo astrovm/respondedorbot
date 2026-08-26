@@ -341,47 +341,137 @@ def test_handle_non_ai_command_passes_world_cup_country_query():
     handler.assert_called_once_with(timezone_offset=-3, team_query="argentina")
 
 
-def test_handle_non_ai_command_tasks_command():
+def test_all_task_command_aliases_list_without_text():
     from api.bot.message_handler import (
         CommandDispatchContext,
         PreparedMessage,
-        _handle_non_ai_command,
+        _handle_known_command,
     )
 
     handler = MagicMock(return_value=("lista de tareas", {"inline_keyboard": []}))
-    commands = {
-        "/tasks": (handler, False, False),
-        "/tareas": (handler, False, False),
-    }
-
+    aliases = ("/tarea", "/tareas", "/task", "/tasks")
+    commands = {alias: (handler, True, True) for alias in aliases}
     deps = MagicMock()
-    for cmd in ("/tasks", "/tareas"):
-        response = _handle_non_ai_command(
+
+    for alias in aliases:
+        response = _handle_known_command(
             deps,
             CommandDispatchContext(
                 commands=commands,
-                command=cmd,
+                command=alias,
                 sanitized_message_text="",
                 message={"message_id": "10"},
                 chat_id="123",
-                chat_type="private",
+                chat_type="group",
                 user_id=7,
                 numeric_chat_id=123,
                 prepared_message=PreparedMessage(
-                    message_text=cmd,
+                    message_text=alias,
                     photo_file_id=None,
                     audio_file_id=None,
                 ),
                 billing_helper=MagicMock(),
                 reply_context_text=None,
-                user_identity="Ana (ana)",
+                user_identity="Test User (@testuser)",
                 redis_client=MagicMock(),
                 timezone_offset=-3,
             ),
         )
 
-        assert response == ("lista de tareas", {"inline_keyboard": []}, False, cmd)
-        handler.assert_called_with("123")
+        assert response == ("lista de tareas", {"inline_keyboard": []}, False, alias)
+
+    assert handler.call_count == 4
+
+
+@patch("api.bot.message_handler._run_ai_flow", return_value=("ok", True))
+def test_all_task_command_aliases_create_with_text_after_credit_preflight(mock_ai_flow):
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_known_command,
+    )
+
+    handler = MagicMock()
+    aliases = ("/tarea", "/tareas", "/task", "/tasks")
+    commands = {alias: (handler, True, True) for alias in aliases}
+    deps = MagicMock()
+    deps.estimate_ai_base_reserve_credits.return_value = (10, {})
+    deps.credits_db_service.is_configured.return_value = True
+    deps.credits_db_service.get_balance.return_value = 10
+
+    for alias in aliases:
+        response = _handle_known_command(
+            deps,
+            CommandDispatchContext(
+                commands=commands,
+                command=alias,
+                sanitized_message_text="en 10 minutos recordame revisar el horno",
+                message={"message_id": "10"},
+                chat_id="123",
+                chat_type="group",
+                user_id=7,
+                numeric_chat_id=123,
+                prepared_message=PreparedMessage(
+                    message_text=f"{alias} en 10 minutos recordame revisar el horno",
+                    photo_file_id=None,
+                    audio_file_id=None,
+                ),
+                billing_helper=MagicMock(),
+                reply_context_text=None,
+                user_identity="Test User (@testuser)",
+                redis_client=MagicMock(),
+                timezone_offset=-3,
+            ),
+        )
+
+        assert response == ("ok", None, True, alias)
+
+    assert mock_ai_flow.call_count == 4
+    for call in mock_ai_flow.call_args_list:
+        assert "herramienta task_set" in call.kwargs["prompt_text"]
+        assert "revisar el horno" in call.kwargs["prompt_text"]
+
+
+@patch("api.bot.message_handler._run_ai_flow")
+def test_task_command_rejects_insufficient_positive_personal_balance(mock_ai_flow):
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_known_command,
+    )
+
+    deps = MagicMock()
+    deps.estimate_ai_base_reserve_credits.return_value = (10, {})
+    deps.credits_db_service.is_configured.return_value = True
+    deps.credits_db_service.get_balance.return_value = 9
+    response = _handle_known_command(
+        deps,
+        CommandDispatchContext(
+            commands={"/task": (MagicMock(), True, True)},
+            command="/task",
+            sanitized_message_text="en 10 minutos recordame revisar el horno",
+            message={"message_id": "10"},
+            chat_id="123",
+            chat_type="group",
+            user_id=7,
+            numeric_chat_id=123,
+            prepared_message=PreparedMessage(
+                message_text="/task en 10 minutos recordame revisar el horno",
+                photo_file_id=None,
+                audio_file_id=None,
+            ),
+            billing_helper=MagicMock(),
+            reply_context_text=None,
+            user_identity="Test User (@testuser)",
+            redis_client=MagicMock(),
+            timezone_offset=-3,
+        ),
+    )
+
+    assert response[2] is False
+    assert "tenés: 0.9" in str(response[0])
+    assert "necesitás: 1.0" in str(response[0])
+    mock_ai_flow.assert_not_called()
 
 
 def test_message_handler_routes_ai_command_through_known_command_path(monkeypatch):

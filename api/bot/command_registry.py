@@ -81,7 +81,13 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
     CommandDefinition(("/transfer",), "transfer_command", False, True, "le pasás créditos tuyos al grupo"),
     CommandDefinition(("/gm",), "get_good_morning", False, False, "gif de buenos días"),
     CommandDefinition(("/gn",), "get_good_night", False, False, "gif de buenas noches"),
-    CommandDefinition(("/tareas", "/tasks"), "tasks_command", False, False, "listado de tareas programadas"),
+    CommandDefinition(
+        ("/tarea", "/tareas", "/task", "/tasks"),
+        "task_command",
+        True,
+        True,
+        "creá una tarea con texto o listá las existentes",
+    ),
     CommandDefinition(("/resumen", "/summary", "/tldr"), "summary_command", False, True, "resumí la conversación [enfoque opcional]"),
 )
 

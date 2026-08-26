@@ -140,9 +140,9 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "tareas",
-        "agendo recordatorios y tareas recurrentes por lenguaje natural; /tareas lista y borra con botones",
-        aliases_for("tasks_command"),
-        examples=("mañana recordame pagar el alquiler", "/tareas"),
+        "agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto",
+        aliases_for("task_command"),
+        examples=("/tarea mañana recordame pagar el alquiler", "/tasks"),
         category="productividad",
         telegram_visible=True,
     ),
