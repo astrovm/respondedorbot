@@ -14,7 +14,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Market data and weather**: `/prices`, `/acciones`, `/usd`, `/clima`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
 - **BCRA economic data**: `/bcra`, `/variables`
 - **Media**: audio transcription (Whisper via Groq, with OpenRouter fallback) and image description (OpenRouter)
-- **Scheduled tasks**: `/tareas`, `/tasks` — create, list, and delete one-shot or recurring reminders via AI or inline buttons
+- **Scheduled tasks**: `/tarea`, `/tareas`, `/task`, `/tasks` — list without text or create from natural-language text
 - **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
 - **Link enrichment**: URLs get metadata injected into AI context; social links auto-replaced (fxTwitter, fixupx, etc.)
 - **On-demand AI context**: market data, weather, Hacker News stories, and bot capabilities are available through tools; local time stays in every system prompt
@@ -87,7 +87,7 @@ uv run --locked python run_polling.py
 | `/topup` | - | Buy AI credits with Telegram Stars |
 | `/balance` | - | Show credit balance |
 | `/transfer` | - | Transfer credits to group |
-| `/tareas` | `/tasks` | Manage scheduled reminders |
+| `/tarea`, `/tareas` | `/task`, `/tasks` | List tasks, or create one when followed by text |
 | `/gm` | - | Good morning GIF |
 | `/gn` | - | Good night GIF |
 | `/help` | - | Command reference |
