@@ -20,7 +20,14 @@ REASONING_CHAT_OUTPUT_TOKEN_LIMIT = 8192
 VISION_OUTPUT_TOKEN_LIMIT = 512
 IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
 SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE = 4_000
-WEB_SEARCH_USD_MICROS_PER_REQUEST = 5_000
+FIRECRAWL_STANDARD_PLAN_USD_MICROS = 83_000_000
+FIRECRAWL_STANDARD_PLAN_CREDITS = 100_000
+FIRECRAWL_SEARCH_CREDITS_PER_REQUEST = 2
+FIRECRAWL_SEARCH_USD_MICROS_PER_REQUEST = (
+    FIRECRAWL_STANDARD_PLAN_USD_MICROS
+    * FIRECRAWL_SEARCH_CREDITS_PER_REQUEST
+    // FIRECRAWL_STANDARD_PLAN_CREDITS
+)
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
@@ -353,8 +360,10 @@ def calculate_billing_for_segments(
             web_search_requests = int(metadata.get("web_search_requests") or 0)
         except (TypeError, ValueError):
             web_search_requests = 0
-        if web_search_requests > 0 and _reported_cost_usd_micros(usage) is None:
-            search_usd_micros = web_search_requests * WEB_SEARCH_USD_MICROS_PER_REQUEST
+        if web_search_requests > 0:
+            search_usd_micros = (
+                web_search_requests * FIRECRAWL_SEARCH_USD_MICROS_PER_REQUEST
+            )
             total_usd_micros += search_usd_micros
             tool_breakdown.append(
                 {

@@ -223,10 +223,10 @@ def test_calculate_billing_for_segments_bills_web_search_requests():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 10_006
-    assert breakdown["charged_credit_units"] == 21
+    assert breakdown["raw_usd_micros"] == 3_326
+    assert breakdown["charged_credit_units"] == 7
     assert breakdown["tool_breakdown"] == [
-        {"tool": "web_search", "count": 2, "usd_micros": 10_000}
+        {"tool": "web_search", "count": 2, "usd_micros": 3_320}
     ]
 
 
@@ -980,7 +980,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
     assert breakdown["model_breakdown"][0]["usd_micros"] == 6
 
 
-def test_calculate_billing_does_not_double_count_search_in_reported_cost():
+def test_calculate_billing_adds_direct_firecrawl_cost_to_reported_model_cost():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -996,8 +996,10 @@ def test_calculate_billing_does_not_double_count_search_in_reported_cost():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 5_006
-    assert breakdown["tool_breakdown"] == []
+    assert breakdown["raw_usd_micros"] == 6_666
+    assert breakdown["tool_breakdown"] == [
+        {"tool": "web_search", "count": 1, "usd_micros": 1_660}
+    ]
 
 
 def test_openrouter_transcription_uses_reported_model_cost():
