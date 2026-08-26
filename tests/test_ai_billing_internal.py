@@ -211,14 +211,17 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     assert breakdown["unsupported_notes"] == []
 
 
-def test_calculate_billing_for_segments_bills_web_search_requests():
+def test_calculate_billing_for_segments_bills_successful_firecrawl_credits():
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
                 "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
-                "metadata": {"web_search_requests": 2},
+                "metadata": {
+                    "web_search_requests": 2,
+                    "firecrawl_credits_used": 4,
+                },
             }
         ]
     )
@@ -991,7 +994,10 @@ def test_calculate_billing_adds_direct_firecrawl_cost_to_reported_model_cost():
                     "completion_tokens": 50,
                     "cost": 0.005006,
                 },
-                "metadata": {"web_search_requests": 1},
+                "metadata": {
+                    "web_search_requests": 1,
+                    "firecrawl_credits_used": 2,
+                },
             }
         ]
     )
@@ -1000,6 +1006,26 @@ def test_calculate_billing_adds_direct_firecrawl_cost_to_reported_model_cost():
     assert breakdown["tool_breakdown"] == [
         {"tool": "web_search", "count": 1, "usd_micros": 1_660}
     ]
+
+
+def test_calculate_billing_does_not_bill_failed_firecrawl_search():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "~deepseek/deepseek-v4-flash-latest",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": 0.005006,
+                },
+                "metadata": {"web_search_requests": 1},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 5_006
+    assert breakdown["tool_breakdown"] == []
 
 
 def test_openrouter_transcription_uses_reported_model_cost():
@@ -1060,6 +1086,35 @@ def test_groq_gpt_oss_local_fallback_uses_current_rates():
     )
 
     assert breakdown["raw_usd_micros"] == 450
+
+
+def test_openrouter_gpt_oss_local_fallback_uses_provider_rates():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {"prompt_tokens": 1_000, "completion_tokens": 500},
+                "metadata": {"provider": "openrouter"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 122
+
+
+def test_groq_transcription_applies_ten_second_minimum():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "transcribe",
+                "model": "groq/whisper-large-v3",
+                "audio_seconds": 1,
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 309
 
 
 def _make_group_billing(*, limit: int, redis_client=None):

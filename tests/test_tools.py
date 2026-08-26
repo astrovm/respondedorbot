@@ -9,6 +9,31 @@ from api.tools.registry import execute_tool, get_all_tool_schemas
 from api.tools.runtime import ToolRuntime
 
 
+def test_tool_runtime_records_only_reported_firecrawl_credits():
+    results = iter(
+        [
+            SimpleNamespace(output='{"results":[]}', metadata={"credits_used": 2}),
+            SimpleNamespace(output='{"error":"failed"}', metadata={}),
+        ]
+    )
+    context = {"chat_id": "synthetic-chat"}
+    runtime = ToolRuntime(
+        execute_tool_fn=lambda *_args: next(results),
+        tool_registry={"web_search": object()},
+        print_fn=lambda *_args: None,
+    )
+    tool_call = SimpleNamespace(
+        id="search-1",
+        function=SimpleNamespace(name="web_search", arguments='{"query":"test"}'),
+    )
+
+    runtime.apply_tool_calls(SimpleNamespace(content=""), [tool_call], [], context)
+    runtime.apply_tool_calls(SimpleNamespace(content=""), [tool_call], [], context)
+
+    assert runtime.take_firecrawl_credits(context) == 2
+    assert runtime.take_firecrawl_credits(context) == 0
+
+
 class TestCalculateTool:
     def test_simple_addition(self):
         result = execute_tool("calculate", {"expression": "2 + 3"})

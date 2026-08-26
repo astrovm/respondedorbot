@@ -22,10 +22,8 @@ IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE = 1_200
 SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE = 4_000
 FIRECRAWL_STANDARD_PLAN_USD_MICROS = 83_000_000
 FIRECRAWL_STANDARD_PLAN_CREDITS = 100_000
-FIRECRAWL_SEARCH_CREDITS_PER_REQUEST = 2
-FIRECRAWL_SEARCH_USD_MICROS_PER_REQUEST = (
+FIRECRAWL_USD_MICROS_PER_CREDIT = (
     FIRECRAWL_STANDARD_PLAN_USD_MICROS
-    * FIRECRAWL_SEARCH_CREDITS_PER_REQUEST
     // FIRECRAWL_STANDARD_PLAN_CREDITS
 )
 
@@ -49,9 +47,16 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "cached_input_per_million": 7_000,
         "output_per_million": 75_000,
     },
-    "openai/gpt-oss-120b": {
+}
+
+PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
+    ("groq", "openai/gpt-oss-120b"): {
         "input_per_million": 150_000,
         "output_per_million": 600_000,
+    },
+    ("openrouter", "openai/gpt-oss-120b"): {
+        "input_per_million": 37_000,
+        "output_per_million": 170_000,
     },
 }
 
@@ -225,6 +230,7 @@ def _calculate_transcription_usd_micros(audio_seconds: float) -> int:
     seconds = max(0.0, float(audio_seconds or 0.0))
     if seconds <= 0:
         return 0
+    seconds = max(10.0, seconds)
     return math.ceil(seconds * hourly_rate / 3600)
 
 
@@ -253,9 +259,14 @@ def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
 
 
 def _calculate_model_token_cost(
-    model: str, usage: Optional[Mapping[str, Any]]
+    model: str,
+    usage: Optional[Mapping[str, Any]],
+    *,
+    provider: str = "",
 ) -> Dict[str, Any]:
-    pricing = MODEL_PRICING_USD_MICROS.get(model)
+    pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get(
+        (str(provider or "").strip().lower(), model)
+    ) or MODEL_PRICING_USD_MICROS.get(model)
     if not pricing or not usage:
         return {
             "model": model,
@@ -337,6 +348,10 @@ def calculate_billing_for_segments(
         model = str(segment.get("model") or "")
         usage = ensure_mapping(segment.get("usage")) or {}
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
+        metadata = ensure_mapping(segment.get("metadata")) or {}
+        provider = str(
+            metadata.get("provider") or segment.get("source") or ""
+        ).strip().lower()
 
         pricing = MODEL_PRICING_USD_MICROS.get(model) or {}
         if kind == "transcribe" and "audio_per_hour" in pricing:
@@ -351,19 +366,22 @@ def calculate_billing_for_segments(
             )
             continue
 
-        model_cost = _calculate_model_token_cost(model, usage)
+        model_cost = _calculate_model_token_cost(model, usage, provider=provider)
         total_usd_micros += int(model_cost["usd_micros"])
         model_breakdown.append(model_cost)
 
-        metadata = ensure_mapping(segment.get("metadata")) or {}
         try:
             web_search_requests = int(metadata.get("web_search_requests") or 0)
         except (TypeError, ValueError):
             web_search_requests = 0
-        if web_search_requests > 0:
-            search_usd_micros = (
-                web_search_requests * FIRECRAWL_SEARCH_USD_MICROS_PER_REQUEST
+        try:
+            firecrawl_credits = max(
+                0, int(metadata.get("firecrawl_credits_used") or 0)
             )
+        except (TypeError, ValueError):
+            firecrawl_credits = 0
+        if firecrawl_credits > 0:
+            search_usd_micros = firecrawl_credits * FIRECRAWL_USD_MICROS_PER_CREDIT
             total_usd_micros += search_usd_micros
             tool_breakdown.append(
                 {
