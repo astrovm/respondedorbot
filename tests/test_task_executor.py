@@ -33,6 +33,56 @@ def _build_executor(
 
 
 class TestTaskExecutor:
+    def test_sends_explanation_when_task_cannot_reserve_credits(self):
+        executor, billing, ask_ai, send_msg = _build_executor(ask_ai_return_value="hola")
+        billing.reserve_ai_credits.return_value = (
+            None,
+            "te quedaste seco de créditos ia, boludo.",
+        )
+
+        task = {
+            "id": "abc123",
+            "chat_id": "-100123",
+            "text": "recordame algo",
+            "user_name": "@testuser",
+            "user_id": 77,
+            "interval_seconds": None,
+            "trigger_config": None,
+        }
+
+        should_delete = executor.execute(task)
+
+        assert should_delete is True
+        ask_ai.assert_not_called()
+        send_msg.assert_called_once_with(
+            "-100123",
+            "@testuser, no pude ejecutar la tarea «recordame algo»:\n"
+            "te quedaste seco de créditos ia, boludo.",
+        )
+
+    def test_recurring_task_reports_credit_failure_and_is_kept(self):
+        executor, billing, ask_ai, send_msg = _build_executor(ask_ai_return_value="hola")
+        billing.reserve_ai_credits.return_value = (None, "saldo insuficiente")
+
+        task = {
+            "id": "abc123",
+            "chat_id": "-100123",
+            "text": "mandá las noticias",
+            "user_name": "@testuser",
+            "user_id": 77,
+            "interval_seconds": 3600,
+            "trigger_config": {"type": "interval", "seconds": 3600},
+        }
+
+        should_delete = executor.execute(task)
+
+        assert should_delete is False
+        ask_ai.assert_not_called()
+        send_msg.assert_called_once_with(
+            "-100123",
+            "@testuser, no pude ejecutar la tarea «mandá las noticias»:\nsaldo insuficiente",
+        )
+
     def test_sends_scheduled_ai_message(self):
         executor, billing, ask_ai, send_msg = _build_executor(
             ask_ai_return_value="hola"
