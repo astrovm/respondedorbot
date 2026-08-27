@@ -170,6 +170,7 @@ class MessageRoutingDeps:
         bool,
     ]
     is_group_chat_type: Callable[[Optional[str]], bool]
+    get_prices: Callable[[str], Optional[str]] = lambda _query: None
 
 
 @dataclass(frozen=True)
@@ -315,6 +316,7 @@ class MessageHandlerDeps:
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
     set_chat_config: Callable[..., Dict[str, Any]] = lambda *_args, **_kwargs: {}
+    get_prices: Callable[[str], Optional[str]] = lambda _query: None
 
 
 def build_message_handler_deps(
@@ -345,6 +347,7 @@ def build_message_handler_deps(
         save_bot_message_metadata=state.save_bot_message_metadata,
         build_reply_context_text=state.build_reply_context_text,
         should_gordo_respond=routing.should_gordo_respond,
+        get_prices=routing.get_prices,
         format_user_message=state.format_user_message,
         save_message_to_redis=state.save_message_to_redis,
         save_chat_member=state.save_chat_member,
@@ -1988,6 +1991,8 @@ def _handle_initialized_message(
         redis_client=runtime.redis_client,
         send_photo=deps.send_photo,
         admin_report=deps.admin_report,
+        fallback_price=deps.get_prices,
+        send_message=deps.send_msg,
     ):
         return "ok"
     if _handle_prepared_message_early_response(

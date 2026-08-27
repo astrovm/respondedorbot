@@ -740,6 +740,15 @@ def test_price_alias_command_dispatches_to_get_prices():
     assert takes_params == True
 
 
+def test_unified_and_crypto_only_price_aliases_use_distinct_handlers():
+    from api.index import initialize_commands
+
+    commands = initialize_commands()
+
+    assert commands["/c"][0] == index.app_runtime.prices.get_prices
+    assert commands["/crypto"][0] == index.app_runtime.prices.get_crypto_prices
+
+
 def test_extract_message_text_complex_cases():
     from api.index import extract_message_text
 

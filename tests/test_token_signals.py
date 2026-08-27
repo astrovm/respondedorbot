@@ -362,6 +362,32 @@ def test_handle_token_signal_message_accepts_cashtag(monkeypatch):
     send_photo.assert_called_once()
 
 
+def test_handle_token_signal_message_falls_back_to_market_price(monkeypatch):
+    import api.markets.token_signals as token_signals
+
+    monkeypatch.setattr(token_signals, "fetch_signal_by_symbol", lambda *_args: None)
+    fallback_price = MagicMock(return_value="NVDA: 123.45 USD (+1.25% 24h)")
+    send_message = MagicMock(return_value=55)
+
+    handled = handle_token_signal_message(
+        {
+            "message_id": 10,
+            "chat": {"id": 100, "type": "group"},
+            "from": {"id": 7},
+            "text": "$NVDA",
+        },
+        redis_client=MagicMock(),
+        send_photo=MagicMock(),
+        admin_report=MagicMock(),
+        fallback_price=fallback_price,
+        send_message=send_message,
+    )
+
+    assert handled is True
+    fallback_price.assert_called_once_with("nvda")
+    send_message.assert_called_once_with("100", "NVDA: 123.45 USD (+1.25% 24h)", "10")
+
+
 def test_handle_token_signal_message_does_not_handle_failed_send(monkeypatch):
     import api.markets.token_signals as token_signals
 

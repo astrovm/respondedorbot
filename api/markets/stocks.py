@@ -104,7 +104,8 @@ def search_yahoo_symbol(
     cache_ttl: int,
 ) -> str | None:
     try:
-        search_queries = list(dict.fromkeys((query, query.replace(" ", ""))))
+        normalized_query = query.strip().lstrip("$")
+        search_queries = list(dict.fromkeys((normalized_query, normalized_query.replace(" ", ""))))
         for search_query in search_queries:
             response = cached_request(
                 YAHOO_SEARCH_URL,
@@ -192,26 +193,14 @@ def get_stock_prices(
     resolve_symbol: StockSymbolResolver,
     fetch_top_stocks: StockListFetcher,
 ) -> str:
-    raw_query = str(msg_text or "").strip()
-    full_query_fallback = False
-    if "," in raw_query:
-        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
-    else:
-        parts = [part for part in raw_query.split() if part]
-        queries = parts
-        full_query_fallback = len(queries) > 1
-    if not queries:
-        queries = fetch_top_stocks()
-        if not queries:
-            return tr("market.stock.top_error")
-
-    quotes = _lookup_stock_quotes(
-        raw_query,
-        queries[:20],
-        full_query_fallback=full_query_fallback,
+    quotes = lookup_stock_quotes(
+        msg_text,
         fetch_quote=fetch_quote,
         resolve_symbol=resolve_symbol,
+        fetch_top_stocks=fetch_top_stocks,
     )
+    if quotes is None:
+        return tr("market.stock.top_error")
 
     lines: list[str] = []
     for query, quote in quotes:
@@ -226,6 +215,37 @@ def get_stock_prices(
     return "\n".join(lines) if lines else tr("market.stock.none")
 
 
+def lookup_stock_quotes(
+    msg_text: str,
+    *,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+    fetch_top_stocks: StockListFetcher,
+) -> list[tuple[str, StockQuote | None]] | None:
+    """Resolve stock-like queries without applying user-facing formatting."""
+
+    raw_query = str(msg_text or "").strip()
+    full_query_fallback = False
+    if "," in raw_query:
+        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
+    else:
+        parts = [part for part in raw_query.split() if part]
+        queries = parts
+        full_query_fallback = len(queries) > 1
+    if not queries:
+        queries = fetch_top_stocks()
+        if not queries:
+            return None
+
+    return _lookup_stock_quotes(
+        raw_query,
+        queries[:20],
+        full_query_fallback=full_query_fallback,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
+
+
 def _lookup_stock_quotes(
     raw_query: str,
     queries: list[str],
@@ -236,7 +256,7 @@ def _lookup_stock_quotes(
 ) -> list[tuple[str, StockQuote | None]]:
     quotes: list[tuple[str, StockQuote | None]] = []
     for query in queries:
-        normalized = query.upper()
+        normalized = query.upper().lstrip("$")
         is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
         quote = fetch_quote(normalized) if is_symbol else None
         quotes.append((query, quote))
@@ -336,5 +356,13 @@ class StockService:
             fetch_top_stocks=self.fetch_top_stocks,
         )
 
+    def lookup_quotes(self, msg_text: str) -> list[tuple[str, StockQuote | None]] | None:
+        return lookup_stock_quotes(
+            msg_text,
+            fetch_quote=self.fetch_quote,
+            resolve_symbol=self.resolve_symbol,
+            fetch_top_stocks=self.fetch_top_stocks,
+        )
 
-__all__ = ["StockQuote", "StockService"]
+
+__all__ = ["StockQuote", "StockService", "lookup_stock_quotes"]

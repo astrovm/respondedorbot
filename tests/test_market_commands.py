@@ -325,6 +325,23 @@ def test_stock_prices_preserve_mixed_case_symbol_lists():
     resolve_symbol.assert_not_called()
 
 
+def test_stock_prices_accept_cashtag_symbols():
+    quote = StockQuote("NVDA", "", 123.45, "USD", "Synthetic Exchange", 1.25)
+    fetch_quote = MagicMock(side_effect=lambda symbol: quote if symbol == "NVDA" else None)
+    resolve_symbol = MagicMock()
+
+    result = get_stock_prices(
+        "$NVDA",
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+        fetch_top_stocks=MagicMock(),
+    )
+
+    assert result == "NVDA: 123.45 USD (+1.25% 24h)"
+    fetch_quote.assert_called_once_with("NVDA")
+    resolve_symbol.assert_not_called()
+
+
 def test_stock_symbol_search_retries_compact_company_name():
     cached_request = MagicMock(
         side_effect=[
