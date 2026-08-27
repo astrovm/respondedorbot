@@ -22,7 +22,9 @@ from api.bot.chat_context import (
     is_group_chat_type,
 )
 from api.billing.credit_units import (
+    CREDIT_SCALE,
     format_credit_units,
+    rescale_credit_units,
     whole_credits_to_units,
 )
 from api.ai.pricing import calculate_billing_for_segments
@@ -386,6 +388,7 @@ class AIMessageBilling:
         metadata: Dict[str, Any] = {
             "command": self.command,
             "usage_tag": usage_tag,
+            "credit_scale": CREDIT_SCALE,
         }
         if extra:
             metadata.update(dict(extra))
@@ -440,16 +443,26 @@ class AIMessageBilling:
 
         persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
         if persisted_reservation:
+            raw_metadata = persisted_reservation.get("metadata")
+            persisted_metadata = (
+                dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+            )
+            persisted_scale = persisted_reservation.get(
+                "credit_scale",
+                persisted_metadata.get("credit_scale"),
+            )
             return {
-                "reserved_credit_units": int(
-                    persisted_reservation.get("reserved_credit_units", 0) or 0
+                "reserved_credit_units": rescale_credit_units(
+                    persisted_reservation.get("reserved_credit_units", 0),
+                    persisted_scale,
                 ),
                 "chat_scope_id": persisted_reservation.get(
                     "chat_scope_id", chat_scope_id
                 ),
                 "source": str(persisted_reservation.get("source") or "user"),
                 "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
-                "metadata": dict(persisted_reservation.get("metadata") or {}),
+                "metadata": persisted_metadata,
+                "credit_scale": CREDIT_SCALE,
             }, None
 
         self._ensure_onboarding_checked()
@@ -492,6 +505,7 @@ class AIMessageBilling:
             "source": source,
             "usage_tag": usage_tag,
             "metadata": reserve_metadata,
+            "credit_scale": CREDIT_SCALE,
         }
 
         if source == "chat" and enforce_message_cap:
@@ -531,6 +545,7 @@ class AIMessageBilling:
         refunded_credit_units: int,
         extra_charged_credit_units: int,
         debt_applied_credit_units: int,
+        payer_scope: str,
         reason: str,
         breakdown: Mapping[str, Any],
         billing_segments: Sequence[Mapping[str, Any]],
@@ -551,6 +566,13 @@ class AIMessageBilling:
                 "refunded_credit_units": refunded_credit_units,
                 "extra_charged_credit_units": extra_charged_credit_units,
                 "debt_applied_credit_units": debt_applied_credit_units,
+                "charged_credit_units_total": (
+                    reserved_credit_units_total
+                    - refunded_credit_units
+                    + extra_charged_credit_units
+                    + debt_applied_credit_units
+                ),
+                "payer_scope": "chat" if payer_scope == "chat" else "user",
                 "pricing_version": breakdown.get("pricing_version"),
                 "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
                 "markup_multiplier": breakdown.get("markup_multiplier"),
@@ -606,6 +628,11 @@ class AIMessageBilling:
         )
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
+        source = (
+            "chat"
+            if str(reservation_meta.get("source") or "user") == "chat"
+            else "user"
+        )
         if billing_segments is None:
             # Missing usage is ambiguous; keep the reserve rather than make the call free.
             breakdown = {
@@ -624,6 +651,7 @@ class AIMessageBilling:
                 refunded_credit_units=0,
                 extra_charged_credit_units=0,
                 debt_applied_credit_units=0,
+                payer_scope=source,
                 reason=reason,
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
@@ -656,12 +684,6 @@ class AIMessageBilling:
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
         chat_scope_id = reservation_meta.get("chat_scope_id")
-        source = (
-            "chat"
-            if str(reservation_meta.get("source") or "user") == "chat"
-            else "user"
-        )
-
         if raw_usd_micros == 0 and not has_usage:
             # Providers may omit usage entirely; zero must not imply a free call.
             actual_credit_units = reserved_credit_units
@@ -785,6 +807,7 @@ class AIMessageBilling:
             refunded_credit_units=refunded_credit_units,
             extra_charged_credit_units=extra_charged_credit_units,
             debt_applied_credit_units=debt_applied_credit_units,
+            payer_scope=source,
             reason=reason,
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
@@ -877,6 +900,7 @@ class AIMessageBilling:
             refunded_credit_units=adjustment.refunded_credit_units,
             extra_charged_credit_units=adjustment.extra_charged_credit_units,
             debt_applied_credit_units=adjustment.debt_applied_credit_units,
+            payer_scope=batch.source,
             reason=record.reason,
             breakdown=record.breakdown,
             billing_segments=record.billing_segments,

@@ -110,7 +110,8 @@ def test_compaction_is_persisted_before_the_model_runs_and_survives_queue_restar
     )
     assert redis_client.hgetall("memory:compaction:jobs") == {}
     settle_reservation.assert_called_once()
-    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 1
+    assert settle_reservation.call_args.kwargs["reserved_credit_units"] == 3
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 2
 
 
 def test_compaction_skips_reservation_when_a_chat_already_has_a_job():
@@ -214,6 +215,7 @@ def test_incompatible_job_refunds_reservation_before_deletion():
     queue.run_pending_once()
 
     settle_reservation.assert_called_once()
+    assert settle_reservation.call_args.kwargs["reserved_credit_units"] == 30
     assert settle_reservation.call_args.kwargs["actual_credit_units"] == 0
     assert redis_client.hgetall("memory:compaction:jobs") == {}
 

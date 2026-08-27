@@ -29,6 +29,7 @@ from api.ai.service import AIConversationRequest, AIService, SummaryCommandReque
 from api.bot.chat_context import format_user_identity, is_group_chat_type
 from api.billing.commands import (
     handle_balance_command,
+    handle_charges_command,
     handle_transfer_command,
 )
 from api.markets.token_signals import handle_token_signal_message
@@ -1274,6 +1275,25 @@ def _handle_balance_command(
     )
 
 
+def _handle_charges_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    sanitized_message_text: str,
+    chat_id: str,
+    user_id: Optional[int],
+    timezone_offset: float,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
+    return handle_charges_command(
+        deps,
+        command=command,
+        sanitized_message_text=sanitized_message_text,
+        chat_id=chat_id,
+        user_id=user_id,
+        timezone_offset=timezone_offset,
+    )
+
+
 def _handle_admin_printcredits_command(
     deps: MessageHandlerDeps,
     *,
@@ -1612,6 +1632,19 @@ def _dispatch_transfer(
     )
 
 
+def _dispatch_charges(
+    deps: MessageHandlerDeps, context: CommandDispatchContext
+) -> CommandResponse:
+    return _handle_charges_command(
+        deps,
+        command=context.command,
+        sanitized_message_text=context.sanitized_message_text,
+        chat_id=context.chat_id,
+        user_id=context.user_id,
+        timezone_offset=context.timezone_offset,
+    )
+
+
 def _dispatch_printcredits(
     deps: MessageHandlerDeps, context: CommandDispatchContext
 ) -> CommandResponse:
@@ -1643,6 +1676,9 @@ _DIRECT_COMMAND_HANDLERS: Dict[
     "/config": _dispatch_config,
     "/topup": _dispatch_topup,
     "/balance": _dispatch_balance,
+    "/charges": _dispatch_charges,
+    "/history": _dispatch_charges,
+    "/gastos": _dispatch_charges,
     "/transfer": _dispatch_transfer,
     "/printcredits": _dispatch_printcredits,
     "/creditlog": _dispatch_creditlog,

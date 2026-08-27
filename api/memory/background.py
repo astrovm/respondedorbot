@@ -11,6 +11,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from api.ai.pricing import credit_units_from_usd_micros
+from api.billing.credit_units import CREDIT_SCALE, rescale_credit_units
 from api.memory.compaction import CompactionPlan
 
 
@@ -20,6 +21,14 @@ _LOCK_PREFIX = "memory:compaction:lock:"
 _LOCK_TTL_SECONDS = 60 * 60
 _POLL_SECONDS = 2.0
 _MAX_ATTEMPTS = 3
+
+
+def _reservation_credit_scale(reservation: Mapping[str, Any]) -> Any:
+    metadata = reservation.get("metadata")
+    metadata_scale = (
+        metadata.get("credit_scale") if isinstance(metadata, Mapping) else None
+    )
+    return reservation.get("credit_scale") or metadata_scale
 
 
 @dataclass
@@ -99,7 +108,7 @@ class DurableCompactionQueue:
         raw_message_id = getattr(billing, "message", {}).get("message_id")
         job = CompactionJob(
             **asdict(plan),
-            reservation=dict(reservation),
+            reservation={**dict(reservation), "credit_scale": CREDIT_SCALE},
             user_id=int(billing.user_id),
             message_id=str(raw_message_id) if raw_message_id is not None else None,
         )
@@ -264,18 +273,21 @@ class DurableCompactionQueue:
             if actual_credit_units is None
             else max(0, int(actual_credit_units))
         )
+        reserved = rescale_credit_units(
+            job.reservation.get("reserved_credit_units"),
+            _reservation_credit_scale(job.reservation),
+        )
         self._settle_reservation(
             user_id=job.user_id,
             chat_id=job.reservation.get("chat_scope_id"),
             source=str(job.reservation.get("source") or "user"),
-            reserved_credit_units=int(
-                job.reservation.get("reserved_credit_units") or 0
-            ),
+            reserved_credit_units=reserved,
             actual_credit_units=actual,
             usage_tag=str(job.reservation.get("usage_tag") or ""),
             metadata={
                 "reason": reason,
                 "message_id": job.message_id,
+                "credit_scale": CREDIT_SCALE,
             },
         )
 
@@ -289,18 +301,21 @@ class DurableCompactionQueue:
         if not usage_tag:
             return False
         try:
+            reserved = rescale_credit_units(
+                reservation.get("reserved_credit_units"),
+                _reservation_credit_scale(reservation),
+            )
             self._settle_reservation(
                 user_id=int(decoded["user_id"]),
                 chat_id=reservation.get("chat_scope_id"),
                 source=str(reservation.get("source") or "user"),
-                reserved_credit_units=int(
-                    reservation.get("reserved_credit_units") or 0
-                ),
+                reserved_credit_units=reserved,
                 actual_credit_units=0,
                 usage_tag=usage_tag,
                 metadata={
                     "reason": "memory_compaction_incompatible_job",
                     "chat_id": chat_id,
+                    "credit_scale": CREDIT_SCALE,
                 },
             )
             return True

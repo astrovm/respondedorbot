@@ -100,16 +100,41 @@ class _MigrationCursor:
         self.onboarding_credits = 3
         self.star_credits_awarded = 100
         self.ledger_amounts = [-3, 3]
-        self.migration_inserted = False
+        self.ledger_metadata = [
+            {
+                "reserved_credit_units": 3,
+                "settled_credits": 2,
+                "note": "keep",
+            },
+            {"actual_credit_units": 2},
+        ]
+        self.applied_migrations = set()
         self.fetchone_result = None
+
+    def _scale_ledger_metadata(self, params):
+        factor = int(params[0])
+        legacy_keys = set(params[1])
+        legacy_factor = int(params[2])
+        credit_scale = int(params[3])
+        for metadata in self.ledger_metadata:
+            for key, value in list(metadata.items()):
+                if "credit_units" in key and isinstance(value, (int, float)):
+                    metadata[key] = int(value) * factor
+                elif key in legacy_keys and isinstance(value, (int, float)):
+                    metadata[key] = int(value) * legacy_factor
+            if any(
+                "credit_units" in key or key in legacy_keys for key in metadata
+            ):
+                metadata["credit_scale"] = credit_scale
 
     def execute(self, query, params=None):
         normalized = " ".join(str(query).split())
 
         if "INSERT INTO credit_schema_migrations" in normalized:
-            if not self.migration_inserted:
-                self.migration_inserted = True
-                self.fetchone_result = (credits_db.CREDIT_UNITS_MIGRATION_NAME,)
+            migration_name = params[0]
+            if migration_name not in self.applied_migrations:
+                self.applied_migrations.add(migration_name)
+                self.fetchone_result = (migration_name,)
             else:
                 self.fetchone_result = None
             return
@@ -137,6 +162,11 @@ class _MigrationCursor:
         if normalized == "UPDATE credit_ledger SET amount = amount * %s":
             scale = int(params[0])
             self.ledger_amounts = [amount * scale for amount in self.ledger_amounts]
+            self.fetchone_result = None
+            return
+
+        if normalized.startswith("UPDATE credit_ledger SET metadata ="):
+            self._scale_ledger_metadata(params)
             self.fetchone_result = None
             return
 
@@ -204,7 +234,7 @@ def test_grant_onboarding_if_needed_grants_credits_when_under_limit():
         )
 
     assert granted is True
-    assert balance == 30
+    assert balance == 300
     assert fake_connection.commit_count == 1
     assert any(
         "INSERT INTO onboarding_grants" in query
@@ -256,20 +286,20 @@ def test_apply_ai_debt_allows_negative_user_balance():
     ):
         balances = credits_db.apply_ai_debt(42, None, whole_credits_to_units(3), "user")
 
-    assert balances == {"user_balance": -29, "chat_balance": 0}
+    assert balances == {"user_balance": -299, "chat_balance": 0}
     assert any(
         "INSERT INTO credit_ledger" in query
         and params is not None
         and params[0] == "ai_settlement_debt"
-        and params[4] == -30
+        and params[4] == -300
         for query, params in fake_cursor.executed
     )
 
 
 def test_charge_ai_credits_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
-    fake_cursor.balance = 1
-    fake_cursor.chat_balance = 40
+    fake_cursor.balance = 10
+    fake_cursor.chat_balance = 400
     fake_connection = _FakeConnection(fake_cursor)
 
     with (
@@ -284,13 +314,13 @@ def test_charge_ai_credits_locks_user_before_chat():
 
     assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
     assert result["source"] == "chat"
-    assert result["chat_balance"] == 10
+    assert result["chat_balance"] == 100
 
 
 def test_refund_ai_charge_chat_source_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
-    fake_cursor.balance = 11
-    fake_cursor.chat_balance = 22
+    fake_cursor.balance = 110
+    fake_cursor.chat_balance = 220
     fake_connection = _FakeConnection(fake_cursor)
 
     with (
@@ -305,7 +335,7 @@ def test_refund_ai_charge_chat_source_locks_user_before_chat():
         )
 
     assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
-    assert result == {"user_balance": 11, "chat_balance": 52}
+    assert result == {"user_balance": 110, "chat_balance": 520}
 
 
 def test_settle_ai_reservation_once_is_idempotent():
@@ -369,8 +399,8 @@ def test_settle_ai_reservation_once_is_idempotent():
 
 def test_apply_ai_debt_chat_source_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
-    fake_cursor.balance = 11
-    fake_cursor.chat_balance = 22
+    fake_cursor.balance = 110
+    fake_cursor.chat_balance = 220
     fake_connection = _FakeConnection(fake_cursor)
 
     with (
@@ -385,13 +415,13 @@ def test_apply_ai_debt_chat_source_locks_user_before_chat():
         )
 
     assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
-    assert result == {"user_balance": 11, "chat_balance": -8}
+    assert result == {"user_balance": 110, "chat_balance": -80}
 
 
 def test_transfer_user_to_chat_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
-    fake_cursor.balance = 50
-    fake_cursor.chat_balance = 22
+    fake_cursor.balance = 500
+    fake_cursor.chat_balance = 220
     fake_connection = _FakeConnection(fake_cursor)
 
     with (
@@ -408,8 +438,8 @@ def test_transfer_user_to_chat_locks_user_before_chat():
     assert result == {
         "ok": True,
         "error": None,
-        "user_balance": 20,
-        "chat_balance": 52,
+        "user_balance": 200,
+        "chat_balance": 520,
     }
 
 
@@ -462,14 +492,14 @@ def test_mint_user_credits_increases_balance_and_writes_ledger():
             actor_user_id=99,
         )
 
-    assert result == {"user_balance": 700}
+    assert result == {"user_balance": 7000}
     assert any(
         "INSERT INTO credit_ledger" in query
         and params is not None
         and params[0] == "printcredits"
         and params[1] == 99
         and params[2] == 42
-        and params[3] == 500
+        and params[3] == 5000
         for query, params in fake_cursor.executed
     )
 
@@ -480,17 +510,94 @@ def test_migrate_credit_amounts_to_units_scales_existing_rows_once():
     migrated = credits_db._migrate_credit_amounts_to_units(cursor)
 
     assert migrated is True
+    assert cursor.balance == 30
+    assert cursor.chat_balance == 20
+    assert cursor.onboarding_credits == 30
+    assert cursor.star_credits_awarded == 1000
+    assert cursor.ledger_amounts == [-30, 30]
+
+    migrated_again = credits_db._migrate_credit_amounts_to_units(cursor)
+
+    assert migrated_again is False
+    assert cursor.balance == 30
+    assert cursor.star_credits_awarded == 1000
+
+
+def test_migrate_credit_amounts_to_hundredths_scales_tenths_once():
+    cursor = _MigrationCursor()
+    credits_db._migrate_credit_amounts_to_units(cursor)
+
+    migrated = credits_db._migrate_credit_amounts_to_hundredths(cursor)
+
+    assert migrated is True
     assert cursor.balance == 3 * CREDIT_SCALE
     assert cursor.chat_balance == 2 * CREDIT_SCALE
     assert cursor.onboarding_credits == 3 * CREDIT_SCALE
     assert cursor.star_credits_awarded == 100 * CREDIT_SCALE
     assert cursor.ledger_amounts == [-3 * CREDIT_SCALE, 3 * CREDIT_SCALE]
+    assert cursor.ledger_metadata == [
+        {
+            "reserved_credit_units": 30,
+            "settled_credits": 200,
+            "note": "keep",
+            "credit_scale": CREDIT_SCALE,
+        },
+        {"actual_credit_units": 20, "credit_scale": CREDIT_SCALE},
+    ]
 
-    migrated_again = credits_db._migrate_credit_amounts_to_units(cursor)
+    migrated_again = credits_db._migrate_credit_amounts_to_hundredths(cursor)
 
     assert migrated_again is False
     assert cursor.balance == 3 * CREDIT_SCALE
-    assert cursor.star_credits_awarded == 100 * CREDIT_SCALE
+    assert cursor.ledger_metadata[0]["reserved_credit_units"] == 30
+
+
+def test_list_user_ai_charges_filters_user_and_applies_cursor():
+    class Cursor:
+        def __init__(self):
+            self.executed = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            self.executed.append((" ".join(str(query).split()), params))
+
+        def fetchall(self):
+            return [
+                (
+                    98,
+                    "ai_settlement_result",
+                    42,
+                    42,
+                    202,
+                    0,
+                    {"charged_credit_units_total": 7},
+                    "2026-08-26T17:00:00+00:00",
+                )
+            ]
+
+    cursor = Cursor()
+    connection = _FakeConnection(cursor)
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        results = credits_db.list_user_ai_charges(
+            42,
+            limit=11,
+            before_id=99,
+        )
+
+    query, params = cursor.executed[0]
+    assert "AND user_id = %s" in query
+    assert "id < %s" in query
+    assert params == ("ai_settlement_result", 42, 99, 99, 11)
+    assert results[0]["user_id"] == 42
+    assert results[0]["metadata"]["charged_credit_units_total"] == 7
 
 
 def test_purge_expired_ai_ledger_events_defaults_to_30_days():

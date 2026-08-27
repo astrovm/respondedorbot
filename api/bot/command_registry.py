@@ -76,6 +76,13 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
     CommandDefinition(("/bcra", "/variables"), "handle_bcra_variables", False, False, "te tiro las variables económicas del bcra"),
     CommandDefinition(("/topup",), "topup_command", False, False, "cargás créditos IA con Telegram Stars por privado"),
     CommandDefinition(("/balance",), "balance_command", False, False, "te muestro tu saldo IA"),
+    CommandDefinition(
+        ("/charges", "/history", "/gastos"),
+        "charges_command",
+        False,
+        True,
+        "te muestro cuánto pagaste por cada uso de IA [limite]",
+    ),
     CommandDefinition(("/printcredits",), "printcredits_command", False, True),
     CommandDefinition(("/creditlog",), "creditlog_command", False, True),
     CommandDefinition(("/transfer",), "transfer_command", False, True, "le pasás créditos tuyos al grupo"),
