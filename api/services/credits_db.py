@@ -1309,6 +1309,14 @@ def list_user_ai_charge_page(
                     SELECT *
                     FROM credit_ledger
                     WHERE user_id = %s
+                      AND event_type IN (
+                          'ai_settlement_result',
+                          'memory_compaction_settlement',
+                          'ai_reserve',
+                          'ai_refund',
+                          'ai_settlement_charge',
+                          'ai_settlement_debt'
+                      )
                 ),
                 finalized_ids AS (
                     SELECT metadata->>'settlement_id' AS settlement_id
