@@ -1,6 +1,9 @@
 import json
 from unittest.mock import patch
 
+from psycopg._queries import PostgresQuery
+from psycopg.adapt import Transformer
+
 from api.billing.credit_units import CREDIT_SCALE, whole_credits_to_units
 from api.services import credits_db
 
@@ -174,6 +177,12 @@ class _MigrationCursor:
 
     def fetchone(self):
         return self.fetchone_result
+
+
+class _PsycopgValidatingMigrationCursor(_MigrationCursor):
+    def execute(self, query, params=None):
+        PostgresQuery(Transformer(None)).convert(query, params)
+        super().execute(query, params)
 
 
 def test_should_deny_onboarding_grant_when_hourly_limit_reached():
@@ -524,7 +533,7 @@ def test_migrate_credit_amounts_to_units_scales_existing_rows_once():
 
 
 def test_migrate_credit_amounts_to_hundredths_scales_tenths_once():
-    cursor = _MigrationCursor()
+    cursor = _PsycopgValidatingMigrationCursor()
     credits_db._migrate_credit_amounts_to_units(cursor)
 
     migrated = credits_db._migrate_credit_amounts_to_hundredths(cursor)
