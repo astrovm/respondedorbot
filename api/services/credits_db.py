@@ -14,6 +14,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     TypeVar,
 )
@@ -41,6 +42,18 @@ AI_LEDGER_EVENT_TYPES = (
 )
 CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_002
 CREDIT_UNITS_MIGRATION_NAME = "credit_amounts_scaled_to_tenths_v1"
+CREDIT_HUNDREDTHS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_003
+CREDIT_HUNDREDTHS_MIGRATION_NAME = "credit_amounts_scaled_to_hundredths_v2"
+_LEGACY_WHOLE_TO_TENTHS_FACTOR = 10
+_TENTHS_TO_HUNDREDTHS_FACTOR = CREDIT_SCALE // 10
+_LEGACY_METADATA_CREDIT_KEYS = (
+    "reserved_credits",
+    "reserved_credits_total",
+    "settled_credits",
+    "refunded_credits",
+    "extra_charged_credits",
+    "debt_applied_credits",
+)
 AI_LEDGER_RETENTION_DAYS = 30
 CREDIT_TRANSACTION_MAX_ATTEMPTS = 3
 _RETRYABLE_CREDIT_TRANSACTION_ERRORS = {
@@ -176,12 +189,45 @@ def ensure_schema() -> None:
                     WHERE event_type = 'memory_compaction_settlement'
                     """)
                 cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_user_ai_settlements
+                    ON credit_ledger (user_id, created_at DESC, id DESC)
+                    WHERE event_type = 'ai_settlement_result'
+                    """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_credit_ledger_unique_ai_settlement
+                    ON credit_ledger (
+                        user_id,
+                        (metadata->>'settlement_id')
+                    )
+                    WHERE event_type = 'ai_settlement_result'
+                      AND metadata ? 'settlement_id'
+                    """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_settlement_id
+                    ON credit_ledger ((metadata->>'settlement_id'))
+                    WHERE metadata ? 'settlement_id'
+                    """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_user_charge_history
+                    ON credit_ledger (user_id, id DESC)
+                    WHERE event_type IN (
+                        'ai_settlement_result',
+                        'memory_compaction_settlement',
+                        'ai_reserve'
+                    )
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_schema_migrations (
                         name TEXT PRIMARY KEY,
                         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """)
                 _migrate_credit_amounts_to_units(cur)
+                _migrate_credit_amounts_to_hundredths(cur)
             conn.commit()
 
         _SCHEMA_READY = True
@@ -208,13 +254,89 @@ def _migrate_credit_amounts_to_units(cur: Any) -> bool:
     if not inserted:
         return False
 
-    cur.execute("UPDATE credit_accounts SET balance = balance * %s", (CREDIT_SCALE,))
-    cur.execute("UPDATE onboarding_grants SET credits = credits * %s", (CREDIT_SCALE,))
+    cur.execute(
+        "UPDATE credit_accounts SET balance = balance * %s",
+        (_LEGACY_WHOLE_TO_TENTHS_FACTOR,),
+    )
+    cur.execute(
+        "UPDATE onboarding_grants SET credits = credits * %s",
+        (_LEGACY_WHOLE_TO_TENTHS_FACTOR,),
+    )
     cur.execute(
         "UPDATE star_payments SET credits_awarded = credits_awarded * %s",
-        (CREDIT_SCALE,),
+        (_LEGACY_WHOLE_TO_TENTHS_FACTOR,),
     )
-    cur.execute("UPDATE credit_ledger SET amount = amount * %s", (CREDIT_SCALE,))
+    cur.execute(
+        "UPDATE credit_ledger SET amount = amount * %s",
+        (_LEGACY_WHOLE_TO_TENTHS_FACTOR,),
+    )
+    return True
+
+
+def _migrate_credit_amounts_to_hundredths(cur: Any) -> bool:
+    """Scale stored credit amounts and legacy ledger metadata once."""
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s)",
+        (CREDIT_HUNDREDTHS_MIGRATION_ADVISORY_LOCK_KEY,),
+    )
+    cur.execute(
+        """
+        INSERT INTO credit_schema_migrations (name)
+        VALUES (%s)
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name
+        """,
+        (CREDIT_HUNDREDTHS_MIGRATION_NAME,),
+    )
+    inserted = cur.fetchone() is not None
+    if not inserted:
+        return False
+
+    factor = _TENTHS_TO_HUNDREDTHS_FACTOR
+    cur.execute("UPDATE credit_accounts SET balance = balance * %s", (factor,))
+    cur.execute("UPDATE onboarding_grants SET credits = credits * %s", (factor,))
+    cur.execute(
+        "UPDATE star_payments SET credits_awarded = credits_awarded * %s",
+        (factor,),
+    )
+    cur.execute("UPDATE credit_ledger SET amount = amount * %s", (factor,))
+    cur.execute(
+        """
+        UPDATE credit_ledger
+        SET metadata = (
+            SELECT jsonb_object_agg(
+                item.key,
+                CASE
+                    WHEN item.key LIKE '%credit_units%'
+                         AND jsonb_typeof(item.value) = 'number'
+                    THEN to_jsonb((item.value #>> '{}')::bigint * %s)
+                    WHEN item.key = ANY(%s)
+                         AND jsonb_typeof(item.value) = 'number'
+                    THEN to_jsonb((item.value #>> '{}')::bigint * %s)
+                    ELSE item.value
+                END
+            ) AS metadata
+            FROM jsonb_each(credit_ledger.metadata) AS item
+        ) || jsonb_build_object('credit_scale', %s)
+        WHERE EXISTS (
+            SELECT 1
+            FROM jsonb_each(credit_ledger.metadata) AS item
+            WHERE jsonb_typeof(item.value) = 'number'
+              AND (
+                  item.key LIKE '%credit_units%'
+                  OR item.key = ANY(%s)
+              )
+        )
+        """,
+        (
+            factor,
+            list(_LEGACY_METADATA_CREDIT_KEYS),
+            CREDIT_SCALE,
+            CREDIT_SCALE,
+            list(_LEGACY_METADATA_CREDIT_KEYS),
+        ),
+    )
     return True
 
 
@@ -1070,6 +1192,7 @@ def record_ai_settlement_result(
                 metadata
             )
             VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT DO NOTHING
             """,
             (
                 str(event_type or "ai_settlement_result"),
@@ -1082,6 +1205,32 @@ def record_ai_settlement_result(
         )
 
     _run_credit_transaction(operation)
+
+
+def _credit_ledger_rows_to_dicts(rows: Sequence[Any]) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        metadata = row[6]
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        elif not isinstance(metadata, Mapping):
+            metadata = {}
+        results.append(
+            {
+                "id": int(row[0]),
+                "event_type": str(row[1]),
+                "actor_user_id": int(row[2]) if row[2] is not None else None,
+                "user_id": int(row[3]) if row[3] is not None else None,
+                "chat_id": int(row[4]) if row[4] is not None else None,
+                "amount": int(row[5]),
+                "metadata": dict(metadata),
+                "created_at": row[7],
+            }
+        )
+    return results
 
 
 def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
@@ -1111,29 +1260,149 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
         )
         rows = cur.fetchall() or []
 
-    results: List[Dict[str, Any]] = []
-    for row in rows:
-        metadata = row[6]
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except Exception:
-                metadata = {}
-        elif not isinstance(metadata, Mapping):
-            metadata = {}
-        results.append(
-            {
-                "id": int(row[0]),
-                "event_type": str(row[1]),
-                "actor_user_id": int(row[2]) if row[2] is not None else None,
-                "user_id": int(row[3]) if row[3] is not None else None,
-                "chat_id": int(row[4]) if row[4] is not None else None,
-                "amount": int(row[5]),
-                "metadata": dict(metadata),
-                "created_at": row[7],
-            }
+    return _credit_ledger_rows_to_dicts(rows)
+
+
+def list_user_ai_charges(
+    user_id: int,
+    *,
+    limit: int = 10,
+    before_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return one user's AI settlements without exposing other users."""
+
+    ensure_schema()
+    normalized_limit = max(1, min(int(limit or 10), 50))
+    normalized_before_id = int(before_id) if before_id is not None else None
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+                SELECT
+                    id,
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    CASE
+                        WHEN entry.event_type = 'ai_reserve'
+                        THEN entry.metadata || jsonb_build_object(
+                            'charged_credit_units_total',
+                                GREATEST(
+                                    0,
+                                    -entry.amount - fallback.adjustment_amount
+                                ),
+                            'billing_pending', TRUE,
+                            'payer_scope',
+                                CASE
+                                    WHEN fallback.user_paid > 0
+                                         AND fallback.chat_paid > 0
+                                    THEN 'mixed'
+                                    WHEN fallback.chat_paid > 0
+                                    THEN 'chat'
+                                    ELSE 'user'
+                                END,
+                            'payer_breakdown', jsonb_build_array(
+                                jsonb_build_object(
+                                    'scope', 'user',
+                                    'credit_units', fallback.user_paid
+                                ),
+                                jsonb_build_object(
+                                    'scope', 'chat',
+                                    'credit_units', fallback.chat_paid
+                                )
+                            )
+                        )
+                        ELSE entry.metadata
+                    END AS metadata,
+                    created_at
+                FROM credit_ledger AS entry
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COALESCE(SUM(adjustment.amount), 0) AS adjustment_amount,
+                        GREATEST(
+                            0,
+                            CASE
+                                WHEN entry.metadata->>'source' = 'user'
+                                THEN -entry.amount
+                                ELSE 0
+                            END
+                            + COALESCE(
+                                SUM(-adjustment.amount) FILTER (
+                                    WHERE adjustment.metadata->>'source' = 'user'
+                                ),
+                                0
+                            )
+                        ) AS user_paid,
+                        GREATEST(
+                            0,
+                            CASE
+                                WHEN entry.metadata->>'source' = 'chat'
+                                THEN -entry.amount
+                                ELSE 0
+                            END
+                            + COALESCE(
+                                SUM(-adjustment.amount) FILTER (
+                                    WHERE adjustment.metadata->>'source' = 'chat'
+                                ),
+                                0
+                            )
+                        ) AS chat_paid
+                    FROM credit_ledger AS adjustment
+                    WHERE adjustment.user_id = entry.user_id
+                      AND adjustment.event_type IN (
+                          'ai_refund',
+                          'ai_settlement_charge',
+                          'ai_settlement_debt'
+                      )
+                      AND adjustment.metadata->>'settlement_id'
+                          = entry.metadata->>'settlement_id'
+                ) AS fallback ON entry.event_type = 'ai_reserve'
+                WHERE entry.user_id = %s
+                  AND (%s::bigint IS NULL OR entry.id < %s)
+                  AND (
+                      entry.event_type = 'ai_settlement_result'
+                      OR entry.event_type = 'memory_compaction_settlement'
+                      OR (
+                          entry.event_type = 'ai_reserve'
+                          AND entry.metadata ? 'settlement_id'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM credit_ledger AS finalized
+                              WHERE finalized.user_id = entry.user_id
+                                AND (
+                                    (
+                                        finalized.event_type = 'ai_settlement_result'
+                                        AND (
+                                            finalized.metadata->>'settlement_id'
+                                                = entry.metadata->>'settlement_id'
+                                            OR finalized.metadata->'settlement_ids'
+                                                ? (entry.metadata->>'settlement_id')
+                                        )
+                                    )
+                                    OR (
+                                        finalized.event_type = 'memory_compaction_settlement'
+                                        AND finalized.metadata->>'settlement_id'
+                                            = entry.metadata->>'settlement_id'
+                                    )
+                                )
+                          )
+                      )
+                  )
+                ORDER BY entry.created_at DESC, entry.id DESC
+                LIMIT %s
+                """,
+            (
+                int(user_id),
+                normalized_before_id,
+                normalized_before_id,
+                normalized_limit,
+            ),
         )
-    return results
+        rows = cur.fetchall() or []
+
+    return _credit_ledger_rows_to_dicts(rows)
 
 
 def purge_expired_ai_ledger_events(

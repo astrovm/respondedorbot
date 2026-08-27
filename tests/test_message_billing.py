@@ -105,6 +105,146 @@ def test_handle_msg_balance_private_uses_personal_balance(monkeypatch):
     assert "/topup" in mock_send_msg.call_args[0][1]
 
 
+def test_handle_msg_charges_lists_only_calling_users_itemized_history():
+    from api.bot.message_handler import handle_msg
+
+    message = {
+        "message_id": "11c",
+        "chat": {"id": "101", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana", "username": "ana"},
+        "text": "/charges 2",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    mock_send_msg = MagicMock()
+    mock_credits = MagicMock()
+    mock_credits.is_configured.return_value = True
+    mock_credits.list_user_ai_charges.return_value = [
+        {
+            "id": 30,
+            "created_at": "2026-08-26T17:32:00+00:00",
+            "metadata": {
+                "command": "/ask",
+                "charged_credit_units_total": 8,
+                "payer_scope": "user",
+                "model_breakdown": [
+                    {"kind": "chat", "usd_micros": 30},
+                ],
+                "tool_breakdown": [
+                    {"tool": "web_search", "count": 1, "usd_micros": 50},
+                ],
+            },
+        },
+        {
+            "id": 29,
+            "created_at": "2026-08-26T16:00:00+00:00",
+            "metadata": {
+                "usage_tag": "auto_audio_media",
+                "charged_credit_units_total": 7,
+                "payer_scope": "chat",
+                "billing_zero_usage_fallback": True,
+            },
+        },
+        {"id": 28, "metadata": {"charged_credit_units_total": 1}},
+    ]
+
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=mock_send_msg,
+        credits_db_service=mock_credits,
+    )
+
+    assert handle_msg(message, deps) == "ok"
+
+    mock_credits.list_user_ai_charges.assert_called_once_with(
+        55,
+        limit=3,
+        before_id=None,
+    )
+    sent_text = mock_send_msg.call_args[0][1]
+    assert "/ask · 0.08 créditos" in sent_text
+    assert "respuesta IA: 0.03" in sent_text
+    assert "búsqueda web: 0.05" in sent_text
+    assert "pagó: saldo personal" in sent_text
+    assert "audio · 0.07 créditos" in sent_text
+    assert "cargo estimado" in sent_text
+    assert "pagó: saldo del grupo" in sent_text
+    assert "total mostrado: 0.15 créditos" in sent_text
+    assert "más: /charges 10 29" in sent_text
+
+
+def test_charge_component_allocation_preserves_rounded_total():
+    from api.billing.commands import allocate_charge_components
+
+    allocation = allocate_charge_components(
+        1,
+        [("respuesta IA", 1), ("búsqueda web", 1), ("transcripción", 1)],
+    )
+
+    assert allocation == [
+        ("respuesta IA", 1),
+        ("búsqueda web", 0),
+        ("transcripción", 0),
+    ]
+    assert sum(units for _label, units in allocation) == 1
+
+
+def test_charge_history_includes_compaction_pending_reserves_and_split_payers():
+    from api.billing.commands import format_user_charge_history
+
+    text = format_user_charge_history(
+        [
+            {
+                "id": 12,
+                "event_type": "memory_compaction_settlement",
+                "created_at": "2026-08-26T17:00:00+00:00",
+                "metadata": {
+                    "usage_tag": "memory_compaction:1:m1",
+                    "actual_credit_units": 2,
+                    "source": "user",
+                },
+            },
+            {
+                "id": 11,
+                "event_type": "ai_reserve",
+                "created_at": "2026-08-26T16:00:00+00:00",
+                "metadata": {
+                    "command": "/ask",
+                    "reserved_credit_units": 100,
+                    "charged_credit_units_total": 107,
+                    "source": "chat",
+                    "payer_scope": "mixed",
+                    "payer_breakdown": [
+                        {"scope": "chat", "credit_units": 100},
+                        {"scope": "user", "credit_units": 7},
+                    ],
+                },
+            },
+            {
+                "id": 10,
+                "event_type": "ai_settlement_result",
+                "created_at": "2026-08-26T15:00:00+00:00",
+                "metadata": {
+                    "command": "/ask",
+                    "charged_credit_units_total": 8,
+                    "payer_scope": "mixed",
+                    "payer_breakdown": [
+                        {"scope": "user", "credit_units": 3},
+                        {"scope": "chat", "credit_units": 5},
+                    ],
+                },
+            },
+        ]
+    )
+
+    assert "memoria · 0.02 créditos" in text
+    assert "liquidación pendiente; se muestra la reserva cobrada" in text
+    assert "pagó: saldo del grupo 1.00 + saldo personal 0.07" in text
+    assert "pagó: saldo personal 0.03 + saldo del grupo 0.05" in text
+    assert "total mostrado: 1.17 créditos" in text
+
+
 def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
     from api.billing.ai import BalanceFormatter
     from api.bot.message_handler import handle_msg
@@ -120,7 +260,7 @@ def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
     mock_send_msg = MagicMock()
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
-    mock_credits.get_balance.return_value = 420
+    mock_credits.get_balance.return_value = 4200
     mock_admin_report = MagicMock()
 
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
@@ -135,7 +275,7 @@ def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    assert "42.0" in mock_send_msg.call_args[0][1]
+    assert "42.00" in mock_send_msg.call_args[0][1]
     mock_admin_report.assert_not_called()
 
 
@@ -206,19 +346,19 @@ def test_handle_msg_transfer_group_moves_fractional_credits():
     mock_transfer.assert_called_once_with(
         user_id=55,
         chat_id=202,
-        amount=1,
+        amount=10,
     )
-    assert "le pasé 0.1 créditos al grupo" in mock_send_msg.call_args[0][1]
+    assert "le pasé 0.10 créditos al grupo" in mock_send_msg.call_args[0][1]
 
 
-def test_handle_msg_transfer_group_rejects_more_than_one_decimal():
+def test_handle_msg_transfer_group_rejects_more_than_two_decimals():
     from api.bot.message_handler import handle_msg
 
     message = {
         "message_id": "12",
         "chat": {"id": "202", "type": "group"},
         "from": {"id": 55, "first_name": "Ana", "username": "ana"},
-        "text": "/transfer 1.55",
+        "text": "/transfer 1.555",
     }
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
@@ -252,7 +392,7 @@ def test_billing_commands_balance_and_transfer_preserve_responses():
     deps.is_group_chat_type.return_value = True
     deps.credits_db_service.transfer_user_to_chat.return_value = {
         "ok": False,
-        "user_balance": 7,
+        "user_balance": 70,
     }
 
     balance = handle_balance_command(
@@ -285,7 +425,7 @@ def test_billing_commands_balance_and_transfer_preserve_responses():
         chat_id=101,
     )
     assert transfer == (
-        "no te alcanza lo tuyo para pasar esa guita al grupo\nte quedan: 0.7",
+        "no te alcanza lo tuyo para pasar esa guita al grupo\nte quedan: 0.70",
         None,
         False,
         "/transfer",
@@ -293,7 +433,7 @@ def test_billing_commands_balance_and_transfer_preserve_responses():
     deps.credits_db_service.transfer_user_to_chat.assert_called_once_with(
         user_id=55,
         chat_id=202,
-        amount=15,
+        amount=150,
     )
 
 
@@ -377,7 +517,7 @@ def test_handle_msg_printcredits_admin_mints_credits(monkeypatch):
     redis_client = MagicMock()
     redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
     mock_send_msg = MagicMock()
-    mock_mint = MagicMock(return_value={"user_balance": 1200})
+    mock_mint = MagicMock(return_value={"user_balance": 12000})
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
     mock_credits.mint_user_credits = mock_mint
@@ -392,10 +532,10 @@ def test_handle_msg_printcredits_admin_mints_credits(monkeypatch):
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    mock_mint.assert_called_once_with(user_id=99, amount=1000, actor_user_id=99)
+    mock_mint.assert_called_once_with(user_id=99, amount=10000, actor_user_id=99)
     sent_text = mock_send_msg.call_args[0][1]
-    assert "te imprimí 100.0 créditos" in sent_text
-    assert "te quedaron 120.0" in sent_text
+    assert "te imprimí 100.00 créditos" in sent_text
+    assert "te quedaron 120.00" in sent_text
 
 
 def test_handle_msg_creditlog_requires_admin(monkeypatch):
@@ -446,9 +586,9 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
                 "created_at": "2026-03-11T17:35:10+00:00",
                 "metadata": {
                     "command": "/ask",
-                    "reserved_credit_units_total": 20,
-                    "settled_credit_units": 10,
-                    "refunded_credit_units": 10,
+                    "reserved_credit_units_total": 200,
+                    "settled_credit_units": 100,
+                    "refunded_credit_units": 100,
                     "extra_charged_credit_units": 0,
                     "raw_usd_micros": 390,
                     "model_breakdown": [
@@ -499,7 +639,7 @@ def test_handle_msg_creditlog_admin_shows_recent_settlements(monkeypatch):
     sent_text = mock_send_msg.call_args[0][1]
     assert "últimas liquidaciones IA" in sent_text
     assert "cmd=/ask" in sent_text
-    assert "reservado=2.0 cobrado=1.0 refund=1.0 extra=0.0 deuda=0.0" in sent_text
+    assert "reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00" in sent_text
     assert "requests: chat=3" in sent_text
     assert "cache_hits: chat=1" in sent_text
     assert "cacheados=900 ahorro_cache=20" in sent_text
@@ -531,8 +671,8 @@ def test_handle_msg_creditlog_marks_zero_usage_fallback(monkeypatch):
                 "created_at": "2026-03-11T17:35:10+00:00",
                 "metadata": {
                     "command": "/ask",
-                    "reserved_credit_units_total": 20,
-                    "settled_credit_units": 20,
+                    "reserved_credit_units_total": 200,
+                    "settled_credit_units": 200,
                     "refunded_credit_units": 0,
                     "extra_charged_credit_units": 0,
                     "raw_usd_micros": 0,
@@ -569,7 +709,7 @@ def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch)
     monkeypatch.setenv("ADMIN_CHAT_ID", "99")
     deps = MagicMock()
     deps.credits_db_service.is_configured.return_value = True
-    deps.credits_db_service.mint_user_credits.return_value = {"user_balance": 1200}
+    deps.credits_db_service.mint_user_credits.return_value = {"user_balance": 12000}
     deps.credits_db_service.list_recent_ai_settlement_results.return_value = [
         {
             "created_at": "2026-03-11T17:35:10+00:00",
@@ -577,9 +717,9 @@ def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch)
             "user_id": 99,
             "metadata": {
                 "command": "/ask",
-                "reserved_credit_units_total": 20,
-                "settled_credit_units": 10,
-                "refunded_credit_units": 10,
+                "reserved_credit_units_total": 200,
+                "settled_credit_units": 100,
+                "refunded_credit_units": 100,
                 "model_breakdown": [{"model": "m1", "usd_micros": 5}],
                 "tool_breakdown": [{"tool": "web", "usd_micros": 7, "count": 2}],
                 "billing_segments": [{"kind": "chat"}, {"kind": "vision"}],
@@ -603,14 +743,14 @@ def test_admin_commands_printcredits_and_creditlog_preserve_outputs(monkeypatch)
     )
 
     assert printed == (
-        "listo, te imprimí 100.0 créditos\nte quedaron 120.0",
+        "listo, te imprimí 100.00 créditos\nte quedaron 120.00",
         None,
         False,
         "/printcredits",
     )
     deps.credits_db_service.mint_user_credits.assert_called_once_with(
         user_id=99,
-        amount=1000,
+        amount=10000,
         actor_user_id=99,
     )
     assert logged[1:] == (None, False, "/creditlog")
@@ -800,7 +940,7 @@ def test_handle_msg_insufficient_credits_returns_random_plus_topup_hint(monkeypa
     assert result == "ok"
     assert (
         mock_send.call_args[0][1]
-        == "no boludo\n\nte quedaste seco de créditos ia, boludo.\nsaldo: 0.0\nmetele /topup si querés que siga laburando"
+        == "no boludo\n\nte quedaste seco de créditos ia, boludo.\nsaldo: 0.00\nmetele /topup si querés que siga laburando"
     )
 
 

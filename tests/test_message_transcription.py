@@ -328,7 +328,7 @@ def test_handle_msg_with_transcribe_command_charges_media_credits(monkeypatch):
     result = handle_msg(message, deps)
     assert result == "ok"
     assert mock_charge.call_count == 1
-    assert mock_charge.call_args.kwargs["amount"] == 1
+    assert mock_charge.call_args.kwargs["amount"] == 7
     mock_refund.assert_not_called()
     mock_send_msg.assert_called_once()
 
@@ -376,7 +376,7 @@ def test_handle_msg_with_transcribe_command_refunds_on_unsuccessful_response(
 
     assert result == "ok"
     assert mock_charge.call_count == 1
-    assert mock_charge.call_args.kwargs["amount"] == 1
+    assert mock_charge.call_args.kwargs["amount"] == 7
     mock_refund.assert_called_once()
     mock_send_msg.assert_called_once()
 
@@ -514,7 +514,7 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     assert result == "ok"
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
     assert mock_charge.call_count == 2
-    assert mock_charge.call_args_list[0].kwargs["amount"] == 1
+    assert mock_charge.call_args_list[0].kwargs["amount"] == 7
     mock_send_msg.assert_called_once()
 
 
@@ -602,7 +602,9 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
     mock_download.assert_called_once_with("voice_123")
     mock_measure.assert_called_once_with(b"audio-bytes")
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
-    assert mock_charge.call_count == 2
+    assert mock_charge.call_count == 3
+    assert mock_charge.call_args_list[0].kwargs["amount"] == 7
+    assert mock_charge.call_args_list[1].kwargs["amount"] == 8
     mock_send_msg.assert_called_once()
 
 

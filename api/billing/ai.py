@@ -22,7 +22,9 @@ from api.bot.chat_context import (
     is_group_chat_type,
 )
 from api.billing.credit_units import (
+    CREDIT_SCALE,
     format_credit_units,
+    rescale_credit_units,
     whole_credits_to_units,
 )
 from api.ai.pricing import calculate_billing_for_segments
@@ -47,6 +49,7 @@ class SettlementAdjustment:
     refunded_credit_units: int = 0
     extra_charged_credit_units: int = 0
     debt_applied_credit_units: int = 0
+    extra_payer_scope: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,10 +389,24 @@ class AIMessageBilling:
         metadata: Dict[str, Any] = {
             "command": self.command,
             "usage_tag": usage_tag,
+            "settlement_id": self._settlement_id(usage_tag),
+            "message_id": self.message.get("message_id"),
+            "credit_scale": CREDIT_SCALE,
         }
         if extra:
             metadata.update(dict(extra))
         return metadata
+
+    def _settlement_id(self, usage_tag: str) -> str:
+        message_id = self.message.get("message_id")
+        return ":".join(
+            (
+                str(self.user_id or "unknown"),
+                self.chat_id,
+                str(message_id if message_id is not None else "unknown"),
+                str(usage_tag or "ai_usage"),
+            )
+        )
 
     def reserve_ai_credits(
         self,
@@ -440,16 +457,26 @@ class AIMessageBilling:
 
         persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
         if persisted_reservation:
+            raw_metadata = persisted_reservation.get("metadata")
+            persisted_metadata = (
+                dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+            )
+            persisted_scale = persisted_reservation.get(
+                "credit_scale",
+                persisted_metadata.get("credit_scale"),
+            )
             return {
-                "reserved_credit_units": int(
-                    persisted_reservation.get("reserved_credit_units", 0) or 0
+                "reserved_credit_units": rescale_credit_units(
+                    persisted_reservation.get("reserved_credit_units", 0),
+                    persisted_scale,
                 ),
                 "chat_scope_id": persisted_reservation.get(
                     "chat_scope_id", chat_scope_id
                 ),
                 "source": str(persisted_reservation.get("source") or "user"),
                 "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
-                "metadata": dict(persisted_reservation.get("metadata") or {}),
+                "metadata": persisted_metadata,
+                "credit_scale": CREDIT_SCALE,
             }, None
 
         self._ensure_onboarding_checked()
@@ -492,6 +519,7 @@ class AIMessageBilling:
             "source": source,
             "usage_tag": usage_tag,
             "metadata": reserve_metadata,
+            "credit_scale": CREDIT_SCALE,
         }
 
         if source == "chat" and enforce_message_cap:
@@ -531,12 +559,28 @@ class AIMessageBilling:
         refunded_credit_units: int,
         extra_charged_credit_units: int,
         debt_applied_credit_units: int,
+        payer_breakdown: Sequence[Mapping[str, Any]],
         reason: str,
         breakdown: Mapping[str, Any],
         billing_segments: Sequence[Mapping[str, Any]],
         missing_usage_billing: bool,
         billing_zero_usage_fallback: bool,
     ) -> Dict[str, Any]:
+        normalized_payers = [
+            {
+                "scope": "chat" if item.get("scope") == "chat" else "user",
+                "credit_units": max(0, int(item.get("credit_units") or 0)),
+            }
+            for item in payer_breakdown
+            if int(item.get("credit_units") or 0) > 0
+        ]
+        payer_scopes = {str(item["scope"]) for item in normalized_payers}
+        payer_scope = (
+            next(iter(payer_scopes))
+            if len(payer_scopes) == 1
+            else "mixed" if payer_scopes else "user"
+        )
+        settlement_ids = [self._settlement_id(tag) for tag in usage_tags]
         return self._build_charge_metadata(
             usage_tag=usage_tag,
             extra={
@@ -551,6 +595,15 @@ class AIMessageBilling:
                 "refunded_credit_units": refunded_credit_units,
                 "extra_charged_credit_units": extra_charged_credit_units,
                 "debt_applied_credit_units": debt_applied_credit_units,
+                "charged_credit_units_total": (
+                    reserved_credit_units_total
+                    - refunded_credit_units
+                    + extra_charged_credit_units
+                    + debt_applied_credit_units
+                ),
+                "payer_scope": payer_scope,
+                "payer_breakdown": normalized_payers,
+                "settlement_ids": settlement_ids,
                 "pricing_version": breakdown.get("pricing_version"),
                 "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
                 "markup_multiplier": breakdown.get("markup_multiplier"),
@@ -571,23 +624,58 @@ class AIMessageBilling:
     ) -> None:
         if self.user_id is None:
             return
-        try:
-            self.credits_db_service.record_ai_settlement_result(
-                user_id=self.user_id,
-                chat_id=chat_scope_id,
-                actor_user_id=self.user_id,
-                metadata=settlement_metadata,
-            )
-        except Exception as error:
-            self.admin_reporter(
-                "falló registrar resultado de liquidación IA",
-                error,
+        for attempt in range(3):
+            try:
+                self.credits_db_service.record_ai_settlement_result(
+                    user_id=self.user_id,
+                    chat_id=chat_scope_id,
+                    actor_user_id=self.user_id,
+                    metadata=settlement_metadata,
+                )
+                return
+            except Exception as error:
+                if attempt == 2:
+                    self.admin_reporter(
+                        "falló registrar resultado de liquidación IA",
+                        error,
+                        {
+                            "chat_id": self.chat_id,
+                            "user_id": self.user_id,
+                            "command": self.command,
+                            "settlement_id": settlement_metadata.get(
+                                "settlement_id"
+                            ),
+                        },
+                    )
+
+    @staticmethod
+    def _payer_breakdown_for_settlement(
+        *,
+        source: str,
+        reserved_credit_units: int,
+        refunded_credit_units: int,
+        debt_applied_credit_units: int,
+        extra_charged_credit_units: int,
+        extra_payer_scope: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        breakdown = [
+            {
+                "scope": source,
+                "credit_units": (
+                    reserved_credit_units
+                    - refunded_credit_units
+                    + debt_applied_credit_units
+                ),
+            }
+        ]
+        if extra_charged_credit_units > 0:
+            breakdown.append(
                 {
-                    "chat_id": self.chat_id,
-                    "user_id": self.user_id,
-                    "command": self.command,
-                },
+                    "scope": extra_payer_scope or source,
+                    "credit_units": extra_charged_credit_units,
+                }
             )
+        return breakdown
 
     def _settle_single_reservation(
         self,
@@ -606,6 +694,11 @@ class AIMessageBilling:
         )
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
+        source = (
+            "chat"
+            if str(reservation_meta.get("source") or "user") == "chat"
+            else "user"
+        )
         if billing_segments is None:
             # Missing usage is ambiguous; keep the reserve rather than make the call free.
             breakdown = {
@@ -624,6 +717,9 @@ class AIMessageBilling:
                 refunded_credit_units=0,
                 extra_charged_credit_units=0,
                 debt_applied_credit_units=0,
+                payer_breakdown=[
+                    {"scope": source, "credit_units": reserved_credit_units}
+                ],
                 reason=reason,
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
@@ -655,13 +751,8 @@ class AIMessageBilling:
         refunded_credit_units = 0
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
+        extra_payer_scope: Optional[str] = None
         chat_scope_id = reservation_meta.get("chat_scope_id")
-        source = (
-            "chat"
-            if str(reservation_meta.get("source") or "user") == "chat"
-            else "user"
-        )
-
         if raw_usd_micros == 0 and not has_usage:
             # Providers may omit usage entirely; zero must not imply a free call.
             actual_credit_units = reserved_credit_units
@@ -776,6 +867,9 @@ class AIMessageBilling:
                     )
             else:
                 extra_charged_credit_units = extra_amount
+                extra_payer_scope = (
+                    "chat" if extra_charge.get("source") == "chat" else "user"
+                )
 
         settlement_metadata = self._build_settlement_metadata(
             usage_tag=usage_tag,
@@ -785,6 +879,14 @@ class AIMessageBilling:
             refunded_credit_units=refunded_credit_units,
             extra_charged_credit_units=extra_charged_credit_units,
             debt_applied_credit_units=debt_applied_credit_units,
+            payer_breakdown=self._payer_breakdown_for_settlement(
+                source=source,
+                reserved_credit_units=reserved_credit_units,
+                refunded_credit_units=refunded_credit_units,
+                debt_applied_credit_units=debt_applied_credit_units,
+                extra_charged_credit_units=extra_charged_credit_units,
+                extra_payer_scope=extra_payer_scope,
+            ),
             reason=reason,
             breakdown=breakdown,
             billing_segments=list(billing_segments or []),
@@ -877,6 +979,14 @@ class AIMessageBilling:
             refunded_credit_units=adjustment.refunded_credit_units,
             extra_charged_credit_units=adjustment.extra_charged_credit_units,
             debt_applied_credit_units=adjustment.debt_applied_credit_units,
+            payer_breakdown=self._payer_breakdown_for_settlement(
+                source=batch.source,
+                reserved_credit_units=batch.reserved_credit_units,
+                refunded_credit_units=adjustment.refunded_credit_units,
+                debt_applied_credit_units=adjustment.debt_applied_credit_units,
+                extra_charged_credit_units=adjustment.extra_charged_credit_units,
+                extra_payer_scope=adjustment.extra_payer_scope,
+            ),
             reason=record.reason,
             breakdown=record.breakdown,
             billing_segments=record.billing_segments,
@@ -1022,7 +1132,7 @@ class AIMessageBilling:
         *,
         actual_credit_units: int,
         reason: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, Optional[str]]:
         extra_amount = actual_credit_units - batch.reserved_credit_units
         try:
             charge = self.credits_db_service.charge_ai_credits(
@@ -1053,7 +1163,8 @@ class AIMessageBilling:
             charge = {"ok": False}
 
         if charge.get("ok"):
-            return extra_amount, 0
+            payer_scope = "chat" if charge.get("source") == "chat" else "user"
+            return extra_amount, 0, payer_scope
         self.admin_reporter(
             "la liquidación IA batch superó la reserva y no pudo cobrar ajuste",
             None,
@@ -1072,7 +1183,7 @@ class AIMessageBilling:
             extra_amount=extra_amount,
             reason=reason,
         )
-        return 0, debt
+        return 0, debt, None
 
     def _calculate_batch_adjustment(
         self,
@@ -1096,7 +1207,7 @@ class AIMessageBilling:
             )
             return breakdown, SettlementAdjustment(actual, refunded_credit_units=refund)
         if actual > batch.reserved_credit_units:
-            extra, debt = self._charge_batch_overage(
+            extra, debt, extra_payer_scope = self._charge_batch_overage(
                 batch,
                 billing_segments,
                 actual_credit_units=actual,
@@ -1106,6 +1217,7 @@ class AIMessageBilling:
                 actual,
                 extra_charged_credit_units=extra,
                 debt_applied_credit_units=debt,
+                extra_payer_scope=extra_payer_scope,
             )
         return breakdown, SettlementAdjustment(actual)
 

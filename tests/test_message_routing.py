@@ -469,8 +469,8 @@ def test_task_command_rejects_insufficient_positive_personal_balance(mock_ai_flo
     )
 
     assert response[2] is False
-    assert "tenés: 0.9" in str(response[0])
-    assert "necesitás: 1.0" in str(response[0])
+    assert "tenés: 0.09" in str(response[0])
+    assert "necesitás: 0.10" in str(response[0])
     mock_ai_flow.assert_not_called()
 
 

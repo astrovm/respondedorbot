@@ -14,7 +14,7 @@ def test_index_handle_msg_balance_uses_real_wiring(monkeypatch):
     mock_send_msg = MagicMock()
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
-    mock_credits.get_balance.return_value = 420
+    mock_credits.get_balance.return_value = 4200
 
     monkeypatch.setattr(_api_index.app_runtime.config, "redis", lambda: redis_client)
     monkeypatch.setattr(
@@ -29,7 +29,7 @@ def test_index_handle_msg_balance_uses_real_wiring(monkeypatch):
     result = _api_index.app_runtime.handle_message(message)
 
     assert result == "ok"
-    assert "42.0" in mock_send_msg.call_args[0][1]
+    assert "42.00" in mock_send_msg.call_args[0][1]
 
 
 def test_index_tasks_command_formats_real_runtime_task_rows(monkeypatch):

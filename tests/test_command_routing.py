@@ -499,12 +499,12 @@ def test_format_balance_command_private_includes_topup_hint():
     from api.billing.ai import BalanceFormatter
 
     credits_db_service = MagicMock()
-    credits_db_service.get_balance.return_value = 420
+    credits_db_service.get_balance.return_value = 4200
     text = BalanceFormatter(credits_db_service).format(
         chat_type="private", user_id=1, chat_id=2
     )
 
-    assert "tenés 42.0 créditos ia" in text
+    assert "tenés 42.00 créditos ia" in text
     assert "mandale /topup" in text
 
 
@@ -512,21 +512,21 @@ def test_format_balance_command_group_includes_topup_and_transfer_hints():
     from api.billing.ai import BalanceFormatter
 
     credits_db_service = MagicMock()
-    credits_db_service.get_balance.side_effect = [300, 1200]
+    credits_db_service.get_balance.side_effect = [3000, 12000]
     text = BalanceFormatter(credits_db_service).format(
         chat_type="group", user_id=1, chat_id=2
     )
 
-    assert "lo tuyo: 30.0" in text
-    assert "lo del grupo: 120.0" in text
+    assert "lo tuyo: 30.00" in text
+    assert "lo del grupo: 120.00" in text
     assert "/topup" in text
     assert "/transfer <monto>" in text
 
 
-def test_get_ai_onboarding_credits_is_30_units():
+def test_get_ai_onboarding_credits_is_300_units():
     get_ai_onboarding_credits = index.app_runtime.billing.get_onboarding_credits
 
-    assert get_ai_onboarding_credits() == 30
+    assert get_ai_onboarding_credits() == 300
 
 
 def test_parse_command_edge_cases():
