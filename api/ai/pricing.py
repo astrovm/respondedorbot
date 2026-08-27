@@ -52,6 +52,7 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
     ("groq", "openai/gpt-oss-120b"): {
         "input_per_million": 150_000,
+        "cached_input_per_million": 75_000,
         "output_per_million": 600_000,
     },
     ("openrouter", "openai/gpt-oss-120b"): {

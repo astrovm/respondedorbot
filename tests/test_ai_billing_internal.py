@@ -1088,6 +1088,25 @@ def test_groq_gpt_oss_local_fallback_uses_current_rates():
     assert breakdown["raw_usd_micros"] == 450
 
 
+def test_groq_gpt_oss_local_fallback_applies_cached_input_discount():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 500,
+                    "prompt_tokens_details": {"cached_tokens": 800},
+                },
+                "metadata": {"provider": "groq"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 390
+
+
 def test_openrouter_gpt_oss_local_fallback_uses_provider_rates():
     breakdown = calculate_billing_for_segments(
         [
