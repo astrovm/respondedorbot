@@ -11,7 +11,7 @@ An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect
 - **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
 - **Incremental summaries**: `/resumen` streams conversation summaries using DeepSeek, with automatic context compaction
 - **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
-- **Market data and weather**: `/prices`, `/acciones`, `/usd`, `/clima`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
+- **Market data and weather**: `/prices`, `/c`, `/crypto`, `/acciones`, `/usd`, `/clima`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
 - **BCRA economic data**: `/bcra`, `/variables`
 - **Media**: audio transcription (Whisper via Groq, with OpenRouter fallback) and image description (OpenRouter)
 - **Scheduled tasks**: `/tarea`, `/tareas`, `/task`, `/tasks` — list without text or create from natural-language text
@@ -66,7 +66,8 @@ uv run --locked python run_polling.py
 | `/ask` | `/pregunta`, `/che`, `/gordo` | AI chat (streaming) |
 | `/resumen` | `/summary` | Stream conversation summary |
 | `/transcribe` | `/describe` | Transcribe audio / describe image |
-| `/prices` | `/price`, `/precios`, `/precio`, `/presio(s)`, `/bresio(s)`, `/brecio(s)`, `/crypto`, `/criptos` | Crypto prices |
+| `/prices` | `/price`, `/precios`, `/precio`, `/c`, `/presio(s)`, `/bresio(s)`, `/brecio(s)` | Crypto, stock, ETF, index, fund, and futures prices |
+| `/crypto` | `/criptos` | Crypto-only prices and conversions |
 | `/clima` | `/weather` | Current weather for a city or location |
 | `/dolar` | `/dollar`, `/usd` | Dollar rates (CriptoYa) |
 | `/petroleo` | `/oil` | Oil prices |
@@ -91,6 +92,8 @@ uv run --locked python run_polling.py
 | `/gn` | - | Good night GIF |
 | `/help` | - | Command reference |
 | `/instance` | - | Instance name |
+
+`/prices` checks CoinMarketCap first and sends unresolved symbols or company names to Yahoo Finance. Use `stock:META` or `crypto:META` when both providers have the same symbol. A complete Solana/EVM address still opens a token card; `$ticker` opens a token card first and falls back to `/prices` when no token is found.
 
 ## Architecture
 

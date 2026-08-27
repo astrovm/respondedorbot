@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from api.cache.service import CacheService
 from api.markets.crypto import get_prices
+from api.markets.stocks import StockService
 
 _CHANGE_FIELDS = {
     "1h": "percent_change_1h",
@@ -26,11 +27,13 @@ class PriceService:
         environment: Mapping[str, str],
         logger: Logger,
         cache_ttl: int,
+        stocks: StockService | None = None,
     ) -> None:
         self._cache = cache
         self._environment = environment
         self._logger = logger
         self._cache_ttl = cache_ttl
+        self._stocks = stocks
 
     def get_api_prices(
         self,
@@ -81,7 +84,7 @@ class PriceService:
             if not price_info:
                 return None
             return float(price_info.get("price"))
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return None
         except Exception as error:
             self._logger.exception(
@@ -92,6 +95,15 @@ class PriceService:
             return None
 
     def get_prices(self, msg_text: str) -> Optional[str]:
+        return get_prices(
+            msg_text,
+            change_fields=_CHANGE_FIELDS,
+            fetch_prices=self.get_api_prices,
+            fetch_quotes=self.fetch_quotes,
+            lookup_stocks=self._stocks.lookup_quotes if self._stocks else None,
+        )
+
+    def get_crypto_prices(self, msg_text: str) -> Optional[str]:
         return get_prices(
             msg_text,
             change_fields=_CHANGE_FIELDS,

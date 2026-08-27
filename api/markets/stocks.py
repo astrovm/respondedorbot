@@ -192,26 +192,14 @@ def get_stock_prices(
     resolve_symbol: StockSymbolResolver,
     fetch_top_stocks: StockListFetcher,
 ) -> str:
-    raw_query = str(msg_text or "").strip()
-    full_query_fallback = False
-    if "," in raw_query:
-        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
-    else:
-        parts = [part for part in raw_query.split() if part]
-        queries = parts
-        full_query_fallback = len(queries) > 1
-    if not queries:
-        queries = fetch_top_stocks()
-        if not queries:
-            return tr("market.stock.top_error")
-
-    quotes = _lookup_stock_quotes(
-        raw_query,
-        queries[:20],
-        full_query_fallback=full_query_fallback,
+    quotes = lookup_stock_quotes(
+        msg_text,
         fetch_quote=fetch_quote,
         resolve_symbol=resolve_symbol,
+        fetch_top_stocks=fetch_top_stocks,
     )
+    if quotes is None:
+        return tr("market.stock.top_error")
 
     lines: list[str] = []
     for query, quote in quotes:
@@ -224,6 +212,37 @@ def get_stock_prices(
         else:
             lines.append(tr("market.stock.not_found", query=query))
     return "\n".join(lines) if lines else tr("market.stock.none")
+
+
+def lookup_stock_quotes(
+    msg_text: str,
+    *,
+    fetch_quote: StockQuoteFetcher,
+    resolve_symbol: StockSymbolResolver,
+    fetch_top_stocks: StockListFetcher,
+) -> list[tuple[str, StockQuote | None]] | None:
+    """Resolve stock-like queries without applying user-facing formatting."""
+
+    raw_query = str(msg_text or "").strip()
+    full_query_fallback = False
+    if "," in raw_query:
+        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
+    else:
+        parts = [part for part in raw_query.split() if part]
+        queries = parts
+        full_query_fallback = len(queries) > 1
+    if not queries:
+        queries = fetch_top_stocks()
+        if not queries:
+            return None
+
+    return _lookup_stock_quotes(
+        raw_query,
+        queries[:20],
+        full_query_fallback=full_query_fallback,
+        fetch_quote=fetch_quote,
+        resolve_symbol=resolve_symbol,
+    )
 
 
 def _lookup_stock_quotes(
@@ -336,5 +355,13 @@ class StockService:
             fetch_top_stocks=self.fetch_top_stocks,
         )
 
+    def lookup_quotes(self, msg_text: str) -> list[tuple[str, StockQuote | None]] | None:
+        return lookup_stock_quotes(
+            msg_text,
+            fetch_quote=self.fetch_quote,
+            resolve_symbol=self.resolve_symbol,
+            fetch_top_stocks=self.fetch_top_stocks,
+        )
 
-__all__ = ["StockQuote", "StockService"]
+
+__all__ = ["StockQuote", "StockService", "lookup_stock_quotes"]

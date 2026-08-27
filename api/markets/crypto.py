@@ -15,10 +15,12 @@ from api.markets.price_commands import (
     parse_conversion_only,
     price_query_parameter,
 )
+from api.markets.stocks import StockQuote
 from api.utils import fmt_num
 
 PriceListFetcher = Callable[[str], dict[str, Any] | None]
 QuoteFetcher = Callable[..., dict[str, Any] | None]
+StockLookup = Callable[[str], list[tuple[str, StockQuote | None]] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,12 +31,27 @@ class PriceDisplay:
     timeframe_label: str
 
 
+@dataclass(frozen=True, slots=True)
+class PriceSelection:
+    rows: list[dict[str, Any]]
+    count: int
+    unresolved: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class MarketPriceResult:
+    crypto_rows: list[dict[str, Any]]
+    stock_quotes: list[StockQuote]
+    unresolved: list[str]
+
+
 def get_prices(
     msg_text: str,
     *,
     change_fields: Mapping[str, str],
     fetch_prices: PriceListFetcher,
     fetch_quotes: QuoteFetcher,
+    lookup_stocks: StockLookup | None = None,
 ) -> str | None:
     msg_text, timeframe = _parse_timeframe(msg_text, change_fields)
     timeframe_error = _unsupported_timeframe_error(
@@ -55,19 +72,60 @@ def get_prices(
     msg_text, convert_to, convert_parameter = parse_conversion_only(msg_text)
     if convert_to not in SUPPORTED_PRICE_SYMBOLS:
         return tr("market.crypto.unsupported_currency", symbol=convert_to)
+    return _get_asset_prices(
+        msg_text,
+        convert_to=convert_to,
+        convert_parameter=convert_parameter,
+        timeframe=timeframe,
+        change_fields=change_fields,
+        fetch_prices=fetch_prices,
+        fetch_quotes=fetch_quotes,
+        lookup_stocks=lookup_stocks,
+    )
+
+
+def _get_asset_prices(
+    msg_text: str,
+    *,
+    convert_to: str,
+    convert_parameter: str,
+    timeframe: str | None,
+    change_fields: Mapping[str, str],
+    fetch_prices: PriceListFetcher,
+    fetch_quotes: QuoteFetcher,
+    lookup_stocks: StockLookup | None,
+) -> str:
+    provider_scope, msg_text = _parse_provider_scope(msg_text)
+    if provider_scope == "stock":
+        return _format_stock_only(msg_text, lookup_stocks)
+
     prices = fetch_prices(convert_parameter)
     listed = _price_data(prices)
     if listed is None:
+        if provider_scope != "crypto":
+            stock_only = _format_stock_only(msg_text, lookup_stocks, missing_error=False)
+            if stock_only:
+                return stock_only
         return tr("market.crypto.load_error")
 
-    price_rows, prices_number, selection_error = _select_price_rows(
+    selection = _select_price_rows(
         msg_text,
         listed=listed,
         convert_parameter=convert_parameter,
         fetch_quotes=fetch_quotes,
     )
-    if selection_error and not price_rows:
-        return selection_error
+    stock_quotes: list[StockQuote] = []
+    unresolved = selection.unresolved
+    if provider_scope != "crypto" and lookup_stocks and unresolved:
+        stock_quotes, unresolved = _lookup_stock_fallback(
+            msg_text,
+            selection=selection,
+            lookup_stocks=lookup_stocks,
+        )
+    result = MarketPriceResult(selection.rows, stock_quotes, unresolved)
+    if result.unresolved and not result.crypto_rows and not result.stock_quotes:
+        return tr("market.crypto.missing", symbols=", ".join(result.unresolved))
+
     display = PriceDisplay(
         convert_to=convert_to,
         convert_parameter=convert_parameter,
@@ -77,8 +135,91 @@ def get_prices(
         ),
         timeframe_label=timeframe or "24h",
     )
-    formatted = _format_price_rows(price_rows[:prices_number], display)
-    return f"{formatted}\n{selection_error}" if selection_error else formatted
+    return _format_market_result(result, selection=selection, display=display)
+
+
+def _format_market_result(
+    result: MarketPriceResult,
+    *,
+    selection: PriceSelection,
+    display: PriceDisplay,
+) -> str:
+    formatted_parts = [
+        part
+        for part in (
+            _format_price_rows(result.crypto_rows[: selection.count], display),
+            _format_stock_quotes(result.stock_quotes),
+        )
+        if part
+    ]
+    if result.unresolved:
+        formatted_parts.append(tr("market.crypto.missing", symbols=", ".join(result.unresolved)))
+    return "\n".join(formatted_parts)
+
+
+def _parse_provider_scope(msg_text: str) -> tuple[str | None, str]:
+    match = re.match(r"^\s*(crypto|stock)\s*:\s*(.*?)\s*$", msg_text, re.IGNORECASE)
+    if not match:
+        return None, msg_text
+    return match.group(1).lower(), match.group(2)
+
+
+def _format_stock_only(
+    query: str,
+    lookup_stocks: StockLookup | None,
+    *,
+    missing_error: bool = True,
+) -> str:
+    if not lookup_stocks or not query.strip():
+        return tr("market.crypto.missing", symbols=query.upper()) if missing_error else ""
+    resolved = lookup_stocks(query) or []
+    quotes = [quote for _, quote in resolved if quote]
+    if quotes:
+        return _format_stock_quotes(quotes)
+    if not missing_error:
+        return ""
+    missing = [item.upper() for item, quote in resolved if quote is None] or [query.upper()]
+    return tr("market.crypto.missing", symbols=", ".join(missing))
+
+
+def _lookup_stock_fallback(
+    raw_query: str,
+    *,
+    selection: PriceSelection,
+    lookup_stocks: StockLookup,
+) -> tuple[list[StockQuote], list[str]]:
+    stock_query = _stock_fallback_query(raw_query, selection)
+    resolved = lookup_stocks(stock_query) or []
+    quotes = [quote for _, quote in resolved if quote]
+    if quotes:
+        missing = [query.upper() for query, quote in resolved if quote is None]
+        return quotes, missing
+    return [], selection.unresolved
+
+
+def _stock_fallback_query(raw_query: str, selection: PriceSelection) -> str:
+    if not selection.rows and "," not in raw_query and len(selection.unresolved) > 1:
+        return raw_query
+    if "," not in raw_query:
+        return ",".join(selection.unresolved)
+
+    unresolved = set(selection.unresolved)
+    stock_segments: list[str] = []
+    for segment in (part.strip() for part in raw_query.split(",")):
+        tokens = expand_price_tokens([token for token in segment.split() if token])
+        if any(token in unresolved for token in tokens):
+            stock_segments.append(segment)
+    return ",".join(stock_segments) or ",".join(selection.unresolved)
+
+
+def _format_stock_quotes(quotes: list[StockQuote]) -> str:
+    lines: list[str] = []
+    for quote in quotes:
+        sign = "+" if quote.variation >= 0 else ""
+        lines.append(
+            f"{quote.symbol}: {quote.price:.2f} {quote.currency} ({sign}{quote.variation:.2f}% 24h)"
+        )
+    return "\n".join(lines)
 
 
 def _unsupported_timeframe_error(
@@ -163,10 +304,10 @@ def _select_price_rows(
     listed: list[dict[str, Any]],
     convert_parameter: str,
     fetch_quotes: QuoteFetcher,
-) -> tuple[list[dict[str, Any]], int, str | None]:
+) -> PriceSelection:
     prices_number = _requested_price_count(msg_text)
     if not msg_text.upper().isupper():
-        return listed, prices_number or 10, None
+        return PriceSelection(listed, prices_number or 10, [])
 
     raw_tokens = [token for token in re.split(r"[,\s]+", msg_text) if token]
     coins = expand_price_tokens(raw_tokens)
@@ -188,11 +329,10 @@ def _select_price_rows(
         token for token in explicit_requested if token not in _matched_price_tokens(selected)
     ]
     if selected:
-        error = tr("market.crypto.missing", symbols=", ".join(unresolved)) if unresolved else None
-        return selected, len(selected), error
+        return PriceSelection(selected, len(selected), unresolved)
     if explicit_requested:
-        return [], 0, tr("market.crypto.missing", symbols=", ".join(explicit_requested))
-    return [], 0, tr("market.crypto.load_error")
+        return PriceSelection([], 0, explicit_requested)
+    return PriceSelection([], 0, [])
 
 
 def _format_price_rows(
