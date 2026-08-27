@@ -115,6 +115,15 @@ class ProviderRuntime:
         self._deps = deps
         self._tool_runtime = tool_runtime
 
+    def _add_firecrawl_credits(
+        self,
+        metadata: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+    ) -> None:
+        firecrawl_credits = self._tool_runtime.take_firecrawl_credits(tool_context)
+        if firecrawl_credits:
+            metadata["firecrawl_credits_used"] = firecrawl_credits
+
     def complete(
         self,
         system_message: Dict[str, Any],
@@ -124,20 +133,21 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AIUsageResult]:
-        context = dict(tool_context or {})
-        context["model"] = self._deps.primary_model
+        runtime_tool_context = dict(tool_context or {})
+        log_context = dict(runtime_tool_context)
+        log_context["model"] = self._deps.primary_model
         logger.info(
             "openrouter: calling chat enable_web_search=%s extra_tools=%d%s",
             enable_web_search,
             len(extra_tools or []),
-            format_log_context(context),
+            format_log_context(log_context),
         )
         return self._run_tool_rounds(
             current_messages=list(messages),
             system_message=system_message,
             enable_web_search=enable_web_search,
             extra_tools=extra_tools,
-            tool_context=tool_context,
+            tool_context=runtime_tool_context,
         )
 
     def _run_chat_completion(
@@ -641,12 +651,14 @@ class ProviderRuntime:
         )
         if not known_calls:
             text = str(getattr(message, "content", "") or "").strip()
+            metadata = {"web_search_requests": total_web_search_requests}
+            self._add_firecrawl_credits(metadata, tool_context)
             result = (
                 self._build_round_result(
                     response,
                     message,
                     round_idx,
-                    metadata={"web_search_requests": total_web_search_requests},
+                    metadata=metadata,
                 )
                 if text
                 else None
@@ -924,6 +936,7 @@ class ProviderRuntime:
                 tool_context=tool_context,
                 round_idx=round_idx,
             )
+        self._add_firecrawl_credits(web_metadata, tool_context)
 
         return ToolRoundDecision(
             current_messages,
@@ -1050,14 +1063,16 @@ class ProviderRuntime:
                 return decision.result
 
             if finish_reason == "length":
+                metadata = {
+                    "truncated": True,
+                    "web_search_requests": total_web_search_requests,
+                }
+                self._add_firecrawl_credits(metadata, tool_context)
                 return self._build_round_result(
                     response,
                     message,
                     round_idx,
-                    metadata={
-                        "truncated": True,
-                        "web_search_requests": total_web_search_requests,
-                    },
+                    metadata=metadata,
                 )
 
             self._report_unexpected_finish(

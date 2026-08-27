@@ -87,13 +87,13 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 1_000
-    assert breakdown["charged_credit_units"] == 2
-    assert breakdown["charged_credits_display"] == "0.2"
+    assert breakdown["raw_usd_micros"] == 46
+    assert breakdown["charged_credit_units"] == 1
+    assert breakdown["charged_credits_display"] == "0.1"
     assert breakdown["model_breakdown"] == [
         {
             "model": "~deepseek/deepseek-v4-flash-latest",
-            "usd_micros": 1_000,
+            "usd_micros": 46,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -173,13 +173,13 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 920
-    assert breakdown["charged_credit_units"] == 2
-    assert breakdown["charged_credits_display"] == "0.2"
+    assert breakdown["raw_usd_micros"] == 33
+    assert breakdown["charged_credit_units"] == 1
+    assert breakdown["charged_credits_display"] == "0.1"
     assert breakdown["model_breakdown"] == [
         {
             "model": "~deepseek/deepseek-v4-flash-latest",
-            "usd_micros": 920,
+            "usd_micros": 33,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -211,19 +211,22 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
     assert breakdown["unsupported_notes"] == []
 
 
-def test_calculate_billing_for_segments_bills_web_search_requests():
+def test_calculate_billing_for_segments_bills_successful_firecrawl_credits():
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
                 "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
-                "metadata": {"web_search_requests": 2},
+                "metadata": {
+                    "web_search_requests": 2,
+                    "firecrawl_credits_used": 4,
+                },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 3_420
+    assert breakdown["raw_usd_micros"] == 3_326
     assert breakdown["charged_credit_units"] == 7
     assert breakdown["tool_breakdown"] == [
         {"tool": "web_search", "count": 2, "usd_micros": 3_320}
@@ -320,8 +323,8 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
                 "kind": "chat",
                 "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
-                    "input_tokens": 4000,
-                    "output_tokens": 3000,
+                    "input_tokens": 40_000,
+                    "output_tokens": 55_000,
                 },
             }
         ],
@@ -406,8 +409,8 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
                 "kind": "chat",
                 "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
-                    "input_tokens": 4000,
-                    "output_tokens": 3000,
+                    "input_tokens": 40_000,
+                    "output_tokens": 55_000,
                 },
             }
         ],
@@ -618,7 +621,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 11
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 19
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -943,10 +946,7 @@ def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
     assert breakdown["model_breakdown"][0]["usd_micros"] == 5_000
 
 
-def test_calculate_billing_keeps_local_cost_when_higher_than_gateway():
-    # Local pricing for 4000 input + 2000 output deepseek tokens:
-    # (4000 * 400_000 + 2000 * 1_200_000) // 1_000_000 = 4_000 usd_micros
-    # Gateway cost of $0.001 USD = 1_000 usd_micros -> local wins
+def test_calculate_billing_uses_reported_gateway_cost_when_lower_than_local():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -961,8 +961,8 @@ def test_calculate_billing_keeps_local_cost_when_higher_than_gateway():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 4_000
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 4_000
+    assert breakdown["raw_usd_micros"] == 1_000
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 1_000
 
 
 def test_calculate_billing_without_gateway_cost_uses_local():
@@ -979,8 +979,161 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 100
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 100
+    assert breakdown["raw_usd_micros"] == 6
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 6
+
+
+def test_calculate_billing_adds_direct_firecrawl_cost_to_reported_model_cost():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "~deepseek/deepseek-v4-flash-latest",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": 0.005006,
+                },
+                "metadata": {
+                    "web_search_requests": 1,
+                    "firecrawl_credits_used": 2,
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 6_666
+    assert breakdown["tool_breakdown"] == [
+        {"tool": "web_search", "count": 1, "usd_micros": 1_660}
+    ]
+
+
+def test_calculate_billing_does_not_bill_failed_firecrawl_search():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "~deepseek/deepseek-v4-flash-latest",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": 0.005006,
+                },
+                "metadata": {"web_search_requests": 1},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 5_006
+    assert breakdown["tool_breakdown"] == []
+
+
+def test_openrouter_transcription_uses_reported_model_cost():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "transcribe",
+                "model": "google/gemini-3.1-flash-lite-preview",
+                "usage": {
+                    "prompt_tokens": 2_000,
+                    "completion_tokens": 100,
+                    "cost": 0.00125,
+                },
+                "audio_seconds": 60,
+                "metadata": {"provider": "openrouter"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 1_250
+    assert breakdown["model_breakdown"][0]["model"] == (
+        "google/gemini-3.1-flash-lite-preview"
+    )
+
+
+def test_gemini_local_fallback_prices_cache_audio_and_cache_writes():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "vision",
+                "model": "google/gemini-3.1-flash-lite-preview",
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 100,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 200,
+                        "audio_tokens": 300,
+                        "cache_write_tokens": 100,
+                    },
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 413
+
+
+def test_groq_gpt_oss_local_fallback_uses_current_rates():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {"prompt_tokens": 1_000, "completion_tokens": 500},
+                "metadata": {"provider": "groq"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 450
+
+
+def test_groq_gpt_oss_local_fallback_applies_cached_input_discount():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 500,
+                    "prompt_tokens_details": {"cached_tokens": 800},
+                },
+                "metadata": {"provider": "groq"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 390
+
+
+def test_openrouter_gpt_oss_local_fallback_uses_provider_rates():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {"prompt_tokens": 1_000, "completion_tokens": 500},
+                "metadata": {"provider": "openrouter"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 122
+
+
+def test_groq_transcription_applies_ten_second_minimum():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "transcribe",
+                "model": "groq/whisper-large-v3",
+                "audio_seconds": 1,
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 309
 
 
 def _make_group_billing(*, limit: int, redis_client=None):

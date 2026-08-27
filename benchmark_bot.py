@@ -40,8 +40,16 @@ class GordoBenchmark:
 
         self.model_pricing = {
             "qwen/qwen3.6-plus": {"input": 0.325, "output": 1.95, "context": "1M"},
-            "minimax/minimax-m2.7": {"input": 0.30, "output": 1.20, "context": "196K"},
-            "~deepseek/deepseek-v4-flash-latest": {"input": 0.40, "output": 1.20, "context": "1M"},
+            "minimax/minimax-m2.7": {
+                "input": 0.24,
+                "output": 0.96,
+                "context": "205K",
+            },
+            "~deepseek/deepseek-v4-flash-latest": {
+                "input": 0.03,
+                "output": 0.075,
+                "context": "1.31M",
+            },
         }
 
     def load_bot_config(self) -> Dict[str, Any]:

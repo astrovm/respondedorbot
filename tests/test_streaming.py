@@ -495,7 +495,10 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_results(
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     execute_tool = MagicMock(
-        return_value=SimpleNamespace(output=search_output)
+        return_value=SimpleNamespace(
+            output=search_output,
+            metadata={"credits_used": 2},
+        )
     )
     usage_results = []
     search_schema = {
@@ -547,6 +550,7 @@ def test_openrouter_stream_executes_direct_web_search_and_validates_results(
         "content": search_output,
     }
     assert usage_results[0].metadata["web_search_requests"] == 1
+    assert usage_results[0].metadata["firecrawl_credits_used"] == 2
     assert usage_results[-1].metadata["web_search_grounded"] is grounded
     assert usage_results[-1].metadata["web_search_source_count"] == source_count
     assert "web_search_requests" not in usage_results[-1].metadata
