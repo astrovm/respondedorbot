@@ -69,6 +69,7 @@ def get_prices(
             fetch_prices=fetch_prices,
         )
 
+    conversion_requested = _has_conversion_modifier(msg_text)
     msg_text, convert_to, convert_parameter = parse_conversion_only(msg_text)
     if convert_to not in SUPPORTED_PRICE_SYMBOLS:
         return tr("market.crypto.unsupported_currency", symbol=convert_to)
@@ -77,6 +78,7 @@ def get_prices(
         convert_to=convert_to,
         convert_parameter=convert_parameter,
         timeframe=timeframe,
+        conversion_requested=conversion_requested,
         change_fields=change_fields,
         fetch_prices=fetch_prices,
         fetch_quotes=fetch_quotes,
@@ -90,6 +92,7 @@ def _get_asset_prices(
     convert_to: str,
     convert_parameter: str,
     timeframe: str | None,
+    conversion_requested: bool,
     change_fields: Mapping[str, str],
     fetch_prices: PriceListFetcher,
     fetch_quotes: QuoteFetcher,
@@ -97,7 +100,11 @@ def _get_asset_prices(
 ) -> str:
     provider_scope, msg_text = _parse_provider_scope(msg_text)
     if provider_scope == "stock":
-        return _format_stock_only(msg_text, lookup_stocks)
+        return (
+            _stock_modifier_error(msg_text)
+            if _stock_modifiers_unsupported(timeframe, conversion_requested)
+            else _format_stock_only(msg_text, lookup_stocks)
+        )
 
     prices = fetch_prices(convert_parameter)
     listed = _price_data(prices)
@@ -121,6 +128,15 @@ def _get_asset_prices(
             msg_text,
             selection=selection,
             lookup_stocks=lookup_stocks,
+        )
+    if stock_quotes and _stock_modifiers_unsupported(timeframe, conversion_requested):
+        return _format_modifier_rejection(
+            selection,
+            stock_quotes=stock_quotes,
+            convert_to=convert_to,
+            convert_parameter=convert_parameter,
+            timeframe=timeframe,
+            change_fields=change_fields,
         )
     result = MarketPriceResult(selection.rows, stock_quotes, unresolved)
     if result.unresolved and not result.crypto_rows and not result.stock_quotes:
@@ -164,6 +180,42 @@ def _parse_provider_scope(msg_text: str) -> tuple[str | None, str]:
     return match.group(1).lower(), match.group(2)
 
 
+def _has_conversion_modifier(msg_text: str) -> bool:
+    return (
+        re.search(r"(?:^|\s)(?:in|to|a|en)\s+[a-zA-Z0-9]+\s*$", msg_text, re.IGNORECASE) is not None
+    )
+
+
+def _stock_modifiers_unsupported(timeframe: str | None, conversion_requested: bool) -> bool:
+    return conversion_requested or timeframe not in (None, "24h")
+
+
+def _stock_modifier_error(symbols: str) -> str:
+    return tr("market.stock.modifiers_unsupported", symbols=symbols.upper())
+
+
+def _format_modifier_rejection(
+    selection: PriceSelection,
+    *,
+    stock_quotes: list[StockQuote],
+    convert_to: str,
+    convert_parameter: str,
+    timeframe: str | None,
+    change_fields: Mapping[str, str],
+) -> str:
+    error = _stock_modifier_error(", ".join(quote.symbol for quote in stock_quotes))
+    if not selection.rows:
+        return error
+    display = PriceDisplay(
+        convert_to=convert_to,
+        convert_parameter=convert_parameter,
+        change_field=change_fields.get(timeframe or "24h", "percent_change_24h"),
+        timeframe_label=timeframe or "24h",
+    )
+    crypto = _format_price_rows(selection.rows[: selection.count], display)
+    return f"{crypto}\n{error}"
+
+
 def _format_stock_only(
     query: str,
     lookup_stocks: StockLookup | None,
@@ -174,12 +226,12 @@ def _format_stock_only(
         return tr("market.crypto.missing", symbols=query.upper()) if missing_error else ""
     resolved = lookup_stocks(query) or []
     quotes = [quote for _, quote in resolved if quote]
-    if quotes:
-        return _format_stock_quotes(quotes)
-    if not missing_error:
-        return ""
-    missing = [item.upper() for item, quote in resolved if quote is None] or [query.upper()]
-    return tr("market.crypto.missing", symbols=", ".join(missing))
+    missing = [item.upper() for item, quote in resolved if quote is None]
+    parts = [_format_stock_quotes(quotes)] if quotes else []
+    if missing_error and (missing or not quotes):
+        missing_symbols = missing or [query.upper()]
+        parts.append(tr("market.crypto.missing", symbols=", ".join(missing_symbols)))
+    return "\n".join(parts)
 
 
 def _lookup_stock_fallback(

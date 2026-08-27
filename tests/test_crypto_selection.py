@@ -198,6 +198,77 @@ def test_stock_scope_bypasses_crypto_for_symbol_collisions():
     fetch_prices.assert_not_called()
 
 
+def test_stock_scope_reports_partial_missing_symbols():
+    lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA")), ("ZZZ", None)])
+
+    result = get_prices(
+        "stock:NVDA,ZZZ",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(),
+        fetch_quotes=MagicMock(),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == ("NVDA: 123.45 USD (+1.25% 24h)\nno encontré estos activos: ZZZ")
+
+
+def test_stock_scope_rejects_currency_conversion():
+    lookup_stocks = MagicMock()
+
+    result = get_prices(
+        "stock:NVDA in EUR",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(),
+        fetch_quotes=MagicMock(),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == "NVDA: las acciones solo soportan moneda nativa y variación 24h"
+    lookup_stocks.assert_not_called()
+
+
+def test_unified_stock_fallback_rejects_currency_conversion():
+    lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA"))])
+
+    result = get_prices(
+        "NVDA in EUR",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": []}),
+        fetch_quotes=MagicMock(return_value={}),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == "NVDA: las acciones solo soportan moneda nativa y variación 24h"
+
+
+def test_unified_stock_fallback_accepts_explicit_24h_timeframe():
+    lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA"))])
+
+    result = get_prices(
+        "NVDA 24h",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": []}),
+        fetch_quotes=MagicMock(return_value={}),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == "NVDA: 123.45 USD (+1.25% 24h)"
+
+
+def test_unified_stock_fallback_rejects_non_24h_timeframe():
+    lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA"))])
+
+    result = get_prices(
+        "NVDA 7d",
+        change_fields={**CHANGE_FIELDS, "7d": "percent_change_7d"},
+        fetch_prices=MagicMock(return_value={"data": []}),
+        fetch_quotes=MagicMock(return_value={}),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == "NVDA: las acciones solo soportan moneda nativa y variación 24h"
+
+
 def test_crypto_scope_does_not_fall_back_to_stock():
     lookup_stocks = MagicMock()
 
