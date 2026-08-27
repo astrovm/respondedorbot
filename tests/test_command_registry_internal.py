@@ -32,6 +32,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "handle_bcra_variables": lambda: "bcra",
             "topup_command": lambda: "topup",
             "balance_command": lambda: "balance",
+            "charges_command": prices,
             "printcredits_command": lambda x: "printcredits",
             "creditlog_command": lambda x: "creditlog",
             "transfer_command": prices,
@@ -52,6 +53,8 @@ def test_build_command_registry_reuses_alias_metadata():
     assert registry["/tarea"] == registry["/tareas"]
     assert registry["/tarea"] == registry["/task"]
     assert registry["/tarea"] == registry["/tasks"]
+    assert registry["/charges"] == registry["/history"]
+    assert registry["/charges"] == registry["/gastos"]
     assert "/purgeailog" not in registry
     assert "/updatecommands" not in registry
 

@@ -141,7 +141,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["usage"] == {"input_tokens": 100, "output_tokens": 50}
     assert log_entry["local_billing"]["raw_usd_micros"] == 6
     assert log_entry["local_billing"]["charged_credit_units"] == 1
-    assert log_entry["local_billing"]["charged_credits_display"] == "0.1"
+    assert log_entry["local_billing"]["charged_credits_display"] == "0.01"
 
 
 def test_log_groq_request_result_logs_empty_requests():

@@ -880,6 +880,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
             "handle_bcra_variables": _dollar_service.handle_bcra_variables,
             "topup_command": _noop_command,
             "balance_command": _noop_command,
+            "charges_command": _noop_param_command,
             "printcredits_command": _noop_param_command,
             "creditlog_command": _noop_param_command,
             "transfer_command": _noop_param_command,

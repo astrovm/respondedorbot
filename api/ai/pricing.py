@@ -7,13 +7,13 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from api.billing.credit_units import format_credit_units
+from api.billing.credit_units import CREDIT_SCALE, format_credit_units
 
 PRICING_VERSION = "2026-08-26"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.0
 CREDIT_CEIL_DIVISOR_USD_MICROS = int(CREDIT_USD_MICROS / BILLING_MARKUP_MULTIPLIER)
-CREDIT_UNIT_USD_MICROS = CREDIT_CEIL_DIVISOR_USD_MICROS // 10
+CREDIT_UNIT_USD_MICROS = CREDIT_CEIL_DIVISOR_USD_MICROS // CREDIT_SCALE
 
 CHAT_OUTPUT_TOKEN_LIMIT = 1024
 REASONING_CHAT_OUTPUT_TOKEN_LIMIT = 8192
@@ -218,7 +218,7 @@ def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
 
 
 def credit_units_from_usd_micros(usd_micros: int) -> int:
-    """Convert raw USD micros into tenths of credits with markup."""
+    """Convert raw USD micros into hundredths of credits with markup."""
 
     micros = max(0, int(usd_micros or 0))
     if micros == 0:
@@ -360,6 +360,7 @@ def calculate_billing_for_segments(
             total_usd_micros += usd_micros
             model_breakdown.append(
                 {
+                    "kind": kind,
                     "model": model or "whisper-large-v3",
                     "usd_micros": usd_micros,
                     "audio_seconds": audio_seconds,
@@ -368,6 +369,7 @@ def calculate_billing_for_segments(
             continue
 
         model_cost = _calculate_model_token_cost(model, usage, provider=provider)
+        model_cost["kind"] = kind
         total_usd_micros += int(model_cost["usd_micros"])
         model_breakdown.append(model_cost)
 

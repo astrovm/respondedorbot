@@ -184,9 +184,14 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "créditos ia",
-        "saldo, topup con Telegram Stars y transferencia de créditos personales al grupo",
-        aliases_for("topup_command", "balance_command", "transfer_command"),
-        ("/transfer 1.5",),
+        "saldo, historial de gastos, topup con Telegram Stars y transferencia de créditos personales al grupo",
+        aliases_for(
+            "topup_command",
+            "balance_command",
+            "charges_command",
+            "transfer_command",
+        ),
+        ("/charges 10", "/transfer 1.5"),
         "créditos",
         telegram_visible=True,
     ),

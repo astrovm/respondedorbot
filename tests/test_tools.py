@@ -478,8 +478,8 @@ class TestTaskSetTool:
             {"chat_id": "123", "user_id": 42},
         )
 
-        assert "tenés: 0.9" in result.output
-        assert "necesitás: 1.0" in result.output
+        assert "tenés: 0.09" in result.output
+        assert "necesitás: 0.10" in result.output
         mock_schedule.assert_not_called()
 
     @patch("api.tools.task_set.schedule_task")
