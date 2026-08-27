@@ -204,18 +204,18 @@ def _charged_credit_units(metadata: Mapping[str, Any], event_type: str = "") -> 
 def _model_component_label(item: Mapping[str, Any]) -> str:
     kind = str(item.get("kind") or "").lower()
     if kind == "transcribe" or float(item.get("audio_seconds") or 0) > 0:
-        return "transcripción"
+        return "audio"
     if kind == "vision":
-        return "análisis de imagen"
-    return "respuesta IA"
+        return "imagen"
+    return "respuesta"
 
 
 def _tool_component_label(item: Mapping[str, Any]) -> str:
     tool = str(item.get("tool") or "").lower()
     count = max(0, int(item.get("count") or 0))
     if tool == "web_search":
-        return f"búsqueda web ({count}x)" if count > 1 else "búsqueda web"
-    return "herramienta IA"
+        return f"web ({count}x)" if count > 1 else "web"
+    return "herramienta"
 
 
 def _raw_charge_components(metadata: Mapping[str, Any]) -> List[Tuple[str, int]]:
@@ -263,43 +263,38 @@ def allocate_charge_components(
 
 
 def _charge_activity(metadata: Mapping[str, Any], event_type: str = "") -> str:
-    command = str(metadata.get("command") or "").strip()
-    if command:
-        return command
     usage_tag = str(metadata.get("usage_tag") or "")
+    if event_type == "memory_compaction_settlement" or "memory_compaction" in usage_tag:
+        return "memoria"
     if "transcribe" in usage_tag or "audio" in usage_tag:
         return "audio"
     if "image" in usage_tag or "vision" in usage_tag:
         return "imagen"
-    if event_type == "memory_compaction_settlement" or "memory_compaction" in usage_tag:
-        return "memoria"
-    return "respuesta IA"
+    return "respuesta"
 
 
-def _payer_label(metadata: Mapping[str, Any]) -> str:
-    payer_totals: Dict[str, int] = {}
-    for raw_payer in metadata.get("payer_breakdown") or []:
-        if not isinstance(raw_payer, Mapping):
+def _payer_totals(entries: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    totals: Dict[str, int] = {"user": 0, "chat": 0}
+    for entry in entries:
+        raw_metadata = entry.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        breakdown = metadata.get("payer_breakdown") or []
+        found_breakdown = False
+        for raw_payer in breakdown:
+            if not isinstance(raw_payer, Mapping):
+                continue
+            found_breakdown = True
+            scope = "chat" if raw_payer.get("scope") == "chat" else "user"
+            totals[scope] += max(0, int(raw_payer.get("credit_units") or 0))
+        if found_breakdown:
             continue
-        scope = "chat" if raw_payer.get("scope") == "chat" else "user"
-        payer_totals[scope] = payer_totals.get(scope, 0) + max(
-            0, int(raw_payer.get("credit_units") or 0)
-        )
-    visible_payers = [
-        (scope, units) for scope, units in payer_totals.items() if units > 0
-    ]
-    if len(visible_payers) > 1:
-        labels = {"user": "saldo personal", "chat": "saldo del grupo"}
-        return " + ".join(
-            f"{labels[scope]} {format_credit_units(units)}"
-            for scope, units in visible_payers
-        )
-
-    payer_scope = str(metadata.get("payer_scope") or metadata.get("source") or "")
-    return {
-        "user": "saldo personal",
-        "chat": "saldo del grupo",
-    }.get(payer_scope, "saldo no especificado")
+        scope = str(metadata.get("payer_scope") or metadata.get("source") or "")
+        if scope in totals:
+            totals[scope] += _charged_credit_units(
+                metadata,
+                str(entry.get("event_type") or ""),
+            )
+    return totals
 
 
 def _charge_time_label(value: Any, timezone_offset: float) -> str:
@@ -317,51 +312,155 @@ def _charge_time_label(value: Any, timezone_offset: float) -> str:
     return local_time.strftime("%d/%m %H:%M")
 
 
+def _entry_components(entry: Mapping[str, Any]) -> List[Tuple[str, int, bool]]:
+    raw_metadata = entry.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+    event_type = str(entry.get("event_type") or "")
+    charged_units = _charged_credit_units(metadata, event_type)
+    pending = bool(metadata.get("billing_pending") or event_type == "ai_reserve")
+    if event_type == "memory_compaction_settlement" or "memory_compaction" in str(
+        metadata.get("usage_tag") or ""
+    ):
+        return [("memoria", charged_units, pending)]
+    allocation = allocate_charge_components(
+        charged_units,
+        _raw_charge_components(metadata),
+    )
+    if allocation:
+        return [
+            (label, units, pending)
+            for label, units in allocation
+            if units > 0
+        ]
+    return [(_charge_activity(metadata, event_type), charged_units, pending)]
+
+
+def _component_sort_key(component: Tuple[str, int, bool]) -> Tuple[int, bool]:
+    label, _units, pending = component
+    if label == "respuesta":
+        rank = 0
+    elif label in {"audio", "imagen"}:
+        rank = 1
+    elif label.startswith("web"):
+        rank = 2
+    elif label == "memoria":
+        rank = 4
+    else:
+        rank = 3
+    return rank, pending
+
+
+def _group_payer_suffix(entries: Sequence[Mapping[str, Any]]) -> str:
+    payer_totals = _payer_totals(entries)
+    user_paid = payer_totals["user"]
+    chat_paid = payer_totals["chat"]
+    if chat_paid <= 0:
+        return ""
+    if user_paid <= 0:
+        return " · grupo"
+    return (
+        f" · grupo {format_credit_units(chat_paid)}"
+        f" · personal {format_credit_units(user_paid)}"
+    )
+
+
 def format_user_charge_history(
-    entries: Sequence[Mapping[str, Any]],
+    groups: Sequence[Mapping[str, Any]],
     *,
     timezone_offset: float = 0,
-    has_more: bool = False,
 ) -> str:
-    lines = ["últimos gastos IA:"]
-    shown_total = 0
-    for entry in entries:
-        raw_metadata = entry.get("metadata")
-        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-        event_type = str(entry.get("event_type") or "")
-        charged_units = _charged_credit_units(metadata, event_type)
-        shown_total += charged_units
-        lines.extend(
-            [
-                "",
-                (
-                    f"{_charge_time_label(entry.get('created_at'), timezone_offset)}"
-                    f" · {_charge_activity(metadata, event_type)}"
-                    f" · {format_credit_units(charged_units)} créditos"
-                ),
-            ]
-        )
-        allocation = allocate_charge_components(
-            charged_units,
-            _raw_charge_components(metadata),
-        )
-        if allocation:
-            lines.extend(
-                f"- {label}: {format_credit_units(units)}"
-                for label, units in allocation
+    lines = ["Gastos IA"]
+    for group in groups:
+        raw_entries = group.get("entries") or []
+        entries = [entry for entry in raw_entries if isinstance(entry, Mapping)]
+        components = [
+            component
+            for entry in entries
+            for component in _entry_components(entry)
+        ]
+        components.sort(key=_component_sort_key)
+        charged_units = sum(units for _label, units, _pending in components)
+        time_label = _charge_time_label(group.get("created_at"), timezone_offset)
+        payer_suffix = _group_payer_suffix(entries)
+        lines.append("")
+        if len(components) == 1:
+            label, units, pending = components[0]
+            pending_suffix = " · pendiente" if pending else ""
+            lines.append(
+                f"{time_label} · {label} · {format_credit_units(units)} cr"
+                f"{pending_suffix}{payer_suffix}"
             )
-        elif metadata.get("missing_usage_billing") or metadata.get(
-            "billing_zero_usage_fallback"
-        ):
-            lines.append("- cargo estimado por falta de detalle del proveedor")
-        if event_type == "ai_reserve":
-            lines.append("- liquidación pendiente; se muestra la reserva cobrada")
-        lines.append(f"- pagó: {_payer_label(metadata)}")
-
-    lines.extend(["", f"total mostrado: {format_credit_units(shown_total)} créditos"])
-    if has_more and entries:
-        lines.append(f"más: /charges 10 {int(entries[-1]['id'])}")
+            continue
+        lines.append(
+            f"{time_label} · {format_credit_units(charged_units)} cr{payer_suffix}"
+        )
+        for label, units, pending in components:
+            pending_suffix = " · pendiente" if pending else ""
+            lines.append(
+                f"  {label} {format_credit_units(units)} cr{pending_suffix}"
+            )
     return "\n".join(lines)
+
+
+def build_charge_history_keyboard(
+    page: Mapping[str, Any],
+    *,
+    user_id: int,
+    limit: int,
+    timezone_offset: float,
+) -> Optional[Dict[str, Any]]:
+    timezone_minutes = round(float(timezone_offset) * 60)
+    buttons: List[Dict[str, str]] = []
+    if page.get("has_newer") and page.get("newer_cursor") is not None:
+        buttons.append(
+            {
+                "text": "‹ Anterior",
+                "callback_data": (
+                    f"chg:{int(user_id)}:{int(limit)}:n:"
+                    f"{int(page['newer_cursor'])}:{timezone_minutes}"
+                ),
+            }
+        )
+    if page.get("has_older") and page.get("older_cursor") is not None:
+        buttons.append(
+            {
+                "text": "Siguiente ›",
+                "callback_data": (
+                    f"chg:{int(user_id)}:{int(limit)}:o:"
+                    f"{int(page['older_cursor'])}:{timezone_minutes}"
+                ),
+            }
+        )
+    return {"inline_keyboard": [buttons]} if buttons else None
+
+
+def build_user_charge_history_page(
+    credits_db_service: Any,
+    *,
+    user_id: int,
+    limit: int,
+    timezone_offset: float,
+    cursor_id: Optional[int] = None,
+    direction: str = "older",
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    page = credits_db_service.list_user_ai_charge_page(
+        user_id,
+        limit=limit,
+        cursor_id=cursor_id,
+        direction="newer" if direction == "newer" else "older",
+    )
+    groups = list(page.get("groups") or [])
+    if not groups:
+        return "no tenés gastos IA recientes", None
+    return (
+        format_user_charge_history(groups, timezone_offset=timezone_offset),
+        build_charge_history_keyboard(
+            page,
+            user_id=user_id,
+            limit=limit,
+            timezone_offset=timezone_offset,
+        ),
+    )
 
 
 def handle_charges_command(
@@ -383,22 +482,22 @@ def handle_charges_command(
         return "no te pude leer el usuario para ver tus gastos", None, False, command
 
     tokens = str(sanitized_message_text or "").split()
-    if len(tokens) > 2:
-        return "mandalo bien: /charges [limite]", None, False, command
+    if len(tokens) > 1:
+        return "mandalo bien: /charges [cantidad]", None, False, command
     try:
         limit = int(tokens[0]) if tokens else 10
-        before_id = int(tokens[1]) if len(tokens) == 2 else None
     except (TypeError, ValueError):
-        return "mandalo bien: /charges [limite]", None, False, command
-    if limit <= 0 or (before_id is not None and before_id <= 0):
-        return "mandalo bien: /charges [limite]", None, False, command
+        return "mandalo bien: /charges [cantidad]", None, False, command
+    if limit <= 0:
+        return "mandalo bien: /charges [cantidad]", None, False, command
     limit = min(limit, 20)
 
     try:
-        results = deps.credits_db_service.list_user_ai_charges(
-            user_id,
-            limit=limit + 1,
-            before_id=before_id,
+        response_text, reply_markup = build_user_charge_history_page(
+            deps.credits_db_service,
+            user_id=user_id,
+            limit=limit,
+            timezone_offset=timezone_offset,
         )
     except Exception as error:
         deps.admin_report(
@@ -408,23 +507,13 @@ def handle_charges_command(
         )
         return "se trabó leyendo tus gastos, probá de nuevo", None, False, command
 
-    entries = list(results[:limit])
-    if not entries:
-        return "no tenés gastos IA recientes", None, False, command
-    return (
-        format_user_charge_history(
-            entries,
-            timezone_offset=timezone_offset,
-            has_more=len(results) > limit,
-        ),
-        None,
-        False,
-        command,
-    )
+    return response_text, reply_markup, False, command
 
 
 __all__ = [
     "allocate_charge_components",
+    "build_charge_history_keyboard",
+    "build_user_charge_history_page",
     "format_user_charge_history",
     "handle_balance_command",
     "handle_charges_command",
