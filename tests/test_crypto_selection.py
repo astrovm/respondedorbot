@@ -132,6 +132,44 @@ def test_unified_prices_fall_back_to_stock_quote():
     lookup_stocks.assert_called_once_with("NVDA")
 
 
+def test_unified_prices_accept_stock_cashtag():
+    lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA"))])
+
+    result = get_prices(
+        "$NVDA",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": []}),
+        fetch_quotes=MagicMock(return_value={}),
+        lookup_stocks=lookup_stocks,
+    )
+
+    assert result == "NVDA: 123.45 USD (+1.25% 24h)"
+    lookup_stocks.assert_called_once_with("NVDA")
+
+
+def test_crypto_prices_accept_crypto_cashtag():
+    result = get_prices(
+        "$BTC",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": [_coin("BTC", 50000, coin_id=1)]}),
+        fetch_quotes=MagicMock(),
+    )
+
+    assert result is not None
+    assert "BTC: 50000 USD" in result
+
+
+def test_crypto_amount_conversion_accepts_cashtags():
+    result = get_prices(
+        "2 $BTC in $USD",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value={"data": [_coin("BTC", 50000, coin_id=1)]}),
+        fetch_quotes=MagicMock(),
+    )
+
+    assert result == "2 BTC = 100000 USD"
+
+
 def test_unified_prices_support_mixed_crypto_and_stocks():
     lookup_stocks = MagicMock(return_value=[("NVDA", _stock("NVDA"))])
 

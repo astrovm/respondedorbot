@@ -104,7 +104,8 @@ def search_yahoo_symbol(
     cache_ttl: int,
 ) -> str | None:
     try:
-        search_queries = list(dict.fromkeys((query, query.replace(" ", ""))))
+        normalized_query = query.strip().lstrip("$")
+        search_queries = list(dict.fromkeys((normalized_query, normalized_query.replace(" ", ""))))
         for search_query in search_queries:
             response = cached_request(
                 YAHOO_SEARCH_URL,
@@ -255,7 +256,7 @@ def _lookup_stock_quotes(
 ) -> list[tuple[str, StockQuote | None]]:
     quotes: list[tuple[str, StockQuote | None]] = []
     for query in queries:
-        normalized = query.upper()
+        normalized = query.upper().lstrip("$")
         is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
         quote = fetch_quote(normalized) if is_symbol else None
         quotes.append((query, quote))

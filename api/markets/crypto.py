@@ -182,7 +182,8 @@ def _parse_provider_scope(msg_text: str) -> tuple[str | None, str]:
 
 def _has_conversion_modifier(msg_text: str) -> bool:
     return (
-        re.search(r"(?:^|\s)(?:in|to|a|en)\s+[a-zA-Z0-9]+\s*$", msg_text, re.IGNORECASE) is not None
+        re.search(r"(?:^|\s)(?:in|to|a|en)\s+\$?[a-zA-Z0-9]+\s*$", msg_text, re.IGNORECASE)
+        is not None
     )
 
 
