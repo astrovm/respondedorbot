@@ -79,6 +79,7 @@ class ChatConfigService:
                     "Chat config storage is not configured; skipping persistence",
                     {"chat_id": chat_id, "config": config},
                 )
+                self._cache[chat_id] = config
                 return config
 
             self._repo.set_chat_config(chat_id, config)
