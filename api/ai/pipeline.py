@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from api.core.i18n import tr
+
 _logger = logging.getLogger(__name__)
 
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
@@ -287,7 +289,7 @@ def _empty_response_fallback(
         _preview_for_log(cleanup.context),
         _preview_for_log(cleanup.identity),
     )
-    return "me quedé reculando y no te pude responder, probá de nuevo"
+    return tr("response.stream_error")
 
 
 def handle_ai_response(

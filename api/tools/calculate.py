@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from typing import Any, Dict, Union
 
+from api.core.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 _SAFE_NODES = (
@@ -28,16 +29,16 @@ def _safe_eval(expr: str) -> Union[float, int, str]:
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError:
-        return f"expresion invalida: {expr}"
+        return tr("calculate.invalid", expression=expr)
     if sum(1 for _ in ast.walk(tree)) > 200:
-        return "expresion demasiado larga"
+        return tr("calculate.too_long")
     for node in ast.walk(tree):
         if not isinstance(node, _SAFE_NODES):
-            return f"expresion no permitida: {expr}"
+            return tr("calculate.forbidden", expression=expr)
     try:
         result = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, {})
     except ZeroDivisionError:
-        return "no se puede dividir por cero"
+        return tr("calculate.zero_division")
     except Exception as e:
         return f"error: {e}"
     if isinstance(result, float):
@@ -55,7 +56,7 @@ def _execute_calculate(
 ) -> ToolResult:
     expression = params.get("expression", "")
     if not expression:
-        return ToolResult(output="no se proporciono una expresion")
+        return ToolResult(output=tr("calculate.missing"))
     result = _safe_eval(str(expression))
     return ToolResult(output=str(result))
 

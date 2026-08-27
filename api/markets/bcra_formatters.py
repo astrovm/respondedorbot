@@ -5,6 +5,7 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from api.core.i18n import tr
 from api.utils import fmt_num, parse_date_string
 
 
@@ -53,7 +54,7 @@ def _format_country_risk(country_risk: Optional[Dict[str, Any]]) -> Optional[str
 
     value_decimals = 1 if abs(value_bps) < 100 else 0
     value_text = fmt_num(float(value_bps), value_decimals).replace(".", ",")
-    risk_line = f"riesgo país: {value_text} bps"
+    risk_line = tr("bcra.country_risk", value=value_text)
 
     details: List[str] = []
     label = country_risk.get("valuation_label")
@@ -67,7 +68,7 @@ def _format_country_risk(country_risk: Optional[Dict[str, Any]]) -> Optional[str
             delta_decimals = 1 if abs_delta < 100 else 0
             delta_text = fmt_num(abs_delta, delta_decimals).replace(".", ",")
             sign = "+" if delta_value > 0 else "-"
-            details.append(f"{sign}{delta_text} bps vs ayer")
+            details.append(tr("bcra.yesterday", change=f"{sign}{delta_text}"))
 
     if details:
         risk_line += " (" + " | ".join(details) + ")"
@@ -86,7 +87,7 @@ def _format_currency_bands(band_limits: Optional[Dict[str, Any]]) -> Optional[st
     date_label = band_limits.get("date")
     lower_text = fmt_num(float(lower), 2)
     upper_text = fmt_num(float(upper), 2)
-    line = f"bandas cambiarias: piso ${lower_text} / techo ${upper_text}"
+    line = tr("bcra.bands", lower=lower_text, upper=upper_text)
     if isinstance(date_label, str) and date_label:
         line += f" ({date_label})"
     return line
@@ -113,37 +114,37 @@ def format_bcra_variables(
     """Format BCRA variables for display (robust to naming changes)."""
 
     if not variables:
-        return "No se pudieron obtener las variables del BCRA"
+        return tr("bcra.none")
 
     specs: List[Tuple[str, Callable[[Any], str]]] = [
         (
             r"base\s*monetaria",
-            lambda v: f"base monetaria: ${format_bcra_value(v)} mill. pesos",
+            lambda v: tr("bcra.monetary_base", value=format_bcra_value(v)),
         ),
         (
             r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
-            lambda v: f"inflación mensual: {format_bcra_value(v, True)}",
+            lambda v: tr("bcra.monthly_inflation", value=format_bcra_value(v, True)),
         ),
         (
             r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
-            lambda v: f"inflación interanual: {format_bcra_value(v, True)}",
+            lambda v: tr("bcra.yearly_inflation", value=format_bcra_value(v, True)),
         ),
         (
             r"(mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada)",
-            lambda v: f"inflación esperada: {format_bcra_value(v, True)}",
+            lambda v: tr("bcra.expected_inflation", value=format_bcra_value(v, True)),
         ),
         (r"tamar", lambda v: f"TAMAR: {format_bcra_value(v, True)}"),
         (r"badlar", lambda v: f"BADLAR: {format_bcra_value(v, True)}"),
         (
             r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
-            lambda v: f"dólar minorista: ${v}",
+            lambda v: tr("bcra.retail_dollar", value=v),
         ),
-        (r"tipo.*cambio.*mayorista", lambda v: f"dólar mayorista: ${v}"),
+        (r"tipo.*cambio.*mayorista", lambda v: tr("bcra.wholesale_dollar", value=v)),
         (r"unidad.*valor.*adquisitivo|\buva\b", lambda v: f"UVA: ${v}"),
         (r"coeficiente.*estabilizacion.*referencia|\bcer\b", lambda v: f"CER: {v}"),
         (
             r"reservas.*internacionales",
-            lambda v: f"reservas: USD {format_bcra_value(v)} millones",
+            lambda v: tr("bcra.reserves", value=format_bcra_value(v)),
         ),
     ]
 
@@ -153,7 +154,7 @@ def format_bcra_variables(
         if isinstance(candidate_meta, dict):
             meta_info = candidate_meta
 
-    lines = ["variables principales bcra\n"]
+    lines = [f"{tr('bcra.title')}\n"]
     latest_dt: Optional[datetime] = None
     for pattern, formatter in specs:
         compiled = re.compile(pattern)
@@ -187,9 +188,7 @@ def format_bcra_variables(
         lines.append(itcrm_line)
 
     if meta_info.get("stale"):
-        stale_msg = (
-            "no hay actualización nueva del bcra, te muestro lo último que tengo"
-        )
+        stale_msg = tr("bcra.stale")
         if stale_msg not in lines:
             lines.append(stale_msg)
 
@@ -197,9 +196,7 @@ def format_bcra_variables(
         effective_today = today or datetime.now(BA_TZ).date()
         age_days = (effective_today - latest_dt.date()).days
         if age_days >= 3:
-            lines.append(
-                f"datos del bcra con {age_days} días de atraso, chequeá más tarde"
-            )
+            lines.append(tr("bcra.delayed", days=age_days))
 
     return "\n".join(lines)
 

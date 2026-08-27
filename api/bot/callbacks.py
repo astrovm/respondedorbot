@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from api.core.i18n import resolve_locale, tr, use_locale
+
 
 @dataclass(frozen=True, slots=True)
 class CallbackConfigDeps:
@@ -102,7 +104,7 @@ def handle_task_callback(
     if deps.guard_callback(
         callback_id,
         not target_task,
-        text="esa tarea no existe",
+        text=tr("task.not_found"),
         show_alert=True,
     ):
         return
@@ -110,9 +112,7 @@ def handle_task_callback(
 
     request_user_id = user.get("id")
     task_owner_id = target_task.get("user_id")
-    is_owner = bool(
-        task_owner_id and str(request_user_id) == str(task_owner_id)
-    )
+    is_owner = bool(task_owner_id and str(request_user_id) == str(task_owner_id))
 
     chat_type = str(chat.get("type", ""))
     if deps.is_group_chat_type(chat_type):
@@ -128,14 +128,14 @@ def handle_task_callback(
     if deps.guard_callback(
         callback_id,
         not is_owner and not is_admin,
-        text="solo el creador o un admin pueden borrar esta tarea",
+        text=tr("task.delete_forbidden"),
         show_alert=True,
     ):
         return
 
     deps.cancel_task(task_id)
     if callback_id:
-        deps.answer_callback(callback_id, text=f"tarea {task_id} borrada")
+        deps.answer_callback(callback_id, text=tr("task.deleted", task_id=task_id))
 
     if message_id:
         tasks = deps.list_tasks(str(chat_id))
@@ -144,8 +144,7 @@ def handle_task_callback(
             deps.edit_message(str(chat_id), int(message_id), new_text, new_keyboard)
         except Exception as error:
             deps.logger.exception(
-                "handle_task_callback: failed to edit task message "
-                "chat_id=%s message_id=%s: %s",
+                "handle_task_callback: failed to edit task message chat_id=%s message_id=%s: %s",
                 chat_id,
                 message_id,
                 error,
@@ -212,7 +211,7 @@ def _update_creditless_limit(
         return config, True
     try:
         limit = _creditless_limit(config, value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         context.deps.log_event(
             "Invalid creditless callback value",
             {"chat_id": context.chat_id, "value": value},
@@ -239,9 +238,14 @@ def update_callback_config(
         "random": "ai_random_replies",
         "followups": "ai_command_followups",
         "linkfixfollowups": "ignore_link_fix_followups",
-        "worldcupgoals": "world_cup_goal_alerts",
     }
-    if action == "link" and value in {"reply", "delete", "off"}:
+    if action == "language" and value in {"es", "en"}:
+        config = context.deps.set_chat_config(
+            context.redis_client,
+            context.chat_id,
+            language=value,
+        )
+    elif action == "link" and value in {"reply", "delete", "off"}:
         config = context.deps.set_chat_config(
             context.redis_client,
             context.chat_id,
@@ -250,7 +254,7 @@ def update_callback_config(
     elif field := toggle_fields.get(action):
         current = context.deps.coerce_bool(
             config.get(field),
-            default=field != "world_cup_goal_alerts",
+            default=True,
         )
         config = context.deps.set_chat_config(
             context.redis_client,
@@ -332,10 +336,7 @@ def _authorize_config_callback(
     redis_client: Any,
     deps: CallbackQueryDeps,
 ) -> bool:
-    if not (
-        context.data.startswith("cfg:")
-        and deps.is_group_chat_type(context.chat_type)
-    ):
+    if not (context.data.startswith("cfg:") and deps.is_group_chat_type(context.chat_type)):
         return True
     if deps.is_chat_admin(
         context.chat_id,
@@ -346,7 +347,7 @@ def _authorize_config_callback(
     deps.guard_callback(context.callback_id, True)
     deps.send_msg(
         context.chat_id,
-        deps.denial_message,
+        tr("config.admin_only"),
         str(context.message_id),
     )
     deps.report_unauthorized(
@@ -394,31 +395,39 @@ def handle_callback_query(
     deps: CallbackQueryDeps,
 ) -> None:
     context = _callback_context(callback_query, deps)
-    if context is None or _route_feature_callback(callback_query, context, deps):
+    if context is None:
         return
 
     redis_client = deps.config_redis()
-    if not _authorize_config_callback(context, redis_client, deps):
-        return
-
     config = deps.get_chat_config(redis_client, context.chat_id)
-    try:
-        _, action, value = context.data.split(":", 2)
-    except ValueError:
-        deps.guard_callback(context.callback_id, True)
-        return
-
-    config, handled = update_callback_config(
-        config,
-        action,
-        value,
-        context=ConfigUpdateContext(
-            redis_client=redis_client,
-            chat_id=context.chat_id,
-            callback_id=context.callback_id,
-            deps=deps.config,
-        ),
+    locale = resolve_locale(
+        config.get("language"),
+        telegram_language_code=context.user.get("language_code"),
+        chat_type=context.chat_type,
     )
-    if handled:
-        return
-    _render_config_callback(config, context, deps)
+    with use_locale(locale):
+        if _route_feature_callback(callback_query, context, deps):
+            return
+        if not _authorize_config_callback(context, redis_client, deps):
+            return
+
+        try:
+            _, action, value = context.data.split(":", 2)
+        except ValueError:
+            deps.guard_callback(context.callback_id, True)
+            return
+
+        config, handled = update_callback_config(
+            config,
+            action,
+            value,
+            context=ConfigUpdateContext(
+                redis_client=redis_client,
+                chat_id=context.chat_id,
+                callback_id=context.callback_id,
+                deps=deps.config,
+            ),
+        )
+        if handled:
+            return
+        _render_config_callback(config, context, deps)

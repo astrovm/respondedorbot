@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.core.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -13,11 +14,11 @@ def _execute_dollar_rates(
 ) -> ToolResult:
     get_rates = context.get("get_dollar_rates")
     if get_rates is None:
-        return ToolResult(output="dollar rate lookup not available")
+        return ToolResult(output=tr("tool.unavailable", tool="dollar rates"))
 
     result = get_rates(str(params.get("timeframe") or ""))
     if not result:
-        return ToolResult(output="no se pudieron obtener las cotizaciones del dolar")
+        return ToolResult(output=tr("tool.dollar.error"))
     return ToolResult(output=str(result))
 
 

@@ -17,11 +17,13 @@ def build_commands_list(
     command_groups: Sequence[CommandGroup],
     *,
     descriptions: Mapping[str, str] = COMMAND_DESCRIPTIONS,
+    locale: str = "es",
 ) -> list[dict[str, str]]:
     if descriptions is COMMAND_DESCRIPTIONS:
         descriptions = telegram_command_descriptions(
             command_groups=command_groups,
             descriptions=descriptions,
+            locale=locale,
         )
 
     commands_list: list[dict[str, str]] = []
@@ -52,16 +54,24 @@ def update_bot_commands(
     descriptions: Mapping[str, str] = COMMAND_DESCRIPTIONS,
     logger: Callable[[str], None] = print,
 ) -> bool:
-    commands_list = build_commands_list(command_groups, descriptions=descriptions)
-    _response, error = request_fn(
-        "setMyCommands",
-        method="POST",
-        json_payload={"commands": json.dumps(commands_list)},
-        token=token,
-        expect_json=False,
-    )
-    if error:
-        logger(f"Error updating bot commands: {error}")
-        return False
-    logger(f"Bot commands updated successfully: {len(commands_list)} commands")
+    payloads = [
+        (None, build_commands_list(command_groups, descriptions=descriptions, locale="es")),
+        ("es", build_commands_list(command_groups, descriptions=descriptions, locale="es")),
+        ("en", build_commands_list(command_groups, descriptions=descriptions, locale="en")),
+    ]
+    for language_code, commands_list in payloads:
+        payload = {"commands": json.dumps(commands_list)}
+        if language_code:
+            payload["language_code"] = language_code
+        _response, error = request_fn(
+            "setMyCommands",
+            method="POST",
+            json_payload=payload,
+            token=token,
+            expect_json=False,
+        )
+        if error:
+            logger(f"Error updating bot commands ({language_code or 'default'}): {error}")
+            return False
+    logger(f"Bot commands updated successfully: {len(payloads[0][1])} commands")
     return True

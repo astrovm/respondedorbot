@@ -303,44 +303,6 @@ def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
     assert response == ("resumen listo", None, True, "/resumen")
 
 
-def test_handle_non_ai_command_passes_world_cup_country_query():
-    from api.bot.message_handler import (
-        CommandDispatchContext,
-        PreparedMessage,
-        _handle_non_ai_command,
-    )
-
-    handler = MagicMock(return_value="fixture")
-    commands = {"/mundial": (handler, False, True)}
-
-    response = _handle_non_ai_command(
-        MagicMock(),
-        CommandDispatchContext(
-            commands=commands,
-            command="/mundial",
-            sanitized_message_text="argentina",
-            message={"message_id": "10"},
-            chat_id="123",
-            chat_type="private",
-            user_id=7,
-            numeric_chat_id=123,
-            prepared_message=PreparedMessage(
-                message_text="/mundial argentina",
-                photo_file_id=None,
-                audio_file_id=None,
-            ),
-            billing_helper=MagicMock(),
-            reply_context_text=None,
-            user_identity="Ana (ana)",
-            redis_client=MagicMock(),
-            timezone_offset=-3,
-        ),
-    )
-
-    assert response == ("fixture", None, False, "/mundial")
-    handler.assert_called_once_with(timezone_offset=-3, team_query="argentina")
-
-
 def test_all_task_command_aliases_list_without_text():
     from api.bot.message_handler import (
         CommandDispatchContext,
@@ -526,6 +488,7 @@ def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     ai_service = MagicMock()
+
     def run_conversation(_request):
         set_streamed_response_metadata("999", "respuesta ai")
         return ("respuesta ai", True)
@@ -559,9 +522,7 @@ def test_message_handler_ai_command_passes_single_request_object(monkeypatch):
     assert request.is_spontaneous is False
     assert request.handler_func is deps.handle_ai_stream
     mock_send_msg.assert_not_called()
-    mock_save_message.assert_any_call(
-        "557", "bot_999", "respuesta ai", ANY, role="assistant"
-    )
+    mock_save_message.assert_any_call("557", "bot_999", "respuesta ai", ANY, role="assistant")
 
 
 def test_message_handler_private_message_is_not_spontaneous(monkeypatch):
@@ -572,6 +533,7 @@ def test_message_handler_private_message_is_not_spontaneous(monkeypatch):
     monkeypatch.setenv("TELEGRAM_USERNAME", "testbot")
 
     ai_service = MagicMock()
+
     def run_conversation(_request):
         set_streamed_response_metadata("999", "synthetic response")
         return ("synthetic response", True)
@@ -610,9 +572,7 @@ def test_message_handler_private_message_is_not_spontaneous(monkeypatch):
     assert request.handler_func is deps.handle_ai_stream
     assert request.is_spontaneous is False
     mock_send_msg.assert_not_called()
-    mock_save_message.assert_any_call(
-        "558", "bot_999", "synthetic response", ANY, role="assistant"
-    )
+    mock_save_message.assert_any_call("558", "bot_999", "synthetic response", ANY, role="assistant")
 
 
 def test_message_handler_direct_bot_reply_is_not_spontaneous(monkeypatch):
@@ -833,11 +793,13 @@ def test_message_handler_explicit_intent_with_link_bypasses_replacement(
     from api.bot.message_handler import handle_msg
 
     make_deps, _ = _build_message_handler_deps()
-    mock_replace_links = MagicMock(return_value=(
-        "qué onda https://fixupx.com/user/status/1",
-        True,
-        ["https://x.com/user/status/1"],
-    ))
+    mock_replace_links = MagicMock(
+        return_value=(
+            "qué onda https://fixupx.com/user/status/1",
+            True,
+            ["https://x.com/user/status/1"],
+        )
+    )
     link_service = MagicMock()
     link_service.replace = mock_replace_links
     deps = make_deps(link_service=link_service)
@@ -880,9 +842,7 @@ def test_message_handler_replaces_plain_link_reply_to_bot(monkeypatch):
     result = handle_msg(message, deps)
 
     assert result == "ok"
-    link_service.replace.assert_called_once_with(
-        "https://x.com/i/status/1234567890123456789"
-    )
+    link_service.replace.assert_called_once_with("https://x.com/i/status/1234567890123456789")
     deps.send_msg.assert_called_once_with(
         "562",
         "https://fixupx.com/status/1234567890123456789\n\ncompartido por @test_user",

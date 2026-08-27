@@ -10,6 +10,7 @@ from requests.exceptions import RequestException
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
+from api.core.i18n import tr
 from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_set_json
 from api.utils import fmt_num
@@ -172,7 +173,7 @@ def get_oil_price(*, fetch_stock: StockFetcher) -> str:
             prices[name] = parsed
 
     if not prices:
-        return "no pude traer el precio del petróleo boludo"
+        return tr("market.stock.oil_error")
 
     lines: list[str] = []
     for name in ("Brent", "WTI"):
@@ -202,7 +203,7 @@ def get_stock_prices(
     if not queries:
         queries = fetch_top_stocks()
         if not queries:
-            return "no pude traer el top de acciones, probá de nuevo"
+            return tr("market.stock.top_error")
 
     quotes = _lookup_stock_quotes(
         raw_query,
@@ -221,8 +222,8 @@ def get_stock_prices(
                 f"({sign}{quote.variation:.2f}% 24h)"
             )
         else:
-            lines.append(f"{query}: no se pudo encontrar")
-    return "\n".join(lines) if lines else "no se pudo obtener ninguna cotización"
+            lines.append(tr("market.stock.not_found", query=query))
+    return "\n".join(lines) if lines else tr("market.stock.none")
 
 
 def _lookup_stock_quotes(
@@ -253,9 +254,7 @@ def _lookup_stock_quotes(
     full_quote = direct_by_symbol.get(str(resolved or "").upper())
     if full_quote is None and resolved:
         full_quote = fetch_quote(resolved)
-    if full_quote and (
-        not direct_quotes or full_quote.symbol.upper() not in direct_by_symbol
-    ):
+    if full_quote and (not direct_quotes or full_quote.symbol.upper() not in direct_by_symbol):
         return [(raw_query, full_quote)]
     if not direct_quotes:
         return [(raw_query, None)]

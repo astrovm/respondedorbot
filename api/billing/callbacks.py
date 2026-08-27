@@ -5,7 +5,7 @@ from typing import Any
 
 from api.billing.ai import AIBillingPack
 from api.billing.commands import build_user_charge_history_page
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
+from api.core.i18n import tr
 
 ChargeCallbackParams = tuple[int, int, str, int, int, int, int]
 
@@ -38,16 +38,14 @@ def send_stars_invoice(
         method="POST",
         json_payload={
             "chat_id": chat_id,
-            "title": f"Pack IA {pack_credits} créditos",
-            "description": (
-                f"Recarga de {pack_credits} créditos para mensajes IA"
-            ),
+            "title": tr("topup.invoice_title", credits=pack_credits),
+            "description": tr("topup.invoice_description", credits=pack_credits),
             "payload": f"topup:{pack['id']}:{user_id}",
             "provider_token": "",
             "currency": "XTR",
             "prices": [
                 {
-                    "label": f"{pack_credits} créditos IA",
+                    "label": tr("topup.invoice_label", credits=pack_credits),
                     "amount": pack["xtr"],
                 }
             ],
@@ -57,7 +55,7 @@ def send_stars_invoice(
 
 
 def billing_unavailable_message() -> str:
-    return BILLING_UNAVAILABLE_MESSAGE
+    return tr("billing.unavailable")
 
 
 def handle_topup_callback(
@@ -89,7 +87,7 @@ def handle_topup_callback(
     if guard_callback(
         callback_id,
         str(chat.get("type", "")) != "private",
-        text="cargá por privado, maestro",
+        text=tr("topup.callback_private"),
         show_alert=True,
     ):
         return
@@ -99,24 +97,24 @@ def handle_topup_callback(
     if guard_callback(
         callback_id,
         not pack,
-        text="ese pack es fruta, elegí otro",
+        text=tr("topup.invalid_pack"),
         show_alert=True,
     ):
         return
     try:
         user_id = int(str(user.get("id")))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         guard_callback(callback_id, True)
         return
     assert pack is not None
     sent = send_invoice(chat_id=str(chat_id), user_id=user_id, pack=pack)
     if callback_id:
         if sent:
-            answer_callback(callback_id, text="listo, te dejé la factura")
+            answer_callback(callback_id, text=tr("topup.invoice_ready"))
         else:
             answer_callback(
                 callback_id,
-                text="no pude armar la factura, probá de nuevo",
+                text=tr("topup.invoice_error"),
                 show_alert=True,
             )
 
@@ -129,15 +127,15 @@ def _parse_charge_history_callback(
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
     try:
-        prefix, owner_raw, limit_raw, direction_raw, cursor_raw, timezone_raw = (
-            callback_data.split(":")
+        prefix, owner_raw, limit_raw, direction_raw, cursor_raw, timezone_raw = callback_data.split(
+            ":"
         )
         owner_id = int(owner_raw)
         limit = int(limit_raw)
         cursor_id = int(cursor_raw)
         timezone_minutes = int(timezone_raw)
         requester_id = int(str((callback_query.get("from") or {}).get("id")))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if (
         prefix != "chg"
@@ -174,7 +172,7 @@ def handle_charge_history_callback(
         _answer_charge_callback(
             answer_callback,
             callback_id,
-            text="botón vencido",
+            text=tr("callback.expired"),
             show_alert=True,
         )
         return
@@ -191,7 +189,7 @@ def handle_charge_history_callback(
         _answer_charge_callback(
             answer_callback,
             callback_id,
-            text="este historial no es tuyo",
+            text=tr("callback.not_yours"),
             show_alert=True,
         )
         return
@@ -205,11 +203,11 @@ def handle_charge_history_callback(
             cursor_id=cursor_id,
             direction="newer" if direction_raw == "n" else "older",
         )
-        if keyboard is None and text == "no tenés gastos IA recientes":
+        if keyboard is None and text == tr("charges.empty"):
             _answer_charge_callback(
                 answer_callback,
                 callback_id,
-                text="no hay más gastos",
+                text=tr("callback.no_more_charges"),
             )
             return
         chat_id = str(((callback_query.get("message") or {}).get("chat") or {})["id"])
@@ -224,11 +222,7 @@ def handle_charge_history_callback(
             "Error paginating /charges",
             error,
             {
-                "chat_id": str(
-                    ((callback_query.get("message") or {}).get("chat") or {}).get(
-                        "id"
-                    )
-                ),
+                "chat_id": str(((callback_query.get("message") or {}).get("chat") or {}).get("id")),
                 "user_id": owner_id,
                 "cursor_id": cursor_id,
                 "direction": direction_raw,
@@ -237,14 +231,14 @@ def handle_charge_history_callback(
         _answer_charge_callback(
             answer_callback,
             callback_id,
-            text="se trabó leyendo tus gastos",
+            text=tr("charges.callback_error"),
             show_alert=True,
         )
         return
     _answer_charge_callback(
         answer_callback,
         callback_id,
-        text=None if edited else "no pude actualizar el historial",
+        text=None if edited else tr("callback.update_failed"),
         show_alert=not edited,
     )
 
@@ -274,16 +268,16 @@ def handle_pre_checkout_query(
     pack = get_pack(pack_id or "")
     try:
         user_id = int(str((query.get("from") or {}).get("id")))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         answer_query(
             str(query_id),
             ok=False,
-            error_message="tu usuario vino medio roto para cobrar",
+            error_message=tr("payment.invalid_user"),
         )
         return
     try:
         total_amount = int(str(query.get("total_amount")))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         total_amount = -1
 
     if (
@@ -295,7 +289,7 @@ def handle_pre_checkout_query(
         answer_query(
             str(query_id),
             ok=False,
-            error_message="ese pago vino raro y no te lo pude validar",
+            error_message=tr("payment.invalid"),
         )
         return
     answer_query(str(query_id), ok=True)
@@ -333,7 +327,7 @@ def handle_successful_payment(
     pack = get_pack(pack_id or "")
     try:
         total_amount = int(str(payment.get("total_amount")))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         total_amount = -1
 
     if (
@@ -345,7 +339,7 @@ def handle_successful_payment(
     ):
         send_message(
             chat_id,
-            "me cayó un pago raro y no lo pude validar, avisale al admin",
+            tr("payment.invalid_received"),
         )
         admin_report(
             "Invalid successful payment payload",
@@ -378,7 +372,7 @@ def handle_successful_payment(
         )
         send_message(
             chat_id,
-            "me entró la guita pero se trabó la acreditación, avisale al admin",
+            tr("payment.credit_error"),
         )
         return "ok"
 
@@ -386,18 +380,15 @@ def handle_successful_payment(
     if result.get("inserted"):
         send_message(
             chat_id,
-            (
-                f"listo, te cargué {format_credits(pack['credits'])} créditos\n"
-                f"ahora te quedaron {format_credits(balance)}\n"
-                "si querés mandarle al grupo: /transfer <monto>"
+            tr(
+                "payment.success",
+                credits=format_credits(pack["credits"]),
+                balance=format_credits(balance),
             ),
         )
     else:
         send_message(
             chat_id,
-            (
-                "ese pago ya estaba cargado, no rompas las bolas\n"
-                f"te quedaron {format_credits(balance)}"
-            ),
+            tr("payment.duplicate", balance=format_credits(balance)),
         )
     return "ok"

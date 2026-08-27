@@ -82,18 +82,13 @@ def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
 def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
     text = build_config_text(CHAT_CONFIG_DEFAULTS)
 
-    assert "2. seguir charla en comandos" in text
-    assert "después de un comando sigo la conversación si me respondés" in text
-    assert (
-        "ignoro respuestas normales a mensajes automáticos con links arreglados" in text
-    )
-    assert "5. goles del mundial" in text
-    assert "grito cada gol en vivo y descanso al equipo rival" in text
-    assert "▫️ desactivado" in text
+    assert "3. seguir charla en comandos" in text
+    assert "sigo la conversación cuando respondés a un comando" in text
+    assert "ignoro respuestas normales a links que arreglé" in text
     assert "6. respuestas random" in text
-    assert "a veces respondo solo en el grupo aunque nadie me llame" in text
+    assert "a veces respondo en el grupo aunque nadie me llame" in text
     assert "7. mensajes gratis por usuario por hora" in text
-    assert "cuantos mensajes de ia paga el grupo por usuario cada hora" in text
+    assert "mensajes de IA que paga el grupo para cada usuario" in text
     assert "\n5\n" in text
     assert "tocá los botones de abajo para cambiar la config" in text
 
@@ -138,12 +133,8 @@ def test_get_chat_config_respects_per_call_repository_override():
     repo_two.is_configured.return_value = True
     repo_two.get_chat_config.return_value = {"link_mode": "off"}
 
-    first = real_get_chat_config(
-        redis_client, "chat-a", chat_config_db_service=repo_one
-    )
-    second = real_get_chat_config(
-        redis_client, "chat-b", chat_config_db_service=repo_two
-    )
+    first = real_get_chat_config(redis_client, "chat-a", chat_config_db_service=repo_one)
+    second = real_get_chat_config(redis_client, "chat-b", chat_config_db_service=repo_two)
 
     assert first["link_mode"] == "reply"
     assert second["link_mode"] == "off"
@@ -181,9 +172,7 @@ def test_is_chat_admin_fetches_and_caches():
         assert is_chat_admin("chat-1", 99) is True
 
     mock_request.assert_called_once()
-    mock_set.assert_called_once_with(
-        redis_client, ANY, CHAT_ADMIN_STATUS_TTL, {"is_admin": True}
-    )
+    mock_set.assert_called_once_with(redis_client, ANY, CHAT_ADMIN_STATUS_TTL, {"is_admin": True})
 
 
 def test_get_bot_message_metadata_decodes_bytes():
@@ -287,7 +276,7 @@ def test_handle_callback_query_topup_sends_invoice():
     ):
         handle_callback_query(callback)
 
-    mock_cfg.assert_not_called()
+    mock_cfg.assert_called_once_with()
     mock_send_invoice.assert_called_once_with(
         chat_id="1",
         user_id=42,
@@ -311,7 +300,7 @@ def test_handle_callback_query_routes_charge_history_buttons():
         handle_callback_query(callback)
 
     mock_charges.assert_called_once_with(callback)
-    mock_cfg.assert_not_called()
+    mock_cfg.assert_called_once_with()
 
 
 def test_handle_msg_blocks_config_for_non_admin_group():
@@ -375,7 +364,7 @@ def test_handle_callback_query_blocks_non_admin():
     mock_answer.assert_called_once_with("cb-1", text=None, show_alert=False)
     mock_send_msg.assert_called_once()
     mock_report.assert_called_once()
-    mock_get_chat_config.assert_not_called()
+    mock_get_chat_config.assert_called_once_with(redis_instance, "456")
     mock_set_chat_config.assert_not_called()
 
 
@@ -471,43 +460,23 @@ def test_build_config_text_and_keyboard_reflect_values():
     text = build_config_text(config)
     assert "config del gordo" in text
     assert "links arreglados" in text
-    assert "borra el mensaje original y repostea el link arreglado" in text
-    assert (
-        "si está activado, a veces respondo solo en el grupo aunque nadie me llame"
-        in text
-    )
-    assert (
-        "si está activado, después de un comando sigo la conversación si me respondés"
-        in text
-    )
-    assert (
-        "si está activado, ignoro respuestas normales a mensajes automáticos con links arreglados"
-        in text
-    )
-    assert "▫️ desactivado" in text
+    assert "borro el original y reposteo el link arreglado" in text
+    assert "a veces respondo en el grupo aunque nadie me llame" in text
+    assert "sigo la conversación cuando respondés a un comando" in text
+    assert "ignoro respuestas normales a links que arreglé" in text
     assert "tocá los botones de abajo para cambiar la config" in text
 
     keyboard = build_config_keyboard(config)
-    assert keyboard["inline_keyboard"][0][1]["text"] == "✅ borrar link"
-    assert keyboard["inline_keyboard"][0][2]["text"] == "▫️ apagado"
-    assert keyboard["inline_keyboard"][4][0]["text"] == "▫️ gritar goles del mundial"
-    assert (
-        keyboard["inline_keyboard"][4][0]["callback_data"]
-        == "cfg:worldcupgoals:toggle"
-    )
+    assert keyboard["inline_keyboard"][1][1]["text"] == "✅ borrar link"
+    assert keyboard["inline_keyboard"][1][2]["text"] == "▫️ apagado"
     assert keyboard["inline_keyboard"][5][0]["text"] == "▫️ me meto en la charla"
-    assert keyboard["inline_keyboard"][1][0]["text"] == "▫️ seguir charla en comandos"
-    assert (
-        keyboard["inline_keyboard"][2][0]["text"]
-        == "✅ ignorar replies a links arreglados"
-    )
+    assert keyboard["inline_keyboard"][2][0]["text"] == "▫️ seguir charla"
+    assert keyboard["inline_keyboard"][3][0]["text"] == "✅ ignorar replies"
     assert keyboard["inline_keyboard"][5][0]["callback_data"] == "cfg:random:toggle"
     assert keyboard["inline_keyboard"][6][0]["text"] == "0"
     assert keyboard["inline_keyboard"][6][1]["text"] == "-"
     assert keyboard["inline_keyboard"][6][2]["text"] == "5"
-    assert (
-        keyboard["inline_keyboard"][6][2]["callback_data"] == "cfg:creditless:current"
-    )
+    assert keyboard["inline_keyboard"][6][2]["callback_data"] == "cfg:creditless:current"
     assert keyboard["inline_keyboard"][6][3]["text"] == "+"
     assert keyboard["inline_keyboard"][6][4]["text"] == "∞"
 
@@ -587,7 +556,9 @@ def test_handle_callback_query_falls_back_when_edit_fails():
             "api.index._chat_config_service.get_chat_config",
             return_value={**updated_config, "link_mode": "off"},
         ) as mock_get,
-        patch("api.index._chat_config_service.set_chat_config", return_value=updated_config) as mock_set,
+        patch(
+            "api.index._chat_config_service.set_chat_config", return_value=updated_config
+        ) as mock_set,
         patch("api.index.build_config_text", return_value="new text") as mock_text,
         patch(
             "api.index.build_config_keyboard", return_value={"inline_keyboard": ["btn"]}
@@ -657,43 +628,6 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
     mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
     mock_send_msg.assert_not_called()
     mock_answer.assert_called_once_with("cbq")
-
-
-def test_handle_callback_query_enables_world_cup_goal_alerts():
-    redis_client = MagicMock()
-    callback = {
-        "id": "cbq",
-        "data": "cfg:worldcupgoals:toggle",
-        "message": {"chat": {"id": 1}, "message_id": 99},
-    }
-    current_config = dict(CHAT_CONFIG_DEFAULTS)
-    updated_config = {**current_config, "world_cup_goal_alerts": True}
-    with (
-        patch("api.index.app_runtime.config.redis", return_value=redis_client),
-        patch(
-            "api.index._chat_config_service.get_chat_config",
-            return_value=current_config,
-        ),
-        patch(
-            "api.index._chat_config_service.set_chat_config",
-            return_value=updated_config,
-        ) as mock_set,
-        patch("api.index.build_config_text", return_value="text"),
-        patch(
-            "api.index.build_config_keyboard",
-            return_value={"inline_keyboard": []},
-        ),
-        patch("api.index.edit_message", return_value=True),
-        patch("api.index.app_runtime.telegram.send_message"),
-        patch("api.index._answer_callback_query"),
-    ):
-        handle_callback_query(callback)
-
-    mock_set.assert_called_once_with(
-        redis_client,
-        "1",
-        world_cup_goal_alerts=True,
-    )
 
 
 def test_save_and_get_bot_message_metadata():
@@ -819,9 +753,7 @@ class TestTimezoneConfig:
         keyboard = build_config_keyboard(config)
         rows = keyboard["inline_keyboard"]
 
-        tz_row = next(
-            r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r)
-        )
+        tz_row = next(r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r))
         assert any("🌍" in btn["text"] for btn in tz_row)
         assert any("UTC" in btn["text"] for btn in tz_row)
         assert any("UTC-3" in btn["text"] for btn in tz_row)
@@ -837,9 +769,7 @@ class TestTimezoneConfig:
         keyboard = build_config_keyboard(config)
 
         rows = keyboard["inline_keyboard"]
-        tz_row = next(
-            r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r)
-        )
+        tz_row = next(r for r in rows if any("cfg:timezone:" in btn["callback_data"] for btn in r))
         utc3_btn = next(b for b in tz_row if "UTC-3" in b["text"])
         assert "🌍" in utc3_btn["text"]
 

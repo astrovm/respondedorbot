@@ -37,6 +37,7 @@ from api.admin.service import AdminService
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
 from api.core.logging import get_logger
+from api.core.i18n import tr
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.services.tcrm import (
@@ -1322,7 +1323,7 @@ def format_bcra_variables(
     """Format BCRA variables for display (robust to naming changes)."""
 
     if not variables:
-        return "No se pudieron obtener las variables del BCRA"
+        return tr("bcra.none")
 
     get_bands = band_fetcher or get_currency_band_limits
     get_itcrm = itcrm_getter or get_latest_itcrm_value_and_date

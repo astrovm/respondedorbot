@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from PIL import Image, ImageDraw, ImageFont
 
+from api.core.i18n import tr
 from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 
@@ -148,7 +149,9 @@ def _info_mapping(pair: Mapping[str, Any]) -> Mapping[str, Any]:
     return info if isinstance(info, Mapping) else {}
 
 
-def _extract_token_image_url(pair: Mapping[str, Any], pump: Optional[Mapping[str, Any]]) -> Optional[str]:
+def _extract_token_image_url(
+    pair: Mapping[str, Any], pump: Optional[Mapping[str, Any]]
+) -> Optional[str]:
     if pump:
         image_uri = pump.get("image_uri")
         if isinstance(image_uri, str) and image_uri:
@@ -219,7 +222,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         if value is None:
             return default
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -276,8 +279,7 @@ def choose_symbol_pair(
     exact = [
         pair
         for pair in supported
-        if str((pair.get("baseToken") or {}).get("symbol") or "").lower()
-        == normalized
+        if str((pair.get("baseToken") or {}).get("symbol") or "").lower() == normalized
     ]
     return choose_best_pair(exact or supported)
 
@@ -628,11 +630,7 @@ def format_signal_caption(signal: TokenSignal) -> str:
     ath_line = "?"
     if ath_value > 0:
         drawdown_base = current_market_cap if current_market_cap > 0 else current_price
-        drawdown = (
-            ((drawdown_base - ath_value) / ath_value) * 100
-            if drawdown_base
-            else 0
-        )
+        drawdown = ((drawdown_base - ath_value) / ath_value) * 100 if drawdown_base else 0
         age_days = ""
         if ath_ts:
             age = max(0, int(time.time() - ath_ts))
@@ -681,8 +679,12 @@ def format_signal_caption(signal: TokenSignal) -> str:
 
 def _font(size: int, bold: bool = False) -> Any:
     paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ]
     for path in paths:
         try:
@@ -710,7 +712,9 @@ def render_signal_chart(signal: TokenSignal, *, width: int = 1280, height: int =
     candles = [c for c in signal.candles if len(c) >= 5]
     candles = list(reversed(candles)) if candles and candles[0][0] > candles[-1][0] else candles
     if not candles:
-        draw.text((width // 2 - 120, height // 2), "no chart data", fill="#8da1b6", font=_font(32, True))
+        draw.text(
+            (width // 2 - 120, height // 2), "no chart data", fill="#8da1b6", font=_font(32, True)
+        )
     else:
         highs = [_as_float(c[2]) for c in candles]
         lows = [_as_float(c[3]) for c in candles]
@@ -747,7 +751,9 @@ def render_signal_chart(signal: TokenSignal, *, width: int = 1280, height: int =
 
         current = _as_float(pair.get("priceUsd")) or _as_float(candles[-1][4])
         current_y = y_for(current)
-        draw.line((margin_left, current_y, width - margin_right, current_y), fill="#00b894", width=1)
+        draw.line(
+            (margin_left, current_y, width - margin_right, current_y), fill="#00b894", width=1
+        )
         label_font = _font(18, True)
         label_bbox = draw.textbbox((0, 0), price, font=label_font)
         label_width = label_bbox[2] - label_bbox[0]
@@ -758,9 +764,18 @@ def render_signal_chart(signal: TokenSignal, *, width: int = 1280, height: int =
         ath_value, _ath_ts = _ath(candles)
         if ath_value:
             ath_y = y_for(ath_value)
-            draw.text((width - margin_right - 170, max(margin_top, ath_y - 28)), f"{_fmt_money(ath_value, price=True)} ATH", fill="#36e0c3", font=_font(20, True))
+            draw.text(
+                (width - margin_right - 170, max(margin_top, ath_y - 28)),
+                f"{_fmt_money(ath_value, price=True)} ATH",
+                fill="#36e0c3",
+                font=_font(20, True),
+            )
 
-    draw.rectangle((margin_left, margin_top, width - margin_right, height - margin_bottom), outline="#2a3442", width=2)
+    draw.rectangle(
+        (margin_left, margin_top, width - margin_right, height - margin_bottom),
+        outline="#2a3442",
+        width=2,
+    )
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
@@ -810,7 +825,9 @@ def render_or_fetch_signal_photo(signal: TokenSignal) -> bytes:
     return render_signal_chart(signal)
 
 
-def build_signal_keyboard(signal_id: str, token: TokenAddress, pair: Mapping[str, Any]) -> Dict[str, Any]:
+def build_signal_keyboard(
+    signal_id: str, token: TokenAddress, pair: Mapping[str, Any]
+) -> Dict[str, Any]:
     ds_url = str(pair.get("url") or _defined_url(token))
     return {
         "inline_keyboard": [
@@ -919,12 +936,12 @@ def handle_token_signal_callback(
     if not allowed and chat_type in {"group", "supergroup"}:
         allowed = bool(is_chat_admin(chat_id, user_id, redis_client=redis_client))
     if not allowed:
-        answer_callback_query(callback_id, text="solo quien lo pidió o admin", show_alert=True)
+        answer_callback_query(callback_id, text=tr("signal.owner_only"), show_alert=True)
         return True
 
     if action == "del":
         delete_msg(chat_id, message_id)
-        answer_callback_query(callback_id, text="borrado")
+        answer_callback_query(callback_id, text=tr("signal.deleted"))
         return True
     if action != "ref":
         answer_callback_query(callback_id)
@@ -937,7 +954,7 @@ def handle_token_signal_callback(
         if elapsed < SIGNAL_REFRESH_COOLDOWN_SECONDS:
             answer_callback_query(
                 callback_id,
-                text="❌ Podés actualizar cada 15s",
+                text=tr("signal.cooldown"),
                 show_alert=True,
             )
             return True
@@ -951,7 +968,7 @@ def handle_token_signal_callback(
     try:
         signal = fetch_signal(redis_client, token)
         if signal is None:
-            answer_callback_query(callback_id, text="sin datos", show_alert=True)
+            answer_callback_query(callback_id, text=tr("signal.no_data"), show_alert=True)
             return True
         edited = edit_photo(
             chat_id,
@@ -961,14 +978,16 @@ def handle_token_signal_callback(
             reply_markup=build_signal_keyboard(signal_id, token, signal.pair),
         )
         if not edited:
-            answer_callback_query(callback_id, text="falló refresh", show_alert=True)
+            answer_callback_query(callback_id, text=tr("signal.refresh_failed"), show_alert=True)
             return True
         new_state = dict(state)
         new_state["last_refresh_at"] = now
         redis_setex_json(redis_client, signal_state_key(signal_id), SIGNAL_STATE_TTL, new_state)
-        answer_callback_query(callback_id, text="refrescado")
+        answer_callback_query(callback_id, text=tr("signal.refreshed"))
         return True
     except Exception as error:
-        admin_report("token signal refresh failed", error, {"chat_id": chat_id, "signal_id": signal_id})
-        answer_callback_query(callback_id, text="falló refresh", show_alert=True)
+        admin_report(
+            "token signal refresh failed", error, {"chat_id": chat_id, "signal_id": signal_id}
+        )
+        answer_callback_query(callback_id, text=tr("signal.refresh_failed"), show_alert=True)
         return True

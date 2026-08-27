@@ -25,6 +25,14 @@ from api.admin.commands import (
 from api.billing.ai import AIMessageBilling
 from api.ai.pricing import estimate_transcribe_reserve_credits
 from api.core.constants import BILLING_UNAVAILABLE_MESSAGE, PROMPT_NO_MARKDOWN
+from api.core.i18n import (
+    Locale,
+    current_locale,
+    normalize_locale,
+    resolve_locale,
+    tr,
+    use_locale,
+)
 from api.ai.service import AIConversationRequest, AIService, SummaryCommandRequest
 from api.bot.chat_context import format_user_identity, is_group_chat_type
 from api.billing.commands import (
@@ -63,10 +71,7 @@ def _reserve_media_credits(
     )
     if media_charge_error:
         return None, media_charge_error
-    if (
-        not deps.check_provider_available(scope=scope)
-        and not deps.has_openrouter_fallback()
-    ):
+    if not deps.check_provider_available(scope=scope) and not deps.has_openrouter_fallback():
         billing_helper.refund_reserved_ai_credits(
             media_charge_meta, reason=f"{reason}_provider_unavailable"
         )
@@ -87,9 +92,7 @@ def _adjust_media_reservation(
 ) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
     if required_credits <= reserved_credits:
         return reservation, None
-    billing_helper.refund_reserved_ai_credits(
-        reservation, reason=f"{reason}_reserve_adjustment"
-    )
+    billing_helper.refund_reserved_ai_credits(reservation, reason=f"{reason}_reserve_adjustment")
     return _reserve_media_credits(
         deps,
         billing_helper,
@@ -110,9 +113,7 @@ def _settle_media_result(
     refund_reason: str,
 ) -> None:
     if media_charge_meta and not success:
-        billing_helper.refund_reserved_ai_credits(
-            media_charge_meta, reason=refund_reason
-        )
+        billing_helper.refund_reserved_ai_credits(media_charge_meta, reason=refund_reason)
     else:
         billing_helper.settle_reserved_ai_credits_batch(
             [media_charge_meta] if media_charge_meta else [],
@@ -132,9 +133,7 @@ def _media_reserve_error_response(
     if not reserve_error:
         return None
     if reserve_error == "rate_limited":
-        chat_id = str(
-            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
-        )
+        chat_id = str(cast(Mapping[str, Any], message.get("chat") or {}).get("id") or "")
         reserve_error = deps.handle_rate_limit(chat_id, dict(message))
     return replace(
         prepared,
@@ -149,6 +148,7 @@ class MessageChatDeps:
     get_chat_config: Callable[[Any, str], Dict[str, Any]]
     extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
     extract_numeric_chat_id: Callable[[str], Optional[int]]
+    set_chat_config: Callable[..., Dict[str, Any]] = lambda *_args, **_kwargs: {}
 
 
 @dataclass(frozen=True)
@@ -203,9 +203,7 @@ class MessageAIDeps:
     build_insufficient_credits_message: Callable[..., str]
     build_topup_keyboard: Callable[[], Dict[str, Any]]
     credits_db_service: Any
-    maybe_grant_onboarding_credits: Callable[
-        [Any, Callable[..., None], Optional[int]], None
-    ]
+    maybe_grant_onboarding_credits: Callable[[Any, Callable[..., None], Optional[int]], None]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
     handle_transcribe_with_message_result: Callable[
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
@@ -220,8 +218,8 @@ class MessageAIDeps:
     handle_transcribe: Callable[[], str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
-    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = (
-        lambda _usage_tag: None
+    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = lambda _usage_tag: (
+        None
     )
     persist_reservation: Callable[[str, Mapping[str, Any]], None] = (
         lambda _usage_tag, _reservation: None
@@ -231,9 +229,7 @@ class MessageAIDeps:
 
 @dataclass(frozen=True)
 class MessageMediaDeps:
-    extract_message_content: Callable[
-        [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
-    ]
+    extract_message_content: Callable[[Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]]
     _transcribe_audio_file: Callable[
         ..., Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]
     ]
@@ -242,6 +238,7 @@ class MessageMediaDeps:
     measure_audio_duration_seconds: Callable[[bytes], Optional[float]]
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
+
 
 @dataclass(frozen=True)
 class MessageHandlerDeps:
@@ -252,9 +249,7 @@ class MessageHandlerDeps:
     should_auto_process_media: Callable[
         [Mapping[str, CommandTuple], str, str, Mapping[str, Any]], bool
     ]
-    extract_message_content: Callable[
-        [Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]
-    ]
+    extract_message_content: Callable[[Dict[str, Any]], Tuple[str, Optional[str], Optional[str]]]
     link_service: LinkServiceProtocol
     send_msg: Callable[..., Optional[int]]
     send_animation: Callable[..., Optional[int]]
@@ -289,9 +284,7 @@ class MessageHandlerDeps:
     is_group_chat_type: Callable[[Optional[str]], bool]
     extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
     extract_numeric_chat_id: Callable[[str], Optional[int]]
-    maybe_grant_onboarding_credits: Callable[
-        [Any, Callable[..., None], Optional[int]], None
-    ]
+    maybe_grant_onboarding_credits: Callable[[Any, Callable[..., None], Optional[int]], None]
     handle_transcribe_with_message: Callable[[Dict[str, Any]], str]
     handle_transcribe_with_message_result: Callable[
         [Dict[str, Any]], Tuple[str, List[Dict[str, Any]]]
@@ -315,13 +308,14 @@ class MessageHandlerDeps:
     measure_audio_duration_seconds: Callable[[bytes], Optional[float]]
     resize_image_if_needed: Callable[[bytes], bytes]
     encode_image_to_base64: Callable[[bytes], str]
-    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = (
-        lambda _usage_tag: None
+    load_persisted_reservation: Callable[[str], Optional[Mapping[str, Any]]] = lambda _usage_tag: (
+        None
     )
     persist_reservation: Callable[[str, Mapping[str, Any]], None] = (
         lambda _usage_tag, _reservation: None
     )
     clear_persisted_reservation: Callable[[str], None] = lambda _usage_tag: None
+    set_chat_config: Callable[..., Dict[str, Any]] = lambda *_args, **_kwargs: {}
 
 
 def build_message_handler_deps(
@@ -387,6 +381,7 @@ def build_message_handler_deps(
         persist_reservation=ai.persist_reservation,
         clear_persisted_reservation=ai.clear_persisted_reservation,
         ai_service=ai.ai_service,
+        set_chat_config=chat.set_chat_config,
     )
 
 
@@ -419,6 +414,7 @@ class MessageRuntime:
     bot_name: str
     billing_helper: AIMessageBilling
     prepared_message: PreparedMessage
+    locale: Locale = "es"
     auto_process_media: bool = False
 
 
@@ -498,39 +494,43 @@ def _initialize_message_runtime(
 ) -> MessageRuntime:
     redis_client = deps.config_redis()
     chat_config = deps.get_chat_config(redis_client, context.chat_id)
-    commands = deps.initialize_commands()
-    bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-    raw_message_text, photo_file_id, audio_file_id = _probe_message_content(
-        message, deps=deps
-    )
-    command, _ = deps.parse_command(raw_message_text, bot_name)
-    auto_process_media = deps.should_auto_process_media(
-        commands,
-        command,
-        raw_message_text,
-        message,
-    )
-    billing_helper = _build_billing_helper(
-        deps,
-        chat_id=context.chat_id,
+    locale = resolve_locale(
+        chat_config.get("language"),
+        telegram_language_code=(message.get("from") or {}).get("language_code"),
         chat_type=context.chat_type,
-        user_id=context.user_id,
-        numeric_chat_id=context.numeric_chat_id,
-        command=command,
-        message=message,
-        redis_client=redis_client,
-        creditless_user_hourly_limit=int(
-            chat_config.get(
-                "creditless_user_hourly_limit",
-                chat_config.get("creditless_user_daily_limit", 0),
-            )
-        ),
     )
-    prepared_message = PreparedMessage(
-        message_text=raw_message_text,
-        photo_file_id=photo_file_id,
-        audio_file_id=audio_file_id,
-    )
+    with use_locale(locale):
+        commands = deps.initialize_commands()
+        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+        raw_message_text, photo_file_id, audio_file_id = _probe_message_content(message, deps=deps)
+        command, _ = deps.parse_command(raw_message_text, bot_name)
+        auto_process_media = deps.should_auto_process_media(
+            commands,
+            command,
+            raw_message_text,
+            message,
+        )
+        billing_helper = _build_billing_helper(
+            deps,
+            chat_id=context.chat_id,
+            chat_type=context.chat_type,
+            user_id=context.user_id,
+            numeric_chat_id=context.numeric_chat_id,
+            command=command,
+            message=message,
+            redis_client=redis_client,
+            creditless_user_hourly_limit=int(
+                chat_config.get(
+                    "creditless_user_hourly_limit",
+                    chat_config.get("creditless_user_daily_limit", 0),
+                )
+            ),
+        )
+        prepared_message = PreparedMessage(
+            message_text=raw_message_text,
+            photo_file_id=photo_file_id,
+            audio_file_id=audio_file_id,
+        )
     return MessageRuntime(
         redis_client=redis_client,
         chat_config=chat_config,
@@ -538,6 +538,7 @@ def _initialize_message_runtime(
         bot_name=bot_name,
         billing_helper=billing_helper,
         prepared_message=prepared_message,
+        locale=locale,
         auto_process_media=auto_process_media,
     )
 
@@ -569,9 +570,7 @@ def _finalize_message_response(
     )
 
     if response_uses_ai:
-        actual_streamed_message_id, actual_streamed_response_text = (
-            extract_stream_metadata()
-        )
+        actual_streamed_message_id, actual_streamed_response_text = extract_stream_metadata()
         if actual_streamed_message_id:
             deps.save_message_to_redis(
                 context.chat_id,
@@ -704,7 +703,8 @@ def _store_user_message_if_present(
         username=str(sender.get("username") or ""),
         reply_to_message_id=(
             str(reply_to_message.get("message_id"))
-            if isinstance(reply_to_message, Mapping) and reply_to_message.get("message_id") is not None
+            if isinstance(reply_to_message, Mapping)
+            and reply_to_message.get("message_id") is not None
             else None
         ),
         mentions_bot=("@" in message_text or message_text.startswith("/")),
@@ -738,9 +738,7 @@ def _send_response_and_store_metadata(
         message_id,
         reply_markup=response_markup,
     )
-    key = (
-        f"bot_{sent_message_id}" if sent_message_id is not None else f"bot_{message_id}"
-    )
+    key = f"bot_{sent_message_id}" if sent_message_id is not None else f"bot_{message_id}"
     deps.save_message_to_redis(
         chat_id,
         key,
@@ -950,10 +948,10 @@ def _process_audio_media(
     message_text = transcription or (
         deps._transcription_error_message(
             error,
-            download_message="no pude bajar tu audio, mandalo de vuelta",
-            transcribe_message="mandame texto que no soy alexa, boludo",
+            download_message=tr("media.auto_audio_download"),
+            transcribe_message=tr("media.auto_audio_text"),
         )
-        or "mandame texto que no soy alexa, boludo"
+        or tr("media.auto_audio_text")
     )
     return replace(
         prepared,
@@ -972,7 +970,7 @@ def _process_photo_media(
     if not prepared.photo_file_id:
         return prepared
 
-    image_prompt = "Describe what you see in this image in detail."
+    image_prompt = tr("media.photo_prompt")
     media_charge_meta, reserve_error = _reserve_media_credits(
         deps,
         billing_helper,
@@ -982,9 +980,7 @@ def _process_photo_media(
         metadata={"photo_file_id": prepared.photo_file_id},
     )
     if reserve_error == "rate_limited":
-        chat_id = str(
-            cast(Mapping[str, Any], message.get("chat") or {}).get("id") or ""
-        )
+        chat_id = str(cast(Mapping[str, Any], message.get("chat") or {}).get("id") or "")
         return replace(
             prepared,
             early_response=deps.handle_rate_limit(chat_id, message),
@@ -994,9 +990,7 @@ def _process_photo_media(
 
     try:
         image_data = deps.download_telegram_file(prepared.photo_file_id)
-        resized_image = (
-            deps.resize_image_if_needed(image_data) if image_data else None
-        )
+        resized_image = deps.resize_image_if_needed(image_data) if image_data else None
     except Exception:
         billing_helper.refund_reserved_ai_credits(
             media_charge_meta, reason="image_context_preparation_failed"
@@ -1006,7 +1000,7 @@ def _process_photo_media(
     if resized_image:
         return replace(
             prepared,
-            message_text=prepared.message_text or "que onda con esta foto",
+            message_text=prepared.message_text or tr("media.photo_default"),
             resized_image_data=resized_image,
             image_charge_meta=media_charge_meta,
         )
@@ -1018,8 +1012,8 @@ def _process_photo_media(
         return prepared
     return replace(
         prepared,
-        message_text="no pude ver tu foto, boludo",
-        early_response="no pude ver tu foto, boludo",
+        message_text=tr("media.photo_unavailable"),
+        early_response=tr("media.photo_unavailable"),
     )
 
 
@@ -1061,7 +1055,7 @@ def _extract_audio_duration_seconds(message: Mapping[str, Any]) -> float:
             if isinstance(media, Mapping):
                 try:
                     return max(0.0, float(media.get("duration") or 0.0))
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     return 0.0
     return 0.0
 
@@ -1128,9 +1122,7 @@ def _should_bypass_link_replacement(
     if command in commands:
         return True
 
-    return _is_reply_to_bot(message) and not _is_plain_replaceable_link_message(
-        message_text
-    )
+    return _is_reply_to_bot(message) and not _is_plain_replaceable_link_message(message_text)
 
 
 def _is_plain_replaceable_link_message(message_text: str) -> bool:
@@ -1183,9 +1175,7 @@ def _save_replied_message_context(
 
     reply_text = deps.extract_message_content(cast(Dict[str, Any], reply_msg))[0]
     reply_id = str(reply_msg["message_id"])
-    is_bot = reply_msg.get("from", {}).get("username", "") == environ.get(
-        "TELEGRAM_USERNAME"
-    )
+    is_bot = reply_msg.get("from", {}).get("username", "") == environ.get("TELEGRAM_USERNAME")
 
     if not reply_text:
         return
@@ -1194,9 +1184,7 @@ def _save_replied_message_context(
         deps.save_message_to_redis(chat_id, f"bot_{reply_id}", reply_text, redis_client)
         return
 
-    formatted_reply = deps.format_user_message(
-        cast(Dict[str, Any], reply_msg), reply_text, None
-    )
+    formatted_reply = deps.format_user_message(cast(Dict[str, Any], reply_msg), reply_text, None)
     deps.save_message_to_redis(chat_id, reply_id, formatted_reply, redis_client)
 
 
@@ -1209,7 +1197,7 @@ def _handle_config_command(
     message: Dict[str, Any],
     redis_client: Any,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]:
-    if command != "/config":
+    if command not in {"/config", "/configs", "/settings"}:
         return None, None, False, None
 
     if deps.is_group_chat_type(chat_type) and not deps.is_chat_admin(
@@ -1217,8 +1205,11 @@ def _handle_config_command(
         message.get("from", {}).get("id"),
         redis_client=redis_client,
     ):
-        from api.core.constants import ADMIN_CONFIG_DENIAL_MESSAGE
-        deps.send_msg(chat_id, ADMIN_CONFIG_DENIAL_MESSAGE, str(message.get("message_id")))
+        deps.send_msg(
+            chat_id,
+            tr("config.admin_only"),
+            str(message.get("message_id")),
+        )
         deps.report_unauthorized_config_attempt(
             chat_id,
             message.get("from", {}),
@@ -1229,6 +1220,64 @@ def _handle_config_command(
 
     response_msg, response_markup = deps.handle_config_command(chat_id, chat_type)
     return response_msg, response_markup, False, command
+
+
+def _handle_language_command(
+    deps: MessageHandlerDeps,
+    *,
+    command: str,
+    sanitized_message_text: str,
+    chat_id: str,
+    chat_type: str,
+    message: Dict[str, Any],
+    redis_client: Any,
+) -> CommandResponse:
+    if command not in {"/language", "/idioma"}:
+        return None, None, False, None
+    if deps.is_group_chat_type(chat_type) and not deps.is_chat_admin(
+        chat_id,
+        message.get("from", {}).get("id"),
+        redis_client=redis_client,
+    ):
+        deps.send_msg(chat_id, tr("config.admin_only"), str(message.get("message_id")))
+        deps.report_unauthorized_config_attempt(
+            chat_id,
+            message.get("from", {}),
+            chat_type=chat_type,
+            action=f"command:{command}",
+        )
+        return "ok", None, False, None
+
+    requested = sanitized_message_text.strip().lower()
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": tr("config.button.language_es"),
+                    "callback_data": "cfg:language:es",
+                },
+                {
+                    "text": tr("config.button.language_en"),
+                    "callback_data": "cfg:language:en",
+                },
+            ]
+        ]
+    }
+    config = deps.get_chat_config(redis_client, chat_id)
+    if not requested:
+        configured = str(config.get("language") or "auto")
+        locale = (
+            normalize_locale(configured)
+            if configured in {"es", "en"}
+            else current_locale()
+        )
+        language = tr(f"config.language.{locale}", locale=locale)
+        return tr("language.current", locale=locale, language=language), keyboard, False, command
+    if requested not in {"es", "en"}:
+        return tr("language.usage"), keyboard, False, command
+    updated = deps.set_chat_config(redis_client, chat_id, language=requested)
+    locale = normalize_locale(updated.get("language"))
+    return tr("language.changed", locale=locale), keyboard, False, command
 
 
 def _handle_topup_command(
@@ -1247,13 +1296,13 @@ def _handle_topup_command(
     if chat_type != "private":
         bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip("@")
         response_msg = (
-            f"la recarga va por privado, boludo.\nabrime en @{bot_username}"
+            tr("topup.private_only", username=bot_username)
             if bot_username
-            else "la recarga va por privado, abrime en dm"
+            else tr("topup.private_only_no_username")
         )
         return response_msg, None, False, command
 
-    return "elegí cuánto querés cargar:", deps.build_topup_keyboard(), False, command
+    return tr("topup.choose"), deps.build_topup_keyboard(), False, command
 
 
 def _handle_balance_command(
@@ -1309,7 +1358,6 @@ def _handle_admin_printcredits_command(
         chat_id=chat_id,
         user_id=user_id,
     )
-
 
 
 def _handle_admin_creditlog_command(
@@ -1441,12 +1489,8 @@ def _handle_transcribe_command(
         if not audio_file_id and isinstance(audio, Mapping):
             audio_file_id = str(audio.get("file_id") or "") or None
         audio_duration_seconds = _extract_audio_duration_seconds(message)
-        admission_duration = (
-            audio_duration_seconds or UNKNOWN_AUDIO_ADMISSION_SECONDS
-        )
-        reserve_credits = estimate_transcribe_reserve_credits(
-            admission_duration
-        )
+        admission_duration = audio_duration_seconds or UNKNOWN_AUDIO_ADMISSION_SECONDS
+        reserve_credits = estimate_transcribe_reserve_credits(admission_duration)
     else:
         reserve_credits = deps.estimate_image_context_reserve_credits(
             b"",
@@ -1477,9 +1521,7 @@ def _handle_transcribe_command(
             )
             return "ok", None, False, None
         audio_duration_seconds = resolved_duration
-        required_credits = estimate_transcribe_reserve_credits(
-            audio_duration_seconds
-        )
+        required_credits = estimate_transcribe_reserve_credits(audio_duration_seconds)
         media_charge_meta, media_charge_error = _adjust_media_reservation(
             deps,
             billing_helper,
@@ -1495,14 +1537,13 @@ def _handle_transcribe_command(
         if media_charge_error:
             return media_charge_error, None, False, command
 
-    response_msg, billing_segments = deps.handle_transcribe_with_message_result(
-        message
+    response_msg, billing_segments = deps.handle_transcribe_with_message_result(message)
+    transcribe_succeeded = bool(billing_segments) or billing_helper.is_transcribe_success_response(
+        response_msg
     )
-    transcribe_succeeded = bool(
-        billing_segments
-    ) or billing_helper.is_transcribe_success_response(response_msg)
     _settle_media_result(
-        billing_helper, media_charge_meta,
+        billing_helper,
+        media_charge_meta,
         cast(List[Mapping[str, Any]], billing_segments),
         transcribe_succeeded,
         settle_reason="transcribe_command_success",
@@ -1570,21 +1611,14 @@ def _handle_non_ai_command(
             handler_func=handler_func,
         )
 
-    if command in ("/mundial", "/worldcup"):
-        response_msg = handler_func(
-            timezone_offset=context.timezone_offset,
-            team_query=context.sanitized_message_text,
-        )
-    elif takes_params:
+    if takes_params:
         response_msg = handler_func(context.sanitized_message_text)
     else:
         response_msg = handler_func()
     return response_msg, None, False, command
 
 
-def _dispatch_config(
-    deps: MessageHandlerDeps, context: CommandDispatchContext
-) -> CommandResponse:
+def _dispatch_config(deps: MessageHandlerDeps, context: CommandDispatchContext) -> CommandResponse:
     return _handle_config_command(
         deps,
         command=context.command,
@@ -1595,9 +1629,21 @@ def _dispatch_config(
     )
 
 
-def _dispatch_topup(
+def _dispatch_language(
     deps: MessageHandlerDeps, context: CommandDispatchContext
 ) -> CommandResponse:
+    return _handle_language_command(
+        deps,
+        command=context.command,
+        sanitized_message_text=context.sanitized_message_text,
+        chat_id=context.chat_id,
+        chat_type=context.chat_type,
+        message=context.message,
+        redis_client=context.redis_client,
+    )
+
+
+def _dispatch_topup(deps: MessageHandlerDeps, context: CommandDispatchContext) -> CommandResponse:
     return _handle_topup_command(
         deps,
         command=context.command,
@@ -1605,9 +1651,7 @@ def _dispatch_topup(
     )
 
 
-def _dispatch_balance(
-    deps: MessageHandlerDeps, context: CommandDispatchContext
-) -> CommandResponse:
+def _dispatch_balance(deps: MessageHandlerDeps, context: CommandDispatchContext) -> CommandResponse:
     return _handle_balance_command(
         deps,
         command=context.command,
@@ -1632,9 +1676,7 @@ def _dispatch_transfer(
     )
 
 
-def _dispatch_charges(
-    deps: MessageHandlerDeps, context: CommandDispatchContext
-) -> CommandResponse:
+def _dispatch_charges(deps: MessageHandlerDeps, context: CommandDispatchContext) -> CommandResponse:
     return _handle_charges_command(
         deps,
         command=context.command,
@@ -1674,6 +1716,10 @@ _DIRECT_COMMAND_HANDLERS: Dict[
     Callable[[MessageHandlerDeps, CommandDispatchContext], CommandResponse],
 ] = {
     "/config": _dispatch_config,
+    "/configs": _dispatch_config,
+    "/settings": _dispatch_config,
+    "/language": _dispatch_language,
+    "/idioma": _dispatch_language,
     "/topup": _dispatch_topup,
     "/balance": _dispatch_balance,
     "/charges": _dispatch_charges,
@@ -1710,11 +1756,9 @@ def _handle_known_command(
                         response_msg = result
                     return response_msg, response_markup, False, response_command
 
-                required_credits, _reserve_meta = (
-                    deps.estimate_ai_base_reserve_credits(
-                        messages=build_task_messages(prompt_text),
-                        timezone_offset=context.timezone_offset,
-                    )
+                required_credits, _reserve_meta = deps.estimate_ai_base_reserve_credits(
+                    messages=build_task_messages(prompt_text),
+                    timezone_offset=context.timezone_offset,
                 )
                 credit_error = task_credit_precondition_error(
                     credits_db_service=deps.credits_db_service,
@@ -1723,10 +1767,7 @@ def _handle_known_command(
                 )
                 if credit_error:
                     return credit_error, response_markup, False, response_command
-                prompt_text = (
-                    "creá una tarea programada para esta solicitud usando la "
-                    f"herramienta task_set: {prompt_text}"
-                )
+                prompt_text = tr("task.create_prompt", text=prompt_text)
 
             response_msg, response_uses_ai = _run_ai_flow(
                 deps,
@@ -1781,9 +1822,7 @@ def _is_spontaneous_ai_message(context: CommandDispatchContext) -> bool:
     return True
 
 
-def _route_uses_ai(
-    commands: Mapping[str, CommandTuple], command: str
-) -> bool:
+def _route_uses_ai(commands: Mapping[str, CommandTuple], command: str) -> bool:
     if command in _DIRECT_COMMAND_HANDLERS:
         return False
     if command in commands:
@@ -1798,9 +1837,7 @@ def _initialize_incoming_message(
     context = _build_message_context(message, deps)
     if context is None:
         return "ok"
-    if isinstance(message.get("successful_payment"), Mapping):
-        return deps.handle_successful_payment_message(message)
-    return InitializedMessage(
+    initialized = InitializedMessage(
         context=context,
         runtime=_initialize_message_runtime(
             deps,
@@ -1808,6 +1845,10 @@ def _initialize_incoming_message(
             message=message,
         ),
     )
+    if isinstance(message.get("successful_payment"), Mapping):
+        with use_locale(initialized.runtime.locale):
+            return deps.handle_successful_payment_message(message)
+    return initialized
 
 
 def _handle_message_links(
@@ -1883,8 +1924,7 @@ def _dispatch_message_response(
         runtime.prepared_message,
         message=message,
         auto_process_media=(
-            runtime.auto_process_media
-            and _route_uses_ai(runtime.commands, intent.command)
+            runtime.auto_process_media and _route_uses_ai(runtime.commands, intent.command)
         ),
         deps=deps,
         billing_helper=runtime.billing_helper,
@@ -1903,28 +1943,24 @@ def _dispatch_message_response(
         chat_id=context.chat_id,
         redis_client=runtime.redis_client,
     )
-    response_msg, response_markup, response_uses_ai, response_command = (
-        _handle_known_command(
-            deps,
-            CommandDispatchContext(
-                commands=runtime.commands,
-                command=intent.command,
-                sanitized_message_text=intent.sanitized_message_text,
-                message=message,
-                chat_id=context.chat_id,
-                chat_type=context.chat_type,
-                user_id=context.user_id,
-                numeric_chat_id=context.numeric_chat_id,
-                prepared_message=prepared_message,
-                billing_helper=runtime.billing_helper,
-                reply_context_text=intent.reply_context_text,
-                user_identity=context.user_identity,
-                redis_client=runtime.redis_client,
-                timezone_offset=int(
-                    runtime.chat_config.get("timezone_offset", -3)
-                ),
-            ),
-        )
+    response_msg, response_markup, response_uses_ai, response_command = _handle_known_command(
+        deps,
+        CommandDispatchContext(
+            commands=runtime.commands,
+            command=intent.command,
+            sanitized_message_text=intent.sanitized_message_text,
+            message=message,
+            chat_id=context.chat_id,
+            chat_type=context.chat_type,
+            user_id=context.user_id,
+            numeric_chat_id=context.numeric_chat_id,
+            prepared_message=prepared_message,
+            billing_helper=runtime.billing_helper,
+            reply_context_text=intent.reply_context_text,
+            user_identity=context.user_identity,
+            redis_client=runtime.redis_client,
+            timezone_offset=int(runtime.chat_config.get("timezone_offset", -3)),
+        ),
     )
     return _finalize_message_response(
         deps,
@@ -1983,7 +2019,8 @@ def _handle_incoming_message(
     initialized = _initialize_incoming_message(message, deps)
     if isinstance(initialized, str):
         return initialized
-    return _handle_initialized_message(initialized, message, deps)
+    with use_locale(initialized.runtime.locale):
+        return _handle_initialized_message(initialized, message, deps)
 
 
 def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
@@ -2001,7 +2038,7 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
                 "user": message.get("from", {}).get("username", "Unknown"),
             },
         )
-        return "error procesando mensaje"
+        return tr("message.processing_error")
 
 
 __all__ = [

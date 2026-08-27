@@ -149,7 +149,7 @@ def test_get_polymarket_global_elections_requests_and_formats_top_liquidity(
     assert "Candidate C" not in result
     assert "Inactive placeholder" not in result
     assert "Closed candidate" not in result
-    assert "Liquidity US$2.5M | Closes 2027-04-30" in result
+    assert "Liquidez US$2.5M | Cierra 2027-04-30" in result
     assert (
         '<a href="https://polymarket.com/event/higher-election">'
         "🇺🇸 Higher liquidity election</a>"

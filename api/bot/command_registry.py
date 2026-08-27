@@ -21,10 +21,33 @@ class CommandDefinition:
 
 
 COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
-    CommandDefinition(("/ask", "/pregunta", "/che", "/gordo"), "ask_ai", True, True, "te contesto cualquier gilada"),
-    CommandDefinition(("/config",), "config_command", False, False, "tocás la config del gordo y de los links"),
-    CommandDefinition(("/convertbase",), "convert_base", False, True, "te paso números entre bases"),
-    CommandDefinition(("/random",), "select_random", False, True, "elijo por vos entre opciones o números"),
+    CommandDefinition(
+        ("/ask", "/pregunta", "/che", "/gordo"),
+        "ask_ai",
+        True,
+        True,
+        "te contesto cualquier gilada",
+    ),
+    CommandDefinition(
+        ("/config", "/configs", "/settings"),
+        "config_command",
+        False,
+        False,
+        "tocás la config del gordo y de los links",
+    ),
+    CommandDefinition(
+        ("/language", "/idioma"),
+        "language_command",
+        False,
+        True,
+        "cambiás el idioma del bot [es|en]",
+    ),
+    CommandDefinition(
+        ("/convertbase",), "convert_base", False, True, "te paso números entre bases"
+    ),
+    CommandDefinition(
+        ("/random",), "select_random", False, True, "elijo por vos entre opciones o números"
+    ),
     CommandDefinition(
         (
             "/prices",
@@ -52,9 +75,27 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
         True,
         "clima actual [ciudad o ubicación]",
     ),
-    CommandDefinition(("/dolar", "/dollar", "/usd"), "get_dollar_rates", False, True, "cotizaciones del dolar [1h/6h/12h/24h/48h]"),
-    CommandDefinition(("/petroleo", "/oil"), "get_oil_price", False, False, "te paso el precio del Brent y del WTI"),
-    CommandDefinition(("/acciones", "/stocks"), "get_stock_prices", False, True, "precios por símbolo o empresa [aapl tsla]"),
+    CommandDefinition(
+        ("/dolar", "/dollar", "/usd"),
+        "get_dollar_rates",
+        False,
+        True,
+        "cotizaciones del dolar [1h/6h/12h/24h/48h]",
+    ),
+    CommandDefinition(
+        ("/petroleo", "/oil"),
+        "get_oil_price",
+        False,
+        False,
+        "te paso el precio del Brent y del WTI",
+    ),
+    CommandDefinition(
+        ("/acciones", "/stocks"),
+        "get_stock_prices",
+        False,
+        True,
+        "precios por símbolo o empresa [aapl tsla]",
+    ),
     CommandDefinition(
         ("/eleccion", "/elecciones", "/election", "/elections"),
         "get_polymarket_global_elections",
@@ -62,19 +103,52 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
         False,
         "top 10 de elecciones globales en Polymarket por liquidez",
     ),
-    CommandDefinition(("/mundial", "/worldcup"), "get_polymarket_world_cup_games", False, True, "partidos del Mundial [argentina]"),
     CommandDefinition(("/rulo",), "get_rulo", False, False, "te armo los rulos desde el oficial"),
-    CommandDefinition(("/devo",), "get_devo", False, True, "te calculo el arbitraje entre tarjeta y crypto"),
-    CommandDefinition(("/powerlaw",), "powerlaw", False, False, "te tiro el precio justo de btc según power law"),
-    CommandDefinition(("/rainbow",), "rainbow", False, False, "te tiro el precio justo de btc según rainbow chart"),
-    CommandDefinition(("/satoshi", "/sat", "/sats"), "satoshi", False, False, "te digo cuánto vale un satoshi"),
+    CommandDefinition(
+        ("/devo",), "get_devo", False, True, "te calculo el arbitraje entre tarjeta y crypto"
+    ),
+    CommandDefinition(
+        ("/powerlaw",), "powerlaw", False, False, "te tiro el precio justo de btc según power law"
+    ),
+    CommandDefinition(
+        ("/rainbow",), "rainbow", False, False, "te tiro el precio justo de btc según rainbow chart"
+    ),
+    CommandDefinition(
+        ("/satoshi", "/sat", "/sats"), "satoshi", False, False, "te digo cuánto vale un satoshi"
+    ),
     CommandDefinition(("/time",), "get_timestamp", False, False, "timestamp unix actual"),
-    CommandDefinition(("/comando", "/command"), "convert_to_command", False, True, "te lo convierto en comando de telegram"),
-    CommandDefinition(("/instance",), "get_instance_name", False, False, "nombre de esta instancia del bot"),
+    CommandDefinition(
+        ("/comando", "/command"),
+        "convert_to_command",
+        False,
+        True,
+        "te lo convierto en comando de telegram",
+    ),
+    CommandDefinition(
+        ("/instance",), "get_instance_name", False, False, "nombre de esta instancia del bot"
+    ),
     CommandDefinition(("/help",), "get_help", False, False, "te muestro todos los comandos"),
-    CommandDefinition(("/transcribe", "/describe"), "handle_transcribe", False, False, "te transcribo audio o describo imagen"),
-    CommandDefinition(("/bcra", "/variables"), "handle_bcra_variables", False, False, "te tiro las variables económicas del bcra"),
-    CommandDefinition(("/topup",), "topup_command", False, False, "cargás créditos IA con Telegram Stars por privado"),
+    CommandDefinition(
+        ("/transcribe", "/describe"),
+        "handle_transcribe",
+        False,
+        False,
+        "te transcribo audio o describo imagen",
+    ),
+    CommandDefinition(
+        ("/bcra", "/variables"),
+        "handle_bcra_variables",
+        False,
+        False,
+        "te tiro las variables económicas del bcra",
+    ),
+    CommandDefinition(
+        ("/topup",),
+        "topup_command",
+        False,
+        False,
+        "cargás créditos IA con Telegram Stars por privado",
+    ),
     CommandDefinition(("/balance",), "balance_command", False, False, "te muestro tu saldo IA"),
     CommandDefinition(
         ("/charges", "/history", "/gastos"),
@@ -85,7 +159,9 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
     ),
     CommandDefinition(("/printcredits",), "printcredits_command", False, True),
     CommandDefinition(("/creditlog",), "creditlog_command", False, True),
-    CommandDefinition(("/transfer",), "transfer_command", False, True, "le pasás créditos tuyos al grupo"),
+    CommandDefinition(
+        ("/transfer",), "transfer_command", False, True, "le pasás créditos tuyos al grupo"
+    ),
     CommandDefinition(("/gm",), "get_good_morning", False, False, "gif de buenos días"),
     CommandDefinition(("/gn",), "get_good_night", False, False, "gif de buenas noches"),
     CommandDefinition(
@@ -95,7 +171,13 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
         True,
         "creá una tarea con texto o listá las existentes",
     ),
-    CommandDefinition(("/resumen", "/summary", "/tldr"), "summary_command", False, True, "resumí la conversación [enfoque opcional]"),
+    CommandDefinition(
+        ("/resumen", "/summary", "/tldr"),
+        "summary_command",
+        False,
+        True,
+        "resumí la conversación [enfoque opcional]",
+    ),
 )
 
 COMMAND_GROUPS: Tuple[Tuple[Tuple[str, ...], str, bool, bool], ...] = tuple(
@@ -114,6 +196,53 @@ COMMAND_DESCRIPTIONS: Dict[str, str] = {
     if definition.description is not None
     for alias in definition.aliases
 }
+
+_COMMAND_DESCRIPTION_EN_BY_HANDLER: Dict[str, str] = {
+    "ask_ai": "ask me anything",
+    "config_command": "open all bot settings",
+    "language_command": "change the bot language [es|en]",
+    "convert_base": "convert numbers between bases",
+    "select_random": "pick an option or number for you",
+    "get_prices": "crypto prices by symbol [currency] [1h/24h/7d/30d]",
+    "get_weather": "current weather [city or location]",
+    "get_dollar_rates": "dollar exchange rates [1h/6h/12h/24h/48h]",
+    "get_oil_price": "Brent and WTI oil prices",
+    "get_stock_prices": "stock prices by symbol or company [aapl tsla]",
+    "get_polymarket_global_elections": "top global Polymarket elections by liquidity",
+    "get_rulo": "calculate arbitrage from the official exchange rate",
+    "get_devo": "calculate card and crypto arbitrage",
+    "powerlaw": "Bitcoin power-law fair price",
+    "rainbow": "Bitcoin rainbow-chart fair price",
+    "satoshi": "current value of one satoshi",
+    "get_timestamp": "current Unix timestamp",
+    "convert_to_command": "convert text into a Telegram command",
+    "get_instance_name": "name of this bot instance",
+    "get_help": "show all commands",
+    "handle_transcribe": "transcribe audio or describe an image",
+    "handle_bcra_variables": "show BCRA economic variables",
+    "topup_command": "add AI credits with Telegram Stars in private",
+    "balance_command": "show your AI balance",
+    "charges_command": "show what each AI use cost [count]",
+    "transfer_command": "move your credits to the group",
+    "get_good_morning": "random good-morning GIF",
+    "get_good_night": "random good-night GIF",
+    "task_command": "create a task from text or list existing tasks",
+    "summary_command": "summarize the conversation [optional focus]",
+}
+
+
+def command_descriptions(locale: str = "es") -> Dict[str, str]:
+    if locale != "en":
+        return dict(COMMAND_DESCRIPTIONS)
+    return {
+        alias.removeprefix("/"): _COMMAND_DESCRIPTION_EN_BY_HANDLER.get(
+            definition.handler_name,
+            definition.description or definition.handler_name,
+        )
+        for definition in COMMAND_DEFINITIONS
+        if definition.description is not None
+        for alias in definition.aliases
+    }
 
 
 def aliases_for(*handler_names: str) -> Tuple[str, ...]:
@@ -198,8 +327,7 @@ def should_gordo_respond(
     is_command = command in commands
     reply = message.get("reply_to_message") or {}
     is_reply = (
-        isinstance(reply, Mapping)
-        and reply.get("from", {}).get("username", "") == bot_username
+        isinstance(reply, Mapping) and reply.get("from", {}).get("username", "") == bot_username
     )
     ignore_link_fix_followups = bool(chat_config.get("ignore_link_fix_followups", True))
     if not is_command and is_reply and ignore_link_fix_followups:
@@ -227,16 +355,12 @@ def should_gordo_respond(
         trigger_words = ["bot", "assistant"]
 
     if bool(chat_config.get("ai_random_replies", True)):
-        is_trigger = (
-            any(word in message_lower for word in trigger_words)
-            and random.random() < 0.1
-        )
+        is_trigger = any(word in message_lower for word in trigger_words) and random.random() < 0.1
     else:
         is_trigger = False
 
     return is_command or (
-        not command.startswith("/")
-        and (is_trigger or is_private or is_mention or is_reply)
+        not command.startswith("/") and (is_trigger or is_private or is_mention or is_reply)
     )
 
 

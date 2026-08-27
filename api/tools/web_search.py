@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping
 
 import requests
 
+from api.core.i18n import tr
 from api.core.logging import get_logger
 from api.tools.registry import ToolResult, register_tool
 
@@ -64,7 +65,7 @@ def _search_request(query: str, api_key: str) -> requests.Response:
                 json=payload,
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
-        except (requests.ConnectionError, requests.Timeout):
+        except requests.ConnectionError, requests.Timeout:
             if attempt == _MAX_ATTEMPTS - 1:
                 raise
             time.sleep(2**attempt)
@@ -122,8 +123,10 @@ def _parse_search_response(response: requests.Response, query: str) -> ToolResul
     if not response.ok:
         return ToolResult(
             output=(
-                f"Error de búsqueda: Firecrawl respondió HTTP {response.status_code}: "
-                f"{_response_error(response)}"
+                tr(
+                    "tool.search.response",
+                    error=(f"Firecrawl HTTP {response.status_code}: {_response_error(response)}"),
+                )
             ),
             metadata={"status_code": response.status_code},
         )
@@ -131,9 +134,9 @@ def _parse_search_response(response: requests.Response, query: str) -> ToolResul
     try:
         payload = response.json()
     except ValueError:
-        return ToolResult(output="Error de búsqueda: Firecrawl devolvió JSON inválido.")
+        return ToolResult(output=tr("tool.search.invalid_json"))
     if not isinstance(payload, Mapping) or payload.get("success") is not True:
-        return ToolResult(output=f"Error de búsqueda: {_response_error(response)}")
+        return ToolResult(output=tr("tool.search.response", error=_response_error(response)))
 
     results = _extract_results(payload)
     logger.info(
@@ -166,18 +169,18 @@ def _execute_web_search(
 ) -> ToolResult:
     query = _clean_text(params.get("query"), max_chars=500)
     if not query:
-        return ToolResult(output="Error de búsqueda: falta la consulta.")
+        return ToolResult(output=tr("tool.search.missing_query"))
 
     api_key = str(os.environ.get("FIRECRAWL_API_KEY") or "").strip()
     if not api_key:
-        return ToolResult(output="Error de búsqueda: Firecrawl no está configurado.")
+        return ToolResult(output=tr("tool.search.not_configured"))
 
     try:
         response = _search_request(query, api_key)
     except requests.Timeout:
-        return ToolResult(output="Error de búsqueda: Firecrawl agotó el tiempo de espera.")
+        return ToolResult(output=tr("tool.search.timeout"))
     except requests.ConnectionError:
-        return ToolResult(output="Error de búsqueda: no se pudo conectar con Firecrawl.")
+        return ToolResult(output=tr("tool.search.connection"))
     return _parse_search_response(response, query)
 
 

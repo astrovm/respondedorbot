@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from api.ai.pricing import AIUsageResult
+from api.core.i18n import tr
 
 
 def execute_groq_request_with_fallback(
@@ -147,10 +148,9 @@ def describe_image_result(
                 [
                     {
                         "role": "system",
-                        "content": (
-                            "respondé siempre en minúsculas, "
-                            "sin emojis, sin markdown, en lenguaje coloquial "
-                            f"argentino. {no_markdown_prompt}"
+                        "content": tr(
+                            "media.vision_system",
+                            instruction=no_markdown_prompt,
                         ),
                     },
                     {

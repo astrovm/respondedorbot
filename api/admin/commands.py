@@ -6,8 +6,8 @@ from os import environ
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from api.ai.pricing import MODEL_PRICING_USD_MICROS
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.billing.credit_units import format_credit_units, parse_credit_units
+from api.core.i18n import tr
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
 
@@ -27,7 +27,7 @@ def _get_admin_chat_id() -> str:
 def _require_billing(deps: AdminCommandDeps, command: str) -> Optional[CommandResponse]:
     if bool(deps.credits_db_service.is_configured()):
         return None
-    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return tr("billing.unavailable"), None, False, command
 
 
 def handle_admin_printcredits_command(
@@ -43,7 +43,7 @@ def handle_admin_printcredits_command(
 
     admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
+        return tr("admin.only"), None, False, command
 
     billing_required_response = _require_billing(deps, command)
     if billing_required_response is not None:
@@ -52,18 +52,18 @@ def handle_admin_printcredits_command(
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
     amount = parse_credit_units(amount_token)
     if amount is None:
-        return "mandalo bien: /printcredits <monto>", None, False, command
+        return tr("admin.print_usage"), None, False, command
 
     if amount <= 0:
         return (
-            "el monto tiene que ser mayor a 0, no me rompas las bolas",
+            tr("admin.amount_positive"),
             None,
             False,
             command,
         )
 
     if user_id is None:
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+        return tr("admin.print_error"), None, False, command
 
     try:
         mint_result = deps.credits_db_service.mint_user_credits(
@@ -77,12 +77,13 @@ def handle_admin_printcredits_command(
             error,
             {"chat_id": chat_id, "user_id": user_id, "amount": amount},
         )
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+        return tr("admin.print_error"), None, False, command
 
     return (
-        (
-            f"listo, te imprimí {format_credit_units(amount)} créditos\n"
-            f"te quedaron {format_credit_units(mint_result.get('user_balance', 0))}"
+        tr(
+            "admin.print_success",
+            amount=format_credit_units(amount),
+            balance=format_credit_units(mint_result.get("user_balance", 0)),
         ),
         None,
         False,
@@ -92,7 +93,7 @@ def handle_admin_printcredits_command(
 
 def _with_hidden_count(summary: str, total: int, visible: int) -> str:
     hidden = total - visible
-    return f"{summary}, +{hidden} más" if hidden > 0 else summary
+    return tr("admin.more", summary=summary, count=hidden) if hidden > 0 else summary
 
 
 def _summarize_models(items: Sequence[object]) -> str:
@@ -102,7 +103,7 @@ def _summarize_models(items: Sequence[object]) -> str:
             name = str(item.get("model") or "?")
             totals[name] = totals.get(name, 0) + int(item.get("usd_micros") or 0)
     if not totals:
-        return "sin modelos"
+        return tr("admin.no_models")
     ordered = sorted(totals.items(), key=lambda entry: (-entry[1], entry[0]))
     visible = ordered[:5]
     summary = ", ".join(f"{name}={usd}" for name, usd in visible)
@@ -119,7 +120,7 @@ def _summarize_tools(items: Sequence[object]) -> str:
         current["usd_micros"] += int(item.get("usd_micros") or 0)
         current["count"] += int(item.get("count") or 0)
     if not totals:
-        return "sin tools"
+        return tr("admin.no_tools")
     ordered = sorted(
         totals.items(),
         key=lambda entry: (-entry[1]["usd_micros"], -entry[1]["count"], entry[0]),
@@ -223,13 +224,13 @@ def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
 
 
 def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    return ["últimas liquidaciones IA:", *map(_format_creditlog_entry, entries)]
+    return [tr("admin.creditlog_title"), *map(_format_creditlog_entry, entries)]
 
 
 def truncate_creditlog_message(text: str, max_length: int = 3500) -> str:
     if len(text) <= max_length:
         return text
-    suffix = "\n\n[truncado]"
+    suffix = f"\n\n[{tr('admin.truncated')}]"
     return text[: max_length - len(suffix)].rstrip() + suffix
 
 
@@ -246,7 +247,7 @@ def handle_admin_creditlog_command(
 
     admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
+        return tr("admin.only"), None, False, command
 
     billing_required_response = _require_billing(deps, command)
     if billing_required_response is not None:
@@ -258,7 +259,7 @@ def handle_admin_creditlog_command(
         try:
             limit = int(raw_limit.split(" ", 1)[0].strip())
         except (TypeError, ValueError):
-            return "mandalo bien: /creditlog [limite]", None, False, command
+            return tr("admin.creditlog_usage"), None, False, command
     limit = max(1, min(limit, 25))
 
     try:
@@ -269,10 +270,10 @@ def handle_admin_creditlog_command(
             error,
             {"chat_id": chat_id, "user_id": user_id, "limit": limit},
         )
-        return "se trabó leyendo el creditlog, probá de nuevo", None, False, command
+        return tr("admin.creditlog_error"), None, False, command
 
     if not entries:
-        return "no hay liquidaciones ia recientes", None, False, command
+        return tr("admin.creditlog_empty"), None, False, command
 
     return (
         truncate_creditlog_message("\n\n".join(build_creditlog_lines(entries))),

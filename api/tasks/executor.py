@@ -14,6 +14,7 @@ from api.ai.pipeline import (
     strip_markdown_formatting,
 )
 from api.core.logging import get_logger
+from api.core.i18n import normalize_locale, tr, use_locale
 
 logger = get_logger(__name__)
 
@@ -21,24 +22,11 @@ _MAX_FALLBACK_RETRIES = 1
 _MAX_EMPTY_RETRIES = 1
 _MULTIPLE_BLANK_LINES_RE = re.compile(r"\n{3,}")
 
-_TASK_FORMATTING_INSTRUCTIONS = "\n\n" + "\n".join(
-    [
-        "INSTRUCCIONES:",
-        "- mantené el personaje del gordo",
-        "- usá lenguaje coloquial argentino",
-        "- respondé en minúsculas, sin emojis, sin punto final",
-        "- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.",
-        "- dejá una línea en blanco entre cada item numerado",
-        "- cada item debe tener título corto en su propia línea y explicación breve abajo",
-        "- no la pongas toda en una sola frase: estructurala para que sea fácil de leer",
-    ]
-)
-
 
 def build_task_messages(text: str) -> List[Dict[str, str]]:
     """Build the exact prompt payload used to estimate and execute a task."""
 
-    return [{"role": "user", "content": str(text) + _TASK_FORMATTING_INSTRUCTIONS}]
+    return [{"role": "user", "content": f"{text}\n\n{tr('task.format_prompt')}"}]
 
 
 def _restore_task_spacing(original: str, cleaned: str) -> str:
@@ -84,9 +72,7 @@ class TaskExecutor:
         self._admin_report = admin_report
         self._credits_db_service = credits_db_service
         self._gen_random_fn = gen_random_fn
-        self._build_insufficient_credits_message_fn = (
-            build_insufficient_credits_message_fn
-        )
+        self._build_insufficient_credits_message_fn = build_insufficient_credits_message_fn
         self._estimate_ai_base_reserve_credits = estimate_ai_base_reserve_credits
         self._billing_factory = billing_factory
         self._pool = concurrent.futures.ThreadPoolExecutor(
@@ -101,6 +87,11 @@ class TaskExecutor:
         return int(reserve_credits)
 
     def execute(self, task: Mapping[str, Any]) -> bool:
+        locale = normalize_locale(task.get("locale"))
+        with use_locale(locale):
+            return self._execute_localized(task)
+
+    def _execute_localized(self, task: Mapping[str, Any]) -> bool:
         task_id = str(task.get("id", ""))
         chat_id = str(task.get("chat_id", ""))
         text = str(task.get("text", ""))
@@ -150,7 +141,12 @@ class TaskExecutor:
             logger.info("task %s no credits, skipping: %s", task_id, charge_error)
             self._send_msg(
                 chat_id,
-                f"{display}, no pude ejecutar la tarea «{text}»:\n{charge_error}",
+                tr(
+                    "task.execute_failed",
+                    user=display,
+                    text=text,
+                    error=charge_error,
+                ),
             )
             return should_delete
 
@@ -177,11 +173,11 @@ class TaskExecutor:
                         empty_retries += 1
                         logger.warning(
                             "task %s empty response, retry %d/%d",
-                            task_id, empty_retries, _MAX_EMPTY_RETRIES,
+                            task_id,
+                            empty_retries,
+                            _MAX_EMPTY_RETRIES,
                         )
-                        messages.append(
-                            {"role": "system", "content": "respondé la tarea, es obligatorio."}
-                        )
+                        messages.append({"role": "system", "content": tr("task.force_response")})
                         continue
                     logger.warning("task %s empty after retries", task_id)
                     billing.refund_reserved_ai_credits(charge_meta, reason="task_empty")
@@ -192,15 +188,18 @@ class TaskExecutor:
                     fallback_retries += 1
                     logger.warning(
                         "task %s fallback, retry %d/%d",
-                        task_id, fallback_retries, _MAX_FALLBACK_RETRIES,
+                        task_id,
+                        fallback_retries,
+                        _MAX_FALLBACK_RETRIES,
                     )
-                    messages.append(
-                        {"role": "system", "content": "tenés que responder. no hay opcion de no responder."}
-                    )
+                    messages.append({"role": "system", "content": tr("task.force_nonfallback")})
                     continue
 
                 response = _clean_task_response(response)
-                self._send_msg(chat_id, f"{display}, tarea «{text}»:\n{response}")
+                self._send_msg(
+                    chat_id,
+                    tr("task.result", user=display, text=text, response=response),
+                )
                 logger.info("task %s completed successfully", task_id)
 
                 if is_fallback:
@@ -237,10 +236,7 @@ class TaskExecutor:
         """Execute multiple tasks in parallel, returning delete flags."""
         if not tasks:
             return []
-        futures = {
-            self._pool.submit(self.execute, task): task
-            for task in tasks
-        }
+        futures = {self._pool.submit(self.execute, task): task for task in tasks}
         results = []
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]

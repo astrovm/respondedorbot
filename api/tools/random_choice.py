@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.core.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -13,10 +14,10 @@ def _execute_random_choice(
 ) -> ToolResult:
     select_random = context.get("select_random")
     if select_random is None:
-        return ToolResult(output="random choice not available")
+        return ToolResult(output=tr("tool.unavailable", tool="random choice"))
     request = str(params.get("request") or "").strip()
     if not request:
-        return ToolResult(output="indicá opciones o un rango numérico")
+        return ToolResult(output=tr("tool.random.required"))
     return ToolResult(output=select_random(request))
 
 

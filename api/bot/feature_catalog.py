@@ -9,7 +9,9 @@ from api.bot.command_registry import (
     aliases_for,
     COMMAND_DESCRIPTIONS,
     COMMAND_GROUPS,
+    command_descriptions,
 )
+from api.core.i18n import current_locale
 
 CommandGroup = tuple[tuple[str, ...], str, bool, bool]
 
@@ -111,13 +113,6 @@ FEATURES: tuple[FeatureEntry, ...] = (
         telegram_visible=True,
     ),
     FeatureEntry(
-        "mundial",
-        "partidos del Mundial [argentina]",
-        aliases_for("get_polymarket_world_cup_games"),
-        category="mercado",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
         "arbitrajes",
         "rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats",
         aliases_for("get_rulo", "get_devo", "powerlaw", "rainbow", "satoshi"),
@@ -177,9 +172,16 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
     FeatureEntry(
         "config",
-        "config por chat: links, followups, timezone, goles del Mundial, random replies y límite gratis por usuario/hora",
+        "config por chat: idioma, links, followups, timezone, random replies y límite gratis por usuario/hora",
         aliases_for("config_command"),
         category="admin",
+        telegram_visible=True,
+    ),
+    FeatureEntry(
+        "idioma",
+        "cambiá entre español e inglés",
+        aliases_for("language_command"),
+        category="config",
         telegram_visible=True,
     ),
     FeatureEntry(
@@ -213,6 +215,66 @@ FEATURES: tuple[FeatureEntry, ...] = (
     ),
 )
 
+_CATEGORY_EN = {
+    "ia": "AI",
+    "mercado": "markets",
+    "general": "general",
+    "media": "media",
+    "links": "links",
+    "productividad": "productivity",
+    "memoria": "memory",
+    "utilidades": "utilities",
+    "config": "settings",
+    "créditos": "credits",
+    "admin": "admin",
+}
+
+_FEATURE_EN: dict[str, tuple[str, str]] = {
+    "chat ia": (
+        "AI chat",
+        "I answer normal messages; in groups I respond to mentions, replies, random triggers, and AI commands",
+    ),
+    "búsqueda web nativa": ("web search", "I can search the web when a current answer needs it"),
+    "crypto prices": (
+        "crypto prices",
+        "crypto prices by ranking, symbol, base currency, and time window",
+    ),
+    "clima": ("weather", "current weather for any city or location"),
+    "token cards": ("token cards", "send a Solana or EVM address, or a $ticker, for a market card"),
+    "dólar": ("dollar", "dollar exchange rates and changes by time window"),
+    "acciones": ("stocks", "stock prices by symbol or company from Yahoo Finance"),
+    "petróleo": ("oil", "Brent and WTI oil prices"),
+    "bcra": ("BCRA", "economic variables from Argentina's central bank"),
+    "elección": ("elections", "top global election markets on Polymarket by liquidity"),
+    "arbitrajes": (
+        "arbitrage",
+        "official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools",
+    ),
+    "media": ("media", "transcribe audio and video or describe images and stickers"),
+    "links": ("links", "fix supported social links and read linked content as context"),
+    "tareas": ("tasks", "create reminders and recurring tasks with natural language"),
+    "resúmenes y memoria": (
+        "summaries and memory",
+        "summarize chats and retrieve relevant prior messages",
+    ),
+    "utilidades": (
+        "utilities",
+        "random selection, base conversion, Telegram commands, timestamps, and instance info",
+    ),
+    "gifs": ("GIFs", "random good-morning and good-night GIFs"),
+    "config": (
+        "settings",
+        "all chat settings, including language, links, timezone, replies, and group limits",
+    ),
+    "idioma": ("language", "switch between Spanish and English"),
+    "créditos ia": (
+        "AI credits",
+        "balance, expense history, Telegram Stars top-ups, and group transfers",
+    ),
+    "admin créditos": ("credit admin", "mint and inspect credits; admin only"),
+    "help": ("help", "show commands and features"),
+}
+
 
 def _strip_slash(command: str) -> str:
     return command.lstrip("/")
@@ -227,11 +289,7 @@ def command_aliases(command_groups: Sequence[CommandGroup] = COMMAND_GROUPS) -> 
 
 
 def catalog_command_aliases(entries: Iterable[FeatureEntry] = FEATURES) -> set[str]:
-    return {
-        _strip_slash(command)
-        for entry in entries
-        for command in entry.commands
-    }
+    return {_strip_slash(command) for entry in entries for command in entry.commands}
 
 
 def get_feature_for_command(command: str) -> Optional[FeatureEntry]:
@@ -246,7 +304,10 @@ def telegram_command_descriptions(
     *,
     command_groups: Sequence[CommandGroup] = COMMAND_GROUPS,
     descriptions: Mapping[str, str] = COMMAND_DESCRIPTIONS,
+    locale: str = "es",
 ) -> Dict[str, str]:
+    if descriptions is COMMAND_DESCRIPTIONS:
+        descriptions = command_descriptions(locale)
     allowed = command_aliases(command_groups)
     visible = {
         _strip_slash(command)
@@ -255,44 +316,66 @@ def telegram_command_descriptions(
         for command in entry.commands
     }
     return {
-        name: desc
-        for name, desc in descriptions.items()
-        if name in allowed and name in visible
+        name: desc for name, desc in descriptions.items() if name in allowed and name in visible
     }
 
 
 def render_help_text(entries: Iterable[FeatureEntry] = FEATURES) -> str:
-    lines = ["esto es lo que sé hacer, boludo:", ""]
+    locale = current_locale()
+    lines = ["what I can do:" if locale == "en" else "esto es lo que sé hacer, boludo:", ""]
     current_category = ""
     for entry in entries:
         if not entry.help_visible or entry.admin_only:
             continue
-        if entry.category != current_category:
+        category = (
+            _CATEGORY_EN.get(entry.category, entry.category) if locale == "en" else entry.category
+        )
+        if category != current_category:
             if current_category:
                 lines.append("")
-            current_category = entry.category
-            lines.append(f"{entry.category}:")
-        prefix = ", ".join(entry.commands) if entry.commands else entry.title
-        lines.append(f"- {prefix}: {entry.description}")
+            current_category = category
+            lines.append(f"{category}:")
+        title, description = (
+            _FEATURE_EN.get(entry.title, (entry.title, entry.description))
+            if locale == "en"
+            else (entry.title, entry.description)
+        )
+        prefix = ", ".join(entry.commands) if entry.commands else title
+        lines.append(f"- {prefix}: {description}")
         for example in entry.examples:
-            lines.append(f"  ejemplo: {example}")
+            lines.append(f"  {'example' if locale == 'en' else 'ejemplo'}: {example}")
     return "\n".join(lines).strip()
 
 
 def render_ai_capabilities_prompt(entries: Iterable[FeatureEntry] = FEATURES) -> str:
-    lines = [
-        "CAPACIDADES DEL BOT:",
-        "- si el usuario pregunta que podes hacer, responde desde esta lista",
-        "- no inventes comandos; /buscar y /search no existen",
-        "- si existe comando exacto para algo, sugerilo con el comando exacto",
-    ]
+    locale = current_locale()
+    lines = (
+        [
+            "BOT CAPABILITIES:",
+            "- if the user asks what you can do, answer from this list",
+            "- do not invent commands; /buscar and /search do not exist",
+            "- when an exact command exists, suggest that exact command",
+        ]
+        if locale == "en"
+        else [
+            "CAPACIDADES DEL BOT:",
+            "- si el usuario pregunta que podes hacer, responde desde esta lista",
+            "- no inventes comandos; /buscar y /search no existen",
+            "- si existe comando exacto para algo, sugerilo con el comando exacto",
+        ]
+    )
     for entry in entries:
         if not entry.ai_visible:
             continue
-        label = ", ".join(entry.commands) if entry.commands else entry.title
+        title, description = (
+            _FEATURE_EN.get(entry.title, (entry.title, entry.description))
+            if locale == "en"
+            else (entry.title, entry.description)
+        )
+        label = ", ".join(entry.commands) if entry.commands else title
         if entry.admin_only:
-            label = f"{label} (solo admin)"
-        lines.append(f"- {label}: {entry.description}")
+            label = f"{label} ({'admin only' if locale == 'en' else 'solo admin'})"
+        lines.append(f"- {label}: {description}")
     return "\n".join(lines)
 
 

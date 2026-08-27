@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Protocol
 
+from api.core.i18n import tr
 from api.links.service import LinkServiceProtocol
 
 
@@ -44,14 +45,12 @@ def handle_link_replacement(
         shared_by = f"@{username}"
     else:
         name_parts = [
-            part
-            for part in (user_info.get("first_name"), user_info.get("last_name"))
-            if part
+            part for part in (user_info.get("first_name"), user_info.get("last_name")) if part
         ]
         shared_by = " ".join(name_parts)
 
     if shared_by:
-        fixed_text += f"\n\ncompartido por {shared_by}"
+        fixed_text += f"\n\n{tr('links.shared_by', name=shared_by)}"
 
     link_context = deps.link_service.build_context({"text": fixed_text})
     stored_bot_message = fixed_text

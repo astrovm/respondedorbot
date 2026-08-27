@@ -24,6 +24,8 @@ from typing import (
 
 import redis
 
+from api.core.i18n import tr
+
 from api.bot.chat_context import format_user_identity
 from api.services.maintenance import CHAT_STATE_TTL
 
@@ -552,20 +554,20 @@ def describe_replied_message(
     if reply_text:
         return reply_text
     if reply_msg.get("photo"):
-        return "una foto sin texto"
+        return tr("media.reply.photo")
     if reply_msg.get("sticker"):
         sticker = cast(Mapping[str, Any], reply_msg.get("sticker", {}))
         emoji_char = sticker.get("emoji")
         if emoji_char:
-            return f"un sticker {emoji_char}"
+            return tr("media.reply.sticker", emoji=emoji_char)
     if reply_msg.get("voice"):
-        return "un audio de voz"
+        return tr("media.reply.voice")
     if reply_msg.get("audio"):
-        return "un archivo de audio"
+        return tr("media.reply.audio")
     if reply_msg.get("video"):
-        return "un video"
+        return tr("media.reply.video")
     if reply_msg.get("document"):
-        return "un archivo adjunto"
+        return tr("media.reply.document")
     return None
 
 

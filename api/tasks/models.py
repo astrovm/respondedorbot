@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+from api.core.i18n import tr
+
 _SPANISH_TO_ENGLISH_WEEKDAY = {
     "lun": "mon",
     "mar": "tue",
@@ -44,9 +46,7 @@ class CronTrigger:
     day: int | None = None
 
 
-type TaskTrigger = (
-    DelayTrigger | IntervalTrigger | DayIntervalTrigger | CronTrigger
-)
+type TaskTrigger = DelayTrigger | IntervalTrigger | DayIntervalTrigger | CronTrigger
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +57,7 @@ class ScheduledTaskRequest:
     user_name: str = ""
     user_id: int | None = None
     timezone_offset: int = -3
+    locale: str = "es"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +101,9 @@ def _parse_weekdays(value: Any) -> tuple[tuple[str, ...], str | None]:
             continue
         normalized = _SPANISH_TO_ENGLISH_WEEKDAY.get(token, token)
         if normalized not in _ENGLISH_WEEKDAYS:
-            return (), f"day_of_week invalido: {token}"
+            return (), tr("task.trigger.weekday", value=token)
         weekdays.append(normalized)
-    return (
-        (tuple(weekdays), None)
-        if weekdays
-        else ((), "day_of_week invalido")
-    )
+    return (tuple(weekdays), None) if weekdays else ((), tr("task.trigger.weekday_empty"))
 
 
 def _parse_cron(config: Mapping[str, Any]) -> TriggerParseResult:
@@ -117,8 +114,8 @@ def _parse_cron(config: Mapping[str, Any]) -> TriggerParseResult:
                 key="hour",
                 minimum=0,
                 maximum=23,
-                missing_error="hour es requerido para trigger cron",
-                range_error="hour debe ser 0-23",
+                missing_error=tr("task.trigger.hour_required"),
+                range_error=tr("task.trigger.hour_range"),
             ),
         )
         minute = _required_bounded_int(
@@ -127,18 +124,16 @@ def _parse_cron(config: Mapping[str, Any]) -> TriggerParseResult:
                 key="minute",
                 minimum=0,
                 maximum=59,
-                missing_error="minute es requerido para trigger cron",
-                range_error="minute debe ser 0-59",
+                missing_error=tr("task.trigger.minute_required"),
+                range_error=tr("task.trigger.minute_range"),
             ),
         )
         weekdays, error = _parse_weekdays(config.get("day_of_week"))
         if error:
             raise TriggerValidationError(error)
         raw_day = config.get("day")
-        if raw_day is not None and (
-            not isinstance(raw_day, int) or not 1 <= raw_day <= 31
-        ):
-            raise TriggerValidationError("day debe ser 1-31")
+        if raw_day is not None and (not isinstance(raw_day, int) or not 1 <= raw_day <= 31):
+            raise TriggerValidationError(tr("task.trigger.day_range"))
         return TriggerParseResult(
             trigger=CronTrigger(
                 kind="cron",
@@ -154,39 +149,29 @@ def _parse_cron(config: Mapping[str, Any]) -> TriggerParseResult:
 
 def _parse_delay(value: Any) -> TriggerParseResult:
     if not isinstance(value, int) or value < 1:
-        return TriggerParseResult(
-            error="delay_seconds debe ser un entero positivo"
-        )
+        return TriggerParseResult(error=tr("task.trigger.delay_positive"))
     if value > 86400 * 3650:
-        return TriggerParseResult(error="el maximo es 10 años")
-    return TriggerParseResult(
-        trigger=DelayTrigger(kind="delay", seconds=value)
-    )
+        return TriggerParseResult(error=tr("task.trigger.delay_max"))
+    return TriggerParseResult(trigger=DelayTrigger(kind="delay", seconds=value))
 
 
 def _parse_interval_seconds(value: Any) -> TriggerParseResult:
     if not isinstance(value, int) or value < 300:
-        return TriggerParseResult(
-            error="el intervalo minimo es 300 segundos (5 min)"
-        )
+        return TriggerParseResult(error=tr("task.trigger.interval_min"))
     if value > 86400 * 7:
-        return TriggerParseResult(error="el intervalo maximo es 7 dias")
-    return TriggerParseResult(
-        trigger=IntervalTrigger(kind="interval_seconds", seconds=value)
-    )
+        return TriggerParseResult(error=tr("task.trigger.interval_max"))
+    return TriggerParseResult(trigger=IntervalTrigger(kind="interval_seconds", seconds=value))
 
 
 def _parse_interval_days(config: Mapping[str, Any]) -> TriggerParseResult:
     days = config.get("days")
     if days is None:
-        return TriggerParseResult(error="days es requerido para trigger interval")
+        return TriggerParseResult(error=tr("task.trigger.days_required"))
     if not isinstance(days, int) or days < 1:
-        return TriggerParseResult(error="days debe ser un entero positivo")
+        return TriggerParseResult(error=tr("task.trigger.days_positive"))
     if days > 90:
-        return TriggerParseResult(error="el maximo son 90 dias")
-    return TriggerParseResult(
-        trigger=DayIntervalTrigger(kind="interval_days", days=days)
-    )
+        return TriggerParseResult(error=tr("task.trigger.days_max"))
+    return TriggerParseResult(trigger=DayIntervalTrigger(kind="interval_days", days=days))
 
 
 def parse_task_trigger(
@@ -200,20 +185,13 @@ def parse_task_trigger(
     if interval_seconds is not None:
         return _parse_interval_seconds(interval_seconds)
     if not isinstance(trigger_config, Mapping):
-        return TriggerParseResult(
-            error=(
-                "necesito usar algun parametro de tiempo: delay_seconds (una vez), "
-                "interval_seconds (repetir), o trigger_config."
-            )
-        )
+        return TriggerParseResult(error=tr("task.trigger.required"))
     trigger_type = trigger_config.get("type")
     if trigger_type == "cron":
         return _parse_cron(trigger_config)
     if trigger_type == "interval":
         return _parse_interval_days(trigger_config)
-    return TriggerParseResult(
-        error="trigger_config.type debe ser 'interval' o 'cron'"
-    )
+    return TriggerParseResult(error=tr("task.trigger.type"))
 
 
 def trigger_config(trigger: TaskTrigger) -> dict[str, Any] | None:

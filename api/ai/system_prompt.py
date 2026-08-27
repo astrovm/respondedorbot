@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from api.core.i18n import tr
+
 ConfigLoader = Callable[[], dict[str, Any]]
 
 
@@ -33,15 +35,16 @@ def build_system_message(
 
 FECHA ACTUAL:
 {formatted_time}
+
+IDIOMA DE RESPUESTA:
+{tr("ai.language_instruction")}
 """
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": task_prefix
-                + str(config.get("system_prompt", ""))
-                + contextual_info,
+                "text": task_prefix + str(config.get("system_prompt", "")) + contextual_info,
             }
         ],
     }

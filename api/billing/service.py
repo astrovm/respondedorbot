@@ -17,6 +17,7 @@ from api.billing.ai import (
     parse_topup_payload,
 )
 from api.billing.credit_units import format_credit_units
+from api.core.i18n import normalize_locale, tr, use_locale
 
 
 class BillingService:
@@ -72,7 +73,7 @@ class BillingService:
         )
 
     def unavailable_alert(self) -> str:
-        return "el cobro de ia está hecho pelota, avisale al admin"
+        return tr("billing.unavailable")
 
     def unavailable_message(self) -> str:
         return billing_callbacks.billing_unavailable_message()
@@ -104,14 +105,16 @@ class BillingService:
         )
 
     def handle_pre_checkout(self, query: dict[str, Any]) -> None:
-        billing_callbacks.handle_pre_checkout_query(
-            query,
-            billing_available=self.is_available,
-            answer_query=self.answer_pre_checkout,
-            unavailable_alert=self.unavailable_alert,
-            parse_payload=self.parse_topup_payload,
-            get_pack=self.get_pack,
-        )
+        locale = normalize_locale((query.get("from") or {}).get("language_code"))
+        with use_locale(locale):
+            billing_callbacks.handle_pre_checkout_query(
+                query,
+                billing_available=self.is_available,
+                answer_query=self.answer_pre_checkout,
+                unavailable_alert=self.unavailable_alert,
+                parse_payload=self.parse_topup_payload,
+                get_pack=self.get_pack,
+            )
 
     def handle_successful_payment(self, message: dict[str, Any]) -> str:
         return billing_callbacks.handle_successful_payment(

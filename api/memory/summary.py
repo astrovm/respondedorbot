@@ -12,6 +12,7 @@ from typing import Any
 
 import redis
 
+from api.core.i18n import tr
 from api.memory import compaction as memory_compaction
 from api.ai.pricing import credit_units_from_usd_micros
 from api.memory.background import DurableCompactionQueue
@@ -88,9 +89,7 @@ def build_chat_messages(
     prompt_text: str,
     prior_summary: str | None = None,
 ) -> list[dict[str, Any]]:
-    api_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": bot_personality}
-    ]
+    api_messages: list[dict[str, Any]] = [{"role": "system", "content": bot_personality}]
     if prior_summary:
         api_messages.append({"role": "assistant", "content": prior_summary})
     for message in messages:
@@ -206,7 +205,7 @@ def stream_summary_command(
         logger.info("summary_stream: no history for chat_id=%s", chat_id)
 
         def empty() -> Iterator[tuple[str, str]]:
-            yield "none", "no hay mensajes para resumir"
+            yield "none", tr("summary.empty")
 
         return empty(), None
 
@@ -256,7 +255,7 @@ def stream_summary_command(
     if not provider.is_available():
 
         def unavailable() -> Iterator[tuple[str, str]]:
-            yield "none", "no pude generar el resumen"
+            yield "none", tr("summary.error")
 
         return unavailable(), source.next_marker
 
@@ -409,9 +408,7 @@ class SummaryService:
             load_personality=self.load_personality,
         )
 
-    build_incremental_source = staticmethod(
-        memory_compaction.build_incremental_summary_source
-    )
+    build_incremental_source = staticmethod(memory_compaction.build_incremental_summary_source)
 
     def build_provider(self) -> Any:
         return self._deps.provider.build_provider(
@@ -460,7 +457,8 @@ class SummaryService:
         compact_fn: Callable[
             [list[dict[str, Any]], str | None],
             tuple[str, int],
-        ] | None = None,
+        ]
+        | None = None,
         compaction_threshold: int | None = None,
         compaction_keep: int | None = None,
     ) -> tuple[str | None, list[dict[str, Any]], str | None, int]:

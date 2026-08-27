@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from api.ai.pipeline import AIResponseRequest, AIResponseRuntime
+from api.core.i18n import tr
 
 
 def handle_rate_limit(
@@ -165,7 +166,7 @@ def handle_ai_stream_response(
     """Stream tokens to Telegram and retry once without streaming if needed."""
 
     if not chat_id:
-        return "me quedé reculando y no te pude responder, probá de nuevo"
+        return tr("response.stream_error")
 
     if image_data:
         inject_image_context(
@@ -196,9 +197,7 @@ def handle_ai_stream_response(
             reply_to_message_id=reply_to_message_id,
         )
         text_override = (
-            response_meta.pop("stream_text_override", None)
-            if response_meta is not None
-            else None
+            response_meta.pop("stream_text_override", None) if response_meta is not None else None
         )
         if isinstance(text_override, str) and text_override.strip():
             final_text = text_override

@@ -93,7 +93,7 @@ class TestCryptoPricesTool:
 
     def test_crypto_prices_no_context(self):
         result = execute_tool("crypto_prices", {"assets": ["ETH"]}, {})
-        assert "not available" in result.output
+        assert "no está disponible" in result.output
 
     def test_crypto_prices_none_result(self):
         mock_gp = MagicMock(return_value=None)
@@ -350,7 +350,7 @@ class TestWebFetchTool:
 
         result = execute_tool("web_fetch", {"url": "https://example.com/x-error"}, {})
 
-        assert "pagina de error" in result.output
+        assert "página de error" in result.output
 
     @patch("api.utils.links.inspect_embed_url")
     @patch("api.links.agent_tools.fetch_url_content")
