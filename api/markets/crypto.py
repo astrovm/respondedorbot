@@ -110,7 +110,13 @@ def _get_asset_prices(
     listed = _price_data(prices)
     if listed is None:
         if provider_scope != "crypto":
-            stock_only = _format_stock_only(msg_text, lookup_stocks, missing_error=False)
+            stock_only = _format_stock_only(
+                msg_text,
+                lookup_stocks,
+                missing_error=False,
+                timeframe=timeframe,
+                conversion_requested=conversion_requested,
+            )
             if stock_only:
                 return stock_only
         return tr("market.crypto.load_error")
@@ -222,11 +228,15 @@ def _format_stock_only(
     lookup_stocks: StockLookup | None,
     *,
     missing_error: bool = True,
+    timeframe: str | None = None,
+    conversion_requested: bool = False,
 ) -> str:
     if not lookup_stocks or not query.strip():
         return tr("market.crypto.missing", symbols=query.upper()) if missing_error else ""
     resolved = lookup_stocks(query) or []
     quotes = [quote for _, quote in resolved if quote]
+    if quotes and _stock_modifiers_unsupported(timeframe, conversion_requested):
+        return _stock_modifier_error(", ".join(quote.symbol for quote in quotes))
     missing = [item.upper() for item, quote in resolved if quote is None]
     parts = [_format_stock_quotes(quotes)] if quotes else []
     if missing_error and (missing or not quotes):

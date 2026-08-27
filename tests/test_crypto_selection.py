@@ -332,3 +332,27 @@ def test_stock_fallback_survives_crypto_provider_failure():
     )
 
     assert result == "NVDA: 123.45 USD (+1.25% 24h)"
+
+
+def test_stock_fallback_rejects_currency_conversion_during_crypto_provider_failure():
+    result = get_prices(
+        "NVDA in EUR",
+        change_fields=CHANGE_FIELDS,
+        fetch_prices=MagicMock(return_value=None),
+        fetch_quotes=MagicMock(),
+        lookup_stocks=MagicMock(return_value=[("NVDA", _stock("NVDA"))]),
+    )
+
+    assert result == "NVDA: las acciones solo soportan moneda nativa y variación 24h"
+
+
+def test_stock_fallback_rejects_timeframe_during_crypto_provider_failure():
+    result = get_prices(
+        "NVDA 7d",
+        change_fields={**CHANGE_FIELDS, "7d": "percent_change_7d"},
+        fetch_prices=MagicMock(return_value=None),
+        fetch_quotes=MagicMock(),
+        lookup_stocks=MagicMock(return_value=[("NVDA", _stock("NVDA"))]),
+    )
+
+    assert result == "NVDA: las acciones solo soportan moneda nativa y variación 24h"
