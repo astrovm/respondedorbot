@@ -72,7 +72,6 @@ uv run --locked python run_polling.py
 | `/petroleo` | `/oil` | Oil prices |
 | `/acciones` | `/stocks` | Stock prices |
 | `/eleccion` | `/elecciones`, `/election`, `/elections` | Global Polymarket elections by liquidity |
-| `/mundial` | `/worldcup` | Next 10 World Cup games on Polymarket |
 | `/devo` | - | Arbitrage calculator (tarjeta vs crypto) |
 | `/rulo` | - | Dollar arbitrage chains |
 | `/powerlaw` | - | Bitcoin power law |

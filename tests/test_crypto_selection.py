@@ -90,7 +90,7 @@ def test_unresolved_asset_is_reported_with_partial_results():
 
     assert result is not None
     assert "AAA:" in result
-    assert "no encontre esos ponzis: ZZZ" in result
+    assert "no encontré estos activos: ZZZ" in result
     assert fetch_quotes.call_args_list == [
         call(["ZZZ"], "USD"),
         call(["zzz"], "USD", by_slug=True),

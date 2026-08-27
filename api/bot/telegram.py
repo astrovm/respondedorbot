@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 import requests
 from urllib.parse import urlparse
 
+from api.i18n import tr
 from api.links.agent_tools import normalize_http_url
 from api.services import http_client
 
@@ -280,7 +281,7 @@ class TelegramGateway:
 
         markup = reply_markup
         if markup is None and buttons:
-            keyboard = [[{"text": "abrir en la app", "url": url}] for url in buttons]
+            keyboard = [[{"text": tr("telegram.open_app"), "url": url}] for url in buttons]
             markup = {"inline_keyboard": keyboard}
 
         if markup is not None:
@@ -355,7 +356,7 @@ class TelegramGateway:
             payload["reply_markup"] = json.dumps(
                 {
                     "inline_keyboard": [
-                        [{"text": "abrir en la app", "url": url}] for url in buttons
+                        [{"text": tr("telegram.open_app"), "url": url}] for url in buttons
                     ]
                 }
             )

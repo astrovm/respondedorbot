@@ -21,6 +21,7 @@ from api.tasks.models import (
     parse_task_trigger,
 )
 from api.services import credits_db
+from api.i18n import current_locale, tr
 
 
 def _task_set_precondition_error(
@@ -29,14 +30,14 @@ def _task_set_precondition_error(
     chat_id: str,
 ) -> str | None:
     if not text:
-        return "no se que tarea crear, pasame el texto"
+        return tr("task.no_text")
     if not chat_id:
-        return "no se en que chat estoy"
+        return tr("task.no_chat")
 
     runtime_status = get_scheduler_runtime_status()
     if not runtime_status.get("ready"):
         reason = runtime_status.get("reason", "runtime unavailable")
-        return f"no se pudo crear la tarea: {reason}"
+        return tr("task.create_runtime", reason=reason)
 
     return None
 
@@ -61,6 +62,7 @@ def _execute_task_set(
     user_name = str(context.get("user_name", ""))
     user_id = context.get("user_id")
     timezone_offset = int(context.get("timezone_offset", -3))
+    locale = str(context.get("locale") or current_locale())
 
     precondition_error = _task_set_precondition_error(
         text=text,
@@ -75,11 +77,11 @@ def _execute_task_set(
         trigger_config=trigger_config,
     )
     if parsed.error or parsed.trigger is None:
-        return ToolResult(output=parsed.error or "trigger invalido")
+        return ToolResult(output=parsed.error or tr("task.invalid_trigger"))
 
     required_credits = estimate_task_reserve_credits(str(text))
     if required_credits is None:
-        return ToolResult(output="no se pudo calcular el costo de la tarea, probá de nuevo")
+        return ToolResult(output=tr("task.cost_error"))
     credit_error = task_credit_precondition_error(
         credits_db_service=credits_db,
         user_id=user_id,
@@ -96,14 +98,17 @@ def _execute_task_set(
             user_name=user_name,
             user_id=int(user_id) if user_id is not None else None,
             timezone_offset=timezone_offset,
+            locale=locale,
         )
     )
     if task_id is None:
-        return ToolResult(output="no se pudo crear la tarea")
+        return ToolResult(output=tr("task.create_error"))
 
     return ToolResult(
-        output=(
-            f"listo, tarea programada {_trigger_description(parsed.trigger)}: {text}"
+        output=tr(
+            "task.created",
+            schedule=_trigger_description(parsed.trigger),
+            text=text,
         ),
         metadata={"task_id": task_id},
     )

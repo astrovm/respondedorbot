@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from api.i18n import tr
 from api.utils import fmt_signed_pct
 
 
@@ -16,7 +17,7 @@ def _safe_float(value: Any) -> Optional[float]:
             return float(value)
         if isinstance(value, str) and value.strip():
             return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return None
 
@@ -41,8 +42,17 @@ def _format_spread_line(
     pct = (diff / oficial_price) * 100 if oficial_price else 0.0
     lines = [
         f"- {label}",
-        f"  • Precio venta: {_format_local_currency(sell_price)} ARS/USD",
-        f"  • Diferencia vs oficial: {_format_local_signed(diff)} ARS ({fmt_signed_pct(pct, 2)}%)",
+        "  • "
+        + tr(
+            "market.rulo.sell_price",
+            price=_format_local_currency(sell_price),
+        ),
+        "  • "
+        + tr(
+            "market.rulo.official_diff",
+            difference=_format_local_signed(diff),
+            percentage=fmt_signed_pct(pct, 2),
+        ),
     ]
     lines.extend(f"  • {detail}" for detail in details)
     return "\n".join(lines)
@@ -91,15 +101,18 @@ def build_rulo_message(
     oficial_price = _safe_float((data.get("oficial") or {}).get("price"))
 
     if not oficial_price or oficial_price <= 0:
-        return "No pude conseguir el oficial para armar el rulo"
+        return tr("market.rulo.official_error")
 
     oficial_cost_ars = oficial_price * usd_amount
     base_usd = _format_local_currency(usd_amount, 0)
     base_ars = _format_local_currency(oficial_cost_ars)
 
     lines = [
-        f"Rulos desde Oficial (precio oficial: {_format_local_currency(oficial_price)} ARS/USD)",
-        f"Inversión base: {base_usd} USD → {base_ars} ARS",
+        tr(
+            "market.rulo.title",
+            price=_format_local_currency(oficial_price),
+        ),
+        tr("market.rulo.base", usd=base_usd, ars=base_ars),
         "",
     ]
 
@@ -115,16 +128,20 @@ def build_rulo_message(
                 mep_best_price,
                 oficial_price,
                 [
-                    f"Resultado: {base_usd} USD → {_format_local_currency(mep_final_ars)} ARS",
-                    f"Ganancia: {_format_local_signed(mep_profit_ars)} ARS",
+                    tr(
+                        "market.rulo.result",
+                        result=f"{base_usd} USD → {_format_local_currency(mep_final_ars)} ARS",
+                    ),
+                    tr(
+                        "market.rulo.profit",
+                        profit=_format_local_signed(mep_profit_ars),
+                    ),
                 ],
             )
         )
 
     blue_data = data.get("blue") or {}
-    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(
-        blue_data.get("price")
-    )
+    blue_price = _safe_float(blue_data.get("bid")) or _safe_float(blue_data.get("price"))
     if blue_price:
         blue_final_ars = blue_price * usd_amount
         blue_profit_ars = blue_final_ars - oficial_cost_ars
@@ -134,18 +151,20 @@ def build_rulo_message(
                 blue_price,
                 oficial_price,
                 [
-                    f"Resultado: {base_usd} USD → {_format_local_currency(blue_final_ars)} ARS",
-                    f"Ganancia: {_format_local_signed(blue_profit_ars)} ARS",
+                    tr(
+                        "market.rulo.result",
+                        result=f"{base_usd} USD → {_format_local_currency(blue_final_ars)} ARS",
+                    ),
+                    tr(
+                        "market.rulo.profit",
+                        profit=_format_local_signed(blue_profit_ars),
+                    ),
                 ],
             )
         )
 
-    best_usd_to_usdt = _best_ask(
-        usd_usdt_data or {}, EXCLUDED_USD_TO_USDT_EXCHANGES
-    )
-    best_usdt_to_ars = _best_bid(
-        usdt_ars_data or {}, EXCLUDED_USDT_TO_ARS_EXCHANGES
-    )
+    best_usd_to_usdt = _best_ask(usd_usdt_data or {}, EXCLUDED_USD_TO_USDT_EXCHANGES)
+    best_usdt_to_ars = _best_bid(usdt_ars_data or {}, EXCLUDED_USDT_TO_ARS_EXCHANGES)
     if best_usd_to_usdt and best_usdt_to_ars:
         usd_to_usdt_rate = best_usd_to_usdt[1]
         usdt_to_ars_rate = best_usdt_to_ars[1]
@@ -160,19 +179,32 @@ def build_rulo_message(
                 oficial_price,
                 [
                     (
-                        f"Tramos: USD→USDT {best_usd_to_usdt[0].upper()}, "
-                        f"USDT→ARS {best_usdt_to_ars[0].upper()}"
+                        tr(
+                            "market.rulo.steps",
+                            steps=(
+                                f"USD→USDT {best_usd_to_usdt[0].upper()}, "
+                                f"USDT→ARS {best_usdt_to_ars[0].upper()}"
+                            ),
+                        )
                     ),
                     (
-                        f"Resultado: {base_usd} USD → {_format_local_currency(usdt_obtained, 2)} USDT → "
-                        f"{_format_local_currency(ars_obtained)} ARS"
+                        tr(
+                            "market.rulo.result",
+                            result=(
+                                f"{base_usd} USD → {_format_local_currency(usdt_obtained, 2)} USDT → "
+                                f"{_format_local_currency(ars_obtained)} ARS"
+                            ),
+                        )
                     ),
-                    f"Ganancia: {_format_local_signed(usdt_profit_ars)} ARS",
+                    tr(
+                        "market.rulo.profit",
+                        profit=_format_local_signed(usdt_profit_ars),
+                    ),
                 ],
             )
         )
 
     if len(lines) <= 2:
-        return "No encontré ningún rulo potable"
+        return tr("market.rulo.none")
 
     return "\n".join(lines)

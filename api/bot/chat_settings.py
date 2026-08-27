@@ -1,4 +1,4 @@
-"""Chat configuration compatibility wrappers and admin helpers."""
+"""Chat configuration rendering and admin helpers."""
 
 from __future__ import annotations
 
@@ -11,122 +11,14 @@ from api.bot.chat_context import is_group_chat_type
 from api.bot.chat_config_defaults import (
     CHAT_ADMIN_STATUS_TTL,
     CHAT_CONFIG_DEFAULTS,
+    CHAT_SETTING_DEFINITIONS,
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
 )
-from api.bot.chat_config_service import (
-    ChatConfigService,
-    build_chat_config_service,
-    decode_redis_value,
-)
+from api.i18n import Locale, current_locale, normalize_locale, tr
 from api.services.redis_helpers import redis_get_json, redis_setex_json
-from api.storage.chat_config_repository import build_chat_config_repository
 
-AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
-
-
-def _build_service(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> ChatConfigService:
-    repo = (
-        chat_config_db_service
-        if chat_config_db_service is not None
-        else build_chat_config_repository()
-    )
-    return build_chat_config_service(
-        repository=repo,
-        admin_reporter=admin_reporter or (lambda *a, **k: None),
-        log_event=log_event or (lambda *a, **k: None),
-    )
-
-
-_cached_service: Optional[Any] = None
-_cached_service_key: Optional[tuple[int, int, int]] = None
-
-
-def _service_cache_key(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> tuple[int, int, int]:
-    return (
-        id(chat_config_db_service),
-        id(admin_reporter),
-        id(log_event),
-    )
-
-
-def _get_cached_service(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> ChatConfigService:
-    global _cached_service, _cached_service_key
-    cache_key = _service_cache_key(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    if _cached_service is None or _cached_service_key != cache_key:
-        _cached_service = _build_service(
-            chat_config_db_service=chat_config_db_service,
-            admin_reporter=admin_reporter,
-            log_event=log_event,
-        )
-        _cached_service_key = cache_key
-    assert _cached_service is not None
-    return _cached_service
-
-
-def reset_chat_config_cache() -> None:
-    global _cached_service, _cached_service_key
-    _cached_service = None
-    _cached_service_key = None
-
-
-def get_chat_config(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> Dict[str, Any]:
-    """Compatibility wrapper that builds a ChatConfigService and delegates.
-
-    Kept as a function so existing callsites (api.index and tests) keep the same
-    signature while the implementation is moved into the service.
-    """
-
-    service = _get_cached_service(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    return service.get_chat_config(redis_client, chat_id)
-
-
-def set_chat_config(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-    **updates: Any,
-) -> Dict[str, Any]:
-    service = _get_cached_service(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    return service.set_chat_config(redis_client, chat_id, **updates)
 
 
 def coerce_bool(value: Any, *, default: bool) -> bool:
@@ -155,25 +47,23 @@ def _format_utc_offset(offset: int) -> str:
 
 @dataclass
 class ChatConfigData:
+    language: str
     link_mode: str
     random_enabled: bool
     followups_enabled: bool
     ignore_link_fix_followups: bool
-    world_cup_goal_alerts: bool
     timezone_offset: int
     creditless_limit: int
 
 
 def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
     return ChatConfigData(
+        language=str(config.get("language", "auto")),
         link_mode=str(config.get("link_mode", "reply")),
         random_enabled=coerce_bool(config.get("ai_random_replies"), default=True),
         followups_enabled=coerce_bool(config.get("ai_command_followups"), default=True),
         ignore_link_fix_followups=coerce_bool(
             config.get("ignore_link_fix_followups"), default=True
-        ),
-        world_cup_goal_alerts=coerce_bool(
-            config.get("world_cup_goal_alerts"), default=False
         ),
         timezone_offset=int(config.get("timezone_offset", -3)),
         creditless_limit=int(
@@ -185,81 +75,90 @@ def parse_chat_config(config: Mapping[str, Any]) -> ChatConfigData:
     )
 
 
+def _config_locale(config: Mapping[str, Any]) -> Locale:
+    configured = str(config.get("language") or "auto")
+    if configured in {"es", "en"}:
+        return normalize_locale(configured)
+    return current_locale()
+
+
+def _setting_value(
+    key: str,
+    parsed: ChatConfigData,
+    *,
+    locale: Locale,
+) -> str:
+    if key == "language":
+        return tr(f"config.language.{locale}", locale=locale)
+    if key == "link_mode":
+        return tr(f"config.link_mode.{parsed.link_mode}", locale=locale)
+    if key == "timezone_offset":
+        return _format_utc_offset(parsed.timezone_offset)
+    if key == "creditless_user_hourly_limit":
+        if parsed.creditless_limit < 0:
+            return "∞"
+        return str(parsed.creditless_limit)
+    enabled = {
+        "ai_command_followups": parsed.followups_enabled,
+        "ignore_link_fix_followups": parsed.ignore_link_fix_followups,
+        "ai_random_replies": parsed.random_enabled,
+    }[key]
+    return (
+        f"{'✅' if enabled else '▫️'} {tr('common.on' if enabled else 'common.off', locale=locale)}"
+    )
+
+
+_SETTING_TEXT_KEYS = {
+    "language": ("config.language.title", "config.language.description"),
+    "link_mode": ("config.link_mode.title", "config.link_mode.description"),
+    "ai_command_followups": (
+        "config.followups.title",
+        "config.followups.description",
+    ),
+    "ignore_link_fix_followups": (
+        "config.link_replies.title",
+        "config.link_replies.description",
+    ),
+    "timezone_offset": ("config.timezone.title", "config.timezone.description"),
+    "ai_random_replies": ("config.random.title", "config.random.description"),
+    "creditless_user_hourly_limit": (
+        "config.free_messages.title",
+        "config.free_messages.description",
+    ),
+}
+
+
 def build_config_text(config: Mapping[str, Any], chat_type: str = "group") -> str:
     """Build the user-facing config summary text."""
 
     parsed = parse_chat_config(config)
-
-    link_labels = {
-        "delete": "borra el mensaje original y repostea el link arreglado",
-        "reply": "responde al mensaje original con el link arreglado",
-        "off": "no toca los links",
-    }
-
-    if parsed.creditless_limit < 0:
-        creditless_label = "ilimitados"
-    elif parsed.creditless_limit == 0:
-        creditless_label = "ninguno"
-    else:
-        creditless_label = str(parsed.creditless_limit)
-
+    locale = _config_locale(config)
     is_group = is_group_chat_type(chat_type) if chat_type else True
-
-    lines = [
-        "config del gordo",
-        "",
-        "1. links arreglados",
-        link_labels.get(parsed.link_mode, parsed.link_mode),
-        "",
-        "2. seguir charla en comandos",
-        "si está activado, después de un comando sigo la conversación si me respondés",
-        f"{'✅ activado' if parsed.followups_enabled else '▫️ desactivado'}",
-        "",
-        "3. ignorar replies a links arreglados",
-        "si está activado, ignoro respuestas normales a mensajes automáticos con links arreglados",
-        f"{'✅ activado' if parsed.ignore_link_fix_followups else '▫️ desactivado'}",
-        "",
-        "4. zona horaria",
-        _format_utc_offset(parsed.timezone_offset),
-        "",
-        "5. goles del mundial",
-        "si está activado, grito cada gol en vivo y descanso al equipo rival",
-        f"{'✅ activado' if parsed.world_cup_goal_alerts else '▫️ desactivado'}",
-    ]
-
-    if is_group:
+    lines = [tr("config.title", locale=locale)]
+    for position, setting in enumerate(CHAT_SETTING_DEFINITIONS, start=1):
+        title_key, description_key = _SETTING_TEXT_KEYS[setting.key]
+        value = _setting_value(setting.key, parsed, locale=locale)
+        if setting.group_only and not is_group:
+            value = tr("common.unavailable_private", locale=locale)
         lines.extend(
             [
                 "",
-                "6. respuestas random",
-                "si está activado, a veces respondo solo en el grupo aunque nadie me llame",
-                f"{'✅ activado' if parsed.random_enabled else '▫️ desactivado'}",
-                "",
-                "7. mensajes gratis por usuario por hora",
-                "cuantos mensajes de ia paga el grupo por usuario cada hora",
-                creditless_label,
+                f"{position}. {tr(title_key, locale=locale)}",
+                tr(description_key, locale=locale),
+                value,
             ]
         )
-
-    lines.extend(
-        [
-            "",
-            "tocá los botones de abajo para cambiar la config",
-        ]
-    )
+    lines.extend(["", tr("config.instructions", locale=locale)])
     return "\n".join(lines)
 
 
-def build_config_keyboard(
-    config: Mapping[str, Any], chat_type: str = "group"
-) -> Dict[str, Any]:
+def build_config_keyboard(config: Mapping[str, Any], chat_type: str = "group") -> Dict[str, Any]:
     """Build the inline keyboard to toggle chat config values."""
 
     parsed = parse_chat_config(config)
+    locale = _config_locale(config)
 
-    def choice_button(
-        label: str, value: str, current: str, *, action: str
-    ) -> Dict[str, str]:
+    def choice_button(label: str, value: str, current: str, *, action: str) -> Dict[str, str]:
         prefix = "✅" if current == value else "▫️"
         return {"text": f"{prefix} {label}", "callback_data": f"cfg:{action}:{value}"}
 
@@ -270,9 +169,7 @@ def build_config_keyboard(
     def creditless_button(label: str, value: str) -> Dict[str, str]:
         return {"text": label, "callback_data": f"cfg:creditless:{value}"}
 
-    creditless_current_label = (
-        "∞" if parsed.creditless_limit < 0 else str(parsed.creditless_limit)
-    )
+    creditless_current_label = "∞" if parsed.creditless_limit < 0 else str(parsed.creditless_limit)
 
     dec_offset = max(parsed.timezone_offset - 1, TIMEZONE_OFFSET_MIN)
     inc_offset = min(parsed.timezone_offset + 1, TIMEZONE_OFFSET_MAX)
@@ -281,20 +178,49 @@ def build_config_keyboard(
 
     keyboard = [
         [
-            choice_button("responder link", "reply", parsed.link_mode, action="link"),
-            choice_button("borrar link", "delete", parsed.link_mode, action="link"),
-            choice_button("apagado", "off", parsed.link_mode, action="link"),
+            choice_button(
+                tr("config.button.language_es", locale=locale),
+                "es",
+                locale,
+                action="language",
+            ),
+            choice_button(
+                tr("config.button.language_en", locale=locale),
+                "en",
+                locale,
+                action="language",
+            ),
+        ],
+        [
+            choice_button(
+                tr("config.button.link_reply", locale=locale),
+                "reply",
+                parsed.link_mode,
+                action="link",
+            ),
+            choice_button(
+                tr("config.button.link_delete", locale=locale),
+                "delete",
+                parsed.link_mode,
+                action="link",
+            ),
+            choice_button(
+                tr("config.button.link_off", locale=locale),
+                "off",
+                parsed.link_mode,
+                action="link",
+            ),
         ],
         [
             toggle_button(
-                "seguir charla en comandos",
+                tr("config.button.followups", locale=locale),
                 parsed.followups_enabled,
                 action="followups",
             )
         ],
         [
             toggle_button(
-                "ignorar replies a links arreglados",
+                tr("config.button.link_replies", locale=locale),
                 parsed.ignore_link_fix_followups,
                 action="linkfixfollowups",
             )
@@ -307,13 +233,6 @@ def build_config_keyboard(
             },
             {"text": "➕ 1h", "callback_data": f"cfg:timezone:{inc_offset}"},
         ],
-        [
-            toggle_button(
-                "gritar goles del mundial",
-                parsed.world_cup_goal_alerts,
-                action="worldcupgoals",
-            )
-        ],
     ]
 
     if is_group:
@@ -321,7 +240,9 @@ def build_config_keyboard(
             [
                 [
                     toggle_button(
-                        "me meto en la charla", parsed.random_enabled, action="random"
+                        tr("config.button.random", locale=locale),
+                        parsed.random_enabled,
+                        action="random",
                     )
                 ],
                 [
@@ -349,9 +270,7 @@ def is_chat_admin(
     telegram_request: Callable[..., Any],
     log_event: ConfigLogger,
     redis_get_json_fn: Callable[[redis.Redis, str], Optional[Any]] = redis_get_json,
-    redis_setex_json_fn: Callable[
-        [redis.Redis, str, int, Any], bool
-    ] = redis_setex_json,
+    redis_setex_json_fn: Callable[[redis.Redis, str, int, Any], bool] = redis_setex_json,
 ) -> bool:
     """Return True if user_id is an admin of the chat."""
 
@@ -364,9 +283,7 @@ def is_chat_admin(
     if redis_client:
         cached_value = redis_get_json_fn(redis_client, cache_key)
         cached_flag = (
-            cached_value.get("is_admin")
-            if isinstance(cached_value, Mapping)
-            else cached_value
+            cached_value.get("is_admin") if isinstance(cached_value, Mapping) else cached_value
         )
         if isinstance(cached_flag, bool):
             return cached_flag
@@ -436,11 +353,8 @@ __all__ = [
     "build_config_keyboard",
     "build_config_text",
     "coerce_bool",
-    "decode_redis_value",
-    "get_chat_config",
     "is_chat_admin",
     "is_group_chat_type",
     "parse_chat_config",
     "report_unauthorized_config_attempt",
-    "set_chat_config",
 ]

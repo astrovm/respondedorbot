@@ -527,6 +527,6 @@ def test_handle_token_signal_callback_refresh_rate_limits(monkeypatch):
     edit_photo.assert_not_called()
     answer.assert_called_once_with(
         "cb1",
-        text="❌ Podés actualizar cada 15s",
+        text="Podés actualizar cada 15s",
         show_alert=True,
     )

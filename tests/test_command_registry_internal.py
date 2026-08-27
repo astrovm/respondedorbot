@@ -9,6 +9,7 @@ def test_build_command_registry_reuses_alias_metadata():
         {
             "ask_ai": prices,
             "config_command": lambda: "config",
+            "language_command": lambda: "language",
             "convert_base": prices,
             "select_random": prices,
             "get_prices": prices,
@@ -18,7 +19,6 @@ def test_build_command_registry_reuses_alias_metadata():
             "get_stock_prices": prices,
             "summary_command": lambda: "resumen",
             "get_polymarket_global_elections": lambda: "election",
-            "get_polymarket_world_cup_games": lambda: "world cup",
             "get_rulo": lambda: "rulo",
             "get_devo": prices,
             "powerlaw": lambda: "powerlaw",
@@ -49,7 +49,9 @@ def test_build_command_registry_reuses_alias_metadata():
     assert registry["/eleccion"] == registry["/elecciones"]
     assert registry["/eleccion"] == registry["/election"]
     assert registry["/eleccion"] == registry["/elections"]
-    assert registry["/mundial"] == registry["/worldcup"]
+    assert registry["/config"] == registry["/configs"]
+    assert registry["/config"] == registry["/settings"]
+    assert registry["/language"] == registry["/idioma"]
     assert registry["/tarea"] == registry["/tareas"]
     assert registry["/tarea"] == registry["/task"]
     assert registry["/tarea"] == registry["/tasks"]

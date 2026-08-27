@@ -114,6 +114,75 @@ def test_compaction_is_persisted_before_the_model_runs_and_survives_queue_restar
     assert settle_reservation.call_args.kwargs["actual_credit_units"] == 2
 
 
+def test_background_compaction_restores_the_enqueued_locale():
+    from api.i18n import current_locale, use_locale
+    from api.memory.compaction import CompactionPlan
+
+    redis_client = _FakeRedis()
+    compact = MagicMock(side_effect=lambda _messages, _summary: (current_locale(), 100))
+    save_result = MagicMock()
+    billing = MagicMock(user_id=42, message={"message_id": 99})
+    billing.reserve_background_ai_credits.return_value = (
+        {
+            "reserved_credit_units": 3,
+            "chat_scope_id": None,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        None,
+    )
+    queue = _build_queue(
+        redis_client,
+        compact=compact,
+        save_result=save_result,
+        settle_reservation=MagicMock(return_value={"applied": True}),
+    )
+    plan = CompactionPlan("123", [{"id": "m1"}], None, None, "m1")
+
+    with use_locale("en"):
+        assert queue.enqueue(plan, billing)
+    stored_job = json.loads(redis_client.hgetall("memory:compaction:jobs")["123"])
+    assert stored_job["locale"] == "en"
+
+    assert queue.run_pending_once() == 1
+    save_result.assert_called_once_with(redis_client, "123", "en", "m1")
+
+
+def test_background_compaction_defaults_old_jobs_to_spanish():
+    from api.i18n import current_locale, use_locale
+    from api.memory.compaction import CompactionPlan
+
+    redis_client = _FakeRedis()
+    compact = MagicMock(side_effect=lambda _messages, _summary: (current_locale(), 100))
+    save_result = MagicMock()
+    billing = MagicMock(user_id=42, message={"message_id": 99})
+    billing.reserve_background_ai_credits.return_value = (
+        {
+            "reserved_credit_units": 3,
+            "chat_scope_id": None,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        None,
+    )
+    queue = _build_queue(
+        redis_client,
+        compact=compact,
+        save_result=save_result,
+        settle_reservation=MagicMock(return_value={"applied": True}),
+    )
+    plan = CompactionPlan("123", [{"id": "m1"}], None, None, "m1")
+    with use_locale("en"):
+        assert queue.enqueue(plan, billing)
+
+    stored_job = json.loads(redis_client.hgetall("memory:compaction:jobs")["123"])
+    stored_job.pop("locale")
+    redis_client.hset("memory:compaction:jobs", "123", json.dumps(stored_job))
+
+    assert queue.run_pending_once() == 1
+    save_result.assert_called_once_with(redis_client, "123", "es", "m1")
+
+
 def test_compaction_skips_reservation_when_a_chat_already_has_a_job():
     from api.memory.compaction import CompactionPlan
 

@@ -65,33 +65,17 @@ def main() -> int:
         return 1
 
     from api.core.logging import setup_logging
+
     setup_logging()
 
     from api import index
     from api.bot.general_commands import gen_random
     from api.bot.ptb import run_polling
-    from api.markets.world_cup_goals import (
-        WorldCupGoalMonitor,
-        start_world_cup_goal_monitor,
-    )
     from api.tasks.scheduler import get_scheduler, init_scheduler
 
     runtime = index.app_runtime
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
     runtime.summary.start_background_worker()
-    start_world_cup_goal_monitor(
-        WorldCupGoalMonitor(
-            list_chat_ids=index.list_world_cup_goal_chat_ids,
-            ask_ai=runtime.ai.ask,
-            send_message=runtime.telegram.send_message,
-            credits_db_service=runtime.billing.credits,
-            estimate_ai_base_reserve_credits=(
-                runtime.estimate_ai_base_reserve_credits
-            ),
-            scoreboard=index._world_cup_scoreboard,
-        )
-    )
-
     try:
         init_scheduler(
             redis_factory=runtime.config.redis,
@@ -104,9 +88,7 @@ def main() -> int:
                 "build_insufficient_credits_message_fn": (
                     runtime.billing.build_insufficient_message
                 ),
-                "estimate_ai_base_reserve_credits": (
-                    runtime.estimate_ai_base_reserve_credits
-                ),
+                "estimate_ai_base_reserve_credits": (runtime.estimate_ai_base_reserve_credits),
             },
         )
         get_scheduler()

@@ -21,11 +21,9 @@ from api.bot.chat_settings import (  # noqa: F401
     CHAT_CONFIG_DEFAULTS,
     build_config_keyboard as _build_config_keyboard,
     build_config_text as _build_config_text,
-    decode_redis_value as _decode_redis_value,
-    get_chat_config as _get_chat_config,
     is_chat_admin as _is_chat_admin,
-    set_chat_config as _set_chat_config,
 )
+from api.services.redis_helpers import decode_redis_value as _decode_redis_value
 from api.bot.command_registry import (
     parse_command as _parse_command,
     should_auto_process_media as _should_auto_process_media,
@@ -123,25 +121,12 @@ def should_auto_process_media(commands, command, message_text, message):
 truncate_text = _truncate_text
 
 
-def get_chat_config(redis_client: redis.Redis, chat_id: str):
-    return _get_chat_config(
-        redis_client,
-        chat_id,
-        chat_config_db_service=index.chat_config_db_service,
-        admin_reporter=index.app_runtime.admin.report,
-        log_event=index._log_config_event,
-    )
+def get_chat_config(chat_id: str):
+    return index._chat_config_service.get_chat_config(chat_id)
 
 
-def set_chat_config(redis_client: redis.Redis, chat_id: str, **updates: Any):
-    return _set_chat_config(
-        redis_client,
-        chat_id,
-        chat_config_db_service=index.chat_config_db_service,
-        admin_reporter=index.app_runtime.admin.report,
-        log_event=index._log_config_event,
-        **updates,
-    )
+def set_chat_config(chat_id: str, **updates: Any):
+    return index._chat_config_service.set_chat_config(chat_id, **updates)
 
 
 def build_config_text(config: Mapping[str, Any]) -> str:

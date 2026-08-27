@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from api.i18n import tr
 from api.markets.price_commands import (
     AmountConversionRequest,
     SUPPORTED_PRICE_SYMBOLS,
@@ -53,11 +54,11 @@ def get_prices(
 
     msg_text, convert_to, convert_parameter = parse_conversion_only(msg_text)
     if convert_to not in SUPPORTED_PRICE_SYMBOLS:
-        return f"no laburo con {convert_to} gordo"
+        return tr("market.crypto.unsupported_currency", symbol=convert_to)
     prices = fetch_prices(convert_parameter)
     listed = _price_data(prices)
     if listed is None:
-        return "no pude traer precios de crypto boludo"
+        return tr("market.crypto.load_error")
 
     price_rows, prices_number, selection_error = _select_price_rows(
         msg_text,
@@ -92,7 +93,7 @@ def _unsupported_timeframe_error(
     if not re.fullmatch(r"\d+[hd]", last_token):
         return None
     valid = ", ".join(change_fields)
-    return f"timeframe '{last_token}' no soportado, uso: {valid}"
+    return tr("market.timeframe_invalid", timeframe=last_token, valid=valid)
 
 
 def _price_data(
@@ -109,11 +110,11 @@ def _convert_amount(
     fetch_prices: PriceListFetcher,
 ) -> str:
     if request.target_symbol not in SUPPORTED_PRICE_SYMBOLS:
-        return f"no laburo con {request.target_symbol} gordo"
+        return tr("market.crypto.unsupported_currency", symbol=request.target_symbol)
 
     prices = _price_data(fetch_prices(request.target_parameter))
     if prices is None:
-        return "no pude traer precios de crypto boludo"
+        return tr("market.crypto.load_error")
     requested_asset = find_coin_by_symbol_or_name(prices, request.source_symbol)
     if requested_asset:
         quote_price = requested_asset["quote"][request.target_parameter]["price"]
@@ -128,17 +129,15 @@ def _convert_amount(
     source_parameter = price_query_parameter(request.source_symbol)
     reverse_prices = _price_data(fetch_prices(source_parameter))
     if reverse_prices is None:
-        return "no pude traer precios de crypto boludo"
+        return tr("market.crypto.load_error")
     target_asset = find_coin_by_symbol_or_name(
         reverse_prices,
         request.target_symbol,
     )
     if not target_asset:
-        return "no laburo con esos ponzis boludo"
+        return tr("market.crypto.unsupported_pair")
     source_amount = (
-        request.amount / 100000000
-        if request.source_symbol == "SATS"
-        else request.amount
+        request.amount / 100000000 if request.source_symbol == "SATS" else request.amount
     )
     asset_price = target_asset["quote"][source_parameter]["price"]
     converted_value = source_amount / asset_price
@@ -171,7 +170,7 @@ def _select_price_rows(
 
     raw_tokens = [token for token in re.split(r"[,\s]+", msg_text) if token]
     coins = expand_price_tokens(raw_tokens)
-    explicit_requested = _fallback_quote_tokens(coins[:len(raw_tokens)])
+    explicit_requested = _fallback_quote_tokens(coins[: len(raw_tokens)])
     selected = _select_listed_coins(listed, coins, prices_number)
     requested = _fallback_quote_tokens(coins)
     matched_tokens = _matched_price_tokens(selected)
@@ -186,16 +185,14 @@ def _select_price_rows(
         )
         selected = _unique_price_rows(selected)
     unresolved = [
-        token
-        for token in explicit_requested
-        if token not in _matched_price_tokens(selected)
+        token for token in explicit_requested if token not in _matched_price_tokens(selected)
     ]
     if selected:
-        error = f"no encontre esos ponzis: {', '.join(unresolved)}" if unresolved else None
+        error = tr("market.crypto.missing", symbols=", ".join(unresolved)) if unresolved else None
         return selected, len(selected), error
     if explicit_requested:
-        return [], 0, f"no encontre esos ponzis: {', '.join(explicit_requested)}"
-    return [], 0, "no pude traer precios de crypto boludo"
+        return [], 0, tr("market.crypto.missing", symbols=", ".join(explicit_requested))
+    return [], 0, tr("market.crypto.load_error")
 
 
 def _format_price_rows(
@@ -212,11 +209,7 @@ def _format_price_rows(
         decimals = f"{display_price:.12f}".split(".")[-1]
         zeros = len(decimals) - len(decimals.lstrip("0"))
         price = f"{display_price:.{zeros + 4}f}".rstrip("0").rstrip(".")
-        percentage = (
-            f"{quote.get(display.change_field, 0):+.2f}"
-            .rstrip("0")
-            .rstrip(".")
-        )
+        percentage = f"{quote.get(display.change_field, 0):+.2f}".rstrip("0").rstrip(".")
         lines.append(
             f"{coin['symbol']}: {price} {display.convert_to} "
             f"({percentage}% {display.timeframe_label})"
@@ -224,9 +217,7 @@ def _format_price_rows(
     return "\n".join(lines)
 
 
-def _parse_timeframe(
-    msg_text: str, valid: Mapping[str, str]
-) -> tuple[str, str | None]:
+def _parse_timeframe(msg_text: str, valid: Mapping[str, str]) -> tuple[str, str | None]:
     parts = msg_text.strip().rsplit(None, 1)
     if parts and parts[-1].lower() in valid:
         timeframe = parts[-1].lower()
@@ -257,11 +248,13 @@ def _select_listed_coins(
 
 
 def _fallback_quote_tokens(tokens: list[str]) -> list[str]:
-    return list(dict.fromkeys(
-        token
-        for token in tokens
-        if token not in {"STABLES", "STABLECOINS"} and not token.isdigit()
-    ))
+    return list(
+        dict.fromkeys(
+            token
+            for token in tokens
+            if token not in {"STABLES", "STABLECOINS"} and not token.isdigit()
+        )
+    )
 
 
 def _iter_quote_rows(quote_data: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -273,12 +266,7 @@ def _iter_quote_rows(quote_data: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def _has_price(coin: dict[str, Any], convert_parameter: str) -> bool:
-    return (
-        coin.get("quote", {})
-        .get(convert_parameter, {})
-        .get("price")
-        is not None
-    )
+    return coin.get("quote", {}).get(convert_parameter, {}).get("price") is not None
 
 
 def _matched_price_tokens(rows: list[dict[str, Any]]) -> set[str]:
@@ -293,9 +281,7 @@ def _unique_price_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
     for coin in rows:
-        identity = str(
-            coin.get("id") or coin.get("symbol") or coin.get("slug") or ""
-        )
+        identity = str(coin.get("id") or coin.get("symbol") or coin.get("slug") or "")
         if not identity or identity in seen:
             continue
         seen.add(identity)
@@ -328,8 +314,6 @@ def _fetch_requested_quotes(
                 by_slug=True,
             )
         )
-        found.extend(
-            coin for coin in slug_rows if _has_price(coin, convert_parameter)
-        )
+        found.extend(coin for coin in slug_rows if _has_price(coin, convert_parameter))
 
     return _unique_price_rows(found)

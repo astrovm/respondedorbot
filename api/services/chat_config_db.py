@@ -69,9 +69,7 @@ def _normalize(
     return normalized
 
 
-def get_chat_config(
-    chat_id: str, defaults: Mapping[str, Any]
-) -> Optional[Dict[str, Any]]:
+def get_chat_config(chat_id: str, defaults: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     """Load chat config from Postgres, or return ``None`` when absent."""
 
     ensure_schema()
@@ -126,23 +124,3 @@ def set_chat_config(chat_id: str, config: Mapping[str, Any]) -> Dict[str, Any]:
         conn.commit()
 
     return stored
-
-
-def list_world_cup_goal_chat_ids() -> list[str]:
-    """Return chats that opted in to live World Cup goal alerts."""
-
-    ensure_schema()
-
-    with credits_db_service.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT chat_id
-                FROM chat_configs
-                WHERE config @> '{"world_cup_goal_alerts": true}'::jsonb
-                """
-            )
-            rows = cur.fetchall()
-        conn.commit()
-
-    return [str(row[0]) for row in rows if row]

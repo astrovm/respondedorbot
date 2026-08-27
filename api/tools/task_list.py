@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 from api.tasks.scheduler import (
     format_task_summary,
@@ -17,11 +18,11 @@ def _execute_task_list(
 ) -> ToolResult:
     chat_id = str(context.get("chat_id", ""))
     if not chat_id:
-        return ToolResult(output="no se en que chat estoy")
+        return ToolResult(output=tr("task.no_chat"))
 
     tasks = list_tasks(chat_id)
     if not tasks:
-        return ToolResult(output="no hay tareas")
+        return ToolResult(output=tr("task.none"))
 
     lines = []
     for t in tasks:

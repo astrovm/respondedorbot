@@ -6,8 +6,8 @@ from os import environ
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from api.ai.pricing import MODEL_PRICING_USD_MICROS
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.billing.credit_units import format_credit_units, parse_credit_units
+from api.i18n import tr
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
 
@@ -27,7 +27,7 @@ def _get_admin_chat_id() -> str:
 def _require_billing(deps: AdminCommandDeps, command: str) -> Optional[CommandResponse]:
     if bool(deps.credits_db_service.is_configured()):
         return None
-    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return tr("billing.unavailable"), None, False, command
 
 
 def handle_admin_printcredits_command(
@@ -43,7 +43,7 @@ def handle_admin_printcredits_command(
 
     admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
+        return tr("admin.only"), None, False, command
 
     billing_required_response = _require_billing(deps, command)
     if billing_required_response is not None:
@@ -52,18 +52,18 @@ def handle_admin_printcredits_command(
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
     amount = parse_credit_units(amount_token)
     if amount is None:
-        return "mandalo bien: /printcredits <monto>", None, False, command
+        return tr("admin.print_usage"), None, False, command
 
     if amount <= 0:
         return (
-            "el monto tiene que ser mayor a 0, no me rompas las bolas",
+            tr("admin.amount_positive"),
             None,
             False,
             command,
         )
 
     if user_id is None:
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+        return tr("admin.print_error"), None, False, command
 
     try:
         mint_result = deps.credits_db_service.mint_user_credits(
@@ -77,12 +77,13 @@ def handle_admin_printcredits_command(
             error,
             {"chat_id": chat_id, "user_id": user_id, "amount": amount},
         )
-        return "se trabó imprimiendo créditos, probá de nuevo", None, False, command
+        return tr("admin.print_error"), None, False, command
 
     return (
-        (
-            f"listo, te imprimí {format_credit_units(amount)} créditos\n"
-            f"te quedaron {format_credit_units(mint_result.get('user_balance', 0))}"
+        tr(
+            "admin.print_success",
+            amount=format_credit_units(amount),
+            balance=format_credit_units(mint_result.get("user_balance", 0)),
         ),
         None,
         False,
@@ -92,7 +93,7 @@ def handle_admin_printcredits_command(
 
 def _with_hidden_count(summary: str, total: int, visible: int) -> str:
     hidden = total - visible
-    return f"{summary}, +{hidden} más" if hidden > 0 else summary
+    return tr("admin.more", summary=summary, count=hidden) if hidden > 0 else summary
 
 
 def _summarize_models(items: Sequence[object]) -> str:
@@ -102,7 +103,7 @@ def _summarize_models(items: Sequence[object]) -> str:
             name = str(item.get("model") or "?")
             totals[name] = totals.get(name, 0) + int(item.get("usd_micros") or 0)
     if not totals:
-        return "sin modelos"
+        return tr("admin.no_models")
     ordered = sorted(totals.items(), key=lambda entry: (-entry[1], entry[0]))
     visible = ordered[:5]
     summary = ", ".join(f"{name}={usd}" for name, usd in visible)
@@ -119,7 +120,7 @@ def _summarize_tools(items: Sequence[object]) -> str:
         current["usd_micros"] += int(item.get("usd_micros") or 0)
         current["count"] += int(item.get("count") or 0)
     if not totals:
-        return "sin tools"
+        return tr("admin.no_tools")
     ordered = sorted(
         totals.items(),
         key=lambda entry: (-entry[1]["usd_micros"], -entry[1]["count"], entry[0]),
@@ -171,7 +172,10 @@ def _summarize_model_cache(items: Sequence[object]) -> Optional[str]:
             ) // 1_000_000
     if cached_tokens_total <= 0:
         return None
-    return f"cacheados={cached_tokens_total} ahorro_cache={savings_total}"
+    return (
+        f"{tr('admin.creditlog.cached_tokens')}={cached_tokens_total} "
+        f"{tr('admin.creditlog.cache_savings')}={savings_total}"
+    )
 
 
 def _metadata_credit(metadata: Mapping[str, Any], *keys: str) -> int:
@@ -180,10 +184,12 @@ def _metadata_credit(metadata: Mapping[str, Any], *keys: str) -> int:
 
 def _creditlog_status(metadata: Mapping[str, Any]) -> str:
     if metadata.get("billing_zero_usage_fallback"):
-        return "estado=groq_zero_usage"
-    if metadata.get("missing_usage_billing"):
-        return "estado=missing_usage"
-    return "estado=ok"
+        value = "groq_zero_usage"
+    elif metadata.get("missing_usage_billing"):
+        value = "missing_usage"
+    else:
+        value = "ok"
+    return f"{tr('admin.creditlog.status')}={value}"
 
 
 def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
@@ -193,21 +199,25 @@ def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
     tools = metadata.get("tool_breakdown") or []
     segments = metadata.get("billing_segments") or []
     created_at = str(entry.get("created_at") or "")
-    created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
-    command = str(metadata.get("command") or metadata.get("usage_tag") or "sin comando")
+    created_label = created_at.replace("T", " ")[:19] if created_at else tr("common.unknown_date")
+    command = str(
+        metadata.get("command")
+        or metadata.get("usage_tag")
+        or tr("admin.creditlog.unknown_command")
+    )
     detail_lines = [
         f"{created_label} | cmd={command} | {_creditlog_status(metadata)}",
         (
             f"chat={metadata.get('chat_id', entry.get('chat_id'))} "
             f"user={metadata.get('user_id', entry.get('user_id'))} "
-            f"reservado={format_credit_units(_metadata_credit(metadata, 'reserved_credit_units_total', 'reserved_credit_units', 'reserved_credits_total', 'reserved_credits'))} "
-            f"cobrado={format_credit_units(_metadata_credit(metadata, 'settled_credit_units', 'settled_credits'))} "
-            f"refund={format_credit_units(_metadata_credit(metadata, 'refunded_credit_units', 'refunded_credits'))} "
-            f"extra={format_credit_units(_metadata_credit(metadata, 'extra_charged_credit_units', 'extra_charged_credits'))} "
-            f"deuda={format_credit_units(_metadata_credit(metadata, 'debt_applied_credit_units', 'debt_applied_credits'))}"
+            f"{tr('admin.creditlog.reserved')}={format_credit_units(_metadata_credit(metadata, 'reserved_credit_units_total', 'reserved_credit_units', 'reserved_credits_total', 'reserved_credits'))} "
+            f"{tr('admin.creditlog.charged')}={format_credit_units(_metadata_credit(metadata, 'settled_credit_units', 'settled_credits'))} "
+            f"{tr('admin.creditlog.refund')}={format_credit_units(_metadata_credit(metadata, 'refunded_credit_units', 'refunded_credits'))} "
+            f"{tr('admin.creditlog.extra')}={format_credit_units(_metadata_credit(metadata, 'extra_charged_credit_units', 'extra_charged_credits'))} "
+            f"{tr('admin.creditlog.debt')}={format_credit_units(_metadata_credit(metadata, 'debt_applied_credit_units', 'debt_applied_credits'))}"
         ),
         f"usd_micros={int(metadata.get('raw_usd_micros') or 0)}",
-        f"requests: {_summarize_segments(segments, cache_only=False) or 'sin segmentos'}",
+        f"{tr('admin.creditlog.requests')}: {_summarize_segments(segments, cache_only=False) or tr('admin.creditlog.no_segments')}",
     ]
     cache_hits = _summarize_segments(segments, cache_only=True)
     if cache_hits:
@@ -215,21 +225,23 @@ def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
     cache_summary = _summarize_model_cache(models)
     if cache_summary:
         detail_lines.append(cache_summary)
-    detail_lines.extend([
-        f"modelos: {_summarize_models(models)}",
-        f"tools: {_summarize_tools(tools)}",
-    ])
+    detail_lines.extend(
+        [
+            f"{tr('admin.creditlog.models')}: {_summarize_models(models)}",
+            f"{tr('admin.creditlog.tools')}: {_summarize_tools(tools)}",
+        ]
+    )
     return "\n".join(detail_lines)
 
 
 def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    return ["últimas liquidaciones IA:", *map(_format_creditlog_entry, entries)]
+    return [tr("admin.creditlog_title"), *map(_format_creditlog_entry, entries)]
 
 
 def truncate_creditlog_message(text: str, max_length: int = 3500) -> str:
     if len(text) <= max_length:
         return text
-    suffix = "\n\n[truncado]"
+    suffix = f"\n\n[{tr('admin.truncated')}]"
     return text[: max_length - len(suffix)].rstrip() + suffix
 
 
@@ -246,7 +258,7 @@ def handle_admin_creditlog_command(
 
     admin_chat_id = _get_admin_chat_id()
     if not admin_chat_id or str(user_id or "") != admin_chat_id:
-        return "este comando es solo para el admin", None, False, command
+        return tr("admin.only"), None, False, command
 
     billing_required_response = _require_billing(deps, command)
     if billing_required_response is not None:
@@ -258,7 +270,7 @@ def handle_admin_creditlog_command(
         try:
             limit = int(raw_limit.split(" ", 1)[0].strip())
         except (TypeError, ValueError):
-            return "mandalo bien: /creditlog [limite]", None, False, command
+            return tr("admin.creditlog_usage"), None, False, command
     limit = max(1, min(limit, 25))
 
     try:
@@ -269,10 +281,10 @@ def handle_admin_creditlog_command(
             error,
             {"chat_id": chat_id, "user_id": user_id, "limit": limit},
         )
-        return "se trabó leyendo el creditlog, probá de nuevo", None, False, command
+        return tr("admin.creditlog_error"), None, False, command
 
     if not entries:
-        return "no hay liquidaciones ia recientes", None, False, command
+        return tr("admin.creditlog_empty"), None, False, command
 
     return (
         truncate_creditlog_message("\n\n".join(build_creditlog_lines(entries))),

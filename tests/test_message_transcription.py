@@ -15,12 +15,7 @@ def test_handle_msg():
     mock_redis = MagicMock()
     mock_config_redis.return_value = mock_redis
 
-    def redis_get(key):
-        if key in {"chat_config:456"}:
-            return json.dumps(CHAT_CONFIG_DEFAULTS)
-        return None
-
-    mock_redis.get.side_effect = redis_get
+    mock_redis.get.return_value = None
     mock_redis.lrange.return_value = []
 
     mock_send_msg = MagicMock()
@@ -76,12 +71,7 @@ def test_handle_msg_with_crypto_command():
     mock_redis = MagicMock()
     mock_config_redis.return_value = mock_redis
 
-    def redis_get(key):
-        if key == "chat_config:123":
-            return json.dumps(CHAT_CONFIG_DEFAULTS)
-        return None
-
-    mock_redis.get.side_effect = redis_get
+    mock_redis.get.return_value = None
 
     mock_send_msg = MagicMock()
     mock_get_prices = MagicMock(return_value="BTC: 50000")
@@ -196,12 +186,7 @@ def test_handle_msg_group_audio_without_invocation_skips_auto_transcription(
     redis_client = MagicMock()
     redis_client.lrange.return_value = []
 
-    def redis_get(key):
-        if key == "chat_config:123":
-            return json.dumps(CHAT_CONFIG_DEFAULTS)
-        return None
-
-    redis_client.get.side_effect = redis_get
+    redis_client.get.return_value = None
     mock_send_msg = MagicMock()
     mock_transcribe = MagicMock(return_value=("transcribed text", None, None))
 

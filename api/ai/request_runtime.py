@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from api.i18n import current_locale, tr
+
 
 def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
     """Normalize old assistant messages before sending them back to the model."""
@@ -16,9 +18,7 @@ def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
     if isinstance(content, str):
         content = content.lower()
         content = "".join(
-            character
-            for character in content
-            if not (0x1F000 <= ord(character) <= 0x1FFFF)
+            character for character in content if not (0x1F000 <= ord(character) <= 0x1FFFF)
         )
         content = content.rstrip(".")
     elif isinstance(content, list):
@@ -93,6 +93,7 @@ def build_ai_request(
         "get_bot_capabilities": get_bot_capabilities,
         "config_redis": config_redis,
         "timezone_offset": timezone_offset,
+        "locale": current_locale(),
     }
     if enable_web_search:
         tool_context["web_search_enabled"] = True
@@ -135,17 +136,14 @@ def inject_image_context(
         return
 
     logger.info("vision model processing image")
-    user_text = (
-        "describí lo que ves en esta imagen en detalle, "
-        "en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
-    )
+    user_text = tr("media.image_prompt")
     image_result = describe_image(image_data, user_text, image_file_id)
     image_description = image_result.text if image_result else None
 
     if image_description:
         # Vision is a separate billable provider call.
         append_billing_segment(response_meta, image_result)
-        image_context = f"[Imagen: {image_description}]"
+        image_context = tr("media.image_context", description=image_description)
         if messages:
             last_message = messages[-1]
             if isinstance(last_message.get("content"), str):
@@ -222,9 +220,7 @@ def ask_ai(
         # A provider/config error should not make the Telegram handler crash.
         error_context = {
             "messages_count": len(messages),
-            "messages_preview": [
-                message.get("content", "")[:100] for message in messages
-            ],
+            "messages_preview": [message.get("content", "")[:100] for message in messages],
         }
         admin_report("Error in ask_ai", error, error_context)
         if response_meta is not None:

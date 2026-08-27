@@ -1,4 +1,5 @@
 from tests.support import *
+from unittest.mock import call
 
 
 def test_build_commands_list_sorts_deduplicates_and_skips_undocumented_aliases():
@@ -46,20 +47,35 @@ def test_update_bot_commands_posts_serialized_sorted_commands():
     )
 
     assert ok is True
-    request_fn.assert_called_once_with(
-        "setMyCommands",
-        method="POST",
-        json_payload={
-            "commands": json.dumps(
-                [
-                    {"command": "alpha", "description": "alpha desc"},
-                    {"command": "beta", "description": "beta desc"},
-                ]
-            )
-        },
-        token="abc",
-        expect_json=False,
+    commands = json.dumps(
+        [
+            {"command": "alpha", "description": "alpha desc"},
+            {"command": "beta", "description": "beta desc"},
+        ]
     )
+    assert request_fn.call_args_list == [
+        call(
+            "setMyCommands",
+            method="POST",
+            json_payload={"commands": commands},
+            token="abc",
+            expect_json=False,
+        ),
+        call(
+            "setMyCommands",
+            method="POST",
+            json_payload={"commands": commands, "language_code": "es"},
+            token="abc",
+            expect_json=False,
+        ),
+        call(
+            "setMyCommands",
+            method="POST",
+            json_payload={"commands": commands, "language_code": "en"},
+            token="abc",
+            expect_json=False,
+        ),
+    ]
 
 
 def test_update_bot_commands_logs_error_and_returns_false():
@@ -76,7 +92,7 @@ def test_update_bot_commands_logs_error_and_returns_false():
     )
 
     assert ok is False
-    logger.assert_called_once_with("Error updating bot commands: boom")
+    logger.assert_called_once_with("Error updating bot commands (default): boom")
 
 
 def test_build_commands_list_includes_tldr_alias_when_documented():

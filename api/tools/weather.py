@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from api.ai.prompt_context import format_weather_info
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -14,14 +15,14 @@ def _execute_weather(
 ) -> ToolResult:
     get_weather = context.get("get_weather_context")
     if get_weather is None:
-        return ToolResult(output="weather lookup not available")
+        return ToolResult(output=tr("tool.unavailable", tool="weather"))
 
     location = str(params.get("location") or "").strip()
     if not location:
-        return ToolResult(output="indicá una ciudad o ubicación")
+        return ToolResult(output=tr("tool.weather.required"))
     weather = get_weather(location)
     if not weather:
-        return ToolResult(output=f"no se pudo obtener el clima de {location}")
+        return ToolResult(output=tr("weather.load_error", location=location))
     return ToolResult(output=format_weather_info(weather))
 
 

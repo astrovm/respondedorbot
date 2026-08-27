@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -13,15 +14,15 @@ def _execute_crypto_prices(
 ) -> ToolResult:
     get_prices_fn = context.get("get_prices")
     if get_prices_fn is None:
-        return ToolResult(output="crypto price lookup not available")
+        return ToolResult(output=tr("tool.unavailable", tool="crypto prices"))
     assets = params.get("assets", [])
     if isinstance(assets, str):
         assets = [assets]
     if not isinstance(assets, list) or not assets:
-        return ToolResult(output="indicá al menos una crypto")
+        return ToolResult(output=tr("tool.crypto.required"))
     normalized = [str(asset).strip() for asset in assets if str(asset).strip()]
     if not normalized:
-        return ToolResult(output="indicá al menos una crypto")
+        return ToolResult(output=tr("tool.crypto.required"))
 
     query = ",".join(normalized[:20])
     convert = str(params.get("convert") or "USD").strip().upper()
@@ -29,7 +30,7 @@ def _execute_crypto_prices(
     query = f"{query} in {convert} {timeframe}"
     result = get_prices_fn(query)
     if result is None:
-        return ToolResult(output="no se pudieron obtener los precios")
+        return ToolResult(output=tr("tool.crypto.error"))
     return ToolResult(output=result)
 
 
