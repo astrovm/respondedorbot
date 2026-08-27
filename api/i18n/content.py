@@ -282,6 +282,37 @@ FEATURE_EXAMPLES: dict[str, dict[Locale, tuple[str, ...]]] = {
     "credits": {"es": ("/charges 10", "/transfer 1.5"), "en": ("/charges 10", "/transfer 1.5")},
 }
 
+WEATHER_DESCRIPTIONS: dict[int, dict[Locale, str]] = {
+    0: {"es": "despejado", "en": "clear"},
+    1: {"es": "mayormente despejado", "en": "mostly clear"},
+    2: {"es": "parcialmente nublado", "en": "partly cloudy"},
+    3: {"es": "nublado", "en": "cloudy"},
+    45: {"es": "neblina", "en": "foggy"},
+    48: {"es": "niebla", "en": "freezing fog"},
+    51: {"es": "llovizna leve", "en": "light drizzle"},
+    53: {"es": "llovizna moderada", "en": "moderate drizzle"},
+    55: {"es": "llovizna intensa", "en": "heavy drizzle"},
+    56: {"es": "llovizna helada leve", "en": "light freezing drizzle"},
+    57: {"es": "llovizna helada intensa", "en": "heavy freezing drizzle"},
+    61: {"es": "lluvia leve", "en": "light rain"},
+    63: {"es": "lluvia moderada", "en": "moderate rain"},
+    65: {"es": "lluvia intensa", "en": "heavy rain"},
+    66: {"es": "lluvia helada leve", "en": "light freezing rain"},
+    67: {"es": "lluvia helada intensa", "en": "heavy freezing rain"},
+    71: {"es": "nevada leve", "en": "light snow"},
+    73: {"es": "nevada moderada", "en": "moderate snow"},
+    75: {"es": "nevada intensa", "en": "heavy snow"},
+    77: {"es": "granizo", "en": "snow grains"},
+    80: {"es": "lluvia leve intermitente", "en": "light rain showers"},
+    81: {"es": "lluvia moderada intermitente", "en": "moderate rain showers"},
+    82: {"es": "lluvia fuerte intermitente", "en": "heavy rain showers"},
+    85: {"es": "nevada leve intermitente", "en": "light snow showers"},
+    86: {"es": "nevada intensa intermitente", "en": "heavy snow showers"},
+    95: {"es": "tormenta", "en": "thunderstorm"},
+    96: {"es": "tormenta con granizo leve", "en": "thunderstorm with light hail"},
+    99: {"es": "tormenta con granizo intenso", "en": "thunderstorm with heavy hail"},
+}
+
 CATEGORY_NAMES: dict[str, dict[Locale, str]] = {
     "ai": {"es": "ia", "en": "AI"},
     "markets": {"es": "mercado", "en": "markets"},
@@ -303,7 +334,7 @@ HELP_TEXT: dict[Locale, dict[str, str | tuple[str, ...]]] = {
         "admin": "solo admin",
         "capabilities": (
             "CAPACIDADES DEL BOT:",
-            "- si el usuario pregunta que podes hacer, responde desde esta lista",
+            "- si el usuario pregunta qué podés hacer, respondé desde esta lista",
             "- no inventes comandos; /buscar y /search no existen",
             "- si existe comando exacto para algo, sugerilo con el comando exacto",
         ),
@@ -333,6 +364,11 @@ def feature_text(key: str, locale: Locale | None = None) -> tuple[str, str]:
 def feature_examples(key: str, locale: Locale | None = None) -> tuple[str, ...]:
     translations = FEATURE_EXAMPLES.get(key)
     return translations[locale or current_locale()] if translations else ()
+
+
+def weather_description(code: int, locale: Locale | None = None) -> str | None:
+    translations = WEATHER_DESCRIPTIONS.get(code)
+    return translations[locale or current_locale()] if translations else None
 
 
 def category_name(key: str, locale: Locale | None = None) -> str:

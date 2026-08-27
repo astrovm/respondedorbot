@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from string import Formatter
 
-from typing import Mapping
+from typing import Mapping, TypeVar
 
 from api.i18n import CATALOGS, ES, SUPPORTED_LOCALES, Locale
 from api.i18n.content import (
@@ -13,12 +13,15 @@ from api.i18n.content import (
     FEATURE_EXAMPLES,
     FEATURE_TEXT,
     HELP_TEXT,
+    WEATHER_DESCRIPTIONS,
 )
+
+_Key = TypeVar("_Key")
 
 
 def _localized_group_errors(
     group_name: str,
-    group: Mapping[str, Mapping[Locale, object]],
+    group: Mapping[_Key, Mapping[Locale, object]],
 ) -> list[str]:
     errors: list[str] = []
     expected_locales = set(SUPPORTED_LOCALES)
@@ -61,6 +64,7 @@ def catalog_errors() -> list[str]:
     errors.extend(_localized_group_errors("feature", FEATURE_TEXT))
     errors.extend(_localized_group_errors("feature_examples", FEATURE_EXAMPLES))
     errors.extend(_localized_group_errors("category", CATEGORY_NAMES))
+    errors.extend(_localized_group_errors("weather", WEATHER_DESCRIPTIONS))
     if set(HELP_TEXT) != expected_locales:
         errors.append(f"help locales {sorted(HELP_TEXT)} != {sorted(expected_locales)}")
     return errors

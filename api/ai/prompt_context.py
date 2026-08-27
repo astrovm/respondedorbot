@@ -7,7 +7,9 @@ from datetime import datetime, tzinfo
 from typing import Any
 
 from api.ai.pipeline import base_instructions
-from api.i18n import current_locale, tr
+from api.i18n import tr
+from api.i18n.content import weather_description
+from api.i18n.prompts import prompt
 
 
 def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -44,69 +46,7 @@ def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def get_weather_description(code: int) -> str:
-    descriptions = {
-        0: "despejado",
-        1: "mayormente despejado",
-        2: "parcialmente nublado",
-        3: "nublado",
-        45: "neblina",
-        48: "niebla",
-        51: "llovizna leve",
-        53: "llovizna moderada",
-        55: "llovizna intensa",
-        56: "llovizna helada leve",
-        57: "llovizna helada intensa",
-        61: "lluvia leve",
-        63: "lluvia moderada",
-        65: "lluvia intensa",
-        66: "lluvia helada leve",
-        67: "lluvia helada intensa",
-        71: "nevada leve",
-        73: "nevada moderada",
-        75: "nevada intensa",
-        77: "granizo",
-        80: "lluvia leve intermitente",
-        81: "lluvia moderada intermitente",
-        82: "lluvia fuerte intermitente",
-        85: "nevada leve intermitente",
-        86: "nevada intensa intermitente",
-        95: "tormenta",
-        96: "tormenta con granizo leve",
-        99: "tormenta con granizo intenso",
-    }
-    if current_locale() == "en":
-        english = {
-            0: "clear",
-            1: "mostly clear",
-            2: "partly cloudy",
-            3: "cloudy",
-            45: "foggy",
-            48: "freezing fog",
-            51: "light drizzle",
-            53: "moderate drizzle",
-            55: "heavy drizzle",
-            56: "light freezing drizzle",
-            57: "heavy freezing drizzle",
-            61: "light rain",
-            63: "moderate rain",
-            65: "heavy rain",
-            66: "light freezing rain",
-            67: "heavy freezing rain",
-            71: "light snow",
-            73: "moderate snow",
-            75: "heavy snow",
-            77: "snow grains",
-            80: "light rain showers",
-            81: "moderate rain showers",
-            82: "heavy rain showers",
-            85: "light snow showers",
-            86: "heavy snow showers",
-            95: "thunderstorm",
-            96: "thunderstorm with light hail",
-            99: "thunderstorm with heavy hail",
-        }
-        return english.get(code, tr("weather.unusual"))
-    return descriptions.get(code, tr("weather.unusual"))
+    return weather_description(code) or tr("weather.unusual")
 
 
 def format_hacker_news_info(
@@ -167,18 +107,15 @@ def _message_context_parts(
     username: str,
     current_time: datetime,
 ) -> list[str]:
-    if current_locale() == "en":
-        return [
-            "CONTEXT:",
-            f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-            f"- User: {first_name}" + (f" ({username})" if username else ""),
-            f"- Time: {current_time.strftime('%H:%M')}",
-        ]
     return [
-        "CONTEXTO:",
-        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
-        f"- Hora: {current_time.strftime('%H:%M')}",
+        prompt("context.header"),
+        prompt(
+            "context.chat", chat_type=chat_type, chat_title=f" ({chat_title})" if chat_title else ""
+        ),
+        prompt(
+            "context.user", first_name=first_name, username=f" ({username})" if username else ""
+        ),
+        prompt("context.time", time=current_time.strftime("%H:%M")),
     ]
 
 
@@ -202,16 +139,12 @@ def build_ai_messages(
         messages.append(
             {
                 "role": "system",
-                "content": f"RESUMEN ACUMULADO DEL CHAT:\n{summary_text}",
+                "content": prompt("context.summary", summary=summary_text),
             }
         )
 
     if retrieved_messages:
-        retrieval_lines = [
-            "RELEVANT EARLIER MESSAGES:"
-            if current_locale() == "en"
-            else "MENSAJES ANTERIORES RELEVANTES:"
-        ]
+        retrieval_lines = [prompt("context.retrieved")]
         for item in retrieved_messages:
             role = str(item.get("role") or "user")
             text = str(item.get("text") or "")
@@ -230,9 +163,7 @@ def build_ai_messages(
 
     sender = message.get("from", {})
     chat = message.get("chat", {})
-    first_name = str(
-        sender.get("first_name") or ("User" if current_locale() == "en" else "Usuario")
-    )
+    first_name = str(sender.get("first_name") or prompt("context.anonymous_user"))
     username = str(sender.get("username") or "")
     chat_type = str(chat.get("type") or "private")
     chat_title = str(chat.get("title") or "") if chat_type != "private" else ""
@@ -247,35 +178,18 @@ def build_ai_messages(
     )
 
     if reply_context and not (messages and messages[-1].get("role") == "assistant"):
-        reply_label = (
-            "MESSAGE BEING REPLIED TO:" if current_locale() == "en" else "MENSAJE AL QUE RESPONDE:"
-        )
-        context_parts.extend(["", reply_label, truncate_text(reply_context)])
+        context_parts.extend(["", prompt("context.reply"), truncate_text(reply_context)])
 
     link_context = build_links_context(message)
     if link_context:
         context_parts.extend(["", link_context])
 
-    instructions = (
-        [
-            "",
-            "INSTRUCTIONS:",
-            "- keep the bot persona",
-            "- use casual English",
-            "- answer without emojis or a final period",
-            "- use one sentence unless a complex explanation needs more structure",
-        ]
-        if current_locale() == "en"
-        else [""] + base_instructions()
-    )
+    instructions = [""] + base_instructions()
     if enable_web_search:
-        instructions.append(
-            "- use web search when you are unsure about a current fact"
-            if current_locale() == "en"
-            else "- si no estás seguro de algo podes buscarlo en internet"
-        )
+        instructions.append(prompt("context.web_search"))
 
-    message_label = "MESSAGE:" if current_locale() == "en" else "MENSAJE:"
-    context_parts.extend(["", message_label, truncate_text(message_text)] + instructions)
+    context_parts.extend(
+        ["", prompt("context.message"), truncate_text(message_text)] + instructions
+    )
     messages.append({"role": "user", "content": "\n".join(context_parts)})
     return messages

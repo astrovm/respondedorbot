@@ -47,9 +47,7 @@ def test_english_locale_reaches_help_commands_markets_and_tasks():
         )
         interval = format_interval(3600)
         tool_error = execute_tool("weather", {"location": ""}, {})
-        media_success = AIMessageBilling.is_transcribe_success_response(
-            "🖼️ image: a black cat"
-        )
+        media_success = AIMessageBilling.is_transcribe_success_response("🖼️ image: a black cat")
 
     assert help_text.startswith("what I can do:")
     assert descriptions["settings"] == "open all bot settings"
@@ -58,6 +56,34 @@ def test_english_locale_reaches_help_commands_markets_and_tasks():
     assert interval == "every 1 hour"
     assert tool_error.output == "weather is unavailable"
     assert media_success
+
+
+def test_english_locale_reaches_all_ai_prompt_context():
+    from api.index import build_ai_messages
+
+    message = {
+        "from": {},
+        "chat": {"type": "private"},
+        "text": "hello",
+    }
+    with use_locale("en"):
+        messages = build_ai_messages(
+            message,
+            [],
+            "hello",
+            reply_context="quoted message",
+            summary_text="prior summary",
+            retrieved_messages=[{"role": "user", "text": "older message"}],
+        )
+
+    all_content = "\n".join(str(item["content"]) for item in messages)
+    assert "ACCUMULATED CHAT SUMMARY:" in all_content
+    assert "RELEVANT EARLIER MESSAGES:" in all_content
+    assert "MESSAGE BEING REPLIED TO:" in all_content
+    assert "INSTRUCTIONS:" in all_content
+    assert "use web search when you are unsure about a current fact" in all_content
+    assert "RESUMEN" not in all_content
+    assert "MENSAJE" not in all_content
 
 
 def test_english_creditlog_has_no_spanish_labels():
