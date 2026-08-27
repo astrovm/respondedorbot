@@ -1,4 +1,4 @@
-"""Chat configuration compatibility wrappers and admin helpers."""
+"""Chat configuration rendering and admin helpers."""
 
 from __future__ import annotations
 
@@ -16,119 +16,9 @@ from api.bot.chat_config_defaults import (
     TIMEZONE_OFFSET_MIN,
 )
 from api.core.i18n import Locale, current_locale, normalize_locale, tr
-from api.bot.chat_config_service import (
-    ChatConfigService,
-    build_chat_config_service,
-    decode_redis_value,
-)
 from api.services.redis_helpers import redis_get_json, redis_setex_json
-from api.storage.chat_config_repository import build_chat_config_repository
 
-AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
-
-
-def _build_service(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> ChatConfigService:
-    repo = (
-        chat_config_db_service
-        if chat_config_db_service is not None
-        else build_chat_config_repository()
-    )
-    return build_chat_config_service(
-        repository=repo,
-        admin_reporter=admin_reporter or (lambda *a, **k: None),
-        log_event=log_event or (lambda *a, **k: None),
-    )
-
-
-_cached_service: Optional[Any] = None
-_cached_service_key: Optional[tuple[int, int, int]] = None
-
-
-def _service_cache_key(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> tuple[int, int, int]:
-    return (
-        id(chat_config_db_service),
-        id(admin_reporter),
-        id(log_event),
-    )
-
-
-def _get_cached_service(
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> ChatConfigService:
-    global _cached_service, _cached_service_key
-    cache_key = _service_cache_key(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    if _cached_service is None or _cached_service_key != cache_key:
-        _cached_service = _build_service(
-            chat_config_db_service=chat_config_db_service,
-            admin_reporter=admin_reporter,
-            log_event=log_event,
-        )
-        _cached_service_key = cache_key
-    assert _cached_service is not None
-    return _cached_service
-
-
-def reset_chat_config_cache() -> None:
-    global _cached_service, _cached_service_key
-    _cached_service = None
-    _cached_service_key = None
-
-
-def get_chat_config(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-) -> Dict[str, Any]:
-    """Compatibility wrapper that builds a ChatConfigService and delegates.
-
-    Kept as a function so existing callsites (api.index and tests) keep the same
-    signature while the implementation is moved into the service.
-    """
-
-    service = _get_cached_service(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    return service.get_chat_config(redis_client, chat_id)
-
-
-def set_chat_config(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    chat_config_db_service: Any = None,
-    admin_reporter: Optional[AdminReporter] = None,
-    log_event: Optional[ConfigLogger] = None,
-    **updates: Any,
-) -> Dict[str, Any]:
-    service = _get_cached_service(
-        chat_config_db_service=chat_config_db_service,
-        admin_reporter=admin_reporter,
-        log_event=log_event,
-    )
-    return service.set_chat_config(redis_client, chat_id, **updates)
 
 
 def coerce_bool(value: Any, *, default: bool) -> bool:
@@ -463,11 +353,8 @@ __all__ = [
     "build_config_keyboard",
     "build_config_text",
     "coerce_bool",
-    "decode_redis_value",
-    "get_chat_config",
     "is_chat_admin",
     "is_group_chat_type",
     "parse_chat_config",
     "report_unauthorized_config_attempt",
-    "set_chat_config",
 ]

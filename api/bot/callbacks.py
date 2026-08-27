@@ -69,7 +69,6 @@ class CallbackContext:
 
 @dataclass(frozen=True, slots=True)
 class ConfigUpdateContext:
-    redis_client: Any
     chat_id: str
     callback_id: str | None
     deps: CallbackConfigDeps
@@ -172,7 +171,6 @@ def _update_timezone(
         return config, False
     return (
         context.deps.set_chat_config(
-            context.redis_client,
             context.chat_id,
             timezone_offset=offset,
         ),
@@ -219,7 +217,6 @@ def _update_creditless_limit(
         return config, False
     return (
         context.deps.set_chat_config(
-            context.redis_client,
             context.chat_id,
             creditless_user_hourly_limit=limit,
         ),
@@ -241,13 +238,11 @@ def update_callback_config(
     }
     if action == "language" and value in {"es", "en"}:
         config = context.deps.set_chat_config(
-            context.redis_client,
             context.chat_id,
             language=value,
         )
     elif action == "link" and value in {"reply", "delete", "off"}:
         config = context.deps.set_chat_config(
-            context.redis_client,
             context.chat_id,
             link_mode=value,
         )
@@ -257,7 +252,6 @@ def update_callback_config(
             default=True,
         )
         config = context.deps.set_chat_config(
-            context.redis_client,
             context.chat_id,
             **{field: not current},
         )
@@ -333,11 +327,11 @@ def _route_feature_callback(
 
 def _authorize_config_callback(
     context: CallbackContext,
-    redis_client: Any,
     deps: CallbackQueryDeps,
 ) -> bool:
     if not (context.data.startswith("cfg:") and deps.is_group_chat_type(context.chat_type)):
         return True
+    redis_client = deps.config_redis()
     if deps.is_chat_admin(
         context.chat_id,
         context.user.get("id"),
@@ -398,29 +392,23 @@ def handle_callback_query(
     if context is None:
         return
 
-    fallback_locale = resolve_locale(
+    locale = resolve_locale(
         None,
         telegram_language_code=context.user.get("language_code"),
         chat_type=context.chat_type,
     )
     if context.data.startswith(("topup:", "chg:")):
-        locale = fallback_locale
-        try:
-            redis_client = deps.config_redis()
-            config = deps.get_chat_config(redis_client, context.chat_id)
-            locale = resolve_locale(
-                config.get("language"),
-                telegram_language_code=context.user.get("language_code"),
-                chat_type=context.chat_type,
-            )
-        except Exception:
-            pass
+        config = deps.get_chat_config(context.chat_id)
+        locale = resolve_locale(
+            config.get("language"),
+            telegram_language_code=context.user.get("language_code"),
+            chat_type=context.chat_type,
+        )
         with use_locale(locale):
             _route_feature_callback(callback_query, context, deps)
         return
 
-    redis_client = deps.config_redis()
-    config = deps.get_chat_config(redis_client, context.chat_id)
+    config = deps.get_chat_config(context.chat_id)
     locale = resolve_locale(
         config.get("language"),
         telegram_language_code=context.user.get("language_code"),
@@ -429,7 +417,7 @@ def handle_callback_query(
     with use_locale(locale):
         if _route_feature_callback(callback_query, context, deps):
             return
-        if not _authorize_config_callback(context, redis_client, deps):
+        if not _authorize_config_callback(context, deps):
             return
 
         try:
@@ -443,7 +431,6 @@ def handle_callback_query(
             action,
             value,
             context=ConfigUpdateContext(
-                redis_client=redis_client,
                 chat_id=context.chat_id,
                 callback_id=context.callback_id,
                 deps=deps.config,

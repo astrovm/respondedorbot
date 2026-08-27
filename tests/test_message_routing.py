@@ -943,8 +943,6 @@ def test_handle_msg_edge_cases(monkeypatch):
     mock_redis = MagicMock()
 
     def redis_get(key):
-        if key == "chat_config:456":
-            return json.dumps(CHAT_CONFIG_DEFAULTS)
         if key.startswith("prices:"):
             return json.dumps({"timestamp": 123, "data": {}})
         return None

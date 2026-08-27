@@ -7,40 +7,7 @@ def test_decode_redis_value_variants():
     assert _decode_redis_value(None) is None
 
 
-def test_get_chat_config_migrates_bytes_from_redis_when_postgres_misses():
-    redis_client = MagicMock(spec=redis.Redis)
-    stored_config = {"link_mode": "off"}
-    redis_client.get.return_value = json.dumps(stored_config).encode("utf-8")
-
-    with (
-        patch("api.index.chat_config_db_service.is_configured", return_value=True),
-        patch("api.index.chat_config_db_service.get_chat_config", return_value=None),
-        patch("api.index.chat_config_db_service.set_chat_config") as mock_set,
-    ):
-        config = get_chat_config(redis_client, "chat-1")
-
-    assert config["link_mode"] == "off"
-    mock_set.assert_called_once_with("chat-1", config)
-
-
-def test_get_chat_config_migrates_string_from_redis_when_postgres_misses():
-    redis_client = MagicMock(spec=redis.Redis)
-    stored_config = {"link_mode": "off"}
-    redis_client.get.return_value = json.dumps(stored_config)
-
-    with (
-        patch("api.index.chat_config_db_service.is_configured", return_value=True),
-        patch("api.index.chat_config_db_service.get_chat_config", return_value=None),
-        patch("api.index.chat_config_db_service.set_chat_config") as mock_set,
-    ):
-        config = get_chat_config(redis_client, "chat-2")
-
-    assert config["link_mode"] == "off"
-    mock_set.assert_called_once_with("chat-2", config)
-
-
 def test_get_chat_config_uses_postgres_when_available():
-    redis_client = MagicMock(spec=redis.Redis)
     pg_config = {
         "link_mode": "reply",
         "ai_random_replies": False,
@@ -54,29 +21,10 @@ def test_get_chat_config_uses_postgres_when_available():
             "api.index.chat_config_db_service.get_chat_config", return_value=pg_config
         ) as mock_get,
     ):
-        config = get_chat_config(redis_client, "chat-4")
+        config = get_chat_config("chat-4")
 
     assert config == pg_config
     mock_get.assert_called_once_with("chat-4", CHAT_CONFIG_DEFAULTS)
-    redis_client.get.assert_not_called()
-
-
-def test_get_chat_config_postgres_error_does_not_fallback_to_redis():
-    redis_client = MagicMock(spec=redis.Redis)
-
-    with (
-        patch("api.index.chat_config_db_service.is_configured", return_value=True),
-        patch(
-            "api.index.chat_config_db_service.get_chat_config",
-            side_effect=RuntimeError("pg down"),
-        ),
-        patch("api.index.app_runtime.admin.report") as mock_admin,
-    ):
-        config = get_chat_config(redis_client, "chat-5")
-
-    assert config == CHAT_CONFIG_DEFAULTS
-    redis_client.get.assert_not_called()
-    mock_admin.assert_called_once()
 
 
 def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
@@ -93,53 +41,10 @@ def test_build_config_text_clarifies_group_free_ai_limit_is_messages():
     assert "tocá los botones de abajo para cambiar la config" in text
 
 
-def test_get_chat_config_migration_error_returns_redis_config_and_reports():
-    redis_client = MagicMock(spec=redis.Redis)
-    redis_client.get.return_value = json.dumps({"link_mode": "off"})
-
-    with (
-        patch("api.index.chat_config_db_service.is_configured", return_value=True),
-        patch("api.index.chat_config_db_service.get_chat_config", return_value=None),
-        patch(
-            "api.index.chat_config_db_service.set_chat_config",
-            side_effect=RuntimeError("pg write failed"),
-        ),
-        patch("api.index.app_runtime.admin.report") as mock_admin,
-    ):
-        config = get_chat_config(redis_client, "chat-6")
-
-    assert config["link_mode"] == "off"
-    mock_admin.assert_called_once()
-
-
 def test_get_chat_config_uses_defaults_when_postgres_is_unconfigured():
-    redis_client = MagicMock(spec=redis.Redis)
-
-    config = get_chat_config(redis_client, "chat-3")
+    config = get_chat_config("chat-3")
 
     assert config == CHAT_CONFIG_DEFAULTS
-    redis_client.get.assert_not_called()
-
-
-def test_get_chat_config_respects_per_call_repository_override():
-    from api.bot.chat_settings import get_chat_config as real_get_chat_config
-
-    redis_client = MagicMock(spec=redis.Redis)
-    repo_one = MagicMock()
-    repo_one.is_configured.return_value = True
-    repo_one.get_chat_config.return_value = {"link_mode": "reply"}
-
-    repo_two = MagicMock()
-    repo_two.is_configured.return_value = True
-    repo_two.get_chat_config.return_value = {"link_mode": "off"}
-
-    first = real_get_chat_config(redis_client, "chat-a", chat_config_db_service=repo_one)
-    second = real_get_chat_config(redis_client, "chat-b", chat_config_db_service=repo_two)
-
-    assert first["link_mode"] == "reply"
-    assert second["link_mode"] == "off"
-    repo_one.get_chat_config.assert_called_once_with("chat-a", CHAT_CONFIG_DEFAULTS)
-    repo_two.get_chat_config.assert_called_once_with("chat-b", CHAT_CONFIG_DEFAULTS)
 
 
 def test_is_chat_admin_uses_cache():
@@ -279,7 +184,7 @@ def test_handle_callback_query_topup_sends_invoice_when_config_redis_is_down():
     ):
         handle_callback_query(callback)
 
-    mock_cfg.assert_called_once_with()
+    mock_cfg.assert_not_called()
     mock_send_invoice.assert_called_once_with(
         chat_id="1",
         user_id=42,
@@ -306,7 +211,7 @@ def test_handle_callback_query_routes_charge_history_buttons_when_config_redis_i
         handle_callback_query(callback)
 
     mock_charges.assert_called_once_with(callback)
-    mock_cfg.assert_called_once_with()
+    mock_cfg.assert_not_called()
 
 
 def test_handle_msg_blocks_config_for_non_admin_group():
@@ -370,7 +275,7 @@ def test_handle_callback_query_blocks_non_admin():
     mock_answer.assert_called_once_with("cb-1", text=None, show_alert=False)
     mock_send_msg.assert_called_once()
     mock_report.assert_called_once()
-    mock_get_chat_config.assert_called_once_with(redis_instance, "456")
+    mock_get_chat_config.assert_called_once_with("456")
     mock_set_chat_config.assert_not_called()
 
 
@@ -405,49 +310,34 @@ def test_config_redis_with_env_vars():
 
 
 def test_set_chat_config_updates_link_mode_and_persists():
-    redis_client = MagicMock()
-    redis_client.get.return_value = None
+    config = set_chat_config("123", link_mode="reply")
 
-    config = set_chat_config(redis_client, "123", link_mode="reply")
-
-    redis_client.set.assert_not_called()
     assert config["link_mode"] == "reply"
 
 
 def test_set_chat_config_turns_off_link_mode():
-    redis_client = MagicMock()
-    redis_client.get.return_value = None
+    config = set_chat_config("123", link_mode="off")
 
-    set_chat_config(redis_client, "123", link_mode="off")
-
-    redis_client.set.assert_not_called()
-    redis_client.delete.assert_not_called()
+    assert config["link_mode"] == "off"
 
 
 def test_set_chat_config_persists_to_postgres_when_available():
-    redis_client = MagicMock()
-    redis_client.get.return_value = None
-
     with (
         patch("api.index.chat_config_db_service.is_configured", return_value=True),
         patch("api.index.chat_config_db_service.set_chat_config") as mock_pg_set,
     ):
-        config = set_chat_config(redis_client, "123", link_mode="reply")
+        config = set_chat_config("123", link_mode="reply")
 
     assert config["link_mode"] == "reply"
     mock_pg_set.assert_called_once_with("123", config)
-    redis_client.set.assert_not_called()
 
 
 def test_get_chat_config_uses_defaults_when_missing():
-    redis_client = MagicMock()
-    redis_client.get.return_value = None
-
     with (
         patch("api.index.chat_config_db_service.is_configured", return_value=True),
         patch("api.index.chat_config_db_service.get_chat_config", return_value=None),
     ):
-        config = get_chat_config(redis_client, "123")
+        config = get_chat_config("123")
 
     assert config["link_mode"] == "reply"
     assert config["ai_random_replies"] is True
@@ -533,8 +423,8 @@ def test_handle_callback_query_updates_random_toggle():
     ):
         handle_callback_query(callback)
 
-    mock_get.assert_called_once_with(redis_client, "1")
-    mock_set.assert_called_once_with(redis_client, "1", ai_random_replies=False)
+    mock_get.assert_called_once_with("1")
+    mock_set.assert_called_once_with("1", ai_random_replies=False)
     mock_text.assert_called_once()
     mock_keyboard.assert_called_once()
     mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})
@@ -576,8 +466,8 @@ def test_handle_callback_query_falls_back_when_edit_fails():
     ):
         handle_callback_query(callback)
 
-    mock_get.assert_called_once_with(redis_client, "9")
-    mock_set.assert_called_once_with(redis_client, "9", link_mode="reply")
+    mock_get.assert_called_once_with("9")
+    mock_set.assert_called_once_with("9", link_mode="reply")
     mock_text.assert_called_once_with(updated_config, "")
     mock_keyboard.assert_called_once_with(updated_config, "")
     mock_edit.assert_called_once_with("9", 42, "new text", {"inline_keyboard": ["btn"]})
@@ -627,8 +517,8 @@ def test_handle_callback_query_updates_link_fix_followups_toggle():
     ):
         handle_callback_query(callback)
 
-    mock_get.assert_called_once_with(redis_client, "1")
-    mock_set.assert_called_once_with(redis_client, "1", ignore_link_fix_followups=False)
+    mock_get.assert_called_once_with("1")
+    mock_set.assert_called_once_with("1", ignore_link_fix_followups=False)
     mock_text.assert_called_once()
     mock_keyboard.assert_called_once()
     mock_edit.assert_called_once_with("1", 99, "text", {"inline_keyboard": []})

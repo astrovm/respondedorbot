@@ -7,7 +7,15 @@ from typing import Any, Optional
 
 import redis
 
-__all__ = ["redis_get_json", "redis_setex_json", "redis_set_json"]
+__all__ = ["decode_redis_value", "redis_get_json", "redis_setex_json", "redis_set_json"]
+
+
+def decode_redis_value(value: Any) -> Optional[str]:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if value is not None:
+        return str(value)
+    return None
 
 
 def redis_get_json(redis_client: redis.Redis, key: str) -> Optional[Any]:

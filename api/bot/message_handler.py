@@ -145,7 +145,7 @@ def _media_reserve_error_response(
 @dataclass(frozen=True)
 class MessageChatDeps:
     config_redis: Callable[[], Any]
-    get_chat_config: Callable[[Any, str], Dict[str, Any]]
+    get_chat_config: Callable[[str], Dict[str, Any]]
     extract_user_id: Callable[[Mapping[str, Any]], Optional[int]]
     extract_numeric_chat_id: Callable[[str], Optional[int]]
     set_chat_config: Callable[..., Dict[str, Any]] = lambda *_args, **_kwargs: {}
@@ -243,7 +243,7 @@ class MessageMediaDeps:
 @dataclass(frozen=True)
 class MessageHandlerDeps:
     config_redis: Callable[[], Any]
-    get_chat_config: Callable[[Any, str], Dict[str, Any]]
+    get_chat_config: Callable[[str], Dict[str, Any]]
     initialize_commands: Callable[[], Dict[str, CommandTuple]]
     parse_command: Callable[[str, str], Tuple[str, str]]
     should_auto_process_media: Callable[
@@ -500,7 +500,7 @@ def _initialize_message_runtime(
     message: Dict[str, Any],
 ) -> MessageRuntime:
     redis_client = deps.config_redis()
-    chat_config = deps.get_chat_config(redis_client, context.chat_id)
+    chat_config = deps.get_chat_config(context.chat_id)
     locale = resolve_locale(
         chat_config.get("language"),
         telegram_language_code=(message.get("from") or {}).get("language_code"),
@@ -1275,7 +1275,7 @@ def _handle_language_command(
             ]
         ]
     }
-    config = deps.get_chat_config(redis_client, chat_id)
+    config = deps.get_chat_config(chat_id)
     if not requested:
         configured = str(config.get("language") or "auto")
         locale = normalize_locale(configured) if configured in {"es", "en"} else current_locale()
@@ -1283,7 +1283,7 @@ def _handle_language_command(
         return tr("language.current", locale=locale, language=language), keyboard, False, command
     if requested not in {"es", "en"}:
         return tr("language.usage"), keyboard, False, command
-    updated = deps.set_chat_config(redis_client, chat_id, language=requested)
+    updated = deps.set_chat_config(chat_id, language=requested)
     locale = normalize_locale(updated.get("language"))
     return tr("language.changed", locale=locale), keyboard, False, command
 

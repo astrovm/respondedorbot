@@ -181,11 +181,11 @@ from api.bot.chat_settings import (
     build_config_keyboard,
     build_config_text,
     coerce_bool,
-    decode_redis_value,
     is_group_chat_type,
 )
 from api.bot.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import build_chat_config_repository
+from api.services.redis_helpers import decode_redis_value
 from api.billing.credit_units import format_credit_units
 from api.bot.command_registry import (
     COMMAND_GROUPS,
@@ -1056,8 +1056,7 @@ _ROUTING_POLICY = build_routing_policy()
 
 
 def handle_config_command(chat_id: str, chat_type: str = "") -> Tuple[str, Dict[str, Any]]:
-    redis_client = _config_runtime.redis()
-    config = _chat_config_service.get_chat_config(redis_client, chat_id)
+    config = _chat_config_service.get_chat_config(chat_id)
     return build_config_text(config, chat_type), build_config_keyboard(config, chat_type)
 
 
