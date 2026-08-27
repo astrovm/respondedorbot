@@ -308,7 +308,7 @@ def _migrate_credit_amounts_to_hundredths(cur: Any) -> bool:
             SELECT jsonb_object_agg(
                 item.key,
                 CASE
-                    WHEN item.key LIKE '%credit_units%'
+                    WHEN item.key LIKE '%%credit_units%%'
                          AND jsonb_typeof(item.value) = 'number'
                     THEN to_jsonb((item.value #>> '{}')::bigint * %s)
                     WHEN item.key = ANY(%s)
@@ -324,7 +324,7 @@ def _migrate_credit_amounts_to_hundredths(cur: Any) -> bool:
             FROM jsonb_each(credit_ledger.metadata) AS item
             WHERE jsonb_typeof(item.value) = 'number'
               AND (
-                  item.key LIKE '%credit_units%'
+                  item.key LIKE '%%credit_units%%'
                   OR item.key = ANY(%s)
               )
         )
