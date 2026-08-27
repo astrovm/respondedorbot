@@ -561,7 +561,7 @@ def test_migrate_credit_amounts_to_hundredths_scales_tenths_once():
     assert cursor.ledger_metadata[0]["reserved_credit_units"] == 30
 
 
-def test_list_user_ai_charges_filters_user_and_applies_cursor():
+def test_list_user_ai_charge_page_groups_rows_and_applies_internal_cursor():
     class Cursor:
         def __init__(self):
             self.executed = []
@@ -573,6 +573,7 @@ def test_list_user_ai_charges_filters_user_and_applies_cursor():
             return None
 
         def execute(self, query, params=None):
+            PostgresQuery(Transformer(None)).convert(query, params)
             self.executed.append((" ".join(str(query).split()), params))
 
         def fetchall(self):
@@ -586,6 +587,9 @@ def test_list_user_ai_charges_filters_user_and_applies_cursor():
                     0,
                     {"charged_credit_units_total": 7},
                     "2026-08-26T17:00:00+00:00",
+                    "202:9",
+                    98,
+                    "2026-08-26T17:00:00+00:00",
                 )
             ]
 
@@ -595,23 +599,99 @@ def test_list_user_ai_charges_filters_user_and_applies_cursor():
         patch("api.services.credits_db.ensure_schema"),
         patch("api.services.credits_db.connect", return_value=connection),
     ):
-        results = credits_db.list_user_ai_charges(
+        results = credits_db.list_user_ai_charge_page(
             42,
             limit=11,
-            before_id=99,
+            cursor_id=99,
+            direction="older",
         )
 
     query, params = cursor.executed[0]
-    assert "entry.user_id = %s" in query
-    assert "entry.id < %s" in query
+    assert "WHERE user_id = %s" in query
+    assert "group_cursor < %s" in query
     assert "memory_compaction_settlement" in query
-    assert "entry.event_type = 'ai_reserve'" in query
+    assert "event_type = 'ai_reserve'" in query
     assert "NOT EXISTS" in query
-    assert "fallback.adjustment_amount" in query
+    assert "SUM(mutation.amount)" in query
     assert "payer_breakdown" in query
-    assert params == (42, 99, 99, 11)
-    assert results[0]["user_id"] == 42
-    assert results[0]["metadata"]["charged_credit_units_total"] == 7
+    assert params == (
+        42,
+        99,
+        "older",
+        99,
+        "older",
+        99,
+        "older",
+        "older",
+        12,
+        "older",
+        "older",
+    )
+    assert results["groups"][0]["entries"][0]["user_id"] == 42
+    assert (
+        results["groups"][0]["entries"][0]["metadata"][
+            "charged_credit_units_total"
+        ]
+        == 7
+    )
+    assert results["has_newer"] is True
+    assert results["has_older"] is False
+
+
+def test_list_user_ai_charge_page_reverses_newer_results_and_keeps_groups():
+    def row(entry_id, group_key, group_cursor):
+        return (
+            entry_id,
+            "ai_settlement_result",
+            42,
+            42,
+            202,
+            0,
+            {"charged_credit_units_total": 1},
+            "2026-08-26T17:00:00+00:00",
+            group_key,
+            group_cursor,
+            "2026-08-26T17:00:00+00:00",
+        )
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            PostgresQuery(Transformer(None)).convert(query, params)
+
+        def fetchall(self):
+            return [
+                row(71, "group-70", 70),
+                row(70, "group-70", 70),
+                row(80, "group-80", 80),
+                row(90, "group-90", 90),
+            ]
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch(
+            "api.services.credits_db.connect",
+            return_value=_FakeConnection(Cursor()),
+        ),
+    ):
+        page = credits_db.list_user_ai_charge_page(
+            42,
+            limit=2,
+            cursor_id=60,
+            direction="newer",
+        )
+
+    assert [group["cursor_id"] for group in page["groups"]] == [80, 70]
+    assert len(page["groups"][1]["entries"]) == 2
+    assert page["has_newer"] is True
+    assert page["has_older"] is True
+    assert page["newer_cursor"] == 80
+    assert page["older_cursor"] == 70
 
 
 def test_record_ai_settlement_result_is_idempotent_by_settlement_id():

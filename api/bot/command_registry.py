@@ -81,7 +81,7 @@ COMMAND_DEFINITIONS: Tuple[CommandDefinition, ...] = (
         "charges_command",
         False,
         True,
-        "te muestro cuánto pagaste por cada uso de IA [limite]",
+        "te muestro cuánto pagaste por cada uso de IA [cantidad]",
     ),
     CommandDefinition(("/printcredits",), "printcredits_command", False, True),
     CommandDefinition(("/creditlog",), "creditlog_command", False, True),

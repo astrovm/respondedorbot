@@ -221,6 +221,29 @@ def ensure_schema() -> None:
                     )
                     """)
                 cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_user_charge_operations
+                    ON credit_ledger (user_id, id DESC)
+                    WHERE event_type IN (
+                        'ai_settlement_result',
+                        'memory_compaction_settlement',
+                        'ai_reserve',
+                        'ai_refund',
+                        'ai_settlement_charge',
+                        'ai_settlement_debt'
+                    )
+                    """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS
+                        idx_credit_ledger_user_settlement_lookup
+                    ON credit_ledger (
+                        user_id,
+                        (metadata->>'settlement_id'),
+                        id DESC
+                    )
+                    WHERE metadata ? 'settlement_id'
+                    """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_schema_migrations (
                         name TEXT PRIMARY KEY,
                         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1263,146 +1286,274 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
     return _credit_ledger_rows_to_dicts(rows)
 
 
-def list_user_ai_charges(
+def list_user_ai_charge_page(
     user_id: int,
     *,
     limit: int = 10,
-    before_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """Return one user's AI settlements without exposing other users."""
+    cursor_id: Optional[int] = None,
+    direction: Literal["older", "newer"] = "older",
+) -> Dict[str, Any]:
+    """Return one user's AI charges grouped by originating Telegram message."""
 
     ensure_schema()
-    normalized_limit = max(1, min(int(limit or 10), 50))
-    normalized_before_id = int(before_id) if before_id is not None else None
+    normalized_limit = max(1, min(int(limit or 10), 20))
+    normalized_cursor_id = int(cursor_id) if cursor_id is not None else None
+    normalized_direction: Literal["older", "newer"] = (
+        "newer" if direction == "newer" else "older"
+    )
 
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-                SELECT
-                    id,
-                    event_type,
-                    actor_user_id,
-                    user_id,
-                    chat_id,
-                    amount,
-                    CASE
-                        WHEN entry.event_type = 'ai_reserve'
-                        THEN entry.metadata || jsonb_build_object(
+                WITH user_ledger AS (
+                    SELECT *
+                    FROM credit_ledger
+                    WHERE user_id = %s
+                      AND event_type IN (
+                          'ai_settlement_result',
+                          'memory_compaction_settlement',
+                          'ai_reserve',
+                          'ai_refund',
+                          'ai_settlement_charge',
+                          'ai_settlement_debt'
+                      )
+                ),
+                finalized_ids AS (
+                    SELECT metadata->>'settlement_id' AS settlement_id
+                    FROM user_ledger
+                    WHERE event_type IN (
+                        'ai_settlement_result',
+                        'memory_compaction_settlement'
+                    )
+                      AND metadata ? 'settlement_id'
+                    UNION
+                    SELECT settlement_id.value
+                    FROM user_ledger
+                    CROSS JOIN LATERAL jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(metadata->'settlement_ids') = 'array'
+                            THEN metadata->'settlement_ids'
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS settlement_id(value)
+                    WHERE event_type = 'ai_settlement_result'
+                ),
+                finalized_operations AS (
+                    SELECT
+                        id,
+                        event_type,
+                        actor_user_id,
+                        user_id,
+                        chat_id,
+                        amount,
+                        metadata,
+                        created_at
+                    FROM user_ledger
+                    WHERE event_type IN (
+                        'ai_settlement_result',
+                        'memory_compaction_settlement'
+                    )
+                ),
+                pending_reservations AS (
+                    SELECT DISTINCT ON (metadata->>'settlement_id')
+                        id,
+                        event_type,
+                        actor_user_id,
+                        user_id,
+                        chat_id,
+                        amount,
+                        metadata,
+                        created_at
+                    FROM user_ledger AS reserve
+                    WHERE event_type = 'ai_reserve'
+                      AND metadata ? 'settlement_id'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM finalized_ids
+                          WHERE finalized_ids.settlement_id
+                              = reserve.metadata->>'settlement_id'
+                      )
+                    ORDER BY metadata->>'settlement_id', id DESC
+                ),
+                pending_operations AS (
+                    SELECT
+                        reserve.id,
+                        reserve.event_type,
+                        reserve.actor_user_id,
+                        reserve.user_id,
+                        reserve.chat_id,
+                        -GREATEST(0, -totals.net_amount) AS amount,
+                        reserve.metadata || jsonb_build_object(
                             'charged_credit_units_total',
-                                GREATEST(
-                                    0,
-                                    -entry.amount - fallback.adjustment_amount
-                                ),
+                                GREATEST(0, -totals.net_amount),
                             'billing_pending', TRUE,
                             'payer_scope',
                                 CASE
-                                    WHEN fallback.user_paid > 0
-                                         AND fallback.chat_paid > 0
+                                    WHEN totals.user_paid > 0
+                                         AND totals.chat_paid > 0
                                     THEN 'mixed'
-                                    WHEN fallback.chat_paid > 0
+                                    WHEN totals.chat_paid > 0
                                     THEN 'chat'
                                     ELSE 'user'
                                 END,
                             'payer_breakdown', jsonb_build_array(
                                 jsonb_build_object(
                                     'scope', 'user',
-                                    'credit_units', fallback.user_paid
+                                    'credit_units', totals.user_paid
                                 ),
                                 jsonb_build_object(
                                     'scope', 'chat',
-                                    'credit_units', fallback.chat_paid
+                                    'credit_units', totals.chat_paid
                                 )
                             )
+                        ) AS metadata,
+                        reserve.created_at
+                    FROM pending_reservations AS reserve
+                    CROSS JOIN LATERAL (
+                        SELECT
+                            COALESCE(SUM(mutation.amount), 0) AS net_amount,
+                            GREATEST(
+                                0,
+                                COALESCE(
+                                    SUM(-mutation.amount) FILTER (
+                                        WHERE mutation.metadata->>'source' = 'user'
+                                    ),
+                                    0
+                                )
+                            ) AS user_paid,
+                            GREATEST(
+                                0,
+                                COALESCE(
+                                    SUM(-mutation.amount) FILTER (
+                                        WHERE mutation.metadata->>'source' = 'chat'
+                                    ),
+                                    0
+                                )
+                            ) AS chat_paid
+                        FROM user_ledger AS mutation
+                        WHERE mutation.event_type IN (
+                            'ai_reserve',
+                            'ai_refund',
+                            'ai_settlement_charge',
+                            'ai_settlement_debt'
                         )
-                        ELSE entry.metadata
-                    END AS metadata,
-                    created_at
-                FROM credit_ledger AS entry
-                LEFT JOIN LATERAL (
+                          AND mutation.metadata->>'settlement_id'
+                              = reserve.metadata->>'settlement_id'
+                    ) AS totals
+                ),
+                operations AS (
+                    SELECT * FROM finalized_operations
+                    UNION ALL
+                    SELECT * FROM pending_operations
+                ),
+                grouped_operations AS (
                     SELECT
-                        COALESCE(SUM(adjustment.amount), 0) AS adjustment_amount,
-                        GREATEST(
-                            0,
-                            CASE
-                                WHEN entry.metadata->>'source' = 'user'
-                                THEN -entry.amount
-                                ELSE 0
-                            END
-                            + COALESCE(
-                                SUM(-adjustment.amount) FILTER (
-                                    WHERE adjustment.metadata->>'source' = 'user'
+                        operations.*,
+                        CONCAT(
+                            COALESCE(
+                                NULLIF(metadata->>'origin_chat_id', ''),
+                                NULLIF(
+                                    SPLIT_PART(
+                                        metadata->>'settlement_id',
+                                        ':',
+                                        2
+                                    ),
+                                    ''
                                 ),
-                                0
+                                chat_id::text,
+                                ''
+                            ),
+                            ':',
+                            COALESCE(
+                                NULLIF(metadata->>'message_id', ''),
+                                'ledger:' || id::text
                             )
-                        ) AS user_paid,
-                        GREATEST(
-                            0,
-                            CASE
-                                WHEN entry.metadata->>'source' = 'chat'
-                                THEN -entry.amount
-                                ELSE 0
-                            END
-                            + COALESCE(
-                                SUM(-adjustment.amount) FILTER (
-                                    WHERE adjustment.metadata->>'source' = 'chat'
-                                ),
-                                0
-                            )
-                        ) AS chat_paid
-                    FROM credit_ledger AS adjustment
-                    WHERE adjustment.user_id = entry.user_id
-                      AND adjustment.event_type IN (
-                          'ai_refund',
-                          'ai_settlement_charge',
-                          'ai_settlement_debt'
-                      )
-                      AND adjustment.metadata->>'settlement_id'
-                          = entry.metadata->>'settlement_id'
-                ) AS fallback ON entry.event_type = 'ai_reserve'
-                WHERE entry.user_id = %s
-                  AND (%s::bigint IS NULL OR entry.id < %s)
-                  AND (
-                      entry.event_type = 'ai_settlement_result'
-                      OR entry.event_type = 'memory_compaction_settlement'
-                      OR (
-                          entry.event_type = 'ai_reserve'
-                          AND entry.metadata ? 'settlement_id'
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM credit_ledger AS finalized
-                              WHERE finalized.user_id = entry.user_id
-                                AND (
-                                    (
-                                        finalized.event_type = 'ai_settlement_result'
-                                        AND (
-                                            finalized.metadata->>'settlement_id'
-                                                = entry.metadata->>'settlement_id'
-                                            OR finalized.metadata->'settlement_ids'
-                                                ? (entry.metadata->>'settlement_id')
-                                        )
-                                    )
-                                    OR (
-                                        finalized.event_type = 'memory_compaction_settlement'
-                                        AND finalized.metadata->>'settlement_id'
-                                            = entry.metadata->>'settlement_id'
-                                    )
-                                )
-                          )
-                      )
-                  )
-                ORDER BY entry.created_at DESC, entry.id DESC
-                LIMIT %s
+                        ) AS group_key
+                    FROM operations
+                ),
+                charge_groups AS (
+                    SELECT
+                        group_key,
+                        MIN(id) AS group_cursor,
+                        MIN(created_at) AS group_created_at
+                    FROM grouped_operations
+                    GROUP BY group_key
+                ),
+                page_groups AS (
+                    SELECT group_key, group_cursor, group_created_at
+                    FROM charge_groups
+                    WHERE %s::bigint IS NULL
+                       OR (%s = 'older' AND group_cursor < %s)
+                       OR (%s = 'newer' AND group_cursor > %s)
+                    ORDER BY
+                        CASE WHEN %s = 'newer' THEN group_cursor END ASC,
+                        CASE WHEN %s = 'older' THEN group_cursor END DESC
+                    LIMIT %s
+                )
+                SELECT
+                    operation.id,
+                    operation.event_type,
+                    operation.actor_user_id,
+                    operation.user_id,
+                    operation.chat_id,
+                    operation.amount,
+                    operation.metadata,
+                    operation.created_at,
+                    page.group_key,
+                    page.group_cursor,
+                    page.group_created_at
+                FROM page_groups AS page
+                JOIN grouped_operations AS operation USING (group_key)
+                ORDER BY
+                    CASE WHEN %s = 'newer' THEN page.group_cursor END ASC,
+                    CASE WHEN %s = 'older' THEN page.group_cursor END DESC,
+                    operation.id DESC
                 """,
             (
                 int(user_id),
-                normalized_before_id,
-                normalized_before_id,
-                normalized_limit,
+                normalized_cursor_id,
+                normalized_direction,
+                normalized_cursor_id,
+                normalized_direction,
+                normalized_cursor_id,
+                normalized_direction,
+                normalized_direction,
+                normalized_limit + 1,
+                normalized_direction,
+                normalized_direction,
             ),
         )
         rows = cur.fetchall() or []
 
-    return _credit_ledger_rows_to_dicts(rows)
+    grouped: Dict[str, Dict[str, Any]] = {}
+    group_order: List[str] = []
+    for row in rows:
+        group_key = str(row[8])
+        if group_key not in grouped:
+            group_order.append(group_key)
+            grouped[group_key] = {
+                "cursor_id": int(row[9]),
+                "created_at": row[10],
+                "entries": [],
+            }
+        grouped[group_key]["entries"].extend(_credit_ledger_rows_to_dicts([row]))
+
+    has_extra = len(group_order) > normalized_limit
+    selected_order = group_order[:normalized_limit]
+    if normalized_direction == "newer":
+        selected_order.reverse()
+    groups = [grouped[key] for key in selected_order]
+    return {
+        "groups": groups,
+        "has_newer": (
+            has_extra if normalized_direction == "newer" else cursor_id is not None
+        ),
+        "has_older": (
+            cursor_id is not None if normalized_direction == "newer" else has_extra
+        ),
+        "newer_cursor": int(groups[0]["cursor_id"]) if groups else None,
+        "older_cursor": int(groups[-1]["cursor_id"]) if groups else None,
+    }
 
 
 def purge_expired_ai_ledger_events(

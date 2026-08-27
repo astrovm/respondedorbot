@@ -4,7 +4,24 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from api.billing.ai import AIBillingPack
+from api.billing.commands import build_user_charge_history_page
 from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
+
+ChargeCallbackParams = tuple[int, int, str, int, int, int, int]
+
+
+def _answer_charge_callback(
+    answer_callback: Callable[..., None],
+    callback_id: str,
+    *,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> None:
+    if callback_id:
+        if text is None and not show_alert:
+            answer_callback(callback_id)
+        else:
+            answer_callback(callback_id, text=text, show_alert=show_alert)
 
 
 def send_stars_invoice(
@@ -102,6 +119,134 @@ def handle_topup_callback(
                 text="no pude armar la factura, probá de nuevo",
                 show_alert=True,
             )
+
+
+def _parse_charge_history_callback(
+    callback_query: Mapping[str, Any],
+) -> ChargeCallbackParams | None:
+    callback_data = str(callback_query.get("data") or "")
+    message = callback_query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    try:
+        prefix, owner_raw, limit_raw, direction_raw, cursor_raw, timezone_raw = (
+            callback_data.split(":")
+        )
+        owner_id = int(owner_raw)
+        limit = int(limit_raw)
+        cursor_id = int(cursor_raw)
+        timezone_minutes = int(timezone_raw)
+        requester_id = int(str((callback_query.get("from") or {}).get("id")))
+    except (TypeError, ValueError):
+        return None
+    if (
+        prefix != "chg"
+        or direction_raw not in {"n", "o"}
+        or not 1 <= limit <= 20
+        or cursor_id <= 0
+        or not -840 <= timezone_minutes <= 840
+        or chat_id is None
+        or message_id is None
+    ):
+        return None
+    return (
+        owner_id,
+        limit,
+        direction_raw,
+        cursor_id,
+        timezone_minutes,
+        requester_id,
+        int(message_id),
+    )
+
+
+def handle_charge_history_callback(
+    callback_query: dict[str, Any],
+    *,
+    credits_db_service: Any,
+    edit_message: Callable[..., bool],
+    answer_callback: Callable[..., None],
+    admin_report: Callable[..., None],
+) -> None:
+    callback_id = str(callback_query.get("id") or "")
+    parsed = _parse_charge_history_callback(callback_query)
+    if parsed is None:
+        _answer_charge_callback(
+            answer_callback,
+            callback_id,
+            text="botón vencido",
+            show_alert=True,
+        )
+        return
+    (
+        owner_id,
+        limit,
+        direction_raw,
+        cursor_id,
+        timezone_minutes,
+        requester_id,
+        message_id,
+    ) = parsed
+    if requester_id != owner_id:
+        _answer_charge_callback(
+            answer_callback,
+            callback_id,
+            text="este historial no es tuyo",
+            show_alert=True,
+        )
+        return
+
+    try:
+        text, keyboard = build_user_charge_history_page(
+            credits_db_service,
+            user_id=owner_id,
+            limit=limit,
+            timezone_offset=timezone_minutes / 60,
+            cursor_id=cursor_id,
+            direction="newer" if direction_raw == "n" else "older",
+        )
+        if keyboard is None and text == "no tenés gastos IA recientes":
+            _answer_charge_callback(
+                answer_callback,
+                callback_id,
+                text="no hay más gastos",
+            )
+            return
+        chat_id = str(((callback_query.get("message") or {}).get("chat") or {})["id"])
+        edited = edit_message(
+            chat_id,
+            message_id,
+            text,
+            keyboard or {"inline_keyboard": []},
+        )
+    except Exception as error:
+        admin_report(
+            "Error paginating /charges",
+            error,
+            {
+                "chat_id": str(
+                    ((callback_query.get("message") or {}).get("chat") or {}).get(
+                        "id"
+                    )
+                ),
+                "user_id": owner_id,
+                "cursor_id": cursor_id,
+                "direction": direction_raw,
+            },
+        )
+        _answer_charge_callback(
+            answer_callback,
+            callback_id,
+            text="se trabó leyendo tus gastos",
+            show_alert=True,
+        )
+        return
+    _answer_charge_callback(
+        answer_callback,
+        callback_id,
+        text=None if edited else "no pude actualizar el historial",
+        show_alert=not edited,
+    )
 
 
 def handle_pre_checkout_query(
