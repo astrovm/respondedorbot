@@ -391,6 +391,7 @@ class AIMessageBilling:
             "usage_tag": usage_tag,
             "settlement_id": self._settlement_id(usage_tag),
             "message_id": self.message.get("message_id"),
+            "origin_chat_id": self.chat_id,
             "credit_scale": CREDIT_SCALE,
         }
         if extra:

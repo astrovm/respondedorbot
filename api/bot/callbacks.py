@@ -35,6 +35,7 @@ class TaskCallbackDeps:
 class CallbackQueryDeps:
     guard_callback: Callable[..., bool]
     handle_topup: Callable[[dict[str, Any]], None]
+    handle_charges: Callable[[dict[str, Any]], None]
     handle_task: Callable[[dict[str, Any]], None]
     handle_signal: Callable[..., bool]
     config_redis: Callable[..., Any]
@@ -305,6 +306,9 @@ def _route_feature_callback(
 ) -> bool:
     if context.data.startswith("topup:"):
         deps.handle_topup(callback_query)
+        return True
+    if context.data.startswith("chg:"):
+        deps.handle_charges(callback_query)
         return True
     if context.data.startswith("task:"):
         deps.handle_task(callback_query)

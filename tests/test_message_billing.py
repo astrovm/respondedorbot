@@ -119,34 +119,45 @@ def test_handle_msg_charges_lists_only_calling_users_itemized_history():
     mock_send_msg = MagicMock()
     mock_credits = MagicMock()
     mock_credits.is_configured.return_value = True
-    mock_credits.list_user_ai_charges.return_value = [
-        {
-            "id": 30,
-            "created_at": "2026-08-26T17:32:00+00:00",
-            "metadata": {
-                "command": "/ask",
-                "charged_credit_units_total": 8,
-                "payer_scope": "user",
-                "model_breakdown": [
-                    {"kind": "chat", "usd_micros": 30},
-                ],
-                "tool_breakdown": [
-                    {"tool": "web_search", "count": 1, "usd_micros": 50},
-                ],
+    mock_credits.list_user_ai_charge_page.return_value = {
+        "groups": [
+            {
+                "cursor_id": 30,
+                "created_at": "2026-08-26T17:32:00+00:00",
+                "entries": [{
+                    "id": 30,
+                    "event_type": "ai_settlement_result",
+                    "metadata": {
+                        "charged_credit_units_total": 8,
+                        "payer_scope": "user",
+                        "model_breakdown": [
+                            {"kind": "chat", "usd_micros": 30},
+                        ],
+                        "tool_breakdown": [
+                            {"tool": "web_search", "count": 1, "usd_micros": 50},
+                        ],
+                    },
+                }],
             },
-        },
-        {
-            "id": 29,
-            "created_at": "2026-08-26T16:00:00+00:00",
-            "metadata": {
-                "usage_tag": "auto_audio_media",
-                "charged_credit_units_total": 7,
-                "payer_scope": "chat",
-                "billing_zero_usage_fallback": True,
+            {
+                "cursor_id": 29,
+                "created_at": "2026-08-26T16:00:00+00:00",
+                "entries": [{
+                    "id": 29,
+                    "event_type": "ai_settlement_result",
+                    "metadata": {
+                        "usage_tag": "auto_audio_media",
+                        "charged_credit_units_total": 7,
+                        "payer_scope": "chat",
+                    },
+                }],
             },
-        },
-        {"id": 28, "metadata": {"charged_credit_units_total": 1}},
-    ]
+        ],
+        "has_newer": False,
+        "has_older": True,
+        "newer_cursor": 30,
+        "older_cursor": 29,
+    }
 
     make_deps, _ = _build_message_handler_deps()
     deps = make_deps(
@@ -157,21 +168,26 @@ def test_handle_msg_charges_lists_only_calling_users_itemized_history():
 
     assert handle_msg(message, deps) == "ok"
 
-    mock_credits.list_user_ai_charges.assert_called_once_with(
+    mock_credits.list_user_ai_charge_page.assert_called_once_with(
         55,
-        limit=3,
-        before_id=None,
+        limit=2,
+        cursor_id=None,
+        direction="older",
     )
     sent_text = mock_send_msg.call_args[0][1]
-    assert "/ask · 0.08 créditos" in sent_text
-    assert "respuesta IA: 0.03" in sent_text
-    assert "búsqueda web: 0.05" in sent_text
-    assert "pagó: saldo personal" in sent_text
-    assert "audio · 0.07 créditos" in sent_text
-    assert "cargo estimado" in sent_text
-    assert "pagó: saldo del grupo" in sent_text
-    assert "total mostrado: 0.15 créditos" in sent_text
-    assert "más: /charges 10 29" in sent_text
+    assert sent_text == (
+        "Gastos IA\n\n"
+        "26/08 14:32 · 0.08 cr\n"
+        "  respuesta 0.03 cr\n"
+        "  web 0.05 cr\n\n"
+        "26/08 13:00 · audio · 0.07 cr · grupo"
+    )
+    assert mock_send_msg.call_args.kwargs["reply_markup"] == {
+        "inline_keyboard": [[{
+            "text": "Siguiente ›",
+            "callback_data": "chg:55:2:o:29:-180",
+        }]]
+    }
 
 
 def test_charge_component_allocation_preserves_rounded_total():
@@ -196,53 +212,169 @@ def test_charge_history_includes_compaction_pending_reserves_and_split_payers():
     text = format_user_charge_history(
         [
             {
-                "id": 12,
-                "event_type": "memory_compaction_settlement",
+                "cursor_id": 12,
                 "created_at": "2026-08-26T17:00:00+00:00",
-                "metadata": {
-                    "usage_tag": "memory_compaction:1:m1",
-                    "actual_credit_units": 2,
-                    "source": "user",
-                },
-            },
-            {
-                "id": 11,
-                "event_type": "ai_reserve",
-                "created_at": "2026-08-26T16:00:00+00:00",
-                "metadata": {
-                    "command": "/ask",
-                    "reserved_credit_units": 100,
-                    "charged_credit_units_total": 107,
-                    "source": "chat",
-                    "payer_scope": "mixed",
-                    "payer_breakdown": [
-                        {"scope": "chat", "credit_units": 100},
-                        {"scope": "user", "credit_units": 7},
-                    ],
-                },
-            },
-            {
-                "id": 10,
-                "event_type": "ai_settlement_result",
-                "created_at": "2026-08-26T15:00:00+00:00",
-                "metadata": {
-                    "command": "/ask",
-                    "charged_credit_units_total": 8,
-                    "payer_scope": "mixed",
-                    "payer_breakdown": [
-                        {"scope": "user", "credit_units": 3},
-                        {"scope": "chat", "credit_units": 5},
-                    ],
-                },
+                "entries": [
+                    {
+                        "id": 12,
+                        "event_type": "memory_compaction_settlement",
+                        "metadata": {
+                            "usage_tag": "memory_compaction:1:m1",
+                            "actual_credit_units": 2,
+                            "source": "user",
+                        },
+                    },
+                    {
+                        "id": 11,
+                        "event_type": "ai_reserve",
+                        "metadata": {
+                            "usage_tag": "memory_compaction:1:m2",
+                            "charged_credit_units_total": 107,
+                            "billing_pending": True,
+                            "payer_breakdown": [
+                                {"scope": "chat", "credit_units": 100},
+                                {"scope": "user", "credit_units": 7},
+                            ],
+                        },
+                    },
+                    {
+                        "id": 10,
+                        "event_type": "ai_settlement_result",
+                        "metadata": {
+                            "charged_credit_units_total": 8,
+                            "payer_breakdown": [
+                                {"scope": "user", "credit_units": 3},
+                                {"scope": "chat", "credit_units": 5},
+                            ],
+                        },
+                    },
+                ],
             },
         ]
     )
 
-    assert "memoria · 0.02 créditos" in text
-    assert "liquidación pendiente; se muestra la reserva cobrada" in text
-    assert "pagó: saldo del grupo 1.00 + saldo personal 0.07" in text
-    assert "pagó: saldo personal 0.03 + saldo del grupo 0.05" in text
-    assert "total mostrado: 1.17 créditos" in text
+    assert text == (
+        "Gastos IA\n\n"
+        "26/08 17:00 · 1.17 cr · grupo 1.05 · personal 0.12\n"
+        "  respuesta 0.08 cr\n"
+        "  memoria 0.02 cr\n"
+        "  memoria 1.07 cr · pendiente"
+    )
+
+
+def test_charge_history_callback_edits_page_for_requesting_user():
+    from api.billing.callbacks import handle_charge_history_callback
+
+    credits = MagicMock()
+    credits.list_user_ai_charge_page.return_value = {
+        "groups": [
+            {
+                "cursor_id": 20,
+                "created_at": "2026-08-26T17:00:00+00:00",
+                "entries": [
+                    {
+                        "id": 20,
+                        "event_type": "ai_settlement_result",
+                        "metadata": {"charged_credit_units_total": 4},
+                    }
+                ],
+            }
+        ],
+        "has_newer": True,
+        "has_older": False,
+        "newer_cursor": 20,
+        "older_cursor": 20,
+    }
+    edit_message = MagicMock(return_value=True)
+    answer_callback = MagicMock()
+
+    handle_charge_history_callback(
+        {
+            "id": "cb-1",
+            "data": "chg:55:2:o:29:-180",
+            "from": {"id": 55},
+            "message": {"message_id": 8, "chat": {"id": 101}},
+        },
+        credits_db_service=credits,
+        edit_message=edit_message,
+        answer_callback=answer_callback,
+        admin_report=MagicMock(),
+    )
+
+    credits.list_user_ai_charge_page.assert_called_once_with(
+        55,
+        limit=2,
+        cursor_id=29,
+        direction="older",
+    )
+    edit_message.assert_called_once_with(
+        "101",
+        8,
+        "Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr",
+        {
+            "inline_keyboard": [[{
+                "text": "‹ Anterior",
+                "callback_data": "chg:55:2:n:20:-180",
+            }]]
+        },
+    )
+    answer_callback.assert_called_once_with("cb-1")
+
+
+def test_charge_history_callback_rejects_other_users():
+    from api.billing.callbacks import handle_charge_history_callback
+
+    credits = MagicMock()
+    edit_message = MagicMock()
+    answer_callback = MagicMock()
+
+    handle_charge_history_callback(
+        {
+            "id": "cb-2",
+            "data": "chg:55:10:o:29:-180",
+            "from": {"id": 99},
+            "message": {"message_id": 8, "chat": {"id": -100}},
+        },
+        credits_db_service=credits,
+        edit_message=edit_message,
+        answer_callback=answer_callback,
+        admin_report=MagicMock(),
+    )
+
+    credits.list_user_ai_charge_page.assert_not_called()
+    edit_message.assert_not_called()
+    answer_callback.assert_called_once_with(
+        "cb-2",
+        text="este historial no es tuyo",
+        show_alert=True,
+    )
+
+
+def test_handle_msg_charges_rejects_public_cursor_argument():
+    from api.bot.message_handler import handle_msg
+
+    message = {
+        "message_id": "11d",
+        "chat": {"id": "101", "type": "private"},
+        "from": {"id": 55, "first_name": "Ana"},
+        "text": "/charges 10 15364",
+    }
+    redis_client = MagicMock()
+    redis_client.get.return_value = json.dumps(CHAT_CONFIG_DEFAULTS)
+    send_msg = MagicMock()
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    make_deps, _ = _build_message_handler_deps()
+    deps = make_deps(
+        config_redis=lambda: redis_client,
+        send_msg=send_msg,
+        credits_db_service=credits,
+    )
+
+    assert handle_msg(message, deps) == "ok"
+
+    assert send_msg.call_args[0][1] == "mandalo bien: /charges [cantidad]"
+    credits.list_user_ai_charge_page.assert_not_called()
 
 
 def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):

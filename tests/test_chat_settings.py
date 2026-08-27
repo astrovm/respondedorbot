@@ -296,6 +296,24 @@ def test_handle_callback_query_topup_sends_invoice():
     mock_answer.assert_called_once()
 
 
+def test_handle_callback_query_routes_charge_history_buttons():
+    callback = {
+        "id": "cbq_charges",
+        "data": "chg:42:10:o:99:-180",
+        "from": {"id": 42},
+        "message": {"chat": {"id": 1, "type": "private"}, "message_id": 99},
+    }
+
+    with (
+        patch("api.index.handle_charges_callback") as mock_charges,
+        patch("api.index.app_runtime.config.redis") as mock_cfg,
+    ):
+        handle_callback_query(callback)
+
+    mock_charges.assert_called_once_with(callback)
+    mock_cfg.assert_not_called()
+
+
 def test_handle_msg_blocks_config_for_non_admin_group():
     from api.index import handle_msg
 

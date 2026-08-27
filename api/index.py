@@ -106,6 +106,7 @@ from api.markets.dollar import DollarService
 from api.providers import config as provider_config
 from api.providers import support as provider_support
 from api.billing.service import BillingService
+from api.billing.callbacks import handle_charge_history_callback
 from api.memory.summary import SummaryService, SummaryServiceDeps
 from api.ai.request_runtime import AIRequestService, AIRequestServiceDeps
 from api.bot import callbacks as callback_runtime
@@ -1178,6 +1179,16 @@ def edit_message(
     return error is None and bool(payload_response)
 
 
+def handle_charges_callback(callback_query: Dict[str, Any]) -> None:
+    handle_charge_history_callback(
+        callback_query,
+        credits_db_service=credits_db_service,
+        edit_message=edit_message,
+        answer_callback=_answer_callback_query,
+        admin_report=_admin_service.report,
+    )
+
+
 _response_service = ResponseService(
     ResponseServiceDeps(
         telegram=telegram_gateway,
@@ -1205,6 +1216,7 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
         deps=callback_runtime.CallbackQueryDeps(
             guard_callback=_guard_callback,
             handle_topup=_billing_service.handle_topup_callback,
+            handle_charges=handle_charges_callback,
             handle_task=handle_task_callback,
             handle_signal=handle_token_signal_callback,
             config_redis=_config_runtime.redis,
