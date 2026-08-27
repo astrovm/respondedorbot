@@ -256,7 +256,7 @@ def test_load_bot_config_caches_result(monkeypatch):
     assert cfg_second is cfg_first
 
 
-def test_handle_callback_query_topup_sends_invoice():
+def test_handle_callback_query_topup_sends_invoice_when_config_redis_is_down():
     callback = {
         "id": "cbq_topup",
         "data": "topup:p100",
@@ -272,7 +272,10 @@ def test_handle_callback_query_topup_sends_invoice():
         patch("api.index.credits_db_service.is_configured", return_value=True),
         patch("api.index.app_runtime.billing.send_invoice", return_value=True) as mock_send_invoice,
         patch("api.index.app_runtime.billing.answer_callback") as mock_answer,
-        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch(
+            "api.index.app_runtime.config.redis",
+            side_effect=RuntimeError("Redis unavailable"),
+        ) as mock_cfg,
     ):
         handle_callback_query(callback)
 
@@ -285,7 +288,7 @@ def test_handle_callback_query_topup_sends_invoice():
     mock_answer.assert_called_once()
 
 
-def test_handle_callback_query_routes_charge_history_buttons():
+def test_handle_callback_query_routes_charge_history_buttons_when_config_redis_is_down():
     callback = {
         "id": "cbq_charges",
         "data": "chg:42:10:o:99:-180",
@@ -295,7 +298,10 @@ def test_handle_callback_query_routes_charge_history_buttons():
 
     with (
         patch("api.index.handle_charges_callback") as mock_charges,
-        patch("api.index.app_runtime.config.redis") as mock_cfg,
+        patch(
+            "api.index.app_runtime.config.redis",
+            side_effect=RuntimeError("Redis unavailable"),
+        ) as mock_cfg,
     ):
         handle_callback_query(callback)
 

@@ -115,6 +115,13 @@ ES: dict[str, str] = {
     "payment.success": "listo, te cargué {credits} créditos\nahora te quedaron {balance}\nsi querés mandarle al grupo: /transfer <monto>",
     "payment.duplicate": "ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}",
     "message.processing_error": "error procesando mensaje",
+    "summary.prompt": (
+        "actualizá el resumen anterior con los mensajes nuevos. entre 10 y 20 items "
+        "cortos y concretos si hay material suficiente, uno por línea. incluí solo "
+        "hechos relevantes: tema, decisiones, pendientes y datos clave. evitá relleno, "
+        "repetición, contexto innecesario y frases largas. NUNCA uses markdown: no "
+        "negritas, no headers, no tablas. usá solo guiones (-) al inicio de cada item."
+    ),
     "weather.load_error": "no se pudo obtener el clima de {location}",
     "weather.no_data": "sin datos",
     "weather.location": "Lugar: {value}",
@@ -426,6 +433,13 @@ EN: dict[str, str] = {
     "payment.success": "added {credits} credits\nyour balance is now {balance}\nuse /transfer <amount> to fund a group",
     "payment.duplicate": "this payment was already credited\nyour balance is {balance}",
     "message.processing_error": "error processing message",
+    "summary.prompt": (
+        "update the previous summary with the new messages. use 10 to 20 short, "
+        "concrete items when there is enough material, one per line. include only "
+        "relevant facts: topic, decisions, pending work, and key data. avoid filler, "
+        "repetition, unnecessary context, and long sentences. NEVER use markdown: no "
+        "bold text, headings, or tables. use only hyphens (-) at the start of each item."
+    ),
     "weather.load_error": "I could not load the weather for {location}",
     "weather.no_data": "no data",
     "weather.location": "Location: {value}",

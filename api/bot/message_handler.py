@@ -24,7 +24,7 @@ from api.admin.commands import (
 )
 from api.billing.ai import AIMessageBilling
 from api.ai.pricing import estimate_transcribe_reserve_credits
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE, PROMPT_NO_MARKDOWN
+from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
 from api.core.i18n import (
     Locale,
     current_locale,
@@ -432,6 +432,13 @@ class MessageIntent:
     should_respond: bool
 
 
+class _LocalizedMessageError(Exception):
+    def __init__(self, error: Exception, locale: Locale) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.locale = locale
+
+
 @dataclass(frozen=True)
 class CommandDispatchContext:
     commands: Mapping[str, CommandTuple]
@@ -500,37 +507,42 @@ def _initialize_message_runtime(
         chat_type=context.chat_type,
     )
     with use_locale(locale):
-        commands = deps.initialize_commands()
-        bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
-        raw_message_text, photo_file_id, audio_file_id = _probe_message_content(message, deps=deps)
-        command, _ = deps.parse_command(raw_message_text, bot_name)
-        auto_process_media = deps.should_auto_process_media(
-            commands,
-            command,
-            raw_message_text,
-            message,
-        )
-        billing_helper = _build_billing_helper(
-            deps,
-            chat_id=context.chat_id,
-            chat_type=context.chat_type,
-            user_id=context.user_id,
-            numeric_chat_id=context.numeric_chat_id,
-            command=command,
-            message=message,
-            redis_client=redis_client,
-            creditless_user_hourly_limit=int(
-                chat_config.get(
-                    "creditless_user_hourly_limit",
-                    chat_config.get("creditless_user_daily_limit", 0),
-                )
-            ),
-        )
-        prepared_message = PreparedMessage(
-            message_text=raw_message_text,
-            photo_file_id=photo_file_id,
-            audio_file_id=audio_file_id,
-        )
+        try:
+            commands = deps.initialize_commands()
+            bot_name = f"@{environ.get('TELEGRAM_USERNAME')}"
+            raw_message_text, photo_file_id, audio_file_id = _probe_message_content(
+                message, deps=deps
+            )
+            command, _ = deps.parse_command(raw_message_text, bot_name)
+            auto_process_media = deps.should_auto_process_media(
+                commands,
+                command,
+                raw_message_text,
+                message,
+            )
+            billing_helper = _build_billing_helper(
+                deps,
+                chat_id=context.chat_id,
+                chat_type=context.chat_type,
+                user_id=context.user_id,
+                numeric_chat_id=context.numeric_chat_id,
+                command=command,
+                message=message,
+                redis_client=redis_client,
+                creditless_user_hourly_limit=int(
+                    chat_config.get(
+                        "creditless_user_hourly_limit",
+                        chat_config.get("creditless_user_daily_limit", 0),
+                    )
+                ),
+            )
+            prepared_message = PreparedMessage(
+                message_text=raw_message_text,
+                photo_file_id=photo_file_id,
+                audio_file_id=audio_file_id,
+            )
+        except Exception as error:
+            raise _LocalizedMessageError(error, locale) from error
     return MessageRuntime(
         redis_client=redis_client,
         chat_config=chat_config,
@@ -1266,11 +1278,7 @@ def _handle_language_command(
     config = deps.get_chat_config(redis_client, chat_id)
     if not requested:
         configured = str(config.get("language") or "auto")
-        locale = (
-            normalize_locale(configured)
-            if configured in {"es", "en"}
-            else current_locale()
-        )
+        locale = normalize_locale(configured) if configured in {"es", "en"} else current_locale()
         language = tr(f"config.language.{locale}", locale=locale)
         return tr("language.current", locale=locale, language=language), keyboard, False, command
     if requested not in {"es", "en"}:
@@ -1417,14 +1425,7 @@ def _handle_summary_command(
     elif parts and not parts[0].isdigit():
         custom_instruction = sanitized_message_text.strip()
 
-    base_prompt = (
-        "actualizá el resumen anterior con los mensajes nuevos. "
-        "entre 10 y 20 items cortos y concretos si hay material suficiente, uno por línea. "
-        "incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. "
-        "evitá relleno, repetición, contexto innecesario y frases largas. "
-        f"{PROMPT_NO_MARKDOWN} "
-        "usá solo guiones (-) al inicio de cada item."
-    )
+    base_prompt = tr("summary.prompt")
     if custom_instruction:
         prompt_text = f"{custom_instruction}. {base_prompt}"
     else:
@@ -2020,7 +2021,10 @@ def _handle_incoming_message(
     if isinstance(initialized, str):
         return initialized
     with use_locale(initialized.runtime.locale):
-        return _handle_initialized_message(initialized, message, deps)
+        try:
+            return _handle_initialized_message(initialized, message, deps)
+        except Exception as error:
+            raise _LocalizedMessageError(error, initialized.runtime.locale) from error
 
 
 def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
@@ -2029,16 +2033,26 @@ def handle_msg(message: Dict[str, Any], deps: MessageHandlerDeps) -> str:
     try:
         return _handle_incoming_message(message, deps)
     except Exception as error:
+        original_error = error.error if isinstance(error, _LocalizedMessageError) else error
+        error_locale = (
+            error.locale
+            if isinstance(error, _LocalizedMessageError)
+            else resolve_locale(
+                None,
+                telegram_language_code=(message.get("from") or {}).get("language_code"),
+                chat_type=str((message.get("chat") or {}).get("type", "")),
+            )
+        )
         deps.admin_report(
-            f"Message handling error: {error}",
-            error,
+            f"Message handling error: {original_error}",
+            original_error,
             {
                 "message_id": message.get("message_id"),
                 "chat_id": message.get("chat", {}).get("id"),
                 "user": message.get("from", {}).get("username", "Unknown"),
             },
         )
-        return tr("message.processing_error")
+        return tr("message.processing_error", locale=error_locale)
 
 
 __all__ = [

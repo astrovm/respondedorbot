@@ -398,6 +398,27 @@ def handle_callback_query(
     if context is None:
         return
 
+    fallback_locale = resolve_locale(
+        None,
+        telegram_language_code=context.user.get("language_code"),
+        chat_type=context.chat_type,
+    )
+    if context.data.startswith(("topup:", "chg:")):
+        locale = fallback_locale
+        try:
+            redis_client = deps.config_redis()
+            config = deps.get_chat_config(redis_client, context.chat_id)
+            locale = resolve_locale(
+                config.get("language"),
+                telegram_language_code=context.user.get("language_code"),
+                chat_type=context.chat_type,
+            )
+        except Exception:
+            pass
+        with use_locale(locale):
+            _route_feature_callback(callback_query, context, deps)
+        return
+
     redis_client = deps.config_redis()
     config = deps.get_chat_config(redis_client, context.chat_id)
     locale = resolve_locale(

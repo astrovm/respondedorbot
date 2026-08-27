@@ -185,12 +185,13 @@ def test_resolve_message_intent_uses_reply_text_for_command_without_params():
     assert intent.should_respond is True
 
 
-def test_handle_non_ai_command_summary_uses_streaming():
+def test_handle_non_ai_command_summary_uses_english_streaming_prompt():
     from api.bot.message_handler import (
         CommandDispatchContext,
         PreparedMessage,
         _handle_non_ai_command,
     )
+    from api.core.i18n import use_locale
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (
@@ -200,30 +201,33 @@ def test_handle_non_ai_command_summary_uses_streaming():
     )
     commands = {"/resumen": (MagicMock(), False, True)}
 
-    response = _handle_non_ai_command(
-        deps,
-        CommandDispatchContext(
-            commands=commands,
-            command="/resumen",
-            sanitized_message_text="focus en crypto",
-            message={"message_id": "10"},
-            chat_id="123",
-            chat_type="private",
-            user_id=7,
-            numeric_chat_id=123,
-            prepared_message=PreparedMessage("/resumen", None, None),
-            billing_helper=MagicMock(),
-            reply_context_text=None,
-            user_identity="Ana (ana)",
-            redis_client=MagicMock(),
-        ),
-    )
+    with use_locale("en"):
+        response = _handle_non_ai_command(
+            deps,
+            CommandDispatchContext(
+                commands=commands,
+                command="/resumen",
+                sanitized_message_text="focus on crypto",
+                message={"message_id": "10"},
+                chat_id="123",
+                chat_type="private",
+                user_id=7,
+                numeric_chat_id=123,
+                prepared_message=PreparedMessage("/resumen", None, None),
+                billing_helper=MagicMock(),
+                reply_context_text=None,
+                user_identity="Ana (ana)",
+                redis_client=MagicMock(),
+            ),
+        )
 
     assert response == (None, None, True, "/resumen")
     deps.ai_service.run_summary_command_stream.assert_called_once()
     call_args = deps.ai_service.run_summary_command_stream.call_args
     assert call_args[0][0].chat_id == "123"
-    assert "focus en crypto" in call_args[0][0].prompt_text
+    assert "focus on crypto" in call_args[0][0].prompt_text
+    assert "update the previous summary" in call_args[0][0].prompt_text
+    assert "actualizá" not in call_args[0][0].prompt_text
 
 
 def test_handle_non_ai_command_summary_fallback_returns_text():
@@ -907,6 +911,28 @@ def test_handle_msg_with_exception():
         result = handle_msg(message)
         assert result == "error procesando mensaje"
         mock_admin_report.assert_called_once()
+
+
+def test_handle_msg_uses_configured_locale_when_initialization_fails():
+    from api.bot.message_handler import handle_msg
+
+    make_deps, _ = _build_message_handler_deps()
+    initialization_error = RuntimeError("command initialization failed")
+    deps = make_deps(
+        get_chat_config=MagicMock(return_value={**CHAT_CONFIG_DEFAULTS, "language": "en"}),
+        initialize_commands=MagicMock(side_effect=initialization_error),
+    )
+    message = {
+        "message_id": 1,
+        "chat": {"id": 123, "type": "private"},
+        "from": {"id": 42, "first_name": "John", "language_code": "es"},
+        "text": "hello",
+    }
+
+    result = handle_msg(message, deps)
+
+    assert result == "error processing message"
+    assert deps.admin_report.call_args.args[1] is initialization_error
 
 
 def test_handle_msg_edge_cases(monkeypatch):
