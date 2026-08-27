@@ -859,6 +859,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
             "convert_base": convert_base,
             "select_random": select_random,
             "get_prices": _price_service.get_prices,
+            "get_crypto_prices": _price_service.get_crypto_prices,
             "get_weather": get_weather_command,
             "get_dollar_rates": _dollar_service.get_rates,
             "get_oil_price": _stock_service.get_oil_price,
@@ -958,17 +959,18 @@ _cache_service = CacheService(
     admin=_admin_service,
     logger=_logger,
 )
-_price_service = PriceService(
-    cache=_cache_service,
-    environment=environ,
-    logger=_logger,
-    cache_ttl=TTL_PRICE,
-)
 _stock_service = StockService(
     cache=_cache_service,
     config=_config_runtime,
     price_cache_ttl=TTL_PRICE,
     screener_cache_ttl=TTL_STOCK_SCREENER,
+)
+_price_service = PriceService(
+    cache=_cache_service,
+    environment=environ,
+    logger=_logger,
+    cache_ttl=TTL_PRICE,
+    stocks=_stock_service,
 )
 _giphy_service = GiphyService(
     config=_config_runtime,
@@ -1251,6 +1253,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             link_service=_link_service,
             should_gordo_respond=should_gordo_respond,
             is_group_chat_type=is_group_chat_type,
+            get_prices=_price_service.get_prices,
         ),
         io=MessageIODeps(
             send_msg=telegram_gateway.send_message,

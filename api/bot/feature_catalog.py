@@ -35,7 +35,7 @@ FEATURES: tuple[FeatureEntry, ...] = (
     FeatureEntry("web_search", category="ai", implicit=True),
     FeatureEntry(
         "crypto",
-        aliases_for("get_prices"),
+        aliases_for("get_prices", "get_crypto_prices"),
         (),
         "markets",
         telegram_visible=True,

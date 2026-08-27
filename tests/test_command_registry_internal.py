@@ -13,6 +13,7 @@ def test_build_command_registry_reuses_alias_metadata():
             "convert_base": prices,
             "select_random": prices,
             "get_prices": prices,
+            "get_crypto_prices": prices,
             "get_weather": prices,
             "get_dollar_rates": lambda: "usd",
             "get_oil_price": lambda: "oil",
@@ -44,6 +45,8 @@ def test_build_command_registry_reuses_alias_metadata():
 
     assert registry["/prices"] == registry["/price"]
     assert registry["/prices"] == registry["/precios"]
+    assert registry["/prices"] == registry["/c"]
+    assert registry["/crypto"][0] == prices
     assert registry["/transcribe"] == registry["/describe"]
     assert registry["/resumen"] == registry["/tldr"]
     assert registry["/eleccion"] == registry["/elecciones"]

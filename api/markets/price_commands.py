@@ -83,7 +83,7 @@ class AmountConversionRequest:
 
 
 def normalize_price_symbol(value: str) -> str:
-    return value.upper().replace(" ", "")
+    return value.upper().replace(" ", "").lstrip("$")
 
 
 def price_query_parameter(symbol: str) -> str:
@@ -100,7 +100,7 @@ def expand_price_tokens(tokens: Sequence[str]) -> list[str]:
 def parse_amount_conversion(text: str) -> Optional[AmountConversionRequest]:
     conversion_token_pattern = "|".join(CONVERSION_PREPOSITIONS)
     match = re.match(
-        rf"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+([a-zA-Z0-9]+)\s+(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
+        rf"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+(\$?[a-zA-Z0-9]+)\s+(?:{conversion_token_pattern})\s+(\$?[a-zA-Z0-9]+)\s*$",
         text,
         re.IGNORECASE,
     )
@@ -120,7 +120,7 @@ def parse_amount_conversion(text: str) -> Optional[AmountConversionRequest]:
 def parse_conversion_only(text: str) -> Tuple[str, str, str]:
     conversion_token_pattern = "|".join(CONVERSION_PREPOSITIONS)
     match = re.match(
-        rf"^\s*(?:{conversion_token_pattern})\s+([a-zA-Z0-9]+)\s*$",
+        rf"^\s*(?:{conversion_token_pattern})\s+(\$?[a-zA-Z0-9]+)\s*$",
         text,
         re.IGNORECASE,
     )

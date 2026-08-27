@@ -24,6 +24,10 @@ COMMAND_DESCRIPTIONS: dict[str, dict[Locale, str]] = {
         "en": "pick an option or number for you",
     },
     "get_prices": {
+        "es": "precios de crypto, acciones y otros activos [símbolo o empresa]",
+        "en": "crypto, stock, and other asset prices [symbol or company]",
+    },
+    "get_crypto_prices": {
         "es": "precios crypto por símbolo [moneda] [1h/24h/7d/30d]",
         "en": "crypto prices by symbol [currency] [1h/24h/7d/30d]",
     },
@@ -126,8 +130,14 @@ FEATURE_TEXT: dict[str, dict[Locale, tuple[str, str]]] = {
         "en": ("web search", "I can search the web when a current answer needs it"),
     },
     "crypto": {
-        "es": ("crypto prices", "precios crypto por ranking, símbolo, moneda base y variación"),
-        "en": ("crypto prices", "crypto prices by ranking, symbol, base currency, and time window"),
+        "es": (
+            "precios de mercado",
+            "precios crypto, acciones y otros activos; /crypto limita la búsqueda a crypto",
+        ),
+        "en": (
+            "market prices",
+            "crypto, stock, and other asset prices; /crypto limits lookup to crypto",
+        ),
     },
     "weather": {
         "es": ("clima", "clima actual para cualquier ciudad o ubicación"),
@@ -136,9 +146,12 @@ FEATURE_TEXT: dict[str, dict[Locale, tuple[str, str]]] = {
     "token_cards": {
         "es": (
             "token cards",
-            "si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones",
+            "si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones; si el $ticker no es un token, busco su precio de mercado",
         ),
-        "en": ("token cards", "send a Solana or EVM address, or a $ticker, for a market card"),
+        "en": (
+            "token cards",
+            "send a Solana or EVM address, or a $ticker, for a market card; unknown token cashtags fall back to market prices",
+        ),
     },
     "dollar": {
         "es": ("dólar", "cotizaciones del dólar y variaciones por ventana"),
@@ -248,6 +261,9 @@ FEATURE_EXAMPLES: dict[str, dict[Locale, tuple[str, ...]]] = {
     "web_search": {"es": ("buscá qué pasó con...",), "en": ("search what happened with...",)},
     "crypto": {
         "es": (
+            "/c nvda",
+            "/precio btc nvda",
+            "/precio stock:META",
             "/prices btc eth xmr",
             "/prices 20",
             "/prices 100 in eur",
@@ -255,6 +271,9 @@ FEATURE_EXAMPLES: dict[str, dict[Locale, tuple[str, ...]]] = {
             "/prices stables",
         ),
         "en": (
+            "/c nvda",
+            "/price btc nvda",
+            "/price stock:META",
             "/prices btc eth xmr",
             "/prices 20",
             "/prices 100 in eur",

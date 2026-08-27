@@ -847,6 +847,8 @@ def handle_token_signal_message(
     redis_client: Any,
     send_photo: Callable[..., Optional[int]],
     admin_report: Callable[..., None],
+    fallback_price: Callable[[str], Optional[str]] | None = None,
+    send_message: Callable[..., Optional[int]] | None = None,
 ) -> bool:
     message_text = str(message.get("text") or "")
     token = detect_token_address(message_text)
@@ -866,6 +868,10 @@ def handle_token_signal_message(
             else fetch_signal_by_symbol(redis_client, str(symbol))
         )
         if signal is None:
+            if token is None and symbol and fallback_price and send_message:
+                fallback = fallback_price(str(symbol))
+                if fallback:
+                    return send_message(chat_id, fallback, message_id) is not None
             return False
         signal_id = uuid.uuid4().hex[:12]
         chart = render_or_fetch_signal_photo(signal)
