@@ -135,6 +135,7 @@ class OpenRouterProvider(StreamingAIProvider):
 
         output_token_limit = chat_output_token_limit(self._primary_model)
         current_messages = list(messages)
+        runtime_tool_context = dict(tool_context or {})
         remaining_web_search_uses = self._runtime._configured_web_search_max_uses(enable_web_search)
         total_web_search_requests = 0
         possible_pseudo_tools = self._extra_tool_names(extra_tools)
@@ -184,22 +185,26 @@ class OpenRouterProvider(StreamingAIProvider):
                 tool_calls = getattr(message, "tool_calls", None) or []
                 known_calls = self._runtime._filter_known_calls(
                     tool_calls,
-                    tool_context,
+                    runtime_tool_context,
                     round_idx,
                 )
                 if known_calls:
+                    current_messages = self._tool_runtime.apply_tool_calls(
+                        message,
+                        known_calls,
+                        current_messages,
+                        runtime_tool_context,
+                    )
+                    self._runtime._add_firecrawl_credits(
+                        web_metadata,
+                        runtime_tool_context,
+                    )
                     self._report_stream_usage(
                         on_usage_result,
                         usage_response,
                         message,
                         round_idx,
                         web_metadata,
-                    )
-                    current_messages = self._tool_runtime.apply_tool_calls(
-                        message,
-                        known_calls,
-                        current_messages,
-                        tool_context or {},
                     )
                     continue
 
@@ -220,7 +225,7 @@ class OpenRouterProvider(StreamingAIProvider):
                         SimpleNamespace(content=""),
                         [pseudo_call],
                         current_messages,
-                        tool_context or {},
+                        runtime_tool_context,
                     )
                     continue
 
@@ -229,7 +234,7 @@ class OpenRouterProvider(StreamingAIProvider):
                         streamed_round.text,
                         current_messages,
                         web_metadata,
-                        tool_context=tool_context,
+                        tool_context=runtime_tool_context,
                         round_idx=round_idx,
                     )
                 self._report_stream_usage(

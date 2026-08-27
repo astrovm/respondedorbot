@@ -11,6 +11,8 @@ from api.tools.registry import TOOL_REGISTRY, execute_tool, parse_tool_call_argu
 
 logger = get_logger(__name__)
 
+_FIRECRAWL_CREDITS_CONTEXT_KEY = "_firecrawl_credits_used"
+
 
 def _default_log(message: str) -> None:
     logger.info(message)
@@ -35,6 +37,34 @@ class ToolRuntime:
 
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self._tool_registry
+
+    @staticmethod
+    def take_firecrawl_credits(tool_context: Mapping[str, Any] | None) -> int:
+        if not isinstance(tool_context, dict):
+            return 0
+        try:
+            return max(0, int(tool_context.pop(_FIRECRAWL_CREDITS_CONTEXT_KEY, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _record_firecrawl_credits(
+        tool_name: str,
+        result: Any,
+        tool_context: Mapping[str, Any],
+    ) -> None:
+        if tool_name != "web_search" or not isinstance(tool_context, dict):
+            return
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return
+        try:
+            credits_used = max(0, int(metadata.get("credits_used") or 0))
+        except (TypeError, ValueError):
+            return
+        if credits_used:
+            current = ToolRuntime.take_firecrawl_credits(tool_context)
+            tool_context[_FIRECRAWL_CREDITS_CONTEXT_KEY] = current + credits_used
 
     def apply_tool_calls(
         self,
@@ -68,7 +98,10 @@ class ToolRuntime:
             self._print_fn(
                 f"tool call: {tool_name} params={tool_params}{format_log_context(tool_context)}"
             )
-            result = self._execute_tool_fn(tool_name, tool_params, dict(tool_context))
+            execution_context = dict(tool_context)
+            execution_context.pop(_FIRECRAWL_CREDITS_CONTEXT_KEY, None)
+            result = self._execute_tool_fn(tool_name, tool_params, execution_context)
+            self._record_firecrawl_credits(tool_name, result, tool_context)
             self._print_fn(
                 f"tool result: {tool_name} output={result.output[:200]!r}"
                 f"{format_log_context(tool_context)}"

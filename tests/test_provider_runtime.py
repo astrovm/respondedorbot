@@ -112,7 +112,8 @@ def test_provider_runtime_keeps_direct_search_answer_unchanged():
                     '{"results":['
                     '{"url":"https://example.com/profile"},'
                     '{"url":"https://example.com/interview"}]}'
-                )
+                ),
+                metadata={"credits_used": 2},
             )
         ),
         tool_registry={"web_search": object()},
@@ -158,6 +159,7 @@ def test_provider_runtime_keeps_direct_search_answer_unchanged():
     assert result.metadata["web_search_grounded"] is True
     assert result.metadata["web_search_source_count"] == 2
     assert result.metadata["web_search_citation_count"] == 0
+    assert result.metadata["firecrawl_credits_used"] == 2
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():
