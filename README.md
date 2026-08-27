@@ -1,24 +1,18 @@
 # respondedorbot
 
-An AI-powered Telegram bot playing "el gordo" — a blunt, politically incorrect Argentine character who answers everything in a single lowercase phrase using Argentine slang.
+A Telegram bot that plays "el gordo", a blunt Argentine character that replies in lowercase using Argentine slang.
 
 **[t.me/respondedorbot](https://t.me/respondedorbot)**
 
 ## Features
 
-- **AI chat**: configurable personality with web search, powered by DeepSeek via OpenRouter
-- **Streaming responses**: AI replies stream token-by-token to Telegram, including tool-enabled conversations
-- **Chat memory with RediSearch**: persistent conversation history, full-text search, automatic compaction
-- **Incremental summaries**: `/resumen` streams conversation summaries using DeepSeek, with automatic context compaction
-- **Agentic tools**: AI can call tools (price lookup, calculator, web fetch, task scheduling) via function calling
-- **Market data and weather**: `/prices`, `/c`, `/crypto`, `/acciones`, `/usd`, `/clima`, `/petroleo`, `/devo`, `/powerlaw`, `/rainbow`, `/rulo`, `/eleccion`
-- **BCRA economic data**: `/bcra`, `/variables`
-- **Media**: audio transcription (Whisper via Groq, with OpenRouter fallback) and image description (OpenRouter)
-- **Scheduled tasks**: `/tarea`, `/tareas`, `/task`, `/tasks` — list without text or create from natural-language text
-- **AI credits billing**: Telegram Stars (`/topup`, `/balance`, `/transfer`)
-- **Link enrichment**: URLs get metadata injected into AI context; social links auto-replaced (fxTwitter, fixupx, etc.)
-- **On-demand AI context**: market data, weather, Hacker News stories, and bot capabilities are available through tools; local time stays in every system prompt
-- **Response cleanup**: deduplication, prefix stripping, identity leak prevention
+- Chat with streaming responses, web search, and conversation memory
+- Crypto, stock, ETF, index, fund, futures, dollar, and BCRA data
+- Weather, Polymarket elections, and Hacker News
+- Audio transcription and image description
+- Scheduled tasks and conversation summaries
+- Telegram Stars billing and shared group credits
+- Automatic fixes for supported social links
 
 ## Quick Start
 
@@ -33,12 +27,12 @@ uv run --locked python run_polling.py
 
 | Variable | Description |
 | --- | --- |
-| `BOT_SYSTEM_PROMPT` | Complete AI personality prompt |
+| `BOT_SYSTEM_PROMPT` | Complete personality prompt |
 | `BOT_TRIGGER_WORDS` | Comma-separated keywords that trigger responses in groups |
 | `TELEGRAM_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_USERNAME` | Bot username |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache (requires RediSearch) |
-| `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL (for AI credits) |
+| `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL for credits |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
 | `GROQ_API_KEY` | Paid Groq API key for transcription |
 | `GROQ_FREE_API_KEY` | Optional free-tier Groq key for transcription |
@@ -48,23 +42,23 @@ uv run --locked python run_polling.py
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
-### Provider contract
+### Providers
 
 | Use | Provider | Model |
 |---|---|---|
-| **Chat** | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
-| **Vision** | OpenRouter | `google/gemini-3.1-flash-lite-preview` |
-| **Transcription** | Groq → OpenRouter fallback | `whisper-large-v3` → `google/gemini-3.1-flash-lite-preview` |
-| **Summary** | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
+| Chat | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
+| Vision | OpenRouter | `google/gemini-3.1-flash-lite-preview` |
+| Transcription | Groq, then OpenRouter | `whisper-large-v3`, then `google/gemini-3.1-flash-lite-preview` |
+| Summary | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
 
-**Streaming**: ordinary text streams immediately. Tool-call arguments accumulate during the stream, tools execute when each call completes, and the final response continues streaming afterward.
+Text responses stream to Telegram. Tool calls run when their arguments are complete, then the response continues.
 
 ## Commands
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `/ask` | `/pregunta`, `/che`, `/gordo` | AI chat (streaming) |
-| `/resumen` | `/summary` | Stream conversation summary |
+| `/ask` | `/pregunta`, `/che`, `/gordo` | Chat |
+| `/resumen` | `/summary`, `/tldr` | Stream conversation summary |
 | `/transcribe` | `/describe` | Transcribe audio / describe image |
 | `/prices` | `/price`, `/precios`, `/precio`, `/c`, `/presio(s)`, `/bresio(s)`, `/brecio(s)` | Crypto, stock, ETF, index, fund, and futures prices |
 | `/crypto` | `/criptos` | Crypto-only prices and conversions |
@@ -81,11 +75,13 @@ uv run --locked python run_polling.py
 | `/bcra` | `/variables` | BCRA economic variables |
 | `/random` | - | Random choice or number |
 | `/convertbase` | - | Number base conversion |
-| `/comando` | `/command` | Text → Telegram command |
+| `/comando` | `/command` | Convert text to a Telegram command |
 | `/time` | - | Unix timestamp |
-| `/config` | - | Chat settings (admin only in groups) |
-| `/topup` | - | Buy AI credits with Telegram Stars |
+| `/config` | `/configs`, `/settings` | Chat settings (admin only in groups) |
+| `/language` | `/idioma` | Change the bot language |
+| `/topup` | - | Buy credits with Telegram Stars |
 | `/balance` | - | Show credit balance |
+| `/charges` | `/history`, `/gastos` | Show credit charges |
 | `/transfer` | - | Transfer credits to group |
 | `/tarea`, `/tareas` | `/task`, `/tasks` | List tasks, or create one when followed by text |
 | `/gm` | - | Good morning GIF |
@@ -95,62 +91,19 @@ uv run --locked python run_polling.py
 
 `/prices` checks CoinMarketCap first and sends unresolved symbols or company names to Yahoo Finance. Use `stock:META` or `crypto:META` when both providers have the same symbol. A complete Solana/EVM address still opens a token card; `$ticker` opens a token card first and falls back to `/prices` when no token is found.
 
-## Architecture
+## How it works
 
-### Provider abstraction (`api/providers/`)
+`api/index.py` creates the services used by the Telegram handlers. OpenRouter handles chat and vision. Groq handles transcription, with OpenRouter as a fallback.
 
-- `ProviderChain` — tries providers in order until one succeeds
-- `OpenRouterProvider` — streaming + completion, primary chat model
-### Streaming (`api/bot/streaming.py`)
+Chat history is stored in Redis and indexed with RediSearch. The bot compacts history after 40 new messages and keeps the latest 25. Summaries are updated from the previous summary and the new messages.
 
-`TelegramMessageStreamer` edits Telegram messages every 400ms or 15+ new chars. `OpenRouterProvider.stream()` accumulates streamed tool calls, executes them when complete, and streams the final model response.
-
-### AI service (`api/ai/service.py`)
-
-`AIService` orchestrates credit reservation → model call → billing settlement:
-- **Reserve**: holds worst-case credits before AI call
-- **Settle**: calculates actual cost, charges/refunds difference
-- **Refund**: full return on failure, fallback, or empty response
-
-### Chat memory compaction
-
-- `COMPACTION_THRESHOLD = 20` — compact when delta > 20 messages
-- `COMPACTION_KEEP = 25` — retain last 25 messages
-- `COMPACTION_THRESHOLD = 40` — compact when 40+ new messages
-- Incremental summaries from delta messages + prior summary
-- RediSearch index (`idx:chat_messages`) for full-text search and RAG retrieval
-
-### Billing & credits
-
-- **User credits** — personal balance
-- **Group credits** — shared pool subsidizing creditless users
-- **Onboarding** — 3 free credits for new users
-- **Hourly limit** — `creditless_user_hourly_limit` caps free messages per user per hour
-- **Credit packs** (Telegram Stars): 50→2500 credits with 50% bonus tiers
-
-### Response pipeline (`api/ai/pipeline.py`)
-
-Sequential cleanup:
-1. Remove "gordo:" prefix
-2. Strip echoed context strings
-3. Remove identity leak prefixes (`@user:`)
-4. Deduplicate consecutive lines/sentences
-
-### AI context and tools
-
-Every system prompt includes the current local time. The AI can request other
-context only when needed:
-- **Market**: crypto prices, stock prices, and Argentine dollar rates
-- **Weather**: current conditions for any city or location
-- **Random choice**: choose from comma-separated options or an inclusive integer range
-- **Hacker News**: up to 10 stories with titles, points, and comments
-- **Bot capabilities**: the authoritative feature and command catalog
+Market data, weather, random choices, Hacker News, and command information are loaded only when requested. Credit reservations are settled after each model response and refunded on failure.
 
 ## Project layout
 
 - `api/` - application code
   - `api/admin/` - admin commands, reporting, authorization
-  - `api/ai/` - AI orchestration, prompting, pricing, response cleanup
+  - `api/ai/` - chat orchestration, prompting, pricing, response cleanup
   - `api/billing/` - credits, settlement, billing commands, Stars callbacks
   - `api/bot/` - Telegram adapter, handlers, routing, streaming, chat config
   - `api/cache/` - HTTP and Redis caching
@@ -159,9 +112,9 @@ context only when needed:
   - `api/markets/` - crypto, dollar, stocks, Polymarket, weather
   - `api/media/` - image, audio, video, transcription, media cache
   - `api/memory/` - chat history, retrieval, compaction, summaries
-  - `api/providers/` - AI provider abstraction (OpenRouter, ProviderChain)
+  - `api/providers/` - model providers and fallback chains
   - `api/tasks/` - task execution and scheduling
-  - `api/tools/` - agentic tool registry (crypto, calculator, web fetch, tasks)
+  - `api/tools/` - tool registry for prices, calculations, web fetches, and tasks
   - `api/services/` - persistence and low-level external adapters
   - `api/utils/` - reusable helpers
   - `api/index.py` - application composition root and compatibility exports
@@ -205,28 +158,24 @@ systemctl --user start respondedorbot-redis.service
 systemctl --user start respondedorbot.service
 ```
 
-The bot container mounts `~/respondedorbot/workspace` read-only at
-`/app/workspace`. Both `SOUL.md` and `RULES.md` live outside Git and must be
-created on the VPS before starting the service. Alternatively,
-`BOT_SYSTEM_PROMPT` can provide the complete prompt through the environment.
+The bot mounts `~/respondedorbot/workspace` read-only at `/app/workspace`.
+Create `SOUL.md` and `RULES.md` on the VPS before starting the service. You can
+also set the complete prompt with `BOT_SYSTEM_PROMPT`.
 
-The bundled Redis Quadlet uses the pinned
-`redis/redis-stack-server:7.4.0-v8` image, not plain Redis, because chat memory
-search and compaction require RediSearch commands. Redis does not auto-update;
-upgrade the pinned version only after testing `FT.CREATE` and `FT.SEARCH`. The
-unit intentionally does not override the container command; it passes Redis
-tuning through `REDIS_ARGS` so the image can boot Redis Stack with its modules
-enabled.
+The Redis Quadlet uses `redis/redis-stack-server:7.4.0-v8` because chat memory
+requires RediSearch. Redis does not auto-update. Test `FT.CREATE` and
+`FT.SEARCH` before changing the pinned version. Redis settings are passed
+through `REDIS_ARGS`.
 
 ### Image publishing and rollback
 
-The CI workflow runs Ruff, mypy, and the complete test suite before building
-the bot image. A successful push to `main` publishes both:
+CI runs Ruff, mypy, and the tests before building the image. A successful push
+to `main` publishes:
 
-- `ghcr.io/astrovm/respondedorbot:latest` for normal Podman auto-updates.
+- `ghcr.io/astrovm/respondedorbot:latest` for Podman auto-updates.
 - `ghcr.io/astrovm/respondedorbot:sha-<full-commit-sha>` for rollback.
 
-To temporarily roll back the VPS to a known-good commit:
+To roll back the VPS to a tested commit:
 
 ```bash
 ROLLBACK_SHA=<full-commit-sha>
@@ -252,7 +201,7 @@ systemctl --user restart respondedorbot.service
 
 ### Persist across reboots
 
-`systemctl --user enable` fails on Quadlet-generated units on some distros — use symlinks instead:
+Some distributions cannot enable Quadlet-generated units with `systemctl --user enable`. Use symlinks instead:
 
 ```bash
 mkdir -p ~/.config/systemd/user/default.target.wants
