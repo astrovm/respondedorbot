@@ -311,7 +311,10 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
 
 def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     billing = _build_billing_helper()
-    billing.credits_db_service.charge_ai_credits.return_value = {"ok": True}
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "source": "chat",
+    }
 
     billing.settle_reserved_ai_credits(
         {
@@ -341,6 +344,30 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs[
+        "metadata"
+    ]
+    assert metadata["payer_scope"] == "mixed"
+    assert metadata["payer_breakdown"] == [
+        {"scope": "user", "credit_units": 100},
+        {"scope": "chat", "credit_units": 7},
+    ]
+
+
+def test_record_ai_settlement_result_retries_idempotent_write():
+    billing = _build_billing_helper()
+    billing.credits_db_service.record_ai_settlement_result.side_effect = [
+        RuntimeError("temporary database failure"),
+        None,
+    ]
+
+    billing._record_ai_settlement_result(
+        chat_scope_id=1,
+        settlement_metadata={"settlement_id": "1:1:1:ai_response_base"},
+    )
+
+    assert billing.credits_db_service.record_ai_settlement_result.call_count == 2
+    billing.admin_reporter.assert_not_called()
 
 
 def test_reserve_ai_credits_reuses_persisted_reservation_without_new_charge():

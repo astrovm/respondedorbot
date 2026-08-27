@@ -31,6 +31,14 @@ def _reservation_credit_scale(reservation: Mapping[str, Any]) -> Any:
     return reservation.get("credit_scale") or metadata_scale
 
 
+def _reservation_settlement_id(reservation: Mapping[str, Any]) -> str:
+    metadata = reservation.get("metadata")
+    metadata_id = (
+        metadata.get("settlement_id") if isinstance(metadata, Mapping) else None
+    )
+    return str(reservation.get("settlement_id") or metadata_id or "")
+
+
 @dataclass
 class CompactionJob:
     chat_id: str
@@ -287,6 +295,7 @@ class DurableCompactionQueue:
             metadata={
                 "reason": reason,
                 "message_id": job.message_id,
+                "settlement_id": _reservation_settlement_id(job.reservation),
                 "credit_scale": CREDIT_SCALE,
             },
         )
@@ -315,6 +324,7 @@ class DurableCompactionQueue:
                 metadata={
                     "reason": "memory_compaction_incompatible_job",
                     "chat_id": chat_id,
+                    "settlement_id": _reservation_settlement_id(reservation),
                     "credit_scale": CREDIT_SCALE,
                 },
             )

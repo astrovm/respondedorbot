@@ -158,9 +158,20 @@ def _metadata_credit(metadata: Mapping[str, Any], *keys: str) -> int:
     return 0
 
 
-def _charged_credit_units(metadata: Mapping[str, Any]) -> int:
+def _charged_credit_units(metadata: Mapping[str, Any], event_type: str = "") -> int:
     if "charged_credit_units_total" in metadata:
         return max(0, int(metadata.get("charged_credit_units_total") or 0))
+    if event_type == "memory_compaction_settlement":
+        return max(0, int(metadata.get("actual_credit_units") or 0))
+    if event_type == "ai_reserve":
+        return max(
+            0,
+            _metadata_credit(
+                metadata,
+                "reserved_credit_units",
+                "reserved_credits",
+            ),
+        )
     reserved = _metadata_credit(
         metadata,
         "reserved_credit_units_total",
@@ -251,7 +262,7 @@ def allocate_charge_components(
     return [(str(item[0]), int(item[1])) for item in allocated]
 
 
-def _charge_activity(metadata: Mapping[str, Any]) -> str:
+def _charge_activity(metadata: Mapping[str, Any], event_type: str = "") -> str:
     command = str(metadata.get("command") or "").strip()
     if command:
         return command
@@ -260,9 +271,35 @@ def _charge_activity(metadata: Mapping[str, Any]) -> str:
         return "audio"
     if "image" in usage_tag or "vision" in usage_tag:
         return "imagen"
-    if "memory_compaction" in usage_tag:
+    if event_type == "memory_compaction_settlement" or "memory_compaction" in usage_tag:
         return "memoria"
     return "respuesta IA"
+
+
+def _payer_label(metadata: Mapping[str, Any]) -> str:
+    payer_totals: Dict[str, int] = {}
+    for raw_payer in metadata.get("payer_breakdown") or []:
+        if not isinstance(raw_payer, Mapping):
+            continue
+        scope = "chat" if raw_payer.get("scope") == "chat" else "user"
+        payer_totals[scope] = payer_totals.get(scope, 0) + max(
+            0, int(raw_payer.get("credit_units") or 0)
+        )
+    visible_payers = [
+        (scope, units) for scope, units in payer_totals.items() if units > 0
+    ]
+    if len(visible_payers) > 1:
+        labels = {"user": "saldo personal", "chat": "saldo del grupo"}
+        return " + ".join(
+            f"{labels[scope]} {format_credit_units(units)}"
+            for scope, units in visible_payers
+        )
+
+    payer_scope = str(metadata.get("payer_scope") or metadata.get("source") or "")
+    return {
+        "user": "saldo personal",
+        "chat": "saldo del grupo",
+    }.get(payer_scope, "saldo no especificado")
 
 
 def _charge_time_label(value: Any, timezone_offset: float) -> str:
@@ -291,14 +328,15 @@ def format_user_charge_history(
     for entry in entries:
         raw_metadata = entry.get("metadata")
         metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-        charged_units = _charged_credit_units(metadata)
+        event_type = str(entry.get("event_type") or "")
+        charged_units = _charged_credit_units(metadata, event_type)
         shown_total += charged_units
         lines.extend(
             [
                 "",
                 (
                     f"{_charge_time_label(entry.get('created_at'), timezone_offset)}"
-                    f" · {_charge_activity(metadata)}"
+                    f" · {_charge_activity(metadata, event_type)}"
                     f" · {format_credit_units(charged_units)} créditos"
                 ),
             ]
@@ -316,12 +354,9 @@ def format_user_charge_history(
             "billing_zero_usage_fallback"
         ):
             lines.append("- cargo estimado por falta de detalle del proveedor")
-        payer_scope = str(metadata.get("payer_scope") or "")
-        payer_label = {
-            "user": "saldo personal",
-            "chat": "saldo del grupo",
-        }.get(payer_scope, "saldo no especificado")
-        lines.append(f"- pagó: {payer_label}")
+        if event_type == "ai_reserve":
+            lines.append("- liquidación pendiente; se muestra la reserva cobrada")
+        lines.append(f"- pagó: {_payer_label(metadata)}")
 
     lines.extend(["", f"total mostrado: {format_credit_units(shown_total)} créditos"])
     if has_more and entries:

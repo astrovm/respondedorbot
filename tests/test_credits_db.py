@@ -593,11 +593,40 @@ def test_list_user_ai_charges_filters_user_and_applies_cursor():
         )
 
     query, params = cursor.executed[0]
-    assert "AND user_id = %s" in query
-    assert "id < %s" in query
-    assert params == ("ai_settlement_result", 42, 99, 99, 11)
+    assert "entry.user_id = %s" in query
+    assert "entry.id < %s" in query
+    assert "memory_compaction_settlement" in query
+    assert "entry.event_type = 'ai_reserve'" in query
+    assert "NOT EXISTS" in query
+    assert "fallback.adjustment_amount" in query
+    assert "payer_breakdown" in query
+    assert params == (42, 99, 99, 11)
     assert results[0]["user_id"] == 42
     assert results[0]["metadata"]["charged_credit_units_total"] == 7
+
+
+def test_record_ai_settlement_result_is_idempotent_by_settlement_id():
+    cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
+    connection = _FakeConnection(cursor)
+    metadata = {"settlement_id": "42:202:9:ai_response_base"}
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        credits_db.record_ai_settlement_result(
+            user_id=42,
+            chat_id=202,
+            metadata=metadata,
+        )
+
+    query, params = next(
+        (query, params)
+        for query, params in cursor.executed
+        if "INSERT INTO credit_ledger" in query
+    )
+    assert "ON CONFLICT DO NOTHING" in query
+    assert json.loads(params[5])["settlement_id"] == metadata["settlement_id"]
 
 
 def test_purge_expired_ai_ledger_events_defaults_to_30_days():

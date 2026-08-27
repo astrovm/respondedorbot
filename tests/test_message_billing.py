@@ -190,6 +190,61 @@ def test_charge_component_allocation_preserves_rounded_total():
     assert sum(units for _label, units in allocation) == 1
 
 
+def test_charge_history_includes_compaction_pending_reserves_and_split_payers():
+    from api.billing.commands import format_user_charge_history
+
+    text = format_user_charge_history(
+        [
+            {
+                "id": 12,
+                "event_type": "memory_compaction_settlement",
+                "created_at": "2026-08-26T17:00:00+00:00",
+                "metadata": {
+                    "usage_tag": "memory_compaction:1:m1",
+                    "actual_credit_units": 2,
+                    "source": "user",
+                },
+            },
+            {
+                "id": 11,
+                "event_type": "ai_reserve",
+                "created_at": "2026-08-26T16:00:00+00:00",
+                "metadata": {
+                    "command": "/ask",
+                    "reserved_credit_units": 100,
+                    "charged_credit_units_total": 107,
+                    "source": "chat",
+                    "payer_scope": "mixed",
+                    "payer_breakdown": [
+                        {"scope": "chat", "credit_units": 100},
+                        {"scope": "user", "credit_units": 7},
+                    ],
+                },
+            },
+            {
+                "id": 10,
+                "event_type": "ai_settlement_result",
+                "created_at": "2026-08-26T15:00:00+00:00",
+                "metadata": {
+                    "command": "/ask",
+                    "charged_credit_units_total": 8,
+                    "payer_scope": "mixed",
+                    "payer_breakdown": [
+                        {"scope": "user", "credit_units": 3},
+                        {"scope": "chat", "credit_units": 5},
+                    ],
+                },
+            },
+        ]
+    )
+
+    assert "memoria · 0.02 créditos" in text
+    assert "liquidación pendiente; se muestra la reserva cobrada" in text
+    assert "pagó: saldo del grupo 1.00 + saldo personal 0.07" in text
+    assert "pagó: saldo personal 0.03 + saldo del grupo 0.05" in text
+    assert "total mostrado: 1.17 créditos" in text
+
+
 def test_handle_msg_balance_private_accepts_real_index_formatter(monkeypatch):
     from api.billing.ai import BalanceFormatter
     from api.bot.message_handler import handle_msg
