@@ -1,17 +1,18 @@
 # respondedorbot
 
-A Telegram bot that plays "el gordo", a blunt Argentine character that replies in lowercase using Argentine slang.
+An AI Telegram bot that plays "el gordo", a blunt Argentine character that replies in lowercase using Argentine slang.
 
 **[t.me/respondedorbot](https://t.me/respondedorbot)**
 
 ## Features
 
-- Chat with streaming responses, web search, and conversation memory
+- AI chat with a configurable personality, streaming responses, web search, and conversation memory
+- AI tools for price lookups, calculations, web pages, and scheduled tasks
 - Crypto, stock, ETF, index, fund, futures, dollar, and BCRA data
 - Weather, Polymarket elections, and Hacker News
-- Audio transcription and image description
-- Scheduled tasks and conversation summaries
-- Telegram Stars billing and shared group credits
+- Audio transcription and AI image description
+- Conversation summaries and automatic memory compaction
+- Telegram Stars billing for AI usage, with shared group credits
 - Automatic fixes for supported social links
 
 ## Quick Start
@@ -27,12 +28,12 @@ uv run --locked python run_polling.py
 
 | Variable | Description |
 | --- | --- |
-| `BOT_SYSTEM_PROMPT` | Complete personality prompt |
+| `BOT_SYSTEM_PROMPT` | Complete AI personality prompt |
 | `BOT_TRIGGER_WORDS` | Comma-separated keywords that trigger responses in groups |
 | `TELEGRAM_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_USERNAME` | Bot username |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis cache (requires RediSearch) |
-| `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL for credits |
+| `SUPABASE_POSTGRES_URL` | Pooled Supabase Postgres URL for AI credits |
 | `COINMARKETCAP_KEY` | CoinMarketCap API key |
 | `GROQ_API_KEY` | Paid Groq API key for transcription |
 | `GROQ_FREE_API_KEY` | Optional free-tier Groq key for transcription |
@@ -42,7 +43,7 @@ uv run --locked python run_polling.py
 | `ADMIN_CHAT_ID` | Telegram chat ID for error reports |
 | `FRIENDLY_INSTANCE_NAME` | Instance name for admin reports |
 
-### Providers
+### AI providers
 
 | Use | Provider | Model |
 |---|---|---|
@@ -57,7 +58,7 @@ Text responses stream to Telegram. Tool calls run when their arguments are compl
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `/ask` | `/pregunta`, `/che`, `/gordo` | Chat |
+| `/ask` | `/pregunta`, `/che`, `/gordo` | AI chat |
 | `/resumen` | `/summary`, `/tldr` | Stream conversation summary |
 | `/transcribe` | `/describe` | Transcribe audio / describe image |
 | `/prices` | `/price`, `/precios`, `/precio`, `/c`, `/presio(s)`, `/bresio(s)`, `/brecio(s)` | Crypto, stock, ETF, index, fund, and futures prices |
@@ -79,7 +80,7 @@ Text responses stream to Telegram. Tool calls run when their arguments are compl
 | `/time` | - | Unix timestamp |
 | `/config` | `/configs`, `/settings` | Chat settings (admin only in groups) |
 | `/language` | `/idioma` | Change the bot language |
-| `/topup` | - | Buy credits with Telegram Stars |
+| `/topup` | - | Buy AI credits with Telegram Stars |
 | `/balance` | - | Show credit balance |
 | `/charges` | `/history`, `/gastos` | Show credit charges |
 | `/transfer` | - | Transfer credits to group |
@@ -93,17 +94,17 @@ Text responses stream to Telegram. Tool calls run when their arguments are compl
 
 ## How it works
 
-`api/index.py` creates the services used by the Telegram handlers. OpenRouter handles chat and vision. Groq handles transcription, with OpenRouter as a fallback.
+`api/index.py` creates the services used by the Telegram handlers. OpenRouter handles AI chat, vision, and summaries. Groq handles transcription, with OpenRouter as a fallback.
 
 Chat history is stored in Redis and indexed with RediSearch. The bot compacts history after 40 new messages and keeps the latest 25. Summaries are updated from the previous summary and the new messages.
 
-Market data, weather, random choices, Hacker News, and command information are loaded only when requested. Credit reservations are settled after each model response and refunded on failure.
+Market data, weather, random choices, Hacker News, and command information are passed to the AI only when requested. AI credit reservations are settled after each response and refunded on failure.
 
 ## Project layout
 
 - `api/` - application code
   - `api/admin/` - admin commands, reporting, authorization
-  - `api/ai/` - chat orchestration, prompting, pricing, response cleanup
+  - `api/ai/` - AI orchestration, prompting, pricing, response cleanup
   - `api/billing/` - credits, settlement, billing commands, Stars callbacks
   - `api/bot/` - Telegram adapter, handlers, routing, streaming, chat config
   - `api/cache/` - HTTP and Redis caching
@@ -112,9 +113,9 @@ Market data, weather, random choices, Hacker News, and command information are l
   - `api/markets/` - crypto, dollar, stocks, Polymarket, weather
   - `api/media/` - image, audio, video, transcription, media cache
   - `api/memory/` - chat history, retrieval, compaction, summaries
-  - `api/providers/` - model providers and fallback chains
+  - `api/providers/` - AI providers and fallback chains
   - `api/tasks/` - task execution and scheduling
-  - `api/tools/` - tool registry for prices, calculations, web fetches, and tasks
+  - `api/tools/` - AI tools for prices, calculations, web fetches, and tasks
   - `api/services/` - persistence and low-level external adapters
   - `api/utils/` - reusable helpers
   - `api/index.py` - application composition root and compatibility exports
