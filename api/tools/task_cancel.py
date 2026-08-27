@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 from api.tasks.scheduler import cancel_task, list_tasks
 
@@ -14,15 +15,15 @@ def _execute_task_cancel(
 ) -> ToolResult:
     task_id = params.get("task_id", "")
     if not task_id:
-        return ToolResult(output="necesito el id de la tarea, usa /tareas para verlas")
+        return ToolResult(output=tr("task.cancel.required"))
     chat_id = str(context.get("chat_id", ""))
     if not chat_id:
-        return ToolResult(output="no se en que chat estoy")
+        return ToolResult(output=tr("task.no_chat"))
     if not any(str(task.get("id")) == str(task_id) for task in list_tasks(chat_id)):
-        return ToolResult(output="esa tarea no existe en este chat")
+        return ToolResult(output=tr("task.cancel.not_found"))
 
     cancel_task(task_id)
-    return ToolResult(output=f"tarea {task_id} cancelada")
+    return ToolResult(output=tr("task.cancel.done", task_id=task_id))
 
 
 register_tool(

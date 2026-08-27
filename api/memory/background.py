@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from api.ai.pricing import credit_units_from_usd_micros
 from api.billing.credit_units import CREDIT_SCALE, rescale_credit_units
+from api.i18n import current_locale, normalize_locale, use_locale
 from api.memory.compaction import CompactionPlan
 
 
@@ -49,6 +50,7 @@ class CompactionJob:
     reservation: dict[str, Any]
     user_id: int
     message_id: str | None
+    locale: str = "es"
     attempts: int = 0
     next_attempt_at: float = 0.0
     result_summary: str | None = None
@@ -119,6 +121,7 @@ class DurableCompactionQueue:
             reservation={**dict(reservation), "credit_scale": CREDIT_SCALE},
             user_id=int(billing.user_id),
             message_id=str(raw_message_id) if raw_message_id is not None else None,
+            locale=current_locale(),
         )
         try:
             stored = bool(
@@ -223,7 +226,8 @@ class DurableCompactionQueue:
             return
 
         if not job.result_summary:
-            summary, cost = self._compact(job.messages, job.prior_summary)
+            with use_locale(normalize_locale(job.locale)):
+                summary, cost = self._compact(job.messages, job.prior_summary)
             if not summary or cost <= 0:
                 raise RuntimeError("summary provider did not produce billable output")
             job.result_summary = summary

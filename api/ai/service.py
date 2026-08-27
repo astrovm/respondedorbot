@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+from api.i18n import tr
 
 
 _summary_logger = logging.getLogger(__name__)
@@ -39,17 +40,13 @@ class AIService:
         reason: str,
     ) -> None:
         if reservation:
-            request.billing_helper.refund_reserved_ai_credits(
-                reservation, reason=reason
-            )
+            request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
 
     def _prepare_conversation_messages(
         self, request: AIConversationRequest
     ) -> Tuple[List[Dict[str, Any]], Any]:
         chat_history = self.get_chat_history(request.chat_id, request.redis_client)
-        reply_to_message = (
-            request.message.get("reply_to_message") if request.message else None
-        )
+        reply_to_message = request.message.get("reply_to_message") if request.message else None
         reply_to_message_id = None
         if isinstance(reply_to_message, dict):
             raw_reply_to_id = reply_to_message.get("message_id")
@@ -90,31 +87,22 @@ class AIService:
         ):
             return existing_charge_meta, None
 
-        if (
-            not self.check_provider_available(scope="vision")
-            and not self.has_openrouter_fallback()
-        ):
+        if not self.check_provider_available(scope="vision") and not self.has_openrouter_fallback():
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="image_context_local_rate_limit"
             )
-            rate_limit_msg = self.handle_rate_limit(
-                request.chat_id, request.message
-            )
+            rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             response = "ok" if request.is_spontaneous else rate_limit_msg
             return None, (response, False)
 
         image_prompt = "Describe what you see in this image in detail."
-        media_charge_meta, media_charge_error = (
-            request.billing_helper.reserve_ai_credits(
-                "image_context_media",
-                self.estimate_image_context_reserve_credits(
-                    request.prepared_message.resized_image_data,
-                    image_prompt,
-                ),
-                metadata={
-                    "photo_file_id": request.prepared_message.photo_file_id
-                },
-            )
+        media_charge_meta, media_charge_error = request.billing_helper.reserve_ai_credits(
+            "image_context_media",
+            self.estimate_image_context_reserve_credits(
+                request.prepared_message.resized_image_data,
+                image_prompt,
+            ),
+            metadata={"photo_file_id": request.prepared_message.photo_file_id},
         )
         if not media_charge_error:
             return media_charge_meta, None
@@ -130,16 +118,12 @@ class AIService:
         request: AIConversationRequest,
         messages: List[Dict[str, Any]],
     ) -> Tuple[int, Dict[str, Any]]:
-        full_reserve_credits, reserve_meta = (
-            self.estimate_ai_base_reserve_credits(
-                messages,
-                extra_input_tokens=(
-                    IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-                    if request.prepared_message.photo_file_id
-                    else 0
-                ),
-                timezone_offset=request.timezone_offset,
-            )
+        full_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
+            messages,
+            extra_input_tokens=(
+                IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE if request.prepared_message.photo_file_id else 0
+            ),
+            timezone_offset=request.timezone_offset,
         )
         return full_reserve_credits, {
             "estimated_prompt_messages": len(messages),
@@ -167,9 +151,7 @@ class AIService:
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
             admission_messages,
             extra_input_tokens=(
-                IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-                if request.prepared_message.photo_file_id
-                else 0
+                IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE if request.prepared_message.photo_file_id else 0
             ),
             timezone_offset=request.timezone_offset,
         )
@@ -187,20 +169,13 @@ class AIService:
                 media_charge_meta,
                 reason="ai_response_base_reserve_failed",
             )
-            return (
-                ("ok", False) if request.is_spontaneous else (base_charge_error, False)
-            )
+            return ("ok", False) if request.is_spontaneous else (base_charge_error, False)
 
-        if (
-            not self.check_provider_available(scope="chat")
-            and not self.has_openrouter_fallback()
-        ):
+        if not self.check_provider_available(scope="chat") and not self.has_openrouter_fallback():
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="chat_provider_unavailable"
             )
-            self._refund_if_present(
-                request, media_charge_meta, reason="chat_provider_unavailable"
-            )
+            self._refund_if_present(request, media_charge_meta, reason="chat_provider_unavailable")
             rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             return ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
 
@@ -215,22 +190,18 @@ class AIService:
             )
             raise
 
-        full_reserve_credits, full_reserve_meta = (
-            self._estimate_full_conversation_reserve(
-                request,
-                ai_messages,
-            )
+        full_reserve_credits, full_reserve_meta = self._estimate_full_conversation_reserve(
+            request,
+            ai_messages,
         )
         if full_reserve_credits > main_reserve_credits:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_response_reserve_adjustment"
             )
-            base_charge_meta, base_charge_error = (
-                request.billing_helper.reserve_ai_credits(
-                    "ai_response_base",
-                    full_reserve_credits,
-                    metadata=full_reserve_meta,
-                )
+            base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
+                "ai_response_base",
+                full_reserve_credits,
+                metadata=full_reserve_meta,
             )
             if base_charge_error:
                 self._refund_if_present(
@@ -269,9 +240,7 @@ class AIService:
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
         if bool(ai_response_meta.get("ai_fallback")):
             # The local fallback has no provider usage, so release every reserve.
-            self._refund_if_present(
-                request, media_charge_meta, reason="ai_response_fallback"
-            )
+            self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_response_fallback"
             )
@@ -319,10 +288,7 @@ class AIService:
         if base_charge_error:
             return base_charge_error, None, True
 
-        if (
-            not self.check_provider_available(scope="chat")
-            and not self.has_openrouter_fallback()
-        ):
+        if not self.check_provider_available(scope="chat") and not self.has_openrouter_fallback():
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="summary_provider_unavailable"
             )
@@ -342,7 +308,7 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="summary_preparation_failed"
             )
-            return "no pude generar el resumen", None, True
+            return tr("summary.error"), None, True
 
         try:
             final_text = stream_consumer(token_iterator)
@@ -351,7 +317,7 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="summary_stream_failed"
             )
-            return "no pude generar el resumen", None, True
+            return tr("summary.error"), None, True
 
         request.billing_helper.settle_reserved_ai_credits_batch(
             [base_charge_meta],

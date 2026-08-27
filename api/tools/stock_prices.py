@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -13,15 +14,15 @@ def _execute_stock_prices(
 ) -> ToolResult:
     get_stock_prices = context.get("get_stock_prices")
     if get_stock_prices is None:
-        return ToolResult(output="stock price lookup not available")
+        return ToolResult(output=tr("tool.unavailable", tool="stock prices"))
     queries = params.get("queries", [])
     if isinstance(queries, str):
         queries = [queries]
     if not isinstance(queries, list) or not queries:
-        return ToolResult(output="indicá al menos un símbolo o empresa")
+        return ToolResult(output=tr("tool.stock.required"))
     normalized = [str(query).strip() for query in queries if str(query).strip()]
     if not normalized:
-        return ToolResult(output="indicá al menos un símbolo o empresa")
+        return ToolResult(output=tr("tool.stock.required"))
     return ToolResult(output=get_stock_prices(",".join(normalized[:20])))
 
 

@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from api.i18n import tr
+from api.i18n.prompts import prompt
+
 ConfigLoader = Callable[[], dict[str, Any]]
 
 
@@ -18,39 +21,25 @@ def build_system_message(
     config = load_config()
     formatted_time = str((context.get("time") or {}).get("formatted", "")).strip()
 
-    task_prefix = ""
-    if task_mode:
-        task_prefix = (
-            "EJECUTANDO TAREA PROGRAMADA:\n"
-            "Responde la siguiente instruccion y nada mas.\n"
-            "No hagas preguntas, no ofrezcas seguimientos, no pidas confirmacion.\n"
-            "Genera tu respuesta y terminá.\n\n"
-        )
+    task_prefix = prompt("task_mode") if task_mode else ""
 
     tool_instruction = _build_tool_instruction() if tools_active else ""
-    contextual_info = f"""
-{tool_instruction}
-
-FECHA ACTUAL:
-{formatted_time}
-"""
+    contextual_info = prompt(
+        "system_context",
+        tool_instruction=tool_instruction,
+        formatted_time=formatted_time,
+        language_instruction=tr("ai.language_instruction"),
+    )
     return {
         "role": "system",
         "content": [
             {
                 "type": "text",
-                "text": task_prefix
-                + str(config.get("system_prompt", ""))
-                + contextual_info,
+                "text": task_prefix + str(config.get("system_prompt", "")) + contextual_info,
             }
         ],
     }
 
 
 def _build_tool_instruction() -> str:
-    return (
-        "\n\nHERRAMIENTAS:\n"
-        "Llamalas directamente, sin pedir permiso ni narrar antes.\n"
-        "No expliques que vas a hacer antes de usar una herramienta simple.\n"
-        "Usa las herramientas cuando necesites datos actuales o externos.\n"
-    )
+    return prompt("tools")

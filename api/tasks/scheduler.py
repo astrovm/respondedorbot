@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.core.logging import get_logger
+from api.i18n import current_locale, tr
 from api.bot.general_commands import gen_random
 from api.services import credits_db as credits_db_service
 from api.tasks.executor import (
@@ -88,9 +89,7 @@ def _ensure_runtime_deps() -> None:
                 "build_insufficient_credits_message_fn": (
                     app_runtime.billing.build_insufficient_message
                 ),
-                "estimate_ai_base_reserve_credits": (
-                    app_runtime.estimate_ai_base_reserve_credits
-                ),
+                "estimate_ai_base_reserve_credits": (app_runtime.estimate_ai_base_reserve_credits),
             },
         )
     except Exception as error:
@@ -165,14 +164,15 @@ def get_scheduler_runtime_status() -> Dict[str, Any]:
 def format_interval(seconds: int, prefix: str = "cada ") -> str:
     if seconds >= _DAY:
         val = seconds // _DAY
-        unit = f"dia{'s' if val != 1 else ''}"
+        unit = tr("task.day" if val == 1 else "task.days")
     elif seconds >= _HOUR:
         val = seconds // _HOUR
-        unit = f"hora{'s' if val != 1 else ''}"
+        unit = tr("task.hour" if val == 1 else "task.hours")
     else:
         val = seconds // _MINUTE
-        unit = f"minuto{'s' if val != 1 else ''}"
-    return f"{prefix}{val} {unit}"
+        unit = tr("task.minute" if val == 1 else "task.minutes")
+    key = "task.in" if prefix.strip() == "en" else "task.every"
+    return tr(key, value=val, unit=unit)
 
 
 def describe_trigger(trigger_config: Optional[Dict[str, Any]]) -> str:
@@ -187,15 +187,15 @@ def describe_task_trigger(trigger: TaskTrigger) -> str:
         time_text = f"{trigger.hour:02d}:{trigger.minute:02d}"
         if trigger.weekdays:
             weekdays = ", ".join(
-                _ENGLISH_TO_SPANISH_WEEKDAY.get(day, day)
+                day if current_locale() == "en" else _ENGLISH_TO_SPANISH_WEEKDAY.get(day, day)
                 for day in trigger.weekdays
             )
-            return f"los {weekdays} a las {time_text}"
+            return tr("task.weekdays", weekdays=weekdays, time=time_text)
         if trigger.day is not None:
-            return f"el dia {trigger.day} de cada mes a las {time_text}"
-        return f"todos los dias a las {time_text}"
+            return tr("task.monthly", day=trigger.day, time=time_text)
+        return tr("task.daily", time=time_text)
     if isinstance(trigger, DayIntervalTrigger):
-        return f"cada {trigger.days} dias"
+        return tr("task.every", value=trigger.days, unit=tr("task.days"))
     if isinstance(trigger, IntervalTrigger):
         return format_interval(trigger.seconds)
     return format_interval(trigger.seconds, "en ")
@@ -211,13 +211,15 @@ def format_task_summary(task: Dict[str, Any], *, prefix: str = "") -> str:
     if interval:
         freq = format_interval(interval)
         return (
-            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, "
+            f"{tr('task.next', time=next_run)}"
         )
 
     if trigger_config:
         freq = describe_trigger(trigger_config)
         return (
-            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, prox: {next_run}"
+            f"{prefix}[{task['id']}] {task_text}{owner_bit} - {freq}, "
+            f"{tr('task.next', time=next_run)}"
         )
 
     return f"{prefix}[{task['id']}] {task_text}{owner_bit} - {next_run}"
@@ -237,7 +239,7 @@ def _owner_display(user_name: str) -> str:
 def _coerce_timezone_offset(value: Any, default: int = -3) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -250,7 +252,7 @@ def _format_run_time(raw: str, timezone_offset: int = -3) -> str:
             dt = dt.replace(tzinfo=UTC)
         local = dt.astimezone(timezone(timedelta(hours=timezone_offset)))
         return local.strftime("%d/%m %H:%M")
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return raw
 
 
@@ -317,7 +319,7 @@ def _task_score(data: Mapping[str, Any]) -> float:
     if raw_run_date:
         try:
             return datetime.fromisoformat(str(raw_run_date).replace("Z", "+00:00")).timestamp()
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
     return 0.0
 
@@ -338,7 +340,7 @@ def _decode_task(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     try:
         loaded = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return None
     return loaded if isinstance(loaded, dict) else None
 
@@ -421,9 +423,7 @@ def _task_payload(
     run_date: datetime | None,
 ) -> Dict[str, Any]:
     interval_seconds = (
-        request.trigger.seconds
-        if isinstance(request.trigger, IntervalTrigger)
-        else None
+        request.trigger.seconds if isinstance(request.trigger, IntervalTrigger) else None
     )
     return {
         "id": task_id,
@@ -435,6 +435,7 @@ def _task_payload(
         "run_date": run_date.isoformat() if run_date else None,
         "trigger_config": trigger_config(request.trigger),
         "timezone_offset": _coerce_timezone_offset(request.timezone_offset),
+        "locale": request.locale,
     }
 
 
@@ -536,18 +537,13 @@ def _migrate_chat_task_index(redis_client: Any, chat_id: str) -> List[Dict[str, 
 def _load_indexed_tasks(redis_client: Any, chat_id: str) -> List[Dict[str, Any]]:
     index_key = _task_index_key(chat_id)
     raw_ids = redis_client.zrange(index_key, 0, -1)
-    task_ids = [
-        item if isinstance(item, str) else item.decode("utf-8")
-        for item in raw_ids
-    ]
+    task_ids = [item if isinstance(item, str) else item.decode("utf-8") for item in raw_ids]
     if not task_ids:
         if redis_client.get(_task_index_marker_key(chat_id)):
             return []
         return _migrate_chat_task_index(redis_client, chat_id)
 
-    raw_tasks = redis_client.mget(
-        [f"{TASK_REDIS_PREFIX}{task_id}" for task_id in task_ids]
-    )
+    raw_tasks = redis_client.mget([f"{TASK_REDIS_PREFIX}{task_id}" for task_id in task_ids])
     tasks: List[Dict[str, Any]] = []
     missing_ids: List[str] = []
     for task_id, raw in zip(task_ids, raw_tasks):

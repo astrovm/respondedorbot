@@ -7,6 +7,7 @@ from typing import Any
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
+from api.i18n import tr
 from api.markets.rulo import build_rulo_message
 from api.services.stale_cache import StaleCache
 from api.markets.dollar_commands import sort_dollar_rates
@@ -44,9 +45,7 @@ def format_dollar_rates(
                 {
                     "name": label,
                     "price": float(value),
-                    "history": history
-                    if isinstance(history, (int, float))
-                    else None,
+                    "history": history if isinstance(history, (int, float)) else None,
                 }
             )
 
@@ -55,12 +54,10 @@ def format_dollar_rates(
     for dollar in rates:
         line = f"{dollar['name']}: {fmt_num(dollar['price'], 2)}"
         if dollar["history"] is not None:
-            line += (
-                f" ({fmt_signed_pct(dollar['history'], 2)}% {hours_ago}hs)"
-            )
+            line += f" ({fmt_signed_pct(dollar['history'], 2)}% {hours_ago}hs)"
         lines.append(line)
     if hours_ago != 24 and all(rate.get("history") is None for rate in rates):
-        lines.append(f"\n(sin datos historicos para {hours_ago}hs todavia)")
+        lines.append(f"\n({tr('market.no_history', hours=hours_ago)})")
     return "\n".join(lines)
 
 
@@ -79,9 +76,10 @@ def get_dollar_rates(
     if timeframe is None and msg_text.strip():
         token = msg_text.strip().lower()
         if re.fullmatch(r"\d+[hd]", token):
-            return (
-                f"timeframe '{token}' no soportado, uso: "
-                f"{', '.join(timeframes)}"
+            return tr(
+                "market.timeframe_invalid",
+                timeframe=token,
+                valid=", ".join(timeframes),
             )
     hours_ago = timeframes.get(timeframe, 24) if timeframe else 24
     cache_key = f"market:dolar:formatted:{hours_ago}"
@@ -124,9 +122,7 @@ def build_dollar_rates_text(
     band_limits = get_band_limits()
     if band_limits and hours_ago != 24:
         band_limits = {
-            key: value
-            for key, value in band_limits.items()
-            if not key.endswith("_change_pct")
+            key: value for key, value in band_limits.items() if not key.endswith("_change_pct")
         }
     return format_rates(sorted_rates, hours_ago, band_limits)
 
@@ -144,42 +140,44 @@ def get_devo(msg_text: str, *, fetch_dollars: DollarFetcher) -> str:
             fee = float(msg_text) / 100
 
         if fee != fee or fee > 1 or purchase != purchase or purchase < 0:
-            return (
-                "mandá bien los datos capo: fee entre 0 y 100, "
-                "y monto de compra positivo"
-            )
+            return tr("market.dollar.input_error")
         dollars = fetch_dollars()
         if not dollars or "data" not in dollars:
-            return "no pude traer cotizaciones del dólar boludo"
+            return tr("market.dollar.load_error")
 
         data = dollars["data"]
-        usdt = (
-            float(data["cripto"]["usdt"]["ask"])
-            + float(data["cripto"]["usdt"]["bid"])
-        ) / 2
+        usdt = (float(data["cripto"]["usdt"]["ask"]) + float(data["cripto"]["usdt"]["bid"])) / 2
         official = float(data["oficial"]["price"])
         card = float(data["tarjeta"]["price"])
         profit = -(fee * usdt + official - usdt) / card
-        message = f"""ganancia: {fmt_num(profit * 100, 2)}%
-
-comisión: {fmt_num(fee * 100, 2)}%
-oficial: {fmt_num(official, 2)}
-usdt: {fmt_num(usdt, 2)}
-tarjeta: {fmt_num(card, 2)}"""
+        message = tr(
+            "market.dollar.devo_summary",
+            profit=fmt_num(profit * 100, 2),
+            fee=fmt_num(fee * 100, 2),
+            official=fmt_num(official, 2),
+            usdt=fmt_num(usdt, 2),
+            card=fmt_num(card, 2),
+        )
 
         if purchase > 0:
             purchase_ars = purchase * card
             purchase_usdt = purchase_ars / usdt
             profit_ars = purchase_ars * profit
             profit_usdt = profit_ars / usdt
-            message = f"""{fmt_num(purchase, 2)} USD Tarjeta = {fmt_num(purchase_ars, 2)} ARS = {fmt_num(purchase_usdt, 2)} USDT
-Ganarias {fmt_num(profit_ars, 2)} ARS / {fmt_num(profit_usdt, 2)} USDT
-Total: {fmt_num(purchase_ars + profit_ars, 2)} ARS / {fmt_num(purchase_usdt + profit_usdt, 2)} USDT
-
-{message}"""
+            message = tr(
+                "market.dollar.devo_purchase",
+                usd=fmt_num(purchase, 2),
+                ars=fmt_num(purchase_ars, 2),
+                usdt=fmt_num(purchase_usdt, 2),
+                profit_ars=fmt_num(profit_ars, 2),
+                profit_usdt=fmt_num(profit_usdt, 2),
+                total_ars=fmt_num(purchase_ars + profit_ars, 2),
+                total_usdt=fmt_num(purchase_usdt + profit_usdt, 2),
+                summary=message,
+            )
         return message
     except ValueError:
-        return "uso: /devo <fee_porcentaje>[, <monto_compra>]"
+        return tr("market.dollar.devo_usage")
 
 
 def get_rulo(
@@ -193,7 +191,7 @@ def get_rulo(
     amount = str(int(usd_amount))
     dollars = fetch_dollars()
     if not dollars or "data" not in dollars:
-        return "error consiguiendo cotizaciones del dólar"
+        return tr("market.dollar.load_error")
     usd_usdt = cached_request(
         f"https://criptoya.com/api/USDT/USD/{amount}",
         None,
@@ -221,19 +219,19 @@ def satoshi(*, get_btc_price: PriceGetter, logger: Logger) -> str:
         price_usd = get_btc_price("USD")
         price_ars = get_btc_price("ARS")
         if price_usd is None:
-            return "no pude traer el precio de btc en usd"
+            return tr("market.dollar.btc_usd_error")
         if price_ars is None:
-            return "no pude traer el precio de btc en ars"
+            return tr("market.dollar.btc_ars_error")
         return f"""1 satoshi = ${price_usd / 100_000_000:.8f} USD
 1 satoshi = ${price_ars / 100_000_000:.4f} ARS
 
 $1 USD = {int(100_000_000 / price_usd):,} sats
 $1 ARS = {100_000_000 / price_ars:.3f} sats"""
-    except (TypeError, ValueError, ZeroDivisionError):
-        return "no pude conseguir el precio de btc boludo"
+    except TypeError, ValueError, ZeroDivisionError:
+        return tr("market.dollar.btc_error")
     except Exception as error:
         logger.exception("satoshi failed: %s", error)
-        return "no pude conseguir el precio de btc boludo"
+        return tr("market.dollar.btc_error")
 
 
 def handle_bcra_variables(
@@ -245,14 +243,11 @@ def handle_bcra_variables(
     try:
         variables = get_variables()
         if not variables:
-            return (
-                "No pude obtener las variables del BCRA en este momento, "
-                "probá más tarde"
-            )
+            return tr("market.bcra.load_error")
         return format_variables(variables)
     except Exception:
         logger.exception("Error handling BCRA variables")
-        return "error al obtener las variables del BCRA"
+        return tr("market.bcra.error")
 
 
 def _parse_timeframe(

@@ -17,7 +17,7 @@ from typing import (
     cast,
 )
 
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
+from api.i18n import tr
 from api.bot.chat_context import (
     is_group_chat_type,
 )
@@ -105,9 +105,7 @@ def _segment_has_token_usage(segment: Optional[Mapping[str, Any]]) -> bool:
     usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
     raw_prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     prompt_tokens_details = (
-        dict(raw_prompt_tokens_details)
-        if isinstance(raw_prompt_tokens_details, Mapping)
-        else {}
+        dict(raw_prompt_tokens_details) if isinstance(raw_prompt_tokens_details, Mapping) else {}
     )
     return (
         int(usage.get("input_tokens", 0) or 0) > 0
@@ -127,7 +125,11 @@ def build_topup_keyboard() -> Dict[str, Any]:
         rows.append(
             [
                 {
-                    "text": f"{format_credit_units(pack['credits'])} créditos - {pack['xtr']} ⭐",
+                    "text": tr(
+                        "topup.pack_button",
+                        credits=format_credit_units(pack["credits"]),
+                        stars=pack["xtr"],
+                    ),
                     "callback_data": f"topup:{pack_id}",
                 }
             ]
@@ -148,7 +150,7 @@ def parse_topup_payload(payload: str) -> Tuple[Optional[str], Optional[int]]:
     if len(parts) >= 3:
         try:
             user_id = int(parts[2])
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             user_id = None
     return parts[1], user_id
 
@@ -162,18 +164,15 @@ def build_insufficient_credits_message(
     """Build a user-facing paywall message when no credits are available."""
 
     if is_group_chat_type(chat_type):
-        return (
-            "se quedaron secos de créditos ia en este grupo, boludo.\n"
-            f"- lo tuyo: {format_credit_units(user_balance)}\n"
-            f"- lo del grupo: {format_credit_units(chat_balance)}\n"
-            "metele /topup por privado y si querés pasá saldo al grupo con /transfer <monto>\n"
-            "si querés ver bien la miseria, mandá /balance"
+        return tr(
+            "billing.insufficient_group",
+            user=format_credit_units(user_balance),
+            group=format_credit_units(chat_balance),
         )
 
-    return (
-        "te quedaste seco de créditos ia, boludo.\n"
-        f"saldo: {format_credit_units(user_balance)}\n"
-        "metele /topup si querés que siga laburando"
+    return tr(
+        "billing.insufficient_private",
+        balance=format_credit_units(user_balance),
     )
 
 
@@ -213,18 +212,16 @@ def format_balance_command(
     user_balance = credits_db_service.get_balance("user", int(user_id))
     if is_group_chat_type(chat_type):
         chat_balance = credits_db_service.get_balance("chat", int(chat_id))
-        return (
-            "saldos ia, maestro:\n"
-            f"- lo tuyo: {format_credit_units(user_balance)}\n"
-            f"- lo del grupo: {format_credit_units(chat_balance)}\n"
-            "si no alcanza lo tuyo, manoteo del grupo\n"
-            "si querés cargar más: /topup por privado\n"
-            "si querés pasarle al grupo: /transfer <monto>"
+        return tr(
+            "balance.group_full",
+            user=format_credit_units(user_balance),
+            group=format_credit_units(chat_balance),
         )
 
     return (
-        f"tenés {format_credit_units(user_balance)} créditos ia\n"
-        "si querés cargar más mandale /topup"
+        tr("balance.user", balance=format_credit_units(user_balance))
+        + "\n"
+        + tr("balance.private_topup")
     )
 
 
@@ -259,11 +256,9 @@ class AIMessageBilling:
     redis_client: Any = None
     creditless_user_hourly_limit: int = 0
     onboarding_checked: bool = False
-    billing_not_configured_message: str = BILLING_UNAVAILABLE_MESSAGE
-    billing_missing_scope_message: str = (
-        "no te pude sacar bien el usuario o el chat para cobrar, qué quilombo"
-    )
-    billing_charge_error_message: str = "se trabó el cobro de ia, probá de nuevo"
+    billing_not_configured_message: str = field(default_factory=lambda: tr("billing.unavailable"))
+    billing_missing_scope_message: str = field(default_factory=lambda: tr("billing.missing_scope"))
+    billing_charge_error_message: str = field(default_factory=lambda: tr("billing.charge_error"))
     charge_errors: List[str] = field(default_factory=list)
     load_persisted_reservation_fn: Callable[[str], Optional[Mapping[str, Any]]] = (
         lambda _usage_tag: None
@@ -323,10 +318,9 @@ class AIMessageBilling:
                     err,
                     {"chat_id": self.chat_id, "user_id": self.user_id},
                 )
-            return (
-                f"llegaste al limite de {self.creditless_user_hourly_limit} "
-                "mensajes de ia pagados por el grupo por hora, boludo. "
-                "cargá créditos con /topup si querés seguir"
+            return tr(
+                "billing.group_cap",
+                limit=self.creditless_user_hourly_limit,
             )
         return None
 
@@ -340,9 +334,7 @@ class AIMessageBilling:
             return None
         return f"creditless_cap:{self.chat_id}:{self.user_id}"
 
-    def _rollback_creditless_cap(
-        self, reservation_meta: Optional[Mapping[str, Any]]
-    ) -> None:
+    def _rollback_creditless_cap(self, reservation_meta: Optional[Mapping[str, Any]]) -> None:
         if not reservation_meta:
             return
         if str(reservation_meta.get("source") or "user") != "chat":
@@ -361,9 +353,7 @@ class AIMessageBilling:
                 {"chat_id": self.chat_id, "user_id": self.user_id},
             )
 
-    def _build_insufficient_credits_reply(
-        self, charge_result: Mapping[str, Any]
-    ) -> str:
+    def _build_insufficient_credits_reply(self, charge_result: Mapping[str, Any]) -> str:
         random_response = build_random_reply(
             self.gen_random_fn,
             cast(Mapping[str, Any], self.message.get("from") or {}),
@@ -459,9 +449,7 @@ class AIMessageBilling:
         persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
         if persisted_reservation:
             raw_metadata = persisted_reservation.get("metadata")
-            persisted_metadata = (
-                dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-            )
+            persisted_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
             persisted_scale = persisted_reservation.get(
                 "credit_scale",
                 persisted_metadata.get("credit_scale"),
@@ -471,9 +459,7 @@ class AIMessageBilling:
                     persisted_reservation.get("reserved_credit_units", 0),
                     persisted_scale,
                 ),
-                "chat_scope_id": persisted_reservation.get(
-                    "chat_scope_id", chat_scope_id
-                ),
+                "chat_scope_id": persisted_reservation.get("chat_scope_id", chat_scope_id),
                 "source": str(persisted_reservation.get("source") or "user"),
                 "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
                 "metadata": persisted_metadata,
@@ -579,7 +565,9 @@ class AIMessageBilling:
         payer_scope = (
             next(iter(payer_scopes))
             if len(payer_scopes) == 1
-            else "mixed" if payer_scopes else "user"
+            else "mixed"
+            if payer_scopes
+            else "user"
         )
         settlement_ids = [self._settlement_id(tag) for tag in usage_tags]
         return self._build_charge_metadata(
@@ -643,9 +631,7 @@ class AIMessageBilling:
                             "chat_id": self.chat_id,
                             "user_id": self.user_id,
                             "command": self.command,
-                            "settlement_id": settlement_metadata.get(
-                                "settlement_id"
-                            ),
+                            "settlement_id": settlement_metadata.get("settlement_id"),
                         },
                     )
 
@@ -663,9 +649,7 @@ class AIMessageBilling:
             {
                 "scope": source,
                 "credit_units": (
-                    reserved_credit_units
-                    - refunded_credit_units
-                    + debt_applied_credit_units
+                    reserved_credit_units - refunded_credit_units + debt_applied_credit_units
                 ),
             }
         ]
@@ -690,16 +674,10 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credit_units = int(
-            reservation_meta.get("reserved_credit_units", 0) or 0
-        )
+        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         usage_tags = [usage_tag]
-        source = (
-            "chat"
-            if str(reservation_meta.get("source") or "user") == "chat"
-            else "user"
-        )
+        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
         if billing_segments is None:
             # Missing usage is ambiguous; keep the reserve rather than make the call free.
             breakdown = {
@@ -718,9 +696,7 @@ class AIMessageBilling:
                 refunded_credit_units=0,
                 extra_charged_credit_units=0,
                 debt_applied_credit_units=0,
-                payer_breakdown=[
-                    {"scope": source, "credit_units": reserved_credit_units}
-                ],
+                payer_breakdown=[{"scope": source, "credit_units": reserved_credit_units}],
                 reason=reason,
                 breakdown=breakdown,
                 billing_segments=list(billing_segments or []),
@@ -744,9 +720,7 @@ class AIMessageBilling:
             self.clear_persisted_reservation_fn(usage_tag)
             return
         breakdown = calculate_billing_for_segments(billing_segments or [])
-        actual_credit_units = _billing_summary_int(
-            breakdown, "charged_credit_units"
-        )
+        actual_credit_units = _billing_summary_int(breakdown, "charged_credit_units")
         raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
         has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
         refunded_credit_units = 0
@@ -868,9 +842,7 @@ class AIMessageBilling:
                     )
             else:
                 extra_charged_credit_units = extra_amount
-                extra_payer_scope = (
-                    "chat" if extra_charge.get("source") == "chat" else "user"
-                )
+                extra_payer_scope = "chat" if extra_charge.get("source") == "chat" else "user"
 
         settlement_metadata = self._build_settlement_metadata(
             usage_tag=usage_tag,
@@ -904,27 +876,16 @@ class AIMessageBilling:
     def _build_batch_reservation(
         reservations: list[dict[str, Any]],
     ) -> BatchReservation:
-        usage_tags = [
-            str(item.get("usage_tag") or "ai_usage") for item in reservations
-        ]
+        usage_tags = [str(item.get("usage_tag") or "ai_usage") for item in reservations]
         return BatchReservation(
             items=reservations,
             reserved_credit_units=sum(
-                int(item.get("reserved_credit_units", 0) or 0)
-                for item in reservations
+                int(item.get("reserved_credit_units", 0) or 0) for item in reservations
             ),
             usage_tags=usage_tags,
-            usage_tag=(
-                usage_tags[0]
-                if len(set(usage_tags)) == 1
-                else "ai_usage_batch"
-            ),
+            usage_tag=(usage_tags[0] if len(set(usage_tags)) == 1 else "ai_usage_batch"),
             chat_scope_id=reservations[0].get("chat_scope_id"),
-            source=(
-                "chat"
-                if str(reservations[0].get("source") or "user") == "chat"
-                else "user"
-            ),
+            source=("chat" if str(reservations[0].get("source") or "user") == "chat" else "user"),
         )
 
     @staticmethod
@@ -1281,14 +1242,8 @@ class AIMessageBilling:
         if not reservation_meta or self.user_id is None:
             return
 
-        reserved_credit_units = int(
-            reservation_meta.get("reserved_credit_units", 0) or 0
-        )
-        source = (
-            "chat"
-            if str(reservation_meta.get("source") or "user") == "chat"
-            else "user"
-        )
+        reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
+        source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
         refund_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
@@ -1356,9 +1311,9 @@ class AIMessageBilling:
         if not text:
             return False
         success_prefixes = (
-            "🎵 te saqué esto del audio: ",
-            "🖼️ en la imagen veo: ",
-            "🎨 en el sticker veo: ",
+            tr("media.audio_result", text=""),
+            tr("media.image_result"),
+            tr("media.sticker_result"),
         )
         return text.startswith(success_prefixes)
 

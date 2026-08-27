@@ -99,7 +99,6 @@ from api.providers.errors import (
 from api.providers.service import ProviderService
 from api.markets import polymarket as polymarket_commands
 from api.markets.polymarket import PolymarketService
-from api.markets.world_cup_goals import MatchScore, WorldCupScoreboard
 from api.markets.price import PriceService
 from api.markets import dollar as dollar_runtime
 from api.markets.dollar import DollarService
@@ -141,8 +140,9 @@ from api.ai.pricing import (
     estimate_vision_reserve_credits,
 )
 from api.links.agent_tools import fetch_url_content
-from api.core.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
+from api.i18n import tr
 from api.providers import OpenRouterProvider, ProviderChain
+
 # Side-effect imports: modules register tools at import time via register_tool()
 import api.tools.crypto_prices
 import api.tools.calculate
@@ -180,11 +180,11 @@ from api.bot.chat_settings import (
     build_config_keyboard,
     build_config_text,
     coerce_bool,
-    decode_redis_value,
     is_group_chat_type,
 )
 from api.bot.chat_config_service import build_chat_config_service
 from api.storage.chat_config_repository import build_chat_config_repository
+from api.services.redis_helpers import decode_redis_value
 from api.billing.credit_units import format_credit_units
 from api.bot.command_registry import (
     COMMAND_GROUPS,
@@ -316,9 +316,7 @@ _DOLLAR_TIMEFRAME_HOURS: Dict[str, int] = {
 }
 
 
-def _parse_timeframe(
-    msg_text: str, valid: Mapping[str, Any]
-) -> Tuple[str, Optional[str]]:
+def _parse_timeframe(msg_text: str, valid: Mapping[str, Any]) -> Tuple[str, Optional[str]]:
     """Strip a trailing timeframe token from msg_text.
 
     Returns (cleaned_text, tf_key) where tf_key is None if no timeframe found.
@@ -336,6 +334,8 @@ BA_TZ = timezone(timedelta(hours=-3))
 
 def make_chat_tz(offset: int = -3) -> timezone:
     return timezone(timedelta(hours=offset))
+
+
 PRIMARY_CHAT_MODEL = "~deepseek/deepseek-v4-flash-latest"
 SUMMARY_MODEL = "~deepseek/deepseek-v4-flash-latest"
 SUMMARY_MAX_TOKENS = 2048
@@ -354,9 +354,9 @@ _MAX_TOOL_ROUNDS = 5
 _TOOL_RUNTIME = ToolRuntime()
 
 
-MESSAGE_BLOCK_PATTERN = re.compile(
-    r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)"
-)
+MESSAGE_BLOCK_PATTERN = re.compile(r"(?ms)^MENSAJE:\n(?P<message>.*?)(?:\n\nINSTRUCCIONES:|\Z)")
+
+
 def _extract_message_block_from_prompt(text: str) -> str:
     """Extract the message block from the AI prompt wrapper."""
 
@@ -466,9 +466,7 @@ def _fetch_urls_from_latest_message(
     if not urls:
         return ""
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(len(urls), 5)
-    ) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), 5)) as executor:
         results = list(executor.map(fetch_url_content, urls))
 
     parts = []
@@ -509,11 +507,6 @@ def refresh_price_caches() -> None:
 
 def _schedule_background_refresh(fn: Callable[[], None]) -> None:
     _BACKGROUND_REFRESH_EXECUTOR.submit(fn)
-
-
-_DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = (
-    media_commands.DEFAULT_TRANSCRIPTION_ERROR_MESSAGES
-)
 
 
 def _describe_replied_media(
@@ -560,7 +553,7 @@ def handle_transcribe_with_message(message: Dict[str, Any]) -> str:
 
 def handle_transcribe() -> str:
     """Return the marker command handled by the message processor."""
-    return "el /transcribe se usa respondiendo a un audio, imagen o sticker"
+    return tr("media.command_help")
 
 
 def powerlaw() -> str:
@@ -574,15 +567,19 @@ def powerlaw() -> str:
 
     price = _price_service.get_btc_price("USD")
     if price is None:
-        return "no pude traer el precio de btc para calcular power law"
+        return tr("market.powerlaw.error")
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
-        percentage_txt = f"{percentage:.2f}% caro boludo"
+        percentage_txt = tr("market.valuation.expensive", percentage=f"{percentage:.2f}")
     else:
-        percentage_txt = f"{abs(percentage):.2f}% regalado gordo"
+        percentage_txt = tr("market.valuation.cheap", percentage=f"{abs(percentage):.2f}")
 
-    msg = f"segun power law btc deberia estar en {value:.2f} usd ({percentage_txt})"
+    msg = tr(
+        "market.powerlaw.result",
+        value=f"{value:.2f}",
+        valuation=percentage_txt,
+    )
     return msg
 
 
@@ -594,15 +591,19 @@ def rainbow() -> str:
 
     price = _price_service.get_btc_price("USD")
     if price is None:
-        return "no pude traer el precio de btc para calcular rainbow"
+        return tr("market.rainbow.error")
 
     percentage = ((price - value) / value) * 100
     if percentage > 0:
-        percentage_txt = f"{percentage:.2f}% caro boludo"
+        percentage_txt = tr("market.valuation.expensive", percentage=f"{percentage:.2f}")
     else:
-        percentage_txt = f"{abs(percentage):.2f}% regalado gordo"
+        percentage_txt = tr("market.valuation.cheap", percentage=f"{abs(percentage):.2f}")
 
-    msg = f"segun rainbow chart btc deberia estar en {value:.2f} usd ({percentage_txt})"
+    msg = tr(
+        "market.rainbow.result",
+        value=f"{value:.2f}",
+        valuation=percentage_txt,
+    )
     return msg
 
 
@@ -610,7 +611,7 @@ def _build_tasks_message(
     tasks: List[Dict[str, Any]],
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     if not tasks:
-        return "no hay tareas", None
+        return tr("task.none"), None
 
     lines = []
     rows: List[List[Dict[str, str]]] = []
@@ -618,7 +619,12 @@ def _build_tasks_message(
     for t in tasks:
         lines.append(format_task_summary(t, prefix="• "))
         rows.append(
-            [{"text": f"borrar {t['id']}", "callback_data": f"task:del:{t['id']}"}]
+            [
+                {
+                    "text": tr("task.delete_button", task_id=t["id"]),
+                    "callback_data": f"task:del:{t['id']}",
+                }
+            ]
         )
 
     return "\n".join(lines), {"inline_keyboard": rows}
@@ -626,7 +632,7 @@ def _build_tasks_message(
 
 def tasks_command(chat_id: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     if not chat_id:
-        return "no se en que chat estoy", None
+        return tr("task.no_chat"), None
 
     tasks = _task_list_tasks(chat_id)
     return _build_tasks_message(tasks)
@@ -645,6 +651,7 @@ def get_weather(location: str = "Buenos Aires") -> dict[str, Any]:
         datetime_type=datetime,
         logger=_logger,
     )
+
 
 def get_hacker_news_context(limit: int = HACKER_NEWS_MAX_ITEMS) -> List[Dict[str, Any]]:
     return hacker_news.get_hacker_news_context(
@@ -697,7 +704,7 @@ def get_weather_command(location: str) -> str:
     requested_location = location or "Buenos Aires"
     weather = get_weather_context(requested_location)
     if not weather:
-        return f"no se pudo obtener el clima de {requested_location}"
+        return tr("weather.load_error", location=requested_location)
     return format_weather_info(weather)
 
 
@@ -717,9 +724,7 @@ def estimate_ai_base_reserve_credits(
         system_message=None,
         messages=messages,
         max_output_tokens=chat_output_token_limit(PRIMARY_CHAT_MODEL),
-        extra_input_tokens=(
-            extra_input_tokens + SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE
-        ),
+        extra_input_tokens=(extra_input_tokens + SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE),
         model=PRIMARY_CHAT_MODEL,
     )
 
@@ -729,9 +734,7 @@ def estimate_ai_base_reserve_credits(
     }
 
 
-def estimate_image_context_reserve_credits(
-    _image_data: Optional[bytes], prompt_text: str
-) -> int:
+def estimate_image_context_reserve_credits(_image_data: Optional[bytes], prompt_text: str) -> int:
     return estimate_vision_reserve_credits(
         prompt_text=prompt_text,
         image_data=None,
@@ -740,9 +743,7 @@ def estimate_image_context_reserve_credits(
     )
 
 
-def estimate_image_context_rate_limit_tokens(
-    image_data: bytes, prompt_text: str
-) -> int:
+def estimate_image_context_rate_limit_tokens(image_data: bytes, prompt_text: str) -> int:
     image_base64 = _image_service.encode(image_data)
     image_url = f"data:image/webp;base64,{image_base64}"
     input_payload = [
@@ -780,7 +781,6 @@ _media_service = MediaService(
         vision_max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
         transcribe_model=GROQ_TRANSCRIBE_MODEL,
         openrouter_transcribe_model=OPENROUTER_TRANSCRIBE_MODEL,
-        no_markdown_prompt=PROMPT_NO_MARKDOWN,
         default_backoff_seconds=GROQ_BACKOFF_DEFAULT_SECONDS,
     )
 )
@@ -855,6 +855,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
         {
             "ask_ai": _ai_request_service.ask,
             "config_command": _noop_command,
+            "language_command": _noop_param_command,
             "convert_base": convert_base,
             "select_random": select_random,
             "get_prices": _price_service.get_prices,
@@ -862,12 +863,7 @@ def initialize_commands() -> Dict[str, Tuple[Callable[..., Any], bool, bool]]:
             "get_dollar_rates": _dollar_service.get_rates,
             "get_oil_price": _stock_service.get_oil_price,
             "get_stock_prices": _stock_service.get_stock_prices,
-            "get_polymarket_global_elections": (
-                _polymarket_service.get_global_elections
-            ),
-            "get_polymarket_world_cup_games": (
-                _polymarket_service.get_world_cup_games
-            ),
+            "get_polymarket_global_elections": (_polymarket_service.get_global_elections),
             "get_rulo": _dollar_service.get_rulo,
             "get_devo": _dollar_service.get_devo,
             "powerlaw": powerlaw,
@@ -957,10 +953,6 @@ def build_routing_policy() -> RoutingPolicy:
 # Business services share the lower-level config, cache, provider, and state
 # objects created above. Handlers use these services instead of rebuilding
 # integrations for every Telegram update.
-def _fetch_world_cup_scores() -> dict[str, MatchScore]:
-    return polymarket_commands.fetch_scoreboard_scores()
-
-
 _cache_service = CacheService(
     config=_config_runtime,
     admin=_admin_service,
@@ -982,15 +974,10 @@ _giphy_service = GiphyService(
     config=_config_runtime,
     logger=_logger,
 )
-_world_cup_scoreboard = WorldCupScoreboard(
-    fetch_scores=_fetch_world_cup_scores
-)
 _polymarket_service = PolymarketService(
     cache=_cache_service,
     cache_ttl=TTL_POLYMARKET,
     stream_cache_ttl=TTL_POLYMARKET_STREAM,
-    make_timezone=make_chat_tz,
-    scoreboard=_world_cup_scoreboard,
 )
 _bcra_service = BCRAService(
     cache=_cache_service,
@@ -1030,7 +1017,6 @@ _summary_service = SummaryService(
         compaction_keep=COMPACTION_KEEP,
         max_summary_messages=COMPACTION_MAX_SUMMARY_MESSAGES,
         truncate_lines=COMPACTION_TRUNCATE_LINES,
-        no_markdown_prompt=PROMPT_NO_MARKDOWN,
         pricing_by_model=MODEL_PRICING_USD_MICROS,
         redis_factory=_config_runtime.redis,
         credits=credits_db_service,
@@ -1063,18 +1049,9 @@ _ai_request_service = AIRequestService(
 _ROUTING_POLICY = build_routing_policy()
 
 
-def handle_config_command(
-    chat_id: str, chat_type: str = ""
-) -> Tuple[str, Dict[str, Any]]:
-    redis_client = _config_runtime.redis()
-    config = _chat_config_service.get_chat_config(redis_client, chat_id)
-    return build_config_text(config, chat_type), build_config_keyboard(
-        config, chat_type
-    )
-
-
-def list_world_cup_goal_chat_ids() -> list[str]:
-    return _chat_config_service.list_world_cup_goal_chat_ids()
+def handle_config_command(chat_id: str, chat_type: str = "") -> Tuple[str, Dict[str, Any]]:
+    config = _chat_config_service.get_chat_config(chat_id)
+    return build_config_text(config, chat_type), build_config_keyboard(config, chat_type)
 
 
 def _answer_callback_query(
@@ -1228,7 +1205,6 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             is_group_chat_type=is_group_chat_type,
             send_msg=telegram_gateway.send_message,
             report_unauthorized=_admin_service.report_unauthorized_config_attempt,
-            denial_message=ADMIN_CONFIG_DENIAL_MESSAGE,
             get_chat_config=_chat_config_service.get_chat_config,
             config=callback_runtime.CallbackConfigDeps(
                 set_chat_config=_chat_config_service.set_chat_config,
@@ -1266,6 +1242,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             get_chat_config=_chat_config_service.get_chat_config,
             extract_user_id=_extract_user_id,
             extract_numeric_chat_id=_extract_numeric_chat_id,
+            set_chat_config=_chat_config_service.set_chat_config,
         ),
         routing=MessageRoutingDeps(
             initialize_commands=initialize_commands,
@@ -1297,9 +1274,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             balance_formatter=BalanceFormatter(credits_db_service),
             handle_ai_stream=_response_service.stream_handler,
             gen_random=gen_random,
-            build_insufficient_credits_message=(
-                _billing_service.build_insufficient_message
-            ),
+            build_insufficient_credits_message=(_billing_service.build_insufficient_message),
             build_topup_keyboard=_billing_service.build_topup_keyboard,
             credits_db_service=credits_db_service,
             maybe_grant_onboarding_credits=lambda _svc, _rep, uid: (
@@ -1310,14 +1285,10 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
             check_provider_available=_provider_service.is_scope_available,
             has_openrouter_fallback=_provider_service.has_openrouter_fallback,
             handle_rate_limit=_response_service.handle_rate_limit,
-            handle_successful_payment_message=(
-                _billing_service.handle_successful_payment
-            ),
+            handle_successful_payment_message=(_billing_service.handle_successful_payment),
             handle_config_command=handle_config_command,
             is_chat_admin=_admin_service.is_chat_admin,
-            report_unauthorized_config_attempt=(
-                _admin_service.report_unauthorized_config_attempt
-            ),
+            report_unauthorized_config_attempt=(_admin_service.report_unauthorized_config_attempt),
             handle_transcribe=handle_transcribe,
             estimate_ai_base_reserve_credits=estimate_ai_base_reserve_credits,
             estimate_image_context_reserve_credits=estimate_image_context_reserve_credits,
@@ -1325,9 +1296,7 @@ def _build_message_handler_deps() -> MessageHandlerDeps:
         media=MessageMediaDeps(
             extract_message_content=extract_message_content,
             _transcribe_audio_file=_media_service.transcribe_file,
-            _transcription_error_message=(
-                media_commands.transcription_error_message
-            ),
+            _transcription_error_message=(media_commands.transcription_error_message),
             download_telegram_file=telegram_gateway.download_file,
             measure_audio_duration_seconds=measure_audio_duration_seconds,
             resize_image_if_needed=_image_service.resize,

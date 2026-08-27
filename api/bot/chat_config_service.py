@@ -1,16 +1,13 @@
 """Service layer for chat configuration business logic.
 
-This module centralizes config loading, migration from Redis to Postgres, and
-update semantics. It exposes a ChatConfigService that can be tested in
-isolation from the persistence implementation.
+This module centralizes PostgreSQL-backed config loading and update semantics.
+It exposes a ChatConfigService that can be tested in isolation from the
+persistence implementation.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, Dict, Mapping, Optional
-
-import redis
 
 from api.bot.chat_config_defaults import CHAT_CONFIG_DEFAULTS
 from api.storage.chat_config_repository import (
@@ -20,43 +17,6 @@ from api.storage.chat_config_repository import (
 
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
-
-
-def decode_redis_value(value: Any) -> Optional[str]:
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8", errors="replace")
-    if value is not None:
-        return str(value)
-    return None
-
-
-def load_chat_config_from_redis(
-    redis_client: redis.Redis,
-    chat_id: str,
-    *,
-    log_event: ConfigLogger,
-) -> Dict[str, Any]:
-    config: Dict[str, Any] = dict(CHAT_CONFIG_DEFAULTS)
-    raw = redis_client.get(f"chat_config:{chat_id}")
-    raw_text = decode_redis_value(raw)
-    log_event(
-        "Chat config raw value fetched",
-        {"chat_id": chat_id, "raw_value": raw_text[:200] if raw_text else None},
-    )
-
-    if raw_text:
-        try:
-            loaded = json.loads(raw_text)
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict):
-            for key, value in loaded.items():
-                if key in config:
-                    config[key] = value
-            return config
-
-    log_event("No stored chat config found; using defaults", {"chat_id": chat_id})
-    return config
 
 
 class ChatConfigService:
@@ -75,9 +35,7 @@ class ChatConfigService:
     def clear_cache(self) -> None:
         self._cache.clear()
 
-    def get_chat_config(
-        self, redis_client: redis.Redis, chat_id: str
-    ) -> Dict[str, Any]:
+    def get_chat_config(self, chat_id: str) -> Dict[str, Any]:
         if chat_id in self._cache:
             return self._cache[chat_id]
 
@@ -95,28 +53,8 @@ class ChatConfigService:
             if isinstance(pg_config, dict):
                 self._cache[chat_id] = pg_config
                 return pg_config
-
-            redis_config = load_chat_config_from_redis(
-                redis_client,
-                chat_id,
-                log_event=self._log_event,
-            )
-            if redis_config != CHAT_CONFIG_DEFAULTS:
-                try:
-                    self._repo.set_chat_config(chat_id, redis_config)
-                except Exception as persist_error:
-                    self._admin_reporter(
-                        "Error migrating chat config from Redis to Postgres",
-                        persist_error,
-                        {"chat_id": chat_id},
-                    )
-                else:
-                    self._log_event(
-                        "Migrated chat config from Redis to Postgres",
-                        {"chat_id": chat_id, "config": redis_config},
-                    )
-            self._cache[chat_id] = redis_config
-            return redis_config
+            self._cache[chat_id] = config
+            return config
         except Exception as error:
             self._admin_reporter(
                 "Error loading chat config",
@@ -125,10 +63,8 @@ class ChatConfigService:
             )
         return config
 
-    def set_chat_config(
-        self, redis_client: redis.Redis, chat_id: str, **updates: Any
-    ) -> Dict[str, Any]:
-        config = self.get_chat_config(redis_client, chat_id)
+    def set_chat_config(self, chat_id: str, **updates: Any) -> Dict[str, Any]:
+        config = self.get_chat_config(chat_id)
         for key, value in updates.items():
             if key in config:
                 config[key] = value
@@ -143,6 +79,7 @@ class ChatConfigService:
                     "Chat config storage is not configured; skipping persistence",
                     {"chat_id": chat_id, "config": config},
                 )
+                self._cache[chat_id] = config
                 return config
 
             self._repo.set_chat_config(chat_id, config)
@@ -155,19 +92,6 @@ class ChatConfigService:
 
         self._cache[chat_id] = config
         return config
-
-    def list_world_cup_goal_chat_ids(self) -> list[str]:
-        if not self._repo.is_configured():
-            return []
-        try:
-            return self._repo.list_world_cup_goal_chat_ids()
-        except Exception as error:
-            self._admin_reporter(
-                "Error listing World Cup goal alert chats",
-                error,
-                {},
-            )
-            return []
 
 
 def build_chat_config_service(
@@ -190,13 +114,9 @@ def build_chat_config_service(
         admin_reporter = _noop_admin_report
     if log_event is None:
 
-        def _noop_log_event(
-            _message: str, _extra: Optional[Mapping[str, Any]]
-        ) -> None:
+        def _noop_log_event(_message: str, _extra: Optional[Mapping[str, Any]]) -> None:
             pass
 
         log_event = _noop_log_event
 
-    return ChatConfigService(
-        repository, admin_reporter=admin_reporter, log_event=log_event
-    )
+    return ChatConfigService(repository, admin_reporter=admin_reporter, log_event=log_event)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -17,7 +18,7 @@ def _execute_web_fetch(
 
     url = params.get("url", "")
     if not url:
-        return ToolResult(output="no se proporciono una url")
+        return ToolResult(output=tr("tool.fetch.missing_url"))
     tweet = fetch_tweet_content(str(url))
     if tweet:
         tweet_error = tweet.get("error")
@@ -35,27 +36,25 @@ def _execute_web_fetch(
         if text:
             output_parts.append(text)
         return ToolResult(
-            output="\n".join(output_parts) or "tweet sin texto legible",
+            output="\n".join(output_parts) or tr("tool.fetch.empty_tweet"),
             metadata={"url": tweet.get("url", url)},
         )
     result = fetch_url_content(str(url))
     error = result.get("error")
     if error:
-        return ToolResult(output=f"error obteniendo {url}: {error}")
+        return ToolResult(output=tr("tool.fetch.error", url=url, error=error))
     title = result.get("title") or ""
     content = result.get("content") or ""
     if "Something went wrong" in content and "Try again" in content:
         return ToolResult(
-            output="error obteniendo la pagina: X devolvio una pagina de error",
+            output=tr("tool.fetch.page_error"),
             metadata={"url": result.get("url", url)},
         )
     output_parts = []
     if title:
-        output_parts.append(f"Titulo: {title}")
+        output_parts.append(tr("tool.fetch.title", title=title))
     output_parts.append(content)
-    return ToolResult(
-        output="\n".join(output_parts), metadata={"url": result.get("url", url)}
-    )
+    return ToolResult(output="\n".join(output_parts), metadata={"url": result.get("url", url)})
 
 
 register_tool(

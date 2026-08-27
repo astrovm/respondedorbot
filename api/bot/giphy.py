@@ -8,6 +8,7 @@ from os import environ
 import redis
 
 from api.core.config_runtime import ConfigRuntime
+from api.i18n import tr
 from api.services import http_client
 from api.services.maintenance import GIPHY_STALE_TTL
 from api.services.redis_helpers import redis_get_json
@@ -114,11 +115,11 @@ def get_random_gif(category: str, *, get_pool: PoolGetter) -> str | None:
 
 
 def get_good_morning(*, get_gif: GifGetter) -> str:
-    return get_gif("gm") or "buen día boludo"
+    return get_gif("gm") or tr("greeting.morning")
 
 
 def get_good_night(*, get_gif: GifGetter) -> str:
-    return get_gif("gn") or "buenas noches boludo"
+    return get_gif("gn") or tr("greeting.night")
 
 
 class GiphyService:

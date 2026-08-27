@@ -1,4 +1,4 @@
-"""Single source of truth for user-visible bot capabilities."""
+"""Structural catalog of bot capabilities; localized prose lives in ``api.i18n``."""
 
 from __future__ import annotations
 
@@ -6,18 +6,20 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Optional, Sequence
 
 from api.bot.command_registry import (
-    aliases_for,
     COMMAND_DESCRIPTIONS,
     COMMAND_GROUPS,
+    aliases_for,
+    command_descriptions,
 )
+from api.i18n import current_locale
+from api.i18n.content import category_name, feature_examples, feature_text, help_text
 
 CommandGroup = tuple[tuple[str, ...], str, bool, bool]
 
 
 @dataclass(frozen=True)
 class FeatureEntry:
-    title: str
-    description: str
+    key: str
     commands: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
     category: str = "general"
@@ -29,134 +31,62 @@ class FeatureEntry:
 
 
 FEATURES: tuple[FeatureEntry, ...] = (
+    FeatureEntry("ai_chat", aliases_for("ask_ai"), (), "ai", telegram_visible=True),
+    FeatureEntry("web_search", category="ai", implicit=True),
     FeatureEntry(
-        "chat ia",
-        "te contesto mensajes normales; en grupos respondo si me mencionan, me responden, usan trigger random o mandan comando ia",
-        aliases_for("ask_ai"),
-        ("/gordo explicame esto",),
-        "ia",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "búsqueda web nativa",
-        "en mensajes normales puedo buscar en internet cuando hace falta",
-        examples=("buscá qué pasó con...",),
-        category="ia",
-        implicit=True,
-    ),
-    FeatureEntry(
-        "crypto prices",
-        "precios crypto por ranking, símbolo, moneda base y variación",
+        "crypto",
         aliases_for("get_prices"),
-        (
-            "/prices btc eth xmr",
-            "/prices 20",
-            "/prices 100 in eur",
-            "/prices btc 7d",
-            "/prices stables",
-        ),
-        "mercado",
+        (),
+        "markets",
         telegram_visible=True,
     ),
+    FeatureEntry("weather", aliases_for("get_weather"), telegram_visible=True),
+    FeatureEntry("token_cards", category="markets", implicit=True),
+    FeatureEntry("dollar", aliases_for("get_dollar_rates"), (), "markets", telegram_visible=True),
     FeatureEntry(
-        "clima",
-        "clima actual para cualquier ciudad o ubicación",
-        aliases_for("get_weather"),
-        ("/clima Córdoba, Argentina",),
-        "general",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "token cards",
-        "si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones",
-        examples=("J8PS...pump", "$GLORP"),
-        category="mercado",
-        implicit=True,
-    ),
-    FeatureEntry(
-        "dólar",
-        "cotizaciones del dólar y variaciones por ventana",
-        aliases_for("get_dollar_rates"),
-        ("/usd 1h",),
-        "mercado",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "acciones",
-        "precios de acciones por símbolo o empresa desde Yahoo Finance",
+        "stocks",
         aliases_for("get_stock_prices"),
-        ("/acciones aapl tsla", "/acciones Mercado Libre"),
-        "mercado",
+        (),
+        "markets",
         telegram_visible=True,
     ),
+    FeatureEntry("oil", aliases_for("get_oil_price"), category="markets", telegram_visible=True),
     FeatureEntry(
-        "petróleo",
-        "precio Brent y WTI",
-        aliases_for("get_oil_price"),
-        category="mercado",
-        telegram_visible=True,
+        "bcra", aliases_for("handle_bcra_variables"), category="markets", telegram_visible=True
     ),
     FeatureEntry(
-        "bcra",
-        "variables económicas del BCRA",
-        aliases_for("handle_bcra_variables"),
-        category="mercado",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "elección",
-        "top 10 de elecciones globales en Polymarket por liquidez",
+        "elections",
         aliases_for("get_polymarket_global_elections"),
-        category="mercado",
+        category="markets",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "mundial",
-        "partidos del Mundial [argentina]",
-        aliases_for("get_polymarket_world_cup_games"),
-        category="mercado",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "arbitrajes",
-        "rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats",
+        "arbitrage",
         aliases_for("get_rulo", "get_devo", "powerlaw", "rainbow", "satoshi"),
-        ("/devo 0.5, 100",),
-        "mercado",
+        (),
+        "markets",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "media",
-        "transcribo voice/audio/video/video_note y describo fotos o stickers respondiendo al mensaje; también puedo procesar media cuando me hablan",
-        aliases_for("handle_transcribe"),
-        category="media",
-        telegram_visible=True,
+        "media", aliases_for("handle_transcribe"), category="media", telegram_visible=True
     ),
+    FeatureEntry("links", category="links", implicit=True),
     FeatureEntry(
-        "links",
-        "arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto",
-        category="links",
-        implicit=True,
-    ),
-    FeatureEntry(
-        "tareas",
-        "agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto",
+        "tasks",
         aliases_for("task_command"),
-        examples=("/tarea mañana recordame pagar el alquiler", "/tasks"),
-        category="productividad",
+        (),
+        "productivity",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "resúmenes y memoria",
-        "resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto",
+        "memory",
         aliases_for("summary_command"),
-        ("/resumen focus en crypto",),
-        "memoria",
+        (),
+        "memory",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "utilidades",
-        "random, conversión de bases, comandos Telegram, timestamp e instancia",
+        "utilities",
         aliases_for(
             "select_random",
             "convert_base",
@@ -164,53 +94,37 @@ FEATURES: tuple[FeatureEntry, ...] = (
             "get_timestamp",
             "get_instance_name",
         ),
-        ("/random pizza, carne, sushi", "/convertbase 101, 2, 10"),
-        "utilidades",
+        (),
+        "utilities",
         telegram_visible=True,
     ),
     FeatureEntry(
         "gifs",
-        "gif random de buenos días o buenas noches",
         aliases_for("get_good_morning", "get_good_night"),
-        category="utilidades",
+        category="utilities",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "config",
-        "config por chat: links, followups, timezone, goles del Mundial, random replies y límite gratis por usuario/hora",
-        aliases_for("config_command"),
-        category="admin",
+        "config", aliases_for("config_command"), category="settings", telegram_visible=True
+    ),
+    FeatureEntry(
+        "language", aliases_for("language_command"), category="settings", telegram_visible=True
+    ),
+    FeatureEntry(
+        "credits",
+        aliases_for("topup_command", "balance_command", "charges_command", "transfer_command"),
+        (),
+        "credits",
         telegram_visible=True,
     ),
     FeatureEntry(
-        "créditos ia",
-        "saldo, historial de gastos, topup con Telegram Stars y transferencia de créditos personales al grupo",
-        aliases_for(
-            "topup_command",
-            "balance_command",
-            "charges_command",
-            "transfer_command",
-        ),
-        ("/charges 10", "/transfer 1.5"),
-        "créditos",
-        telegram_visible=True,
-    ),
-    FeatureEntry(
-        "admin créditos",
-        "mint y log de créditos, solo admin",
+        "credit_admin",
         aliases_for("printcredits_command", "creditlog_command"),
         category="admin",
         help_visible=False,
-        telegram_visible=False,
         admin_only=True,
     ),
-    FeatureEntry(
-        "help",
-        "muestro comandos y features",
-        aliases_for("get_help"),
-        category="utilidades",
-        telegram_visible=True,
-    ),
+    FeatureEntry("help", aliases_for("get_help"), category="utilities", telegram_visible=True),
 )
 
 
@@ -221,17 +135,13 @@ def _strip_slash(command: str) -> str:
 def command_aliases(command_groups: Sequence[CommandGroup] = COMMAND_GROUPS) -> set[str]:
     return {
         _strip_slash(alias)
-        for aliases, _handler_name, _uses_ai, _takes_params in command_groups
+        for aliases, _handler, _uses_ai, _takes_params in command_groups
         for alias in aliases
     }
 
 
 def catalog_command_aliases(entries: Iterable[FeatureEntry] = FEATURES) -> set[str]:
-    return {
-        _strip_slash(command)
-        for entry in entries
-        for command in entry.commands
-    }
+    return {_strip_slash(command) for entry in entries for command in entry.commands}
 
 
 def get_feature_for_command(command: str) -> Optional[FeatureEntry]:
@@ -246,7 +156,10 @@ def telegram_command_descriptions(
     *,
     command_groups: Sequence[CommandGroup] = COMMAND_GROUPS,
     descriptions: Mapping[str, str] = COMMAND_DESCRIPTIONS,
+    locale: str = "es",
 ) -> Dict[str, str]:
+    if descriptions is COMMAND_DESCRIPTIONS:
+        descriptions = command_descriptions(locale)
     allowed = command_aliases(command_groups)
     visible = {
         _strip_slash(command)
@@ -255,44 +168,50 @@ def telegram_command_descriptions(
         for command in entry.commands
     }
     return {
-        name: desc
-        for name, desc in descriptions.items()
-        if name in allowed and name in visible
+        name: desc for name, desc in descriptions.items() if name in allowed and name in visible
     }
 
 
 def render_help_text(entries: Iterable[FeatureEntry] = FEATURES) -> str:
-    lines = ["esto es lo que sé hacer, boludo:", ""]
+    locale = current_locale()
+    localized_title = help_text("title", locale)
+    assert isinstance(localized_title, str)
+    lines = [localized_title, ""]
     current_category = ""
     for entry in entries:
         if not entry.help_visible or entry.admin_only:
             continue
-        if entry.category != current_category:
+        category = category_name(entry.category, locale)
+        if category != current_category:
             if current_category:
                 lines.append("")
-            current_category = entry.category
-            lines.append(f"{entry.category}:")
-        prefix = ", ".join(entry.commands) if entry.commands else entry.title
-        lines.append(f"- {prefix}: {entry.description}")
-        for example in entry.examples:
-            lines.append(f"  ejemplo: {example}")
+            current_category = category
+            lines.append(f"{category}:")
+        title, description = feature_text(entry.key, locale)
+        prefix = ", ".join(entry.commands) if entry.commands else title
+        lines.append(f"- {prefix}: {description}")
+        example_label = help_text("example", locale)
+        assert isinstance(example_label, str)
+        for example in feature_examples(entry.key, locale):
+            lines.append(f"  {example_label}: {example}")
     return "\n".join(lines).strip()
 
 
 def render_ai_capabilities_prompt(entries: Iterable[FeatureEntry] = FEATURES) -> str:
-    lines = [
-        "CAPACIDADES DEL BOT:",
-        "- si el usuario pregunta que podes hacer, responde desde esta lista",
-        "- no inventes comandos; /buscar y /search no existen",
-        "- si existe comando exacto para algo, sugerilo con el comando exacto",
-    ]
+    locale = current_locale()
+    header = help_text("capabilities", locale)
+    assert isinstance(header, tuple)
+    lines = list(header)
     for entry in entries:
         if not entry.ai_visible:
             continue
-        label = ", ".join(entry.commands) if entry.commands else entry.title
+        title, description = feature_text(entry.key, locale)
+        label = ", ".join(entry.commands) if entry.commands else title
         if entry.admin_only:
-            label = f"{label} (solo admin)"
-        lines.append(f"- {label}: {entry.description}")
+            admin_label = help_text("admin", locale)
+            assert isinstance(admin_label, str)
+            label = f"{label} ({admin_label})"
+        lines.append(f"- {label}: {description}")
     return "\n".join(lines)
 
 

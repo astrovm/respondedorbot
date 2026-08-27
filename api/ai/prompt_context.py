@@ -6,7 +6,10 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, tzinfo
 from typing import Any
 
-from api.ai.pipeline import INSTRUCCIONES_BASE
+from api.ai.pipeline import base_instructions
+from api.i18n import tr
+from api.i18n.content import weather_description
+from api.i18n.prompts import prompt
 
 
 def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -34,9 +37,7 @@ def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             "30d": crypto["quote"]["USD"]["percent_change_30d"],
                         },
                         "market_cap": crypto["quote"]["USD"]["market_cap"],
-                        "dominance": crypto["quote"]["USD"][
-                            "market_cap_dominance"
-                        ],
+                        "dominance": crypto["quote"]["USD"]["market_cap_dominance"],
                     }
                 },
             }
@@ -45,37 +46,7 @@ def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def get_weather_description(code: int) -> str:
-    descriptions = {
-        0: "despejado",
-        1: "mayormente despejado",
-        2: "parcialmente nublado",
-        3: "nublado",
-        45: "neblina",
-        48: "niebla",
-        51: "llovizna leve",
-        53: "llovizna moderada",
-        55: "llovizna intensa",
-        56: "llovizna helada leve",
-        57: "llovizna helada intensa",
-        61: "lluvia leve",
-        63: "lluvia moderada",
-        65: "lluvia intensa",
-        66: "lluvia helada leve",
-        67: "lluvia helada intensa",
-        71: "nevada leve",
-        73: "nevada moderada",
-        75: "nevada intensa",
-        77: "granizo",
-        80: "lluvia leve intermitente",
-        81: "lluvia moderada intermitente",
-        82: "lluvia fuerte intermitente",
-        85: "nevada leve intermitente",
-        86: "nevada intensa intermitente",
-        95: "tormenta",
-        96: "tormenta con granizo leve",
-        99: "tormenta con granizo intenso",
-    }
-    return descriptions.get(code, "clima raro")
+    return weather_description(code) or tr("weather.unusual")
 
 
 def format_hacker_news_info(
@@ -83,20 +54,20 @@ def format_hacker_news_info(
     include_discussion: bool = True,
 ) -> str:
     if not news:
-        return "- sin datos por ahora"
+        return f"- {tr('news.no_data')}"
 
     lines: list[str] = []
     for item in news:
         if not isinstance(item, dict):
             continue
 
-        title = str(item.get("title") or "(sin título)").strip()
+        title = str(item.get("title") or f"({tr('news.no_title')})").strip()
         url = str(item.get("url") or "").strip()
         stats: list[str] = []
         if isinstance(item.get("points"), int):
             stats.append(f"{item['points']} pts")
         if isinstance(item.get("comments"), int):
-            stats.append(f"{item['comments']} coms")
+            stats.append(f"{item['comments']} {tr('news.comments')}")
 
         stats_text = f" ({', '.join(stats)})" if stats else ""
         entry = f"- {title}{stats_text}"
@@ -108,26 +79,44 @@ def format_hacker_news_info(
                 entry += f" (HN: {hn_url})"
         lines.append(entry)
 
-    return "\n".join(lines) if lines else "- sin datos por ahora"
+    return "\n".join(lines) if lines else f"- {tr('news.no_data')}"
 
 
 def format_weather_info(weather: dict[str, Any]) -> str:
     visibility_km = weather.get("visibility")
     visibility = (
-        f"{visibility_km / 1000:.1f}km"
-        if visibility_km is not None
-        else "sin datos"
+        f"{visibility_km / 1000:.1f}km" if visibility_km is not None else tr("weather.no_data")
     )
     location = weather.get("location")
-    location_line = f"- Lugar: {location}\n" if location else ""
+    location_line = f"- {tr('weather.location', value=location)}\n" if location else ""
     return (
         f"{location_line}"
-        f"- Temperatura aparente: {weather.get('apparent_temperature', '?')}°C\n"
-        f"- Probabilidad de lluvia: {weather.get('precipitation_probability', '?')}%\n"
-        f"- Estado: {weather.get('description', 'sin datos')}\n"
-        f"- Nubosidad: {weather.get('cloud_cover', '?')}%\n"
-        f"- Visibilidad: {visibility}"
+        f"- {tr('weather.apparent', value=weather.get('apparent_temperature', '?'))}\n"
+        f"- {tr('weather.rain', value=weather.get('precipitation_probability', '?'))}\n"
+        f"- {tr('weather.condition', value=weather.get('description', tr('weather.no_data')))}\n"
+        f"- {tr('weather.clouds', value=weather.get('cloud_cover', '?'))}\n"
+        f"- {tr('weather.visibility', value=visibility)}"
     )
+
+
+def _message_context_parts(
+    *,
+    chat_type: str,
+    chat_title: str,
+    first_name: str,
+    username: str,
+    current_time: datetime,
+) -> list[str]:
+    return [
+        prompt("context.header"),
+        prompt(
+            "context.chat", chat_type=chat_type, chat_title=f" ({chat_title})" if chat_title else ""
+        ),
+        prompt(
+            "context.user", first_name=first_name, username=f" ({username})" if username else ""
+        ),
+        prompt("context.time", time=current_time.strftime("%H:%M")),
+    ]
 
 
 def build_ai_messages(
@@ -150,65 +139,57 @@ def build_ai_messages(
         messages.append(
             {
                 "role": "system",
-                "content": f"RESUMEN ACUMULADO DEL CHAT:\n{summary_text}",
+                "content": prompt("context.summary", summary=summary_text),
             }
         )
 
     if retrieved_messages:
-        retrieval_lines = ["MENSAJES ANTERIORES RELEVANTES:"]
+        retrieval_lines = [prompt("context.retrieved")]
         for item in retrieved_messages:
             role = str(item.get("role") or "user")
             text = str(item.get("text") or "")
             if text:
                 retrieval_lines.append(f"- {role}: {text}")
         if len(retrieval_lines) > 1:
-            messages.append(
-                {"role": "system", "content": "\n".join(retrieval_lines)}
-            )
+            messages.append({"role": "system", "content": "\n".join(retrieval_lines)})
 
     for history_message in chat_history:
         messages.append(
             {
                 "role": history_message["role"],
-                "content": [
-                    {"type": "text", "text": history_message["text"]}
-                ],
+                "content": [{"type": "text", "text": history_message["text"]}],
             }
         )
 
     sender = message.get("from", {})
     chat = message.get("chat", {})
-    first_name = str(sender.get("first_name") or "Usuario")
+    first_name = str(sender.get("first_name") or prompt("context.anonymous_user"))
     username = str(sender.get("username") or "")
     chat_type = str(chat.get("type") or "private")
     chat_title = str(chat.get("title") or "") if chat_type != "private" else ""
     current_time = datetime.now(make_timezone(timezone_offset))
 
-    context_parts = [
-        "CONTEXTO:",
-        f"- Chat: {chat_type}" + (f" ({chat_title})" if chat_title else ""),
-        f"- Usuario: {first_name}" + (f" ({username})" if username else ""),
-        f"- Hora: {current_time.strftime('%H:%M')}",
-    ]
+    context_parts = _message_context_parts(
+        chat_type=chat_type,
+        chat_title=chat_title,
+        first_name=first_name,
+        username=username,
+        current_time=current_time,
+    )
 
-    if (
-        reply_context
-        and not (messages and messages[-1].get("role") == "assistant")
-    ):
-        context_parts.extend(
-            ["", "MENSAJE AL QUE RESPONDE:", truncate_text(reply_context)]
-        )
+    if reply_context and not (messages and messages[-1].get("role") == "assistant"):
+        context_parts.extend(["", prompt("context.reply"), truncate_text(reply_context)])
 
     link_context = build_links_context(message)
     if link_context:
         context_parts.extend(["", link_context])
 
-    instructions = [""] + INSTRUCCIONES_BASE[:]
+    instructions = [""] + base_instructions()
     if enable_web_search:
-        instructions.append("- si no estás seguro de algo podes buscarlo en internet")
+        instructions.append(prompt("context.web_search"))
 
     context_parts.extend(
-        ["", "MENSAJE:", truncate_text(message_text)] + instructions
+        ["", prompt("context.message"), truncate_text(message_text)] + instructions
     )
     messages.append({"role": "user", "content": "\n".join(context_parts)})
     return messages

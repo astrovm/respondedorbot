@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
+from api.i18n import tr
 from api.billing.credit_units import format_credit_units, parse_credit_units
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
@@ -31,7 +31,7 @@ class BillingCommandDeps(Protocol):
 def _require_billing(deps: BillingCommandDeps, command: str) -> Optional[CommandResponse]:
     if bool(deps.credits_db_service.is_configured()):
         return None
-    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return tr("billing.unavailable"), None, False, command
 
 
 def handle_balance_command(
@@ -52,16 +52,14 @@ def handle_balance_command(
 
     if user_id is None or numeric_chat_id is None:
         return (
-            "no te pude leer bien el usuario para ver los saldos",
+            tr("balance.invalid_identity"),
             None,
             False,
             command,
         )
 
     try:
-        deps.maybe_grant_onboarding_credits(
-            deps.credits_db_service, deps.admin_report, user_id
-        )
+        deps.maybe_grant_onboarding_credits(deps.credits_db_service, deps.admin_report, user_id)
         response_msg = deps.balance_formatter.format(
             chat_type=chat_type,
             user_id=user_id,
@@ -73,7 +71,7 @@ def handle_balance_command(
             error,
             {"chat_id": chat_id, "user_id": user_id},
         )
-        response_msg = "se trabó leyendo tu saldo, probá de nuevo"
+        response_msg = tr("balance.load_error")
     return response_msg, None, False, command
 
 
@@ -95,11 +93,11 @@ def handle_transfer_command(
         return billing_required_response
 
     if not deps.is_group_chat_type(chat_type):
-        return "esto es para grupos, capo: /transfer <monto>", None, False, command
+        return tr("transfer.group_only"), None, False, command
 
     if user_id is None or numeric_chat_id is None:
         return (
-            "no te pude sacar bien el usuario o el grupo para transferir",
+            tr("transfer.identity_error"),
             None,
             False,
             command,
@@ -108,11 +106,11 @@ def handle_transfer_command(
     amount_token = sanitized_message_text.split(" ", 1)[0].strip()
     amount = parse_credit_units(amount_token)
     if amount is None:
-        return "mandalo bien: /transfer <monto>", None, False, command
+        return tr("transfer.usage"), None, False, command
 
     if amount <= 0:
         return (
-            "el monto tiene que ser mayor a 0, no me rompas las bolas",
+            tr("transfer.positive"),
             None,
             False,
             command,
@@ -134,19 +132,20 @@ def handle_transfer_command(
                 "amount": amount,
             },
         )
-        return "se trabó la transferencia, probá de nuevo", None, False, command
+        return tr("transfer.error"), None, False, command
 
     if transfer_result.get("ok"):
-        response_msg = (
-            f"listo, le pasé {format_credit_units(amount)} créditos al grupo\n"
-            f"- lo tuyo: {format_credit_units(transfer_result.get('user_balance', 0))}\n"
-            f"- lo del grupo: {format_credit_units(transfer_result.get('chat_balance', 0))}"
+        response_msg = tr(
+            "transfer.success",
+            amount=format_credit_units(amount),
+            user=format_credit_units(transfer_result.get("user_balance", 0)),
+            group=format_credit_units(transfer_result.get("chat_balance", 0)),
         )
         return response_msg, None, False, command
 
-    response_msg = (
-        "no te alcanza lo tuyo para pasar esa guita al grupo\n"
-        f"te quedan: {format_credit_units(transfer_result.get('user_balance', 0))}"
+    response_msg = tr(
+        "transfer.insufficient",
+        balance=format_credit_units(transfer_result.get("user_balance", 0)),
     )
     return response_msg, None, False, command
 
@@ -204,18 +203,18 @@ def _charged_credit_units(metadata: Mapping[str, Any], event_type: str = "") -> 
 def _model_component_label(item: Mapping[str, Any]) -> str:
     kind = str(item.get("kind") or "").lower()
     if kind == "transcribe" or float(item.get("audio_seconds") or 0) > 0:
-        return "audio"
+        return tr("charges.audio")
     if kind == "vision":
-        return "imagen"
-    return "respuesta"
+        return tr("charges.image")
+    return tr("charges.response")
 
 
 def _tool_component_label(item: Mapping[str, Any]) -> str:
     tool = str(item.get("tool") or "").lower()
     count = max(0, int(item.get("count") or 0))
     if tool == "web_search":
-        return f"web ({count}x)" if count > 1 else "web"
-    return "herramienta"
+        return f"{tr('charges.web')} ({count}x)" if count > 1 else tr("charges.web")
+    return tr("charges.tool")
 
 
 def _raw_charge_components(metadata: Mapping[str, Any]) -> List[Tuple[str, int]]:
@@ -224,16 +223,12 @@ def _raw_charge_components(metadata: Mapping[str, Any]) -> List[Tuple[str, int]]
         if not isinstance(raw_item, Mapping):
             continue
         label = _model_component_label(raw_item)
-        totals[label] = totals.get(label, 0) + max(
-            0, int(raw_item.get("usd_micros") or 0)
-        )
+        totals[label] = totals.get(label, 0) + max(0, int(raw_item.get("usd_micros") or 0))
     for raw_item in metadata.get("tool_breakdown") or []:
         if not isinstance(raw_item, Mapping):
             continue
         label = _tool_component_label(raw_item)
-        totals[label] = totals.get(label, 0) + max(
-            0, int(raw_item.get("usd_micros") or 0)
-        )
+        totals[label] = totals.get(label, 0) + max(0, int(raw_item.get("usd_micros") or 0))
     return [(label, amount) for label, amount in totals.items() if amount > 0]
 
 
@@ -255,9 +250,7 @@ def allocate_charge_components(
         allocated.append([label, numerator // raw_total, numerator % raw_total, index])
 
     leftover = total_units - sum(int(item[1]) for item in allocated)
-    for item in sorted(allocated, key=lambda value: (-int(value[2]), int(value[3])))[
-        :leftover
-    ]:
+    for item in sorted(allocated, key=lambda value: (-int(value[2]), int(value[3])))[:leftover]:
         item[1] = int(item[1]) + 1
     return [(str(item[0]), int(item[1])) for item in allocated]
 
@@ -265,12 +258,12 @@ def allocate_charge_components(
 def _charge_activity(metadata: Mapping[str, Any], event_type: str = "") -> str:
     usage_tag = str(metadata.get("usage_tag") or "")
     if event_type == "memory_compaction_settlement" or "memory_compaction" in usage_tag:
-        return "memoria"
+        return tr("charges.memory")
     if "transcribe" in usage_tag or "audio" in usage_tag:
-        return "audio"
+        return tr("charges.audio")
     if "image" in usage_tag or "vision" in usage_tag:
-        return "imagen"
-    return "respuesta"
+        return tr("charges.image")
+    return tr("charges.response")
 
 
 def _payer_totals(entries: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -305,7 +298,7 @@ def _charge_time_label(value: Any, timezone_offset: float) -> str:
         except ValueError:
             parsed = None
     if parsed is None:
-        return "sin fecha"
+        return tr("charges.no_date")
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     local_time = parsed.astimezone(timezone(timedelta(hours=float(timezone_offset))))
@@ -321,29 +314,25 @@ def _entry_components(entry: Mapping[str, Any]) -> List[Tuple[str, int, bool]]:
     if event_type == "memory_compaction_settlement" or "memory_compaction" in str(
         metadata.get("usage_tag") or ""
     ):
-        return [("memoria", charged_units, pending)]
+        return [(tr("charges.memory"), charged_units, pending)]
     allocation = allocate_charge_components(
         charged_units,
         _raw_charge_components(metadata),
     )
     if allocation:
-        return [
-            (label, units, pending)
-            for label, units in allocation
-            if units > 0
-        ]
+        return [(label, units, pending) for label, units in allocation if units > 0]
     return [(_charge_activity(metadata, event_type), charged_units, pending)]
 
 
 def _component_sort_key(component: Tuple[str, int, bool]) -> Tuple[int, bool]:
     label, _units, pending = component
-    if label == "respuesta":
+    if label == tr("charges.response"):
         rank = 0
-    elif label in {"audio", "imagen"}:
+    elif label in {tr("charges.audio"), tr("charges.image")}:
         rank = 1
-    elif label.startswith("web"):
+    elif label.startswith(tr("charges.web")):
         rank = 2
-    elif label == "memoria":
+    elif label == tr("charges.memory"):
         rank = 4
     else:
         rank = 3
@@ -357,10 +346,10 @@ def _group_payer_suffix(entries: Sequence[Mapping[str, Any]]) -> str:
     if chat_paid <= 0:
         return ""
     if user_paid <= 0:
-        return " · grupo"
+        return f" · {tr('charges.group')}"
     return (
-        f" · grupo {format_credit_units(chat_paid)}"
-        f" · personal {format_credit_units(user_paid)}"
+        f" · {tr('charges.group')} {format_credit_units(chat_paid)}"
+        f" · {tr('charges.personal')} {format_credit_units(user_paid)}"
     )
 
 
@@ -369,15 +358,11 @@ def format_user_charge_history(
     *,
     timezone_offset: float = 0,
 ) -> str:
-    lines = ["Gastos IA"]
+    lines = [tr("charges.title")]
     for group in groups:
         raw_entries = group.get("entries") or []
         entries = [entry for entry in raw_entries if isinstance(entry, Mapping)]
-        components = [
-            component
-            for entry in entries
-            for component in _entry_components(entry)
-        ]
+        components = [component for entry in entries for component in _entry_components(entry)]
         components.sort(key=_component_sort_key)
         charged_units = sum(units for _label, units, _pending in components)
         time_label = _charge_time_label(group.get("created_at"), timezone_offset)
@@ -385,20 +370,16 @@ def format_user_charge_history(
         lines.append("")
         if len(components) == 1:
             label, units, pending = components[0]
-            pending_suffix = " · pendiente" if pending else ""
+            pending_suffix = f" · {tr('charges.pending')}" if pending else ""
             lines.append(
                 f"{time_label} · {label} · {format_credit_units(units)} cr"
                 f"{pending_suffix}{payer_suffix}"
             )
             continue
-        lines.append(
-            f"{time_label} · {format_credit_units(charged_units)} cr{payer_suffix}"
-        )
+        lines.append(f"{time_label} · {format_credit_units(charged_units)} cr{payer_suffix}")
         for label, units, pending in components:
-            pending_suffix = " · pendiente" if pending else ""
-            lines.append(
-                f"  {label} {format_credit_units(units)} cr{pending_suffix}"
-            )
+            pending_suffix = f" · {tr('charges.pending')}" if pending else ""
+            lines.append(f"  {label} {format_credit_units(units)} cr{pending_suffix}")
     return "\n".join(lines)
 
 
@@ -414,7 +395,7 @@ def build_charge_history_keyboard(
     if page.get("has_newer") and page.get("newer_cursor") is not None:
         buttons.append(
             {
-                "text": "‹ Anterior",
+                "text": tr("charges.previous"),
                 "callback_data": (
                     f"chg:{int(user_id)}:{int(limit)}:n:"
                     f"{int(page['newer_cursor'])}:{timezone_minutes}"
@@ -424,7 +405,7 @@ def build_charge_history_keyboard(
     if page.get("has_older") and page.get("older_cursor") is not None:
         buttons.append(
             {
-                "text": "Siguiente ›",
+                "text": tr("charges.next"),
                 "callback_data": (
                     f"chg:{int(user_id)}:{int(limit)}:o:"
                     f"{int(page['older_cursor'])}:{timezone_minutes}"
@@ -451,7 +432,7 @@ def build_user_charge_history_page(
     )
     groups = list(page.get("groups") or [])
     if not groups:
-        return "no tenés gastos IA recientes", None
+        return tr("charges.empty"), None
     return (
         format_user_charge_history(groups, timezone_offset=timezone_offset),
         build_charge_history_keyboard(
@@ -479,17 +460,17 @@ def handle_charges_command(
     if billing_required_response is not None:
         return billing_required_response
     if user_id is None:
-        return "no te pude leer el usuario para ver tus gastos", None, False, command
+        return tr("balance.user_missing"), None, False, command
 
     tokens = str(sanitized_message_text or "").split()
     if len(tokens) > 1:
-        return "mandalo bien: /charges [cantidad]", None, False, command
+        return tr("charges.usage"), None, False, command
     try:
         limit = int(tokens[0]) if tokens else 10
-    except (TypeError, ValueError):
-        return "mandalo bien: /charges [cantidad]", None, False, command
+    except TypeError, ValueError:
+        return tr("charges.usage"), None, False, command
     if limit <= 0:
-        return "mandalo bien: /charges [cantidad]", None, False, command
+        return tr("charges.usage"), None, False, command
     limit = min(limit, 20)
 
     try:
@@ -505,7 +486,7 @@ def handle_charges_command(
             error,
             {"chat_id": chat_id, "user_id": user_id, "limit": limit},
         )
-        return "se trabó leyendo tus gastos, probá de nuevo", None, False, command
+        return tr("charges.load_error"), None, False, command
 
     return response_text, reply_markup, False, command
 

@@ -67,7 +67,7 @@ def _build_message_handler_flat_defaults(redis_client, mock_credits):
 
     defaults = {
         "config_redis": lambda: redis_client,
-        "get_chat_config": lambda _rc, _cid: dict(CHAT_CONFIG_DEFAULTS),
+        "get_chat_config": lambda _cid: dict(CHAT_CONFIG_DEFAULTS),
         "initialize_commands": _api_index.initialize_commands,
         "parse_command": _parse_command,
         "should_auto_process_media": _should_auto_process_media,

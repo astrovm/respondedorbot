@@ -12,6 +12,8 @@ from typing import Any
 
 import redis
 
+from api.i18n import tr
+from api.i18n.prompts import prompt
 from api.memory import compaction as memory_compaction
 from api.ai.pricing import credit_units_from_usd_micros
 from api.memory.background import DurableCompactionQueue
@@ -88,9 +90,7 @@ def build_chat_messages(
     prompt_text: str,
     prior_summary: str | None = None,
 ) -> list[dict[str, Any]]:
-    api_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": bot_personality}
-    ]
+    api_messages: list[dict[str, Any]] = [{"role": "system", "content": bot_personality}]
     if prior_summary:
         api_messages.append({"role": "assistant", "content": prior_summary})
     for message in messages:
@@ -116,7 +116,6 @@ def compact_conversation(
         tuple[str | None, int],
     ],
     sanitize_text: Callable[[str], str],
-    no_markdown_prompt: str,
     max_summary_messages: int,
     truncate_lines: int,
 ) -> tuple[str, int]:
@@ -131,18 +130,13 @@ def compact_conversation(
     api_messages = build_chat_messages(
         load_personality(),
         messages,
-        (
-            "actualizá el resumen previo con los mensajes nuevos. "
-            "usá formato denso: temas, hechos clave, decisiones y pendientes. "
-            "omití saludos y chat casual. mantené el idioma original. "
-            f"{no_markdown_prompt}"
-        ),
+        prompt("summary.compact", no_markdown=prompt("no_markdown")),
         prior_summary=prior_summary,
     )
 
     result, cost = call_model(api_messages)
     if result:
-        return f"[contexto anterior: {sanitize_text(result)}]", cost
+        return tr("summary.context", summary=sanitize_text(result)), cost
 
     fallback_lines = []
     for message in messages:
@@ -206,7 +200,7 @@ def stream_summary_command(
         logger.info("summary_stream: no history for chat_id=%s", chat_id)
 
         def empty() -> Iterator[tuple[str, str]]:
-            yield "none", "no hay mensajes para resumir"
+            yield "none", tr("summary.empty")
 
         return empty(), None
 
@@ -256,7 +250,7 @@ def stream_summary_command(
     if not provider.is_available():
 
         def unavailable() -> Iterator[tuple[str, str]]:
-            yield "none", "no pude generar el resumen"
+            yield "none", tr("summary.error")
 
         return unavailable(), source.next_marker
 
@@ -303,7 +297,6 @@ class SummaryServiceDeps:
     compaction_keep: int
     max_summary_messages: int
     truncate_lines: int
-    no_markdown_prompt: str
     pricing_by_model: Mapping[str, Mapping[str, int]]
     redis_factory: Callable[[], Any]
     credits: Any
@@ -368,7 +361,6 @@ class SummaryService:
             load_personality=self.load_personality,
             call_model=self.call_model,
             sanitize_text=self._deps.sanitize_text,
-            no_markdown_prompt=self._deps.no_markdown_prompt,
             max_summary_messages=self._deps.max_summary_messages,
             truncate_lines=self._deps.truncate_lines,
         )
@@ -377,7 +369,7 @@ class SummaryService:
         api_messages = build_chat_messages(
             self.load_personality(),
             plan.messages,
-            "actualiza el resumen previo con los mensajes nuevos",
+            prompt("summary.estimate"),
             prior_summary=plan.prior_summary,
         )
         input_tokens = self._deps.estimate_tokens(api_messages)
@@ -409,9 +401,7 @@ class SummaryService:
             load_personality=self.load_personality,
         )
 
-    build_incremental_source = staticmethod(
-        memory_compaction.build_incremental_summary_source
-    )
+    build_incremental_source = staticmethod(memory_compaction.build_incremental_summary_source)
 
     def build_provider(self) -> Any:
         return self._deps.provider.build_provider(
@@ -460,7 +450,8 @@ class SummaryService:
         compact_fn: Callable[
             [list[dict[str, Any]], str | None],
             tuple[str, int],
-        ] | None = None,
+        ]
+        | None = None,
         compaction_threshold: int | None = None,
         compaction_keep: int | None = None,
     ) -> tuple[str | None, list[dict[str, Any]], str | None, int]:
