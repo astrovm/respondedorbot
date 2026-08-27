@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from api.ai.pricing import MODEL_PRICING_USD_MICROS
 from api.billing.credit_units import format_credit_units, parse_credit_units
-from api.core.i18n import tr
+from api.i18n import tr
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
 

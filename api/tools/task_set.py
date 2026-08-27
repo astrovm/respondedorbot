@@ -21,7 +21,7 @@ from api.tasks.models import (
     parse_task_trigger,
 )
 from api.services import credits_db
-from api.core.i18n import current_locale, tr
+from api.i18n import current_locale, tr
 
 
 def _task_set_precondition_error(

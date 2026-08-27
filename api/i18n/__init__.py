@@ -1,10 +1,9 @@
-"""Small, deterministic localization layer for user-facing bot text."""
+"""Central localization boundary for all user-facing bot text and prompts."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from string import Formatter
 from typing import Any, Iterator, Literal, Mapping
 
 Locale = Literal["es", "en"]
@@ -115,6 +114,8 @@ ES: dict[str, str] = {
     "payment.success": "listo, te cargué {credits} créditos\nahora te quedaron {balance}\nsi querés mandarle al grupo: /transfer <monto>",
     "payment.duplicate": "ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}",
     "message.processing_error": "error procesando mensaje",
+    "prompt.reply_context.user": "{user} (en respuesta a {reply_context}): {message_text}",
+    "prompt.reply_context.anonymous": "(en respuesta a {reply_context}): {message_text}",
     "summary.prompt": (
         "actualizá el resumen anterior con los mensajes nuevos. entre 10 y 20 items "
         "cortos y concretos si hay material suficiente, uno por línea. incluí solo "
@@ -128,6 +129,7 @@ ES: dict[str, str] = {
     "weather.apparent": "Temperatura aparente: {value}°C",
     "weather.rain": "Probabilidad de lluvia: {value}%",
     "weather.condition": "Estado: {value}",
+    "weather.unusual": "clima raro",
     "weather.clouds": "Nubosidad: {value}%",
     "weather.visibility": "Visibilidad: {value}",
     "news.no_data": "sin datos por ahora",
@@ -249,11 +251,20 @@ ES: dict[str, str] = {
     "task.cancel.not_found": "esa tarea no existe en este chat",
     "task.cancel.done": "tarea {task_id} cancelada",
     "summary.empty": "no hay mensajes para resumir",
+    "summary.context": "[contexto anterior: {summary}]",
+    "prompt.no_markdown": "NUNCA uses markdown: no negritas, no headers, no tablas.",
+    "prompt.summary.compact": "actualizá el resumen previo con los mensajes nuevos. usá formato denso: temas, hechos clave, decisiones y pendientes. omití saludos y chat casual. mantené el idioma original. {no_markdown}",
+    "prompt.summary.estimate": "actualizá el resumen previo con los mensajes nuevos",
+    "prompt.response.base": "INSTRUCCIONES:\n- mantené el personaje del gordo\n- usá lenguaje coloquial argentino\n- respondé en minúsculas, sin emojis, sin punto final\n- respondé en una sola frase salvo que sea necesario explicar algo complejo",
+    "prompt.task_mode": "EJECUTANDO TAREA PROGRAMADA:\nRespondé la siguiente instrucción y nada más.\nNo hagas preguntas, no ofrezcas seguimientos, no pidas confirmación.\nGenerá tu respuesta y terminá.\n\n",
+    "prompt.tools": "\n\nHERRAMIENTAS:\nLlamalas directamente, sin pedir permiso ni narrar antes.\nNo expliques qué vas a hacer antes de usar una herramienta simple.\nUsá las herramientas cuando necesites datos actuales o externos.\n",
+    "prompt.system_context": "\n{tool_instruction}\n\nFECHA ACTUAL:\n{formatted_time}\n\nIDIOMA DE RESPUESTA:\n{language_instruction}\n",
+    "media.default_image_question": "¿Qué ves en esta imagen?",
     "telegram.open_app": "abrir en la app",
     "greeting.morning": "buen día boludo",
     "greeting.night": "buenas noches boludo",
     "media.image_context": "[Imagen: {description}]",
-    "media.vision_system": "respondé siempre en minúsculas, sin emojis, sin markdown y en lenguaje coloquial argentino. {instruction}",
+    "media.vision_system": "respondé siempre en minúsculas, sin emojis, sin markdown y en lenguaje coloquial argentino.",
     "random.yes": "si",
     "random.no": "no",
     "random.address": "boludo",
@@ -446,6 +457,8 @@ EN: dict[str, str] = {
     "payment.success": "added {credits} credits\nyour balance is now {balance}\nuse /transfer <amount> to fund a group",
     "payment.duplicate": "this payment was already credited\nyour balance is {balance}",
     "message.processing_error": "error processing message",
+    "prompt.reply_context.user": "{user} (replying to {reply_context}): {message_text}",
+    "prompt.reply_context.anonymous": "(replying to {reply_context}): {message_text}",
     "summary.prompt": (
         "update the previous summary with the new messages. use 10 to 20 short, "
         "concrete items when there is enough material, one per line. include only "
@@ -459,6 +472,7 @@ EN: dict[str, str] = {
     "weather.apparent": "Feels like: {value}°C",
     "weather.rain": "Chance of rain: {value}%",
     "weather.condition": "Condition: {value}",
+    "weather.unusual": "unusual weather",
     "weather.clouds": "Cloud cover: {value}%",
     "weather.visibility": "Visibility: {value}",
     "news.no_data": "no data yet",
@@ -580,11 +594,20 @@ EN: dict[str, str] = {
     "task.cancel.not_found": "that task does not exist in this chat",
     "task.cancel.done": "task {task_id} cancelled",
     "summary.empty": "there are no messages to summarize",
+    "summary.context": "[previous context: {summary}]",
+    "prompt.no_markdown": "NEVER use markdown: no bold text, headings, or tables.",
+    "prompt.summary.compact": "update the previous summary with the new messages. use a dense format with topics, key facts, decisions, and pending work. omit greetings and casual chat. preserve the original language. {no_markdown}",
+    "prompt.summary.estimate": "update the previous summary with the new messages",
+    "prompt.response.base": "INSTRUCTIONS:\n- stay in the gordo character\n- use casual English\n- respond without emojis or a final period\n- use one sentence unless a complex explanation needs more",
+    "prompt.task_mode": "RUNNING SCHEDULED TASK:\nAnswer the following instruction and nothing else.\nDo not ask questions, offer follow-ups, or request confirmation.\nGenerate the answer and finish.\n\n",
+    "prompt.tools": "\n\nTOOLS:\nCall them directly without asking permission or narrating first.\nDo not explain what you will do before using a simple tool.\nUse tools when you need current or external data.\n",
+    "prompt.system_context": "\n{tool_instruction}\n\nCURRENT DATE:\n{formatted_time}\n\nRESPONSE LANGUAGE:\n{language_instruction}\n",
+    "media.default_image_question": "What do you see in this image?",
     "telegram.open_app": "open in app",
     "greeting.morning": "good morning",
     "greeting.night": "good night",
     "media.image_context": "[Image: {description}]",
-    "media.vision_system": "respond in English without emojis or markdown. {instruction}",
+    "media.vision_system": "respond in English without emojis or markdown.",
     "random.yes": "yes",
     "random.no": "no",
     "random.address": "dude",
@@ -724,40 +747,11 @@ def tr(key: str, *, locale: Locale | None = None, **values: object) -> str:
     return template.format(**values)
 
 
-def catalog_errors() -> list[str]:
-    errors: list[str] = []
-    expected_keys = set(ES)
-    formatter = Formatter()
-    for locale, catalog in CATALOGS.items():
-        missing = expected_keys - set(catalog)
-        extra = set(catalog) - expected_keys
-        if missing:
-            errors.append(f"{locale} missing keys: {sorted(missing)}")
-        if extra:
-            errors.append(f"{locale} extra keys: {sorted(extra)}")
-        for key in expected_keys & set(catalog):
-            expected_fields = {
-                field for _literal, field, _spec, _conversion in formatter.parse(ES[key]) if field
-            }
-            actual_fields = {
-                field
-                for _literal, field, _spec, _conversion in formatter.parse(catalog[key])
-                if field
-            }
-            if actual_fields != expected_fields:
-                errors.append(
-                    f"{locale}.{key} placeholders {sorted(actual_fields)} != "
-                    f"{sorted(expected_fields)}"
-                )
-    return errors
-
-
 __all__ = [
     "AUTO_LOCALE",
     "DEFAULT_LOCALE",
     "Locale",
     "SUPPORTED_LOCALES",
-    "catalog_errors",
     "current_locale",
     "normalize_locale",
     "resolve_locale",

@@ -17,7 +17,7 @@ from typing import (
     cast,
 )
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.bot.chat_context import (
     is_group_chat_type,
 )

@@ -14,7 +14,7 @@ from api.ai.pipeline import (
     strip_markdown_formatting,
 )
 from api.core.logging import get_logger
-from api.core.i18n import normalize_locale, tr, use_locale
+from api.i18n import normalize_locale, tr, use_locale
 
 logger = get_logger(__name__)
 

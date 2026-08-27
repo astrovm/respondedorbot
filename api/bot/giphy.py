@@ -8,7 +8,7 @@ from os import environ
 import redis
 
 from api.core.config_runtime import ConfigRuntime
-from api.core.i18n import tr
+from api.i18n import tr
 from api.services import http_client
 from api.services.maintenance import GIPHY_STALE_TTL
 from api.services.redis_helpers import redis_get_json

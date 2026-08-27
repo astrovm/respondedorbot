@@ -3,14 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from api.core.i18n import tr
-
-
-DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = {
-    "download": "no pude bajar el audio, mandalo de nuevo",
-    "duration": "no pude medir la duración del audio",
-    "transcribe": "no pude sacar nada de ese audio, probá más tarde",
-}
+from api.i18n import tr
 
 
 def transcription_error_message(

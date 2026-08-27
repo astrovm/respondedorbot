@@ -15,7 +15,7 @@ from api.bot.chat_config_defaults import (
     TIMEZONE_OFFSET_MAX,
     TIMEZONE_OFFSET_MIN,
 )
-from api.core.i18n import Locale, current_locale, normalize_locale, tr
+from api.i18n import Locale, current_locale, normalize_locale, tr
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]

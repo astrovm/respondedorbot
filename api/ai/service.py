@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
-from api.core.i18n import tr
+from api.i18n import tr
 
 
 _summary_logger = logging.getLogger(__name__)

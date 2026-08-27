@@ -9,7 +9,7 @@ from typing import Any, Dict, Mapping
 
 import requests
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.core.logging import get_logger
 from api.tools.registry import ToolResult, register_tool
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from api.ai.prompt_context import format_weather_info
-from api.core.i18n import tr
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 

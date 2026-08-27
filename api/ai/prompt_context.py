@@ -6,8 +6,8 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, tzinfo
 from typing import Any
 
-from api.ai.pipeline import INSTRUCCIONES_BASE
-from api.core.i18n import current_locale, tr
+from api.ai.pipeline import base_instructions
+from api.i18n import current_locale, tr
 
 
 def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -35,9 +35,7 @@ def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             "30d": crypto["quote"]["USD"]["percent_change_30d"],
                         },
                         "market_cap": crypto["quote"]["USD"]["market_cap"],
-                        "dominance": crypto["quote"]["USD"][
-                            "market_cap_dominance"
-                        ],
+                        "dominance": crypto["quote"]["USD"]["market_cap_dominance"],
                     }
                 },
             }
@@ -107,8 +105,8 @@ def get_weather_description(code: int) -> str:
             96: "thunderstorm with light hail",
             99: "thunderstorm with heavy hail",
         }
-        return english.get(code, "unusual weather")
-    return descriptions.get(code, "clima raro")
+        return english.get(code, tr("weather.unusual"))
+    return descriptions.get(code, tr("weather.unusual"))
 
 
 def format_hacker_news_info(
@@ -147,9 +145,7 @@ def format_hacker_news_info(
 def format_weather_info(weather: dict[str, Any]) -> str:
     visibility_km = weather.get("visibility")
     visibility = (
-        f"{visibility_km / 1000:.1f}km"
-        if visibility_km is not None
-        else tr("weather.no_data")
+        f"{visibility_km / 1000:.1f}km" if visibility_km is not None else tr("weather.no_data")
     )
     location = weather.get("location")
     location_line = f"- {tr('weather.location', value=location)}\n" if location else ""
@@ -222,25 +218,20 @@ def build_ai_messages(
             if text:
                 retrieval_lines.append(f"- {role}: {text}")
         if len(retrieval_lines) > 1:
-            messages.append(
-                {"role": "system", "content": "\n".join(retrieval_lines)}
-            )
+            messages.append({"role": "system", "content": "\n".join(retrieval_lines)})
 
     for history_message in chat_history:
         messages.append(
             {
                 "role": history_message["role"],
-                "content": [
-                    {"type": "text", "text": history_message["text"]}
-                ],
+                "content": [{"type": "text", "text": history_message["text"]}],
             }
         )
 
     sender = message.get("from", {})
     chat = message.get("chat", {})
     first_name = str(
-        sender.get("first_name")
-        or ("User" if current_locale() == "en" else "Usuario")
+        sender.get("first_name") or ("User" if current_locale() == "en" else "Usuario")
     )
     username = str(sender.get("username") or "")
     chat_type = str(chat.get("type") or "private")
@@ -255,14 +246,9 @@ def build_ai_messages(
         current_time=current_time,
     )
 
-    if (
-        reply_context
-        and not (messages and messages[-1].get("role") == "assistant")
-    ):
+    if reply_context and not (messages and messages[-1].get("role") == "assistant"):
         reply_label = (
-            "MESSAGE BEING REPLIED TO:"
-            if current_locale() == "en"
-            else "MENSAJE AL QUE RESPONDE:"
+            "MESSAGE BEING REPLIED TO:" if current_locale() == "en" else "MENSAJE AL QUE RESPONDE:"
         )
         context_parts.extend(["", reply_label, truncate_text(reply_context)])
 
@@ -280,7 +266,7 @@ def build_ai_messages(
             "- use one sentence unless a complex explanation needs more structure",
         ]
         if current_locale() == "en"
-        else [""] + INSTRUCCIONES_BASE[:]
+        else [""] + base_instructions()
     )
     if enable_web_search:
         instructions.append(

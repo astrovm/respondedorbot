@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from api.ai.pricing import AIUsageResult
-from api.core.i18n import tr
+from api.i18n import tr
 
 
 def execute_groq_request_with_fallback(
@@ -108,7 +108,6 @@ def describe_image_result(
     logger: Any,
     model: str,
     max_tokens: int,
-    no_markdown_prompt: str,
 ) -> AIUsageResult | None:
     """Describe one image, reusing a cached description when possible."""
 
@@ -148,10 +147,7 @@ def describe_image_result(
                 [
                     {
                         "role": "system",
-                        "content": tr(
-                            "media.vision_system",
-                            instruction=no_markdown_prompt,
-                        ),
+                        "content": tr("media.vision_system"),
                     },
                     {
                         "role": "user",
@@ -477,7 +473,6 @@ class MediaServiceDeps:
     vision_max_tokens: int
     transcribe_model: str
     openrouter_transcribe_model: str
-    no_markdown_prompt: str
     default_backoff_seconds: int
 
 
@@ -514,14 +509,14 @@ class MediaService:
     def describe_image_result(
         self,
         image_data: bytes,
-        user_text: str = "¿Qué ves en esta imagen?",
+        user_text: str | None = None,
         file_id: str | None = None,
         *,
         use_cache: bool = True,
     ) -> AIUsageResult | None:
         return describe_image_result(
             image_data,
-            user_text,
+            user_text or tr("media.default_image_question"),
             file_id,
             use_cache=use_cache,
             get_cached_description=self._deps.cache.get_description,
@@ -535,13 +530,12 @@ class MediaService:
             logger=self._deps.logger,
             model=self._deps.vision_model,
             max_tokens=self._deps.vision_max_tokens,
-            no_markdown_prompt=self._deps.no_markdown_prompt,
         )
 
     def describe_image(
         self,
         image_data: bytes,
-        user_text: str = "¿Qué ves en esta imagen?",
+        user_text: str | None = None,
         file_id: str | None = None,
         *,
         use_cache: bool = True,

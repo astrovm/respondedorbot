@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from api.billing.credit_units import format_credit_units
-from api.core.i18n import tr
+from api.i18n import tr
 
 
 def task_credit_precondition_error(

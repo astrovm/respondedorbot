@@ -24,7 +24,7 @@ from typing import (
 
 import redis
 
-from api.core.i18n import tr
+from api.i18n import tr
 
 from api.bot.chat_context import format_user_identity
 from api.services.maintenance import CHAT_STATE_TTL
@@ -131,7 +131,7 @@ def _sort_by_message_id(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return float(raw_id[4:]) + 0.5
         try:
             return float(raw_id)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return float(msg.get("timestamp", 0))
 
     return sorted(messages, key=_sort_key)
@@ -460,7 +460,11 @@ def search_chat_history(
             if message_id and message_id in excluded:
                 continue
             row["timestamp"] = int(row.get("timestamp") or 0)
-            row["_reply_score"] = 1 if reply_to_message_id and row.get("reply_to_message_id") == reply_to_message_id else 0
+            row["_reply_score"] = (
+                1
+                if reply_to_message_id and row.get("reply_to_message_id") == reply_to_message_id
+                else 0
+            )
             text_tokens = set(str(row.get("text") or "").lower().split())
             row["_overlap_score"] = len(query_tokens & text_tokens)
             results.append(row)
@@ -588,9 +592,7 @@ def build_reply_context_text(
     if not reply_description:
         return None
 
-    reply_user = format_user_identity(
-        cast(Mapping[str, Any], reply_msg.get("from", {}))
-    ).strip()
+    reply_user = format_user_identity(cast(Mapping[str, Any], reply_msg.get("from", {}))).strip()
     if reply_user:
         return f"{reply_user}: {reply_description}"
     return reply_description
@@ -668,8 +670,17 @@ def format_user_message(
     formatted_user = format_user_identity(message.get("from", {}))
     if reply_context:
         if formatted_user:
-            return f"{formatted_user} (en respuesta a {reply_context}): {message_text}"
-        return f"(en respuesta a {reply_context}): {message_text}"
+            return tr(
+                "prompt.reply_context.user",
+                user=formatted_user,
+                reply_context=reply_context,
+                message_text=message_text,
+            )
+        return tr(
+            "prompt.reply_context.anonymous",
+            reply_context=reply_context,
+            message_text=message_text,
+        )
     return f"{formatted_user}: {message_text}"
 
 

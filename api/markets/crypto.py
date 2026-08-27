@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.markets.price_commands import (
     AmountConversionRequest,
     SUPPORTED_PRICE_SYMBOLS,

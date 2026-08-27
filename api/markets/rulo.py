@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.utils import fmt_signed_pct
 
 

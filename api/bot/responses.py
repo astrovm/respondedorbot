@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from api.ai.pipeline import AIResponseRequest, AIResponseRuntime
-from api.core.i18n import tr
+from api.i18n import tr
 
 
 def handle_rate_limit(

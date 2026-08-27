@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from api.core.i18n import resolve_locale, tr, use_locale
+from api.i18n import resolve_locale, tr, use_locale
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +49,6 @@ class CallbackQueryDeps:
     is_group_chat_type: Callable[[str], bool]
     send_msg: Callable[..., Any]
     report_unauthorized: Callable[..., None]
-    denial_message: str
     get_chat_config: Callable[..., dict[str, Any]]
     config: CallbackConfigDeps
     build_config_text: Callable[..., str]

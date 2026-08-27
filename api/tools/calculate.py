@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from typing import Any, Dict, Union
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 
 _SAFE_NODES = (

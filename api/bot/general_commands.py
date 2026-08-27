@@ -10,7 +10,7 @@ from typing import Any, Callable, cast
 import emoji
 from pykakasi import kakasi
 
-from api.core.i18n import current_locale, tr
+from api.i18n import current_locale, tr
 
 KakasiFactory = Callable[[], Any]
 _kakasi = cast(KakasiFactory, kakasi)

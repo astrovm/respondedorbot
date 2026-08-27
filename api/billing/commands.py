@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.billing.credit_units import format_credit_units, parse_credit_units
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]

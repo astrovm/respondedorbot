@@ -191,7 +191,7 @@ def test_handle_non_ai_command_summary_uses_english_streaming_prompt():
         PreparedMessage,
         _handle_non_ai_command,
     )
-    from api.core.i18n import use_locale
+    from api.i18n import use_locale
 
     deps = MagicMock()
     deps.ai_service.run_summary_command_stream.return_value = (

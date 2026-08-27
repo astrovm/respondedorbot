@@ -12,7 +12,7 @@ from typing import Any
 import pycountry
 
 from api.cache.service import CacheService
-from api.core.i18n import tr
+from api.i18n import tr
 from api.services import http_client
 from api.utils import fmt_num
 

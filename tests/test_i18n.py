@@ -3,7 +3,8 @@ from api.bot.chat_settings import build_config_keyboard, build_config_text
 from api.bot.command_registry import command_descriptions
 from api.bot.feature_catalog import render_help_text
 from api.billing.ai import AIMessageBilling
-from api.core.i18n import catalog_errors, resolve_locale, use_locale
+from api.i18n import resolve_locale, use_locale
+from api.i18n.validation import catalog_errors
 from api.markets.crypto import get_prices
 from api.tasks.scheduler import format_interval
 from api.tools.registry import execute_tool

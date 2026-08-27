@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
-from api.core.i18n import tr
+from api.i18n import tr
 
 _SPANISH_TO_ENGLISH_WEEKDAY = {
     "lun": "mon",

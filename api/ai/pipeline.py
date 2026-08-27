@@ -8,7 +8,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from api.core.i18n import tr
+from api.i18n import tr
+from api.i18n.prompts import prompt
 
 _logger = logging.getLogger(__name__)
 
@@ -26,13 +27,9 @@ MARKDOWN_BLOCKQUOTE_PATTERN = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)
 MARKDOWN_BULLET_PATTERN = re.compile(r"^\s{0,3}[-*]\s+", re.MULTILINE)
 LOG_PREVIEW_LIMIT = 160
 
-INSTRUCCIONES_BASE = [
-    "INSTRUCCIONES:",
-    "- mantené el personaje del gordo",
-    "- usá lenguaje coloquial argentino",
-    "- respondé en minúsculas, sin emojis, sin punto final",
-    "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
-]
+
+def base_instructions() -> list[str]:
+    return prompt("response.base").splitlines()
 
 
 @dataclass(frozen=True)
@@ -157,9 +154,7 @@ def strip_leading_context(
 
     trimmed_response = response
     normalized_contexts = [
-        str(context).strip()
-        for context in contexts
-        if context is not None and str(context).strip()
+        str(context).strip() for context in contexts if context is not None and str(context).strip()
     ]
     if not normalized_contexts:
         return trimmed_response
@@ -231,12 +226,10 @@ def _invoke_generic_handler(request: AIResponseRequest) -> Any:
 
     try:
         parameters = inspect.signature(request.handler).parameters
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return request.handler(request.messages)
 
-    accepted_kwargs = {
-        key: value for key, value in kwargs.items() if key in parameters
-    }
+    accepted_kwargs = {key: value for key, value in kwargs.items() if key in parameters}
     return request.handler(request.messages, **accepted_kwargs)
 
 
@@ -270,9 +263,7 @@ def _empty_response_fallback(
     cleanup: _CleanupStages,
 ) -> str:
     was_fallback = (
-        bool(request.response_meta.get("ai_fallback"))
-        if request.response_meta
-        else False
+        bool(request.response_meta.get("ai_fallback")) if request.response_meta else False
     )
     if request.response_meta is not None:
         request.response_meta["ai_fallback"] = True
@@ -312,9 +303,7 @@ def handle_ai_response(
     finally:
         if request_count_token is not None:
             if request.response_meta is not None:
-                request.response_meta["provider_request_count"] = (
-                    runtime.get_request_count()
-                )
+                request.response_meta["provider_request_count"] = runtime.get_request_count()
             runtime.restore_request_count(request_count_token)
 
     cleanup = _clean_response(request, response)
@@ -324,7 +313,7 @@ def handle_ai_response(
 
 
 __all__ = [
-    "INSTRUCCIONES_BASE",
+    "base_instructions",
     "AIResponseRequest",
     "AIResponseRuntime",
     "clean_duplicate_response",

@@ -24,8 +24,7 @@ from api.admin.commands import (
 )
 from api.billing.ai import AIMessageBilling
 from api.ai.pricing import estimate_transcribe_reserve_credits
-from api.core.constants import BILLING_UNAVAILABLE_MESSAGE
-from api.core.i18n import (
+from api.i18n import (
     Locale,
     current_locale,
     normalize_locale,
@@ -669,7 +668,7 @@ def _resolve_message_intent(
 def _billing_unavailable_command_response(
     command: str,
 ) -> Tuple[str, None, bool, str]:
-    return BILLING_UNAVAILABLE_MESSAGE, None, False, command
+    return tr("billing.unavailable"), None, False, command
 
 
 def _get_admin_chat_id() -> str:

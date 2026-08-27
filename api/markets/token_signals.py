@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from PIL import Image, ImageDraw, ImageFont
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 

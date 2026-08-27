@@ -37,7 +37,7 @@ from api.admin.service import AdminService
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
 from api.core.logging import get_logger
-from api.core.i18n import tr
+from api.i18n import tr
 from api.services.maintenance import LAST_SUCCESS_MIN_TTL, last_success_ttl
 from api.services.redis_helpers import redis_get_json, redis_set_json, redis_setex_json
 from api.services.tcrm import (

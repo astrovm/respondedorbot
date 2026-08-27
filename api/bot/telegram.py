@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 import requests
 from urllib.parse import urlparse
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.links.agent_tools import normalize_http_url
 from api.services import http_client
 

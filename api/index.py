@@ -140,8 +140,7 @@ from api.ai.pricing import (
     estimate_vision_reserve_credits,
 )
 from api.links.agent_tools import fetch_url_content
-from api.core.constants import ADMIN_CONFIG_DENIAL_MESSAGE, PROMPT_NO_MARKDOWN
-from api.core.i18n import tr
+from api.i18n import tr
 from api.providers import OpenRouterProvider, ProviderChain
 
 # Side-effect imports: modules register tools at import time via register_tool()
@@ -510,9 +509,6 @@ def _schedule_background_refresh(fn: Callable[[], None]) -> None:
     _BACKGROUND_REFRESH_EXECUTOR.submit(fn)
 
 
-_DEFAULT_TRANSCRIPTION_ERROR_MESSAGES = media_commands.DEFAULT_TRANSCRIPTION_ERROR_MESSAGES
-
-
 def _describe_replied_media(
     replied_msg: Mapping[str, Any],
     *,
@@ -785,7 +781,6 @@ _media_service = MediaService(
         vision_max_tokens=VISION_OUTPUT_TOKEN_LIMIT,
         transcribe_model=GROQ_TRANSCRIBE_MODEL,
         openrouter_transcribe_model=OPENROUTER_TRANSCRIBE_MODEL,
-        no_markdown_prompt=PROMPT_NO_MARKDOWN,
         default_backoff_seconds=GROQ_BACKOFF_DEFAULT_SECONDS,
     )
 )
@@ -1022,7 +1017,6 @@ _summary_service = SummaryService(
         compaction_keep=COMPACTION_KEEP,
         max_summary_messages=COMPACTION_MAX_SUMMARY_MESSAGES,
         truncate_lines=COMPACTION_TRUNCATE_LINES,
-        no_markdown_prompt=PROMPT_NO_MARKDOWN,
         pricing_by_model=MODEL_PRICING_USD_MICROS,
         redis_factory=_config_runtime.redis,
         credits=credits_db_service,
@@ -1211,7 +1205,6 @@ def handle_callback_query(callback_query: Dict[str, Any]) -> None:
             is_group_chat_type=is_group_chat_type,
             send_msg=telegram_gateway.send_message,
             report_unauthorized=_admin_service.report_unauthorized_config_attempt,
-            denial_message=ADMIN_CONFIG_DENIAL_MESSAGE,
             get_chat_config=_chat_config_service.get_chat_config,
             config=callback_runtime.CallbackConfigDeps(
                 set_chat_config=_chat_config_service.set_chat_config,

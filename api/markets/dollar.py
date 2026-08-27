@@ -7,7 +7,7 @@ from typing import Any
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
-from api.core.i18n import tr
+from api.i18n import tr
 from api.markets.rulo import build_rulo_message
 from api.services.stale_cache import StaleCache
 from api.markets.dollar_commands import sort_dollar_rates

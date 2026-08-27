@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from api.core.logging import get_logger
-from api.core.i18n import current_locale, tr
+from api.i18n import current_locale, tr
 from api.bot.general_commands import gen_random
 from api.services import credits_db as credits_db_service
 from api.tasks.executor import (

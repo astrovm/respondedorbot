@@ -12,7 +12,8 @@ from typing import Any
 
 import redis
 
-from api.core.i18n import tr
+from api.i18n import tr
+from api.i18n.prompts import prompt
 from api.memory import compaction as memory_compaction
 from api.ai.pricing import credit_units_from_usd_micros
 from api.memory.background import DurableCompactionQueue
@@ -115,7 +116,6 @@ def compact_conversation(
         tuple[str | None, int],
     ],
     sanitize_text: Callable[[str], str],
-    no_markdown_prompt: str,
     max_summary_messages: int,
     truncate_lines: int,
 ) -> tuple[str, int]:
@@ -130,18 +130,13 @@ def compact_conversation(
     api_messages = build_chat_messages(
         load_personality(),
         messages,
-        (
-            "actualizá el resumen previo con los mensajes nuevos. "
-            "usá formato denso: temas, hechos clave, decisiones y pendientes. "
-            "omití saludos y chat casual. mantené el idioma original. "
-            f"{no_markdown_prompt}"
-        ),
+        prompt("summary.compact", no_markdown=prompt("no_markdown")),
         prior_summary=prior_summary,
     )
 
     result, cost = call_model(api_messages)
     if result:
-        return f"[contexto anterior: {sanitize_text(result)}]", cost
+        return tr("summary.context", summary=sanitize_text(result)), cost
 
     fallback_lines = []
     for message in messages:
@@ -302,7 +297,6 @@ class SummaryServiceDeps:
     compaction_keep: int
     max_summary_messages: int
     truncate_lines: int
-    no_markdown_prompt: str
     pricing_by_model: Mapping[str, Mapping[str, int]]
     redis_factory: Callable[[], Any]
     credits: Any
@@ -367,7 +361,6 @@ class SummaryService:
             load_personality=self.load_personality,
             call_model=self.call_model,
             sanitize_text=self._deps.sanitize_text,
-            no_markdown_prompt=self._deps.no_markdown_prompt,
             max_summary_messages=self._deps.max_summary_messages,
             truncate_lines=self._deps.truncate_lines,
         )
@@ -376,7 +369,7 @@ class SummaryService:
         api_messages = build_chat_messages(
             self.load_personality(),
             plan.messages,
-            "actualiza el resumen previo con los mensajes nuevos",
+            prompt("summary.estimate"),
             prior_summary=plan.prior_summary,
         )
         input_tokens = self._deps.estimate_tokens(api_messages)

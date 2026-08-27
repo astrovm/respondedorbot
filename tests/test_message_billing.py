@@ -112,7 +112,7 @@ def test_pre_checkout_old_invoice_uses_telegram_language():
 
 def test_invoice_payload_carries_current_locale():
     from api.billing.callbacks import send_stars_invoice
-    from api.core.i18n import use_locale
+    from api.i18n import use_locale
 
     telegram_request = MagicMock(return_value=({"ok": True}, None))
 

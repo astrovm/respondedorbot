@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from api.core.i18n import current_locale, tr
+from api.i18n import current_locale, tr
 
 
 def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:

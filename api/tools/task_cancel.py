@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.tools.registry import ToolResult, register_tool
 from api.tasks.scheduler import cancel_task, list_tasks
 

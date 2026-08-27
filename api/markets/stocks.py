@@ -10,7 +10,7 @@ from requests.exceptions import RequestException
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
-from api.core.i18n import tr
+from api.i18n import tr
 from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_set_json
 from api.utils import fmt_num

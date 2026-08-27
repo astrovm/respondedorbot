@@ -5,7 +5,7 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.utils import fmt_num, parse_date_string
 
 

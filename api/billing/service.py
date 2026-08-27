@@ -17,7 +17,7 @@ from api.billing.ai import (
     parse_topup_payload,
 )
 from api.billing.credit_units import format_credit_units
-from api.core.i18n import resolve_locale, tr, use_locale
+from api.i18n import resolve_locale, tr, use_locale
 
 
 class BillingService:

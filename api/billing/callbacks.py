@@ -5,7 +5,7 @@ from typing import Any
 
 from api.billing.ai import AIBillingPack
 from api.billing.commands import build_user_charge_history_page
-from api.core.i18n import current_locale, tr
+from api.i18n import current_locale, tr
 
 ChargeCallbackParams = tuple[int, int, str, int, int, int, int]
 

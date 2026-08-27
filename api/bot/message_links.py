@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Protocol
 
-from api.core.i18n import tr
+from api.i18n import tr
 from api.links.service import LinkServiceProtocol
 
 
