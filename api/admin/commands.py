@@ -181,10 +181,12 @@ def _metadata_credit(metadata: Mapping[str, Any], *keys: str) -> int:
 
 def _creditlog_status(metadata: Mapping[str, Any]) -> str:
     if metadata.get("billing_zero_usage_fallback"):
-        return "estado=groq_zero_usage"
-    if metadata.get("missing_usage_billing"):
-        return "estado=missing_usage"
-    return "estado=ok"
+        value = "groq_zero_usage"
+    elif metadata.get("missing_usage_billing"):
+        value = "missing_usage"
+    else:
+        value = "ok"
+    return f"{tr('admin.creditlog.status')}={value}"
 
 
 def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
@@ -194,21 +196,25 @@ def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
     tools = metadata.get("tool_breakdown") or []
     segments = metadata.get("billing_segments") or []
     created_at = str(entry.get("created_at") or "")
-    created_label = created_at.replace("T", " ")[:19] if created_at else "sin fecha"
-    command = str(metadata.get("command") or metadata.get("usage_tag") or "sin comando")
+    created_label = created_at.replace("T", " ")[:19] if created_at else tr("common.unknown_date")
+    command = str(
+        metadata.get("command")
+        or metadata.get("usage_tag")
+        or tr("admin.creditlog.unknown_command")
+    )
     detail_lines = [
         f"{created_label} | cmd={command} | {_creditlog_status(metadata)}",
         (
             f"chat={metadata.get('chat_id', entry.get('chat_id'))} "
             f"user={metadata.get('user_id', entry.get('user_id'))} "
-            f"reservado={format_credit_units(_metadata_credit(metadata, 'reserved_credit_units_total', 'reserved_credit_units', 'reserved_credits_total', 'reserved_credits'))} "
-            f"cobrado={format_credit_units(_metadata_credit(metadata, 'settled_credit_units', 'settled_credits'))} "
-            f"refund={format_credit_units(_metadata_credit(metadata, 'refunded_credit_units', 'refunded_credits'))} "
-            f"extra={format_credit_units(_metadata_credit(metadata, 'extra_charged_credit_units', 'extra_charged_credits'))} "
-            f"deuda={format_credit_units(_metadata_credit(metadata, 'debt_applied_credit_units', 'debt_applied_credits'))}"
+            f"{tr('admin.creditlog.reserved')}={format_credit_units(_metadata_credit(metadata, 'reserved_credit_units_total', 'reserved_credit_units', 'reserved_credits_total', 'reserved_credits'))} "
+            f"{tr('admin.creditlog.charged')}={format_credit_units(_metadata_credit(metadata, 'settled_credit_units', 'settled_credits'))} "
+            f"{tr('admin.creditlog.refund')}={format_credit_units(_metadata_credit(metadata, 'refunded_credit_units', 'refunded_credits'))} "
+            f"{tr('admin.creditlog.extra')}={format_credit_units(_metadata_credit(metadata, 'extra_charged_credit_units', 'extra_charged_credits'))} "
+            f"{tr('admin.creditlog.debt')}={format_credit_units(_metadata_credit(metadata, 'debt_applied_credit_units', 'debt_applied_credits'))}"
         ),
         f"usd_micros={int(metadata.get('raw_usd_micros') or 0)}",
-        f"requests: {_summarize_segments(segments, cache_only=False) or 'sin segmentos'}",
+        f"{tr('admin.creditlog.requests')}: {_summarize_segments(segments, cache_only=False) or tr('admin.creditlog.no_segments')}",
     ]
     cache_hits = _summarize_segments(segments, cache_only=True)
     if cache_hits:
@@ -216,10 +222,12 @@ def _format_creditlog_entry(entry: Mapping[str, Any]) -> str:
     cache_summary = _summarize_model_cache(models)
     if cache_summary:
         detail_lines.append(cache_summary)
-    detail_lines.extend([
-        f"modelos: {_summarize_models(models)}",
-        f"tools: {_summarize_tools(tools)}",
-    ])
+    detail_lines.extend(
+        [
+            f"{tr('admin.creditlog.models')}: {_summarize_models(models)}",
+            f"{tr('admin.creditlog.tools')}: {_summarize_tools(tools)}",
+        ]
+    )
     return "\n".join(detail_lines)
 
 

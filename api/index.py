@@ -1123,6 +1123,8 @@ _billing_service = BillingService(
     answer_callback=_answer_callback_query,
     answer_pre_checkout=_answer_pre_checkout_query,
     extract_user_id=_extract_user_id,
+    config_redis=_config_runtime.redis,
+    get_chat_config=_chat_config_service.get_chat_config,
 )
 
 

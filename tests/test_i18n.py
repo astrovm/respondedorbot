@@ -57,3 +57,18 @@ def test_english_locale_reaches_help_commands_markets_and_tasks():
     assert interval == "every 1 hour"
     assert tool_error.output == "weather is unavailable"
     assert media_success
+
+
+def test_english_creditlog_has_no_spanish_labels():
+    from api.admin.commands import build_creditlog_lines
+
+    with use_locale("en"):
+        text = "\n".join(build_creditlog_lines([{"metadata": {}}]))
+
+    assert "latest AI settlements:" in text
+    assert "no date | cmd=no command | status=ok" in text
+    assert "reserved=0.00 charged=0.00 refund=0.00 extra=0.00 debt=0.00" in text
+    assert "requests: no segments" in text
+    assert "models: no models" in text
+    assert "sin fecha" not in text
+    assert "reservado=" not in text

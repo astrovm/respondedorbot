@@ -43,6 +43,44 @@ def test_handle_msg_topup_private_returns_keyboard():
     )
 
 
+def test_pre_checkout_uses_saved_private_chat_language():
+    from api.billing.service import BillingService
+
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    answer_pre_checkout = MagicMock()
+    redis_client = MagicMock()
+    get_chat_config = MagicMock(return_value={"language": "en"})
+    service = BillingService(
+        credits=credits,
+        admin_report=MagicMock(),
+        telegram=MagicMock(),
+        telegram_request=MagicMock(),
+        guard_callback=MagicMock(),
+        answer_callback=MagicMock(),
+        answer_pre_checkout=answer_pre_checkout,
+        extract_user_id=MagicMock(),
+        config_redis=MagicMock(return_value=redis_client),
+        get_chat_config=get_chat_config,
+    )
+    query = {
+        "id": "pcq-1",
+        "from": {"id": 42, "language_code": "es"},
+        "invoice_payload": "invalid",
+        "currency": "XTR",
+        "total_amount": 1,
+    }
+
+    service.handle_pre_checkout(query)
+
+    get_chat_config.assert_called_once_with(redis_client, "42")
+    answer_pre_checkout.assert_called_once_with(
+        "pcq-1",
+        ok=False,
+        error_message="I could not validate this payment",
+    )
+
+
 def test_handle_msg_topup_group_redirects_private(monkeypatch):
     from api.bot.message_handler import handle_msg
 
