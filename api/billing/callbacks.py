@@ -5,7 +5,7 @@ from typing import Any
 
 from api.billing.ai import AIBillingPack
 from api.billing.commands import build_user_charge_history_page
-from api.core.i18n import tr
+from api.core.i18n import current_locale, tr
 
 ChargeCallbackParams = tuple[int, int, str, int, int, int, int]
 
@@ -40,7 +40,7 @@ def send_stars_invoice(
             "chat_id": chat_id,
             "title": tr("topup.invoice_title", credits=pack_credits),
             "description": tr("topup.invoice_description", credits=pack_credits),
-            "payload": f"topup:{pack['id']}:{user_id}",
+            "payload": f"topup:{pack['id']}:{user_id}:{current_locale()}",
             "provider_token": "",
             "currency": "XTR",
             "prices": [

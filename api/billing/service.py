@@ -38,8 +38,6 @@ class BillingService:
         answer_callback: Callable[..., None],
         answer_pre_checkout: Callable[..., None],
         extract_user_id: Callable[[Mapping[str, Any]], int | None],
-        config_redis: Callable[[], Any],
-        get_chat_config: Callable[[Any, str], Mapping[str, Any]],
     ) -> None:
         self.credits = credits
         self.admin_report = admin_report
@@ -49,8 +47,6 @@ class BillingService:
         self.answer_callback = answer_callback
         self.answer_pre_checkout = answer_pre_checkout
         self.extract_user_id = extract_user_id
-        self.config_redis = config_redis
-        self.get_chat_config = get_chat_config
 
     get_onboarding_credits = staticmethod(get_ai_onboarding_credits)
     get_packs = staticmethod(get_ai_billing_packs)
@@ -111,22 +107,17 @@ class BillingService:
     def handle_pre_checkout(self, query: dict[str, Any]) -> None:
         sender = query.get("from") or {}
         telegram_language_code = sender.get("language_code")
+        payload_parts = str(query.get("invoice_payload") or "").split(":")
+        payload_locale = (
+            payload_parts[3]
+            if len(payload_parts) >= 4 and payload_parts[0] == "topup"
+            else None
+        )
         locale = resolve_locale(
-            None,
+            payload_locale,
             telegram_language_code=telegram_language_code,
             chat_type="private",
         )
-        try:
-            user_id = int(str(sender.get("id")))
-            redis_client = self.config_redis()
-            config = self.get_chat_config(redis_client, str(user_id))
-            locale = resolve_locale(
-                config.get("language"),
-                telegram_language_code=telegram_language_code,
-                chat_type="private",
-            )
-        except Exception:
-            pass
         with use_locale(locale):
             billing_callbacks.handle_pre_checkout_query(
                 query,

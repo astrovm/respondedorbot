@@ -43,14 +43,12 @@ def test_handle_msg_topup_private_returns_keyboard():
     )
 
 
-def test_pre_checkout_uses_saved_private_chat_language():
+def test_pre_checkout_uses_invoice_language_without_loading_config():
     from api.billing.service import BillingService
 
     credits = MagicMock()
     credits.is_configured.return_value = True
     answer_pre_checkout = MagicMock()
-    redis_client = MagicMock()
-    get_chat_config = MagicMock(return_value={"language": "en"})
     service = BillingService(
         credits=credits,
         admin_report=MagicMock(),
@@ -60,25 +58,75 @@ def test_pre_checkout_uses_saved_private_chat_language():
         answer_callback=MagicMock(),
         answer_pre_checkout=answer_pre_checkout,
         extract_user_id=MagicMock(),
-        config_redis=MagicMock(return_value=redis_client),
-        get_chat_config=get_chat_config,
     )
     query = {
         "id": "pcq-1",
         "from": {"id": 42, "language_code": "es"},
-        "invoice_payload": "invalid",
+        "invoice_payload": "topup:invalid:42:en",
         "currency": "XTR",
         "total_amount": 1,
     }
 
     service.handle_pre_checkout(query)
 
-    get_chat_config.assert_called_once_with(redis_client, "42")
     answer_pre_checkout.assert_called_once_with(
         "pcq-1",
         ok=False,
         error_message="I could not validate this payment",
     )
+
+
+def test_pre_checkout_old_invoice_uses_telegram_language():
+    from api.billing.service import BillingService
+
+    credits = MagicMock()
+    credits.is_configured.return_value = True
+    answer_pre_checkout = MagicMock()
+    service = BillingService(
+        credits=credits,
+        admin_report=MagicMock(),
+        telegram=MagicMock(),
+        telegram_request=MagicMock(),
+        guard_callback=MagicMock(),
+        answer_callback=MagicMock(),
+        answer_pre_checkout=answer_pre_checkout,
+        extract_user_id=MagicMock(),
+    )
+
+    service.handle_pre_checkout(
+        {
+            "id": "pcq-old",
+            "from": {"id": 42, "language_code": "en"},
+            "invoice_payload": "invalid",
+            "currency": "XTR",
+            "total_amount": 1,
+        }
+    )
+
+    answer_pre_checkout.assert_called_once_with(
+        "pcq-old",
+        ok=False,
+        error_message="I could not validate this payment",
+    )
+
+
+def test_invoice_payload_carries_current_locale():
+    from api.billing.callbacks import send_stars_invoice
+    from api.core.i18n import use_locale
+
+    telegram_request = MagicMock(return_value=({"ok": True}, None))
+
+    with use_locale("en"):
+        sent = send_stars_invoice(
+            chat_id="42",
+            user_id=42,
+            pack={"id": "p50", "credits": 5_000, "xtr": 25},
+            format_credits=lambda amount: f"{amount / 100:.2f}",
+            telegram_request=telegram_request,
+        )
+
+    assert sent
+    assert telegram_request.call_args.kwargs["json_payload"]["payload"] == "topup:p50:42:en"
 
 
 def test_handle_msg_topup_group_redirects_private(monkeypatch):

@@ -62,13 +62,25 @@ def test_english_locale_reaches_help_commands_markets_and_tasks():
 def test_english_creditlog_has_no_spanish_labels():
     from api.admin.commands import build_creditlog_lines
 
+    entry = {
+        "metadata": {
+            "model_breakdown": [
+                {
+                    "model": "~deepseek/deepseek-v4-flash-latest",
+                    "input_cached_tokens": 1_000,
+                }
+            ]
+        }
+    }
     with use_locale("en"):
-        text = "\n".join(build_creditlog_lines([{"metadata": {}}]))
+        text = "\n".join(build_creditlog_lines([entry]))
 
     assert "latest AI settlements:" in text
     assert "no date | cmd=no command | status=ok" in text
     assert "reserved=0.00 charged=0.00 refund=0.00 extra=0.00 debt=0.00" in text
     assert "requests: no segments" in text
-    assert "models: no models" in text
+    assert "models: ~deepseek/deepseek-v4-flash-latest=0" in text
+    assert "cached_tokens=1000 cache_savings=" in text
     assert "sin fecha" not in text
     assert "reservado=" not in text
+    assert "cacheados=" not in text

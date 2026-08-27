@@ -172,7 +172,10 @@ def _summarize_model_cache(items: Sequence[object]) -> Optional[str]:
             ) // 1_000_000
     if cached_tokens_total <= 0:
         return None
-    return f"cacheados={cached_tokens_total} ahorro_cache={savings_total}"
+    return (
+        f"{tr('admin.creditlog.cached_tokens')}={cached_tokens_total} "
+        f"{tr('admin.creditlog.cache_savings')}={savings_total}"
+    )
 
 
 def _metadata_credit(metadata: Mapping[str, Any], *keys: str) -> int:
