@@ -77,12 +77,18 @@ class AICreditAuthorizer:
     billing: AIMessageBilling
     operation_id: str
     reservations: list[dict[str, Any]]
+    initial_model_reserve_credit_units: Optional[int] = None
     _counts: dict[str, int] = field(default_factory=dict)
     _authorization_keys: set[str] = field(default_factory=set)
     _lock: Lock = field(default_factory=Lock)
     _closed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        if self.initial_model_reserve_credit_units is None:
+            self.initial_model_reserve_credit_units = sum(
+                max(0, int(item.get("reserved_credit_units", 0) or 0))
+                for item in self.reservations
+            )
         mark_ai_operation_active(self.operation_id)
 
     def close(self) -> None:
@@ -125,14 +131,19 @@ class AICreditAuthorizer:
             self._counts[normalized_kind] = count
             self._authorization_keys.add(authorization_key)
 
-            # The normal admission hold already covers the first chat model call.
+            reserve_units = max(0, int(estimated_credit_units or 0))
             if normalized_kind == "model" and count == 1:
-                return None
+                reserve_units = max(
+                    0,
+                    reserve_units - int(self.initial_model_reserve_credit_units or 0),
+                )
+                if reserve_units == 0:
+                    return None
 
             usage_tag = f"ai_extension:{authorization_key}"
             reservation, error = self.billing.reserve_ai_credits(
                 usage_tag,
-                estimated_credit_units,
+                reserve_units,
                 metadata={
                     "operation_id": self.operation_id,
                     "authorization_kind": normalized_kind,
@@ -148,7 +159,7 @@ class AICreditAuthorizer:
                     self.operation_id,
                     normalized_kind,
                     count,
-                    estimated_credit_units,
+                    reserve_units,
                 )
                 return error
             if reservation:
@@ -158,7 +169,7 @@ class AICreditAuthorizer:
                 self.operation_id,
                 normalized_kind,
                 count,
-                estimated_credit_units,
+                reserve_units,
             )
             return None
 
@@ -555,6 +566,8 @@ class AIMessageBilling:
     def create_authorizer(
         self,
         reservations: List[Optional[Dict[str, Any]]],
+        *,
+        model_reserve_credit_units: Optional[int] = None,
     ) -> AICreditAuthorizer:
         """Create the request-scoped gate used by provider and tool runtimes."""
 
@@ -574,7 +587,12 @@ class AIMessageBilling:
             elif source != self.payer_source:
                 raise ValueError("AI interaction reservations must use one payer")
         operation_id = next(iter(operation_ids), self.operation_id("legacy_ai_response"))
-        return AICreditAuthorizer(self, operation_id, active)
+        return AICreditAuthorizer(
+            self,
+            operation_id,
+            active,
+            initial_model_reserve_credit_units=model_reserve_credit_units,
+        )
 
     def record_provider_segment(
         self,

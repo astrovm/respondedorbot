@@ -8,7 +8,7 @@ from api.tasks.executor import TaskExecutor
 
 
 class _Authorizer:
-    def __init__(self, reservations):
+    def __init__(self, reservations, **_kwargs):
         self.reservations = [item for item in reservations if item]
 
     def __call__(self, *_args, **_kwargs):

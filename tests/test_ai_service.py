@@ -2,7 +2,7 @@ from tests.support import *
 
 
 class _Authorizer:
-    def __init__(self, reservations):
+    def __init__(self, reservations, **_kwargs):
         self.reservations = [item for item in reservations if item]
 
     def __call__(self, *_args, **_kwargs):
@@ -212,6 +212,10 @@ def test_run_summary_settles_from_streamed_provider_usage():
     )
 
     assert result == ("summary", None, False)
+    billing_helper.create_authorizer.assert_called_once_with(
+        [reservation],
+        model_reserve_credit_units=3,
+    )
     billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
         [reservation],
         [segment],

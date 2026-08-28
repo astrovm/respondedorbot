@@ -90,6 +90,29 @@ def test_separate_provider_invocations_extend_the_same_operation():
     assert len(authorizer.reservations) == 2
 
 
+def test_first_model_request_reserves_only_the_admission_gap():
+    billing = MagicMock()
+    billing.reserve_ai_credits.return_value = (
+        {"source": "user", "reserved_credit_units": 7},
+        None,
+    )
+    authorizer = AICreditAuthorizer(
+        billing=billing,
+        operation_id="operation-1",
+        reservations=[{"source": "user", "reserved_credit_units": 3}],
+    )
+
+    error = authorizer(
+        "model",
+        10,
+        {"invocation_id": "first", "round": 1, "attempt": 1},
+    )
+
+    assert error is None
+    billing.reserve_ai_credits.assert_called_once()
+    assert billing.reserve_ai_credits.call_args.args[1] == 7
+
+
 def test_billing_session_keeps_the_initial_payer_for_extensions():
     db = MagicMock()
     db.is_configured.return_value = True
@@ -471,6 +494,20 @@ def test_reconciler_settles_durable_usage_left_by_a_crash():
     assert result == {"settled": 1, "pending": 0, "unresolved": 0}
     credits.settle_ai_operation_once.assert_called_once()
     assert credits.settle_ai_operation_once.call_args.kwargs["actual_credit_units"] > 0
+
+
+def test_reconciler_refunds_a_stale_reservation_without_provider_usage():
+    credits = MagicMock()
+    operation = _operation(_chat_segment(cost=0.0001))
+    operation["segments"] = []
+    credits.list_unsettled_ai_operations.return_value = [operation]
+
+    result = _reconciler(credits).run_once()
+
+    assert result == {"settled": 1, "pending": 0, "unresolved": 0}
+    settled = credits.settle_ai_operation_once.call_args.kwargs
+    assert settled["actual_credit_units"] == 0
+    assert settled["metadata"]["reason"] == "unused_stale_reservation"
 
 
 def test_reconciler_does_not_settle_an_active_provider_operation():

@@ -162,7 +162,12 @@ class TaskExecutor:
             )
             return should_delete
 
-        authorizer = billing.create_authorizer([charge_meta])
+        authorizer = billing.create_authorizer(
+            [charge_meta],
+            model_reserve_credit_units=int(
+                (charge_meta or {}).get("reserved_credit_units", 0) or 0
+            ),
+        )
         response_meta[AI_COST_AUTHORIZER_KEY] = authorizer
         response_meta[AI_SEGMENT_RECORDER_KEY] = authorizer.record_provider_segment
 

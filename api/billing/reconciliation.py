@@ -311,12 +311,17 @@ class AIBillingReconciler:
             )
 
         reserve_metadata = dict(operation.get("reserve_metadata") or {})
+        settlement_reason = (
+            "reconciliation_timeout"
+            if still_pending
+            else "recovered_provider_usage"
+            if segments
+            else "unused_stale_reservation"
+        )
         settlement_metadata = {
             **reserve_metadata,
             "operation_id": operation_id,
-            "reason": (
-                "reconciliation_timeout" if still_pending else "recovered_provider_usage"
-            ),
+            "reason": settlement_reason,
             "billing_segments": segments,
             "pricing_version": breakdown.get("pricing_version"),
             "raw_usd_micros": breakdown.get("raw_usd_micros", 0),

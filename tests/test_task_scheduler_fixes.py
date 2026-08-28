@@ -99,7 +99,7 @@ def _build_executor_for_tests(
     configured_billing = billing_factory.return_value
 
     class _Authorizer:
-        def __init__(self, reservations):
+        def __init__(self, reservations, **_kwargs):
             self.reservations = [item for item in reservations if item]
 
         def __call__(self, *_args, **_kwargs):

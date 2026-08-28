@@ -971,12 +971,13 @@ def list_unsettled_ai_operations(limit: int = 100) -> List[Dict[str, Any]]:
                     '[]'::jsonb
                 ) AS segments
             FROM pending
-            WHERE EXISTS (
-                SELECT 1
-                FROM credit_ledger AS usage
-                WHERE usage.event_type = 'ai_provider_usage'
-                  AND usage.metadata->>'operation_id' = pending.operation_id
-            )
+            WHERE pending.authorized > 0
+               OR EXISTS (
+                    SELECT 1
+                    FROM credit_ledger AS usage
+                    WHERE usage.event_type = 'ai_provider_usage'
+                      AND usage.metadata->>'operation_id' = pending.operation_id
+                )
             ORDER BY pending.created_at
             LIMIT %s
             """,

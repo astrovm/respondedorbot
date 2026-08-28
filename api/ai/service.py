@@ -164,8 +164,12 @@ class AIService:
         request: AIConversationRequest,
         reservations: List[Optional[Dict[str, Any]]],
         initial_segments: List[Mapping[str, Any]],
+        model_reserve_credit_units: int,
     ) -> tuple[Any, Dict[str, Any]]:
-        session = request.billing_helper.create_authorizer(reservations)
+        session = request.billing_helper.create_authorizer(
+            reservations,
+            model_reserve_credit_units=model_reserve_credit_units,
+        )
         for segment in initial_segments:
             session.record_provider_segment(segment)
         return session, {
@@ -352,6 +356,11 @@ class AIService:
             request,
             settlement_reservations,
             media_billing_segments,
+            sum(
+                int(reservation.get("reserved_credit_units", 0) or 0)
+                for reservation in (base_charge_meta, context_charge_meta)
+                if reservation
+            ),
         )
         try:
             return self._finish_conversation_session(
@@ -396,7 +405,12 @@ class AIService:
 
         authorizer = None
         try:
-            authorizer = request.billing_helper.create_authorizer([base_charge_meta])
+            authorizer = request.billing_helper.create_authorizer(
+                [base_charge_meta],
+                model_reserve_credit_units=int(
+                    (base_charge_meta or {}).get("reserved_credit_units", 0) or 0
+                ),
+            )
             response_meta: dict[str, Any] = {
                 AI_COST_AUTHORIZER_KEY: authorizer,
                 AI_SEGMENT_RECORDER_KEY: authorizer.record_provider_segment,
