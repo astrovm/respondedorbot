@@ -259,7 +259,7 @@ def test_run_summary_refunds_first_round_authorization_denial():
         stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
     )
 
-    assert result == ("insufficient credits", None, True)
+    assert result == ("insufficient credits", None, False)
     billing_helper.refund_reserved_ai_credits.assert_called_once_with(
         reservation,
         reason="summary_stream_fallback",
@@ -312,7 +312,7 @@ def test_run_summary_settles_usage_before_authorization_denial():
         stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
     )
 
-    assert result == ("insufficient credits", None, True)
+    assert result == ("insufficient credits", None, False)
     billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
         [reservation],
         [segment],

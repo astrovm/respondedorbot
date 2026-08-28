@@ -405,7 +405,7 @@ class AIService:
                     reservation,
                     reason="summary_stream_fallback",
                 )
-        return final_text, pending_marker, True
+        return final_text, pending_marker, False
 
     def run_summary_command_stream(
         self,
