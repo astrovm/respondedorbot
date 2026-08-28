@@ -6,12 +6,18 @@ import json
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from api.ai.pricing import calculate_billing_for_segments, credit_units_from_usd_micros
 from api.billing.credit_units import CREDIT_SCALE, rescale_credit_units
+from api.billing.provider_usage import provider_segment_id
+from api.billing.reconciliation import (
+    mark_ai_operation_active,
+    mark_ai_operation_inactive,
+)
 from api.i18n import current_locale, normalize_locale, use_locale
 from api.memory.compaction import CompactionPlan
 
@@ -34,6 +40,23 @@ def _reservation_settlement_id(reservation: Mapping[str, Any]) -> str:
     metadata = reservation.get("metadata")
     metadata_id = metadata.get("settlement_id") if isinstance(metadata, Mapping) else None
     return str(reservation.get("settlement_id") or metadata_id or "")
+
+
+def _reservation_operation_id(reservation: Mapping[str, Any]) -> str:
+    metadata = reservation.get("metadata")
+    metadata_id = metadata.get("operation_id") if isinstance(metadata, Mapping) else None
+    return str(reservation.get("operation_id") or metadata_id or "")
+
+
+@contextmanager
+def _active_operation(operation_id: str) -> Iterator[None]:
+    if operation_id:
+        mark_ai_operation_active(operation_id)
+    try:
+        yield
+    finally:
+        if operation_id:
+            mark_ai_operation_inactive(operation_id)
 
 
 @dataclass
@@ -70,6 +93,8 @@ class DurableCompactionQueue:
         save_result: Callable[[Any, str, str, str], None],
         estimate_reserve: Callable[[CompactionPlan], int],
         settle_reservation: Callable[..., Mapping[str, Any]],
+        record_provider_usage: Callable[..., bool],
+        list_provider_usage: Callable[..., list[dict[str, Any]]],
         logger: Any,
         admin_report: Callable[..., Any] | None = None,
     ) -> None:
@@ -80,6 +105,8 @@ class DurableCompactionQueue:
         self._save_result = save_result
         self._estimate_reserve = estimate_reserve
         self._settle_reservation = settle_reservation
+        self._record_provider_usage = record_provider_usage
+        self._list_provider_usage = list_provider_usage
         self._logger = logger
         self._admin_report = admin_report
         self._stop = threading.Event()
@@ -142,7 +169,12 @@ class DurableCompactionQueue:
                 reserved_credit_units=int(reservation.get("reserved_credit_units") or 0),
                 actual_credit_units=0,
                 usage_tag=str(reservation.get("usage_tag") or usage_tag),
-                metadata={"reason": "memory_compaction_enqueue_failed"},
+                metadata={
+                    "reason": "memory_compaction_enqueue_failed",
+                    "operation_id": _reservation_operation_id(reservation),
+                    "settlement_id": _reservation_settlement_id(reservation),
+                    "credit_scale": CREDIT_SCALE,
+                },
             )
         return stored
 
@@ -193,21 +225,28 @@ class DurableCompactionQueue:
             token = uuid4().hex
             if not client.set(f"{_LOCK_PREFIX}{chat_id}", token, nx=True, ex=_LOCK_TTL_SECONDS):
                 continue
-            try:
-                self._process(client, job)
-                client.hdel(_JOBS_KEY, chat_id)
-                processed += 1
-            except Exception as error:
-                self._retry_or_refund(client, job, error)
-            finally:
-                lock_key = f"{_LOCK_PREFIX}{chat_id}"
-                if self._text(client.get(lock_key)) == token:
-                    client.delete(lock_key)
+            with _active_operation(_reservation_operation_id(job.reservation)):
+                try:
+                    self._process(client, job)
+                    client.hdel(_JOBS_KEY, chat_id)
+                    processed += 1
+                except Exception as error:
+                    self._retry_or_refund(client, job, error)
+                finally:
+                    lock_key = f"{_LOCK_PREFIX}{chat_id}"
+                    if self._text(client.get(lock_key)) == token:
+                        client.delete(lock_key)
         return processed
 
     def _process(self, client: Any, job: CompactionJob) -> None:
         current_summary = self._get_summary(client, job.chat_id)
         current_marker = self._get_marker(client, job.chat_id) if current_summary else None
+        if self._restore_provider_result(job):
+            client.hset(
+                _JOBS_KEY,
+                job.chat_id,
+                json.dumps(asdict(job), ensure_ascii=False),
+            )
         if (
             job.result_summary
             and current_summary == job.result_summary
@@ -235,12 +274,15 @@ class DurableCompactionQueue:
             job.result_summary = summary
             job.result_cost_usd_micros = cost
             job.result_billing_segment = billing_segment
+            self._persist_provider_usage(job)
             client.hset(
                 _JOBS_KEY,
                 job.chat_id,
                 json.dumps(asdict(job), ensure_ascii=False),
             )
 
+        else:
+            self._persist_provider_usage(job)
         self._save_result(
             client,
             job.chat_id,
@@ -287,14 +329,16 @@ class DurableCompactionQueue:
         reason: str,
         actual_credit_units: int | None = None,
     ) -> None:
-        billing = (
-            calculate_billing_for_segments([job.result_billing_segment])
-            if job.result_billing_segment is not None
-            else None
-        )
         reserved = rescale_credit_units(
             job.reservation.get("reserved_credit_units"),
             _reservation_credit_scale(job.reservation),
+        )
+        operation_id = self._persist_provider_usage(job)
+        billing_segments = self._provider_segments(job, operation_id)
+        billing = (
+            calculate_billing_for_segments(billing_segments)
+            if billing_segments
+            else None
         )
         pricing_complete = billing is None or billing.get("pricing_complete") is True
         billed_credit_units = (
@@ -320,24 +364,82 @@ class DurableCompactionQueue:
                     "billing_segment": job.result_billing_segment,
                 },
             )
+        usage_tag = str(job.reservation.get("usage_tag") or "")
+        pricing_breakdown = billing or {}
         self._settle_reservation(
             user_id=job.user_id,
             chat_id=job.reservation.get("chat_scope_id"),
             source=str(job.reservation.get("source") or "user"),
             reserved_credit_units=reserved,
             actual_credit_units=actual,
-            usage_tag=str(job.reservation.get("usage_tag") or ""),
+            usage_tag=usage_tag,
             metadata={
                 "reason": reason,
                 "message_id": job.message_id,
                 "settlement_id": _reservation_settlement_id(job.reservation),
+                "operation_id": operation_id,
                 "credit_scale": CREDIT_SCALE,
-                "billing_segments": [job.result_billing_segment]
-                if job.result_billing_segment is not None
-                else [],
-                "pricing_breakdown": billing or {},
+                "billing_segments": billing_segments,
+                "pricing_version": pricing_breakdown.get("pricing_version"),
+                "raw_usd_micros": pricing_breakdown.get("raw_usd_micros", 0),
+                "markup_multiplier": pricing_breakdown.get("markup_multiplier"),
+                "model_breakdown": pricing_breakdown.get("model_breakdown", []),
+                "tool_breakdown": pricing_breakdown.get("tool_breakdown", []),
+                "segment_breakdown": pricing_breakdown.get("segment_breakdown", []),
+                "pricing_complete": pricing_complete,
             },
         )
+
+    def _persist_provider_usage(self, job: CompactionJob) -> str:
+        operation_id = _reservation_operation_id(job.reservation)
+        if operation_id and job.result_billing_segment is not None:
+            self._record_provider_usage(
+                user_id=job.user_id,
+                chat_id=job.reservation.get("chat_scope_id"),
+                operation_id=operation_id,
+                segment_id=provider_segment_id(job.result_billing_segment),
+                segment=job.result_billing_segment,
+            )
+        return operation_id
+
+    def _provider_segments(
+        self,
+        job: CompactionJob,
+        operation_id: str,
+    ) -> list[dict[str, Any]]:
+        if operation_id:
+            durable = self._list_provider_usage(
+                user_id=job.user_id,
+                operation_id=operation_id,
+            )
+            if durable:
+                return durable
+        return (
+            [job.result_billing_segment]
+            if job.result_billing_segment is not None
+            else []
+        )
+
+    def _restore_provider_result(self, job: CompactionJob) -> bool:
+        if job.result_summary:
+            return False
+        operation_id = _reservation_operation_id(job.reservation)
+        if not operation_id:
+            return False
+        segments = self._list_provider_usage(
+            user_id=job.user_id,
+            operation_id=operation_id,
+        )
+        for segment in reversed(segments):
+            summary = str(segment.get("text") or "").strip()
+            if segment.get("kind") != "summary" or not summary:
+                continue
+            billing = calculate_billing_for_segments(segments)
+            job.result_summary = summary
+            job.result_billing_segment = segment
+            job.result_cost_usd_micros = int(billing.get("raw_usd_micros", 0) or 0)
+            return True
+        return False
 
     def _settle_invalid_job(self, decoded: Any, *, chat_id: str) -> bool:
         if not isinstance(decoded, Mapping):
@@ -364,6 +466,7 @@ class DurableCompactionQueue:
                     "reason": "memory_compaction_incompatible_job",
                     "chat_id": chat_id,
                     "settlement_id": _reservation_settlement_id(reservation),
+                    "operation_id": _reservation_operation_id(reservation),
                     "credit_scale": CREDIT_SCALE,
                 },
             )

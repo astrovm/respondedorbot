@@ -185,6 +185,56 @@ class _PsycopgValidatingMigrationCursor(_MigrationCursor):
         super().execute(query, params)
 
 
+class _CompactionRepairCursor:
+    def __init__(self):
+        self.balance = 100
+        self.migration_applied = False
+        self.fetchone_result = None
+        self.fetchall_result = []
+        self.corrections = []
+
+    def execute(self, query, params=None):
+        PostgresQuery(Transformer(None)).convert(query, params)
+        normalized = " ".join(str(query).split())
+        if "INSERT INTO credit_schema_migrations" in normalized:
+            if self.migration_applied:
+                self.fetchone_result = None
+            else:
+                self.migration_applied = True
+                self.fetchone_result = (params[0],)
+            return
+        if normalized.startswith("SELECT DISTINCT ON (refund.id)"):
+            self.fetchall_result = [
+                (
+                    15828,
+                    42,
+                    None,
+                    5,
+                    "user",
+                    "operation-1",
+                    "memory_compaction:123:m1",
+                )
+            ]
+            return
+        if "SELECT balance" in normalized and "FOR UPDATE" in normalized:
+            self.fetchone_result = (self.balance,)
+            return
+        if normalized.startswith("UPDATE credit_accounts SET balance"):
+            self.balance = int(params[0])
+            return
+        if (
+            "INSERT INTO credit_ledger" in normalized
+            and params[0] == "ai_reconciliation_correction"
+        ):
+            self.corrections.append(params)
+
+    def fetchone(self):
+        return self.fetchone_result
+
+    def fetchall(self):
+        return self.fetchall_result
+
+
 def test_should_deny_onboarding_grant_when_hourly_limit_reached():
     assert credits_db._should_deny_onboarding_grant(
         credits_db.ONBOARDING_MAX_GRANTS_PER_HOUR,
@@ -565,6 +615,55 @@ def test_settle_ai_reservation_once_is_idempotent():
     assert len(settlement_rows) == 1
 
 
+def test_settle_ai_reservation_once_uses_atomic_operation_when_available():
+    with patch(
+        "api.services.credits_db.settle_ai_operation_once",
+        return_value={"applied": True},
+    ) as settle_operation:
+        result = credits_db.settle_ai_reservation_once(
+            user_id=42,
+            chat_id=None,
+            source="user",
+            reserved_credit_units=5,
+            actual_credit_units=2,
+            usage_tag="memory_compaction:123:m1",
+            metadata={
+                "operation_id": "operation-1",
+                "settlement_id": "settlement-1",
+                "reason": "memory_compaction_success",
+            },
+        )
+
+    assert result == {"applied": True}
+    kwargs = settle_operation.call_args.kwargs
+    assert kwargs["operation_id"] == "operation-1"
+    assert kwargs["actual_credit_units"] == 2
+    assert kwargs["metadata"]["usage_tag"] == "memory_compaction:123:m1"
+    assert kwargs["metadata"]["payer_breakdown"] == [
+        {"scope": "user", "credit_units": 2}
+    ]
+
+
+def test_duplicate_compaction_refund_repair_restores_the_charged_balance_once():
+    cursor = _CompactionRepairCursor()
+
+    assert credits_db._repair_duplicate_compaction_refunds(cursor) == 1
+    assert cursor.balance == 95
+    assert len(cursor.corrections) == 1
+    assert cursor.corrections[0][4] == -5
+    assert json.loads(cursor.corrections[0][5]) == {
+        "source": "user",
+        "operation_id": "operation-1",
+        "usage_tag": "memory_compaction:123:m1",
+        "reversed_refund_ledger_id": 15828,
+        "reason": "duplicate_compaction_refund",
+    }
+
+    assert credits_db._repair_duplicate_compaction_refunds(cursor) == 0
+    assert cursor.balance == 95
+    assert len(cursor.corrections) == 1
+
+
 def test_apply_ai_debt_chat_source_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
     fake_cursor.balance = 110
@@ -769,6 +868,7 @@ def test_list_user_ai_charge_page_groups_rows_and_applies_internal_cursor():
     assert "WHERE user_id = %s" in query
     assert "group_cursor < %s" in query
     assert "memory_compaction_settlement" in query
+    assert "legacy.metadata->>'usage_tag'" in query
     assert "event_type = 'ai_reserve'" in query
     assert "NOT EXISTS" in query
     assert "SUM(mutation.amount)" in query
@@ -795,6 +895,76 @@ def test_list_user_ai_charge_page_groups_rows_and_applies_internal_cursor():
     )
     assert results["has_newer"] is True
     assert results["has_older"] is False
+
+
+def test_unsettled_operations_ignore_legacy_compaction_settlements():
+    class Cursor:
+        def __init__(self):
+            self.query = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            PostgresQuery(Transformer(None)).convert(query, params)
+            self.query = " ".join(str(query).split())
+
+        def fetchall(self):
+            return []
+
+    cursor = Cursor()
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch(
+            "api.services.credits_db.connect",
+            return_value=_FakeConnection(cursor),
+        ),
+    ):
+        assert credits_db.list_unsettled_ai_operations() == []
+
+    assert "settled.event_type = 'memory_compaction_settlement'" in cursor.query
+    assert "settled.metadata->>'usage_tag'" in cursor.query
+
+
+def test_list_ai_provider_segments_returns_all_calls_in_order():
+    class Cursor:
+        def __init__(self):
+            self.executed = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            PostgresQuery(Transformer(None)).convert(query, params)
+            self.executed = (" ".join(str(query).split()), params)
+
+        def fetchall(self):
+            return [
+                ({"metadata": {"provider_generation_id": "generation-1"}},),
+                ({"metadata": {"provider_generation_id": "generation-2"}},),
+            ]
+
+    cursor = Cursor()
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch(
+            "api.services.credits_db.connect",
+            return_value=_FakeConnection(cursor),
+        ),
+    ):
+        segments = credits_db.list_ai_provider_segments(42, "operation-1")
+
+    assert [
+        segment["metadata"]["provider_generation_id"] for segment in segments
+    ] == ["generation-1", "generation-2"]
+    assert cursor.executed[1] == (42, "operation-1")
+    assert "ORDER BY id" in cursor.executed[0]
 
 
 def test_list_user_ai_charge_page_reverses_newer_results_and_keeps_groups():
