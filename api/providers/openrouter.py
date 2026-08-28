@@ -109,6 +109,7 @@ class OpenRouterProvider(StreamingAIProvider):
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
         return self._runtime.complete(
             system_message,
@@ -116,6 +117,7 @@ class OpenRouterProvider(StreamingAIProvider):
             enable_web_search=enable_web_search,
             extra_tools=extra_tools,
             tool_context=tool_context,
+            on_usage_result=on_usage_result,
         )
 
     def stream(

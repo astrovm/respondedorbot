@@ -25,15 +25,15 @@ from api.tools.runtime import ToolRuntime
 logger = get_logger(__name__)
 _MAX_RETRIES = 2
 _PSEUDO_TOOL_CALL_PATTERN = re.compile(
-    r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$',
+    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<arguments>.*)\)\s*$",
     re.DOTALL,
 )
 _DSML_TOOL_CALL_PATTERN = re.compile(
     r'<｜｜DSML｜｜invoke\s+name="(?P<name>[A-Za-z_][A-Za-z0-9_]*)"\s*>\s*'
     r'<｜｜DSML｜｜parameter\s+name="url"\s+string="true"\s*>'
-    r'(?P<url>https?://[^<\s]+)'
-    r'</｜｜DSML｜｜parameter>\s*'
-    r'</｜｜DSML｜｜invoke>',
+    r"(?P<url>https?://[^<\s]+)"
+    r"</｜｜DSML｜｜parameter>\s*"
+    r"</｜｜DSML｜｜invoke>",
     re.DOTALL,
 )
 
@@ -49,9 +49,7 @@ def _is_retryable_provider_error(error: Exception) -> bool:
 
 
 def _is_json_decode_error(error: Exception) -> bool:
-    return isinstance(error, json.JSONDecodeError) or (
-        "JSONDecodeError" in type(error).__name__
-    )
+    return isinstance(error, json.JSONDecodeError) or ("JSONDecodeError" in type(error).__name__)
 
 
 def _format_provider_error_body(error: Exception) -> str:
@@ -132,6 +130,7 @@ class ProviderRuntime:
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
         runtime_tool_context = dict(tool_context or {})
         log_context = dict(runtime_tool_context)
@@ -148,6 +147,7 @@ class ProviderRuntime:
             enable_web_search=enable_web_search,
             extra_tools=extra_tools,
             tool_context=runtime_tool_context,
+            on_usage_result=on_usage_result,
         )
 
     def _run_chat_completion(
@@ -241,9 +241,7 @@ class ProviderRuntime:
                 return response
         except Exception as error:
             error_context = dict(tool_context or {})
-            error_context.update(
-                {"model": self._deps.primary_model, "tool_round": round_idx + 1}
-            )
+            error_context.update({"model": self._deps.primary_model, "tool_round": round_idx + 1})
             provider_error_body = _format_provider_error_body(error)
             logger.error(
                 "openrouter: chat error %s error=%s%s",
@@ -286,7 +284,7 @@ class ProviderRuntime:
         code = error.get("code")
         try:
             status_code = int(code) if code is not None else 0
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             status_code = 0
         if status_code in {408, 409, 429} or status_code >= 500:
             return True
@@ -312,12 +310,12 @@ class ProviderRuntime:
             try:
                 if float(usage.get(key) or 0) > 0:
                     return True
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
         server_tool_use = ensure_mapping(usage.get("server_tool_use")) or {}
         try:
             return int(server_tool_use.get("web_search_requests") or 0) > 0
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
 
     @staticmethod
@@ -445,12 +443,12 @@ class ProviderRuntime:
         if raw_arguments.startswith(("'", '"')):
             try:
                 url = ast.literal_eval(raw_arguments)
-            except (SyntaxError, ValueError):
+            except SyntaxError, ValueError:
                 return None
         else:
             try:
                 params = json.loads(raw_arguments)
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError, TypeError:
                 return None
             if not isinstance(params, dict):
                 return None
@@ -556,9 +554,7 @@ class ProviderRuntime:
             return None
 
         self._deps.increment_request_count()
-        remaining_web_search_uses = self._configured_web_search_max_uses(
-            enable_web_search
-        )
+        remaining_web_search_uses = self._configured_web_search_max_uses(enable_web_search)
         for round_idx in range(self._deps.max_tool_rounds):
             round_response = self._run_round_choice(
                 client=client,
@@ -618,6 +614,8 @@ class ProviderRuntime:
         result_metadata = {
             "provider": "openrouter",
             "tool_rounds": round_idx + 1,
+            "provider_generation_id": getattr(response, "id", None),
+            "provider_request_id": getattr(response, "_request_id", None),
             **(metadata or {}),
         }
         return self._deps.build_usage_result(
@@ -630,6 +628,36 @@ class ProviderRuntime:
             model=self._deps.primary_model,
             response=response,
             metadata=result_metadata,
+        )
+
+    @staticmethod
+    def _emit_usage_result(
+        callback: Optional[Callable[[AIUsageResult], None]],
+        result: Optional[AIUsageResult],
+    ) -> None:
+        if callback is not None and result is not None:
+            callback(result)
+
+    def _emit_intermediate_round_usage(
+        self,
+        callback: Optional[Callable[[AIUsageResult], None]],
+        response: Any,
+        message: Any,
+        round_idx: int,
+        round_web_search_requests: int,
+        tool_context: Optional[Dict[str, Any]],
+    ) -> None:
+        if callback is None:
+            return
+        metadata = {"web_search_requests": round_web_search_requests}
+        self._add_firecrawl_credits(metadata, tool_context)
+        callback(
+            self._build_round_result(
+                response,
+                message,
+                round_idx,
+                metadata=metadata,
+            )
         )
 
     def _handle_structured_tool_calls(
@@ -682,7 +710,7 @@ class ProviderRuntime:
         if web_search_requests is not None:
             try:
                 metadata["web_search_requests"] = int(web_search_requests)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 pass
         direct_search_requests = self._direct_web_search_request_count(message)
         if direct_search_requests:
@@ -692,11 +720,11 @@ class ProviderRuntime:
             1
             for annotation in annotations
             if (
-            getattr(annotation, "type", None) == "url_citation"
-            or (
-                isinstance(annotation, Mapping)
-                and str(annotation.get("type") or "") == "url_citation"
-            )
+                getattr(annotation, "type", None) == "url_citation"
+                or (
+                    isinstance(annotation, Mapping)
+                    and str(annotation.get("type") or "") == "url_citation"
+                )
             )
         )
         metadata["web_search_citation_count"] = citation_count
@@ -711,7 +739,7 @@ class ProviderRuntime:
         parameters = ensure_mapping(tool.get("parameters")) or {}
         try:
             return max(0, int(parameters.get("max_uses") or 0))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return 0
 
     def _configured_web_search_max_uses(self, enabled: bool) -> Optional[int]:
@@ -736,8 +764,7 @@ class ProviderRuntime:
         return [
             tool
             for tool in tools
-            if str((ensure_mapping(tool.get("function")) or {}).get("name") or "")
-            != "web_search"
+            if str((ensure_mapping(tool.get("function")) or {}).get("name") or "") != "web_search"
         ]
 
     @staticmethod
@@ -750,7 +777,7 @@ class ProviderRuntime:
         try:
             max_results = max(0, int(parameters.get("max_results") or 0))
             current_total = max(0, int(parameters.get("max_total_results") or 0))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return
         if max_results and current_total:
             parameters["max_total_results"] = min(
@@ -766,7 +793,7 @@ class ProviderRuntime:
                 0,
                 int(server_tool_use.get("web_search_requests") or 0),
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             request_count = 0
         if request_count:
             return request_count
@@ -827,7 +854,7 @@ class ProviderRuntime:
                 continue
             try:
                 payload = json.loads(str(item.get("content") or ""))
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError, TypeError:
                 continue
             result_items = (ensure_mapping(payload) or {}).get("results")
             if not isinstance(result_items, list):
@@ -993,15 +1020,14 @@ class ProviderRuntime:
         enable_web_search: bool,
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
         client = self._deps.get_client()
         if client is None:
             return None
 
         self._deps.increment_request_count()
-        remaining_web_search_uses = self._configured_web_search_max_uses(
-            enable_web_search
-        )
+        remaining_web_search_uses = self._configured_web_search_max_uses(enable_web_search)
         total_web_search_requests = 0
         for round_idx in range(self._deps.max_tool_rounds):
             round_response = self._run_round_choice(
@@ -1041,8 +1067,17 @@ class ProviderRuntime:
                     total_web_search_requests=total_web_search_requests,
                 )
                 if decision.result is not None:
+                    self._emit_usage_result(on_usage_result, decision.result)
                     return decision.result
                 if decision.continue_rounds:
+                    self._emit_intermediate_round_usage(
+                        on_usage_result,
+                        response,
+                        message,
+                        round_idx,
+                        round_web_search_requests,
+                        tool_context,
+                    )
                     current_messages = decision.messages
                     continue
                 break
@@ -1058,8 +1093,17 @@ class ProviderRuntime:
                     total_web_search_requests=total_web_search_requests,
                 )
                 if decision.continue_rounds:
+                    self._emit_intermediate_round_usage(
+                        on_usage_result,
+                        response,
+                        message,
+                        round_idx,
+                        round_web_search_requests,
+                        tool_context,
+                    )
                     current_messages = decision.messages
                     continue
+                self._emit_usage_result(on_usage_result, decision.result)
                 return decision.result
 
             if finish_reason == "length":
@@ -1068,12 +1112,14 @@ class ProviderRuntime:
                     "web_search_requests": total_web_search_requests,
                 }
                 self._add_firecrawl_credits(metadata, tool_context)
-                return self._build_round_result(
+                result = self._build_round_result(
                     response,
                     message,
                     round_idx,
                     metadata=metadata,
                 )
+                self._emit_usage_result(on_usage_result, result)
+                return result
 
             self._report_unexpected_finish(
                 response,

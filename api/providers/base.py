@@ -14,8 +14,7 @@ class AIProvider(Protocol):
     """Protocol for AI providers supporting completions."""
 
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     def is_available(self) -> bool:
         """Return whether this provider is configured and ready."""
@@ -29,6 +28,7 @@ class AIProvider(Protocol):
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
         """Execute a non-streaming completion with optional tool support."""
         ...
@@ -82,6 +82,7 @@ class ProviderChain:
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> ProviderResult:
         """Try each provider in order until one returns a result."""
         available = self.available_providers
@@ -90,12 +91,17 @@ class ProviderChain:
 
         for idx, provider in enumerate(available):
             try:
+                complete_kwargs: Dict[str, Any] = {
+                    "enable_web_search": enable_web_search,
+                    "extra_tools": extra_tools,
+                    "tool_context": tool_context,
+                }
+                if on_usage_result is not None:
+                    complete_kwargs["on_usage_result"] = on_usage_result
                 result = provider.complete(
                     system_message,
                     messages,
-                    enable_web_search=enable_web_search,
-                    extra_tools=extra_tools,
-                    tool_context=tool_context,
+                    **complete_kwargs,
                 )
                 if result is not None:
                     return ProviderResult(

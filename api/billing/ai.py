@@ -100,20 +100,8 @@ def _billing_summary_int(summary: Mapping[str, Any], key: str) -> int:
     return int(value) if isinstance(value, (int, float, str)) else 0
 
 
-def _segment_has_token_usage(segment: Optional[Mapping[str, Any]]) -> bool:
-    raw_usage = (segment or {}).get("usage") or {}
-    usage = dict(raw_usage) if isinstance(raw_usage, Mapping) else {}
-    raw_prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-    prompt_tokens_details = (
-        dict(raw_prompt_tokens_details) if isinstance(raw_prompt_tokens_details, Mapping) else {}
-    )
-    return (
-        int(usage.get("input_tokens", 0) or 0) > 0
-        or int(usage.get("output_tokens", 0) or 0) > 0
-        or int(usage.get("prompt_tokens", 0) or 0) > 0
-        or int(usage.get("completion_tokens", 0) or 0) > 0
-        or int(prompt_tokens_details.get("cached_tokens", 0) or 0) > 0
-    )
+def _billing_is_complete(summary: Mapping[str, Any]) -> bool:
+    return summary.get("pricing_complete") is True
 
 
 def build_topup_keyboard() -> Dict[str, Any]:
@@ -595,9 +583,12 @@ class AIMessageBilling:
                 "settlement_ids": settlement_ids,
                 "pricing_version": breakdown.get("pricing_version"),
                 "raw_usd_micros": breakdown.get("raw_usd_micros", 0),
+                "raw_usd_micros_exact": breakdown.get("raw_usd_micros_exact", "0"),
                 "markup_multiplier": breakdown.get("markup_multiplier"),
                 "model_breakdown": breakdown.get("model_breakdown", []),
                 "tool_breakdown": breakdown.get("tool_breakdown", []),
+                "segment_breakdown": breakdown.get("segment_breakdown", []),
+                "pricing_complete": breakdown.get("pricing_complete", False),
                 "unsupported_notes": breakdown.get("unsupported_notes", []),
                 "billing_segments": list(billing_segments or []),
                 "missing_usage_billing": bool(missing_usage_billing),
@@ -722,15 +713,26 @@ class AIMessageBilling:
         breakdown = calculate_billing_for_segments(billing_segments or [])
         actual_credit_units = _billing_summary_int(breakdown, "charged_credit_units")
         raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
-        has_usage = any(_segment_has_token_usage(segment) for segment in billing_segments)
         refunded_credit_units = 0
         extra_charged_credit_units = 0
         debt_applied_credit_units = 0
         extra_payer_scope: Optional[str] = None
         chat_scope_id = reservation_meta.get("chat_scope_id")
-        if raw_usd_micros == 0 and not has_usage:
-            # Providers may omit usage entirely; zero must not imply a free call.
+        if not _billing_is_complete(breakdown):
+            # Missing provider evidence is ambiguous; zero must not imply a free call.
             actual_credit_units = reserved_credit_units
+            self.admin_reporter(
+                "liquidación IA sin costo de proveedor verificable; se mantiene la reserva",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credit_units": reserved_credit_units,
+                    "unsupported_notes": breakdown.get("unsupported_notes", []),
+                    "billing_segments": list(billing_segments or []),
+                },
+            )
         if actual_credit_units < reserved_credit_units:
             refunded_credit_units = reserved_credit_units - actual_credit_units
             try:
@@ -1156,10 +1158,20 @@ class AIMessageBilling:
     ) -> tuple[Mapping[str, Any], SettlementAdjustment]:
         breakdown = calculate_billing_for_segments(billing_segments)
         actual = _billing_summary_int(breakdown, "charged_credit_units")
-        raw_usd_micros = _billing_summary_int(breakdown, "raw_usd_micros")
-        has_usage = any(_segment_has_token_usage(item) for item in billing_segments)
-        if raw_usd_micros == 0 and not has_usage:
+        if not _billing_is_complete(breakdown):
             actual = batch.reserved_credit_units
+            self.admin_reporter(
+                "liquidación IA batch sin costo de proveedor verificable; se mantiene la reserva",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                    "unsupported_notes": breakdown.get("unsupported_notes", []),
+                    "billing_segments": list(billing_segments),
+                },
+            )
 
         if actual < batch.reserved_credit_units:
             refund = self._refund_batch_overreserve(

@@ -1,13 +1,49 @@
+from types import SimpleNamespace
+
 from tests.support import *
+
+
+def test_summary_model_uses_openrouter_reported_cost():
+    from api.memory.summary import call_summary_model
+
+    response = SimpleNamespace(
+        id="generation-summary",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="summary"),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=25,
+            cost="0.00010442124",
+        ),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response)))
+    )
+
+    text, cost, segment = call_summary_model(
+        [{"role": "user", "content": "summarize"}],
+        get_client=lambda: client,
+        estimate_tokens=lambda _messages: 100,
+        estimate_cost=lambda *_args: 999_999,
+        model="~deepseek/deepseek-v4-flash-latest",
+        max_tokens=100,
+        logger=MagicMock(),
+    )
+
+    assert text == "summary"
+    assert cost == 105
+    assert segment is not None
+    assert segment["usage"]["cost"] == "0.00010442124"
 
 
 def test_incremental_summary_helper_uses_only_messages_after_marker():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 6)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 6)]
 
     source = _build_incremental_summary_source(history, "old summary", "m3")
 
@@ -19,10 +55,7 @@ def test_incremental_summary_helper_uses_only_messages_after_marker():
 def test_incremental_summary_helper_reports_zero_delta_without_history_fallback():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 4)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 4)]
 
     source = _build_incremental_summary_source(history, "old summary", "m3")
 
@@ -34,10 +67,7 @@ def test_incremental_summary_helper_reports_zero_delta_without_history_fallback(
 def test_incremental_summary_helper_falls_back_to_all_history_when_marker_missing():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 4)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 4)]
 
     source = _build_incremental_summary_source(history, "old summary", "m99")
 
@@ -51,8 +81,7 @@ def test_compact_chat_memory_absorbs_only_uncompacted_messages_once():
 
     redis_client = MagicMock()
     messages = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 21)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 21)
     ]
 
     summary, kept, marker, cost = compact_chat_memory(
@@ -101,12 +130,10 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     recent_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(81, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(81, 101)
     ]
     full_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 101)
     ]
 
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
@@ -117,7 +144,9 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     )
     monkeypatch.setattr(
         "api.index.app_runtime.state.search_history",
-        lambda *_args, **_kwargs: [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}],
+        lambda *_args, **_kwargs: [
+            {"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}
+        ],
     )
     visible_history, summary_text, retrieved_messages, summary_cost, plan = prepare_chat_memory(
         MagicMock(),
@@ -139,8 +168,7 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
     prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     chat_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 101)
     ]
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_compacted_until", lambda *_: "m80")

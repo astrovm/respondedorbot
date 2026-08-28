@@ -162,6 +162,65 @@ def test_provider_runtime_keeps_direct_search_answer_unchanged():
     assert result.metadata["firecrawl_credits_used"] == 2
 
 
+def test_nonstream_runtime_reports_every_tool_round_for_billing():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    tool_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(name="calc", arguments='{"value":1}'),
+    )
+    responses = [
+        _FakeResponse(
+            [_FakeChoice("tool_calls", SimpleNamespace(content="", tool_calls=[tool_call]))]
+        ),
+        _FakeResponse([_FakeChoice("stop", SimpleNamespace(content="done", tool_calls=[]))]),
+    ]
+    for index, response in enumerate(responses, start=1):
+        response.id = f"generation-{index}"
+        response.usage = {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: _FakeClient(responses),
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage=dict(kwargs["response"].usage),
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda response: dict(response.usage),
+            primary_model="test/model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=SimpleNamespace(output="1", metadata={})),
+            tool_registry={"calc": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+    recorded = []
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "calculate"}],
+        enable_web_search=False,
+        extra_tools=[{"name": "calc"}],
+        on_usage_result=recorded.append,
+    )
+
+    assert result is not None
+    assert [item.metadata["provider_generation_id"] for item in recorded] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [item.usage["cost"] for item in recorded] == [0.001, 0.001]
+
+
 def test_provider_runtime_executes_tool_calls_until_stop():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -325,12 +384,8 @@ def test_provider_runtime_shares_web_search_budget_across_tool_rounds(
 
     assert result is not None
     assert result.metadata["web_search_requests"] == total_requests
-    assert client.calls[0]["tools"] == [
-        {"type": "function", "function": {"name": "calc"}}
-    ]
-    assert client.calls[1]["tools"] == [
-        {"type": "function", "function": {"name": "calc"}}
-    ]
+    assert client.calls[0]["tools"] == [{"type": "function", "function": {"name": "calc"}}]
+    assert client.calls[1]["tools"] == [{"type": "function", "function": {"name": "calc"}}]
     assert "extra_body" not in client.calls[0]
     assert "extra_body" not in client.calls[1]
 
@@ -911,9 +966,7 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
                             tool_calls=[
                                 SimpleNamespace(
                                     id="call_1",
-                                    function=SimpleNamespace(
-                                        name="calc", arguments='{"x": 1}'
-                                    ),
+                                    function=SimpleNamespace(name="calc", arguments='{"x": 1}'),
                                 )
                             ],
                             annotations=[],
@@ -954,9 +1007,7 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     system_message = {"role": "system", "content": "sys"}
     user_messages = [{"role": "user", "content": "hola"}]
 
-    runtime_from_complete, complete_execute_tool_fn = _build_runtime(
-        _tool_then_stop_responses()
-    )
+    runtime_from_complete, complete_execute_tool_fn = _build_runtime(_tool_then_stop_responses())
     complete_result = runtime_from_complete.complete(
         system_message,
         user_messages,
@@ -1254,10 +1305,7 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
 
-    decode_errors = [
-        json.JSONDecodeError("Expecting value", "\n         \n", 0)
-        for _ in range(5)
-    ]
+    decode_errors = [json.JSONDecodeError("Expecting value", "\n         \n", 0) for _ in range(5)]
     client = _FakeClient(decode_errors)
     admin_report = MagicMock()
 

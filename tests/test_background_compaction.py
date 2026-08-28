@@ -56,6 +56,52 @@ def _build_queue(redis_client, *, compact, save_result, settle_reservation):
     )
 
 
+def test_background_compaction_retains_reserve_when_provider_cost_is_missing():
+    from api.memory.background import CompactionJob, DurableCompactionQueue
+
+    settle_reservation = MagicMock(return_value={"applied": True})
+    admin_report = MagicMock()
+    queue = DurableCompactionQueue(
+        redis_factory=lambda: _FakeRedis(),
+        compact=MagicMock(),
+        get_summary=MagicMock(),
+        get_marker=MagicMock(),
+        save_result=MagicMock(),
+        estimate_reserve=MagicMock(),
+        settle_reservation=settle_reservation,
+        logger=MagicMock(),
+        admin_report=admin_report,
+    )
+    job = CompactionJob(
+        chat_id="123",
+        messages=[],
+        prior_summary=None,
+        expected_marker=None,
+        target_marker="m1",
+        reservation={
+            "reserved_credit_units": 3,
+            "credit_scale": 100,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        user_id=42,
+        message_id="99",
+        result_summary="summary",
+        result_billing_segment={
+            "kind": "summary",
+            "model": "unknown/model",
+            "usage": {},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter"},
+        },
+    )
+
+    queue._settle(job, reason="memory_compaction_success")
+
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 3
+    admin_report.assert_called_once()
+
+
 def test_compaction_is_persisted_before_the_model_runs_and_survives_queue_restart():
     from api.memory.compaction import CompactionPlan
 

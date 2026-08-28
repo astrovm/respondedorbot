@@ -255,11 +255,7 @@ class ProviderService:
             build_usage_result=self.build_usage_result,
             extract_usage_map=self.extract_usage_map,
             primary_model=model or self.primary_model,
-            max_tool_rounds=(
-                self.max_tool_rounds
-                if max_tool_rounds is None
-                else max_tool_rounds
-            ),
+            max_tool_rounds=(self.max_tool_rounds if max_tool_rounds is None else max_tool_rounds),
             tool_runtime=self.tool_runtime,
         )
 
@@ -281,16 +277,28 @@ class ProviderService:
     ) -> str | None:
         """Return the first successful provider text and record its usage."""
 
+        on_usage_result: Callable[[AIUsageResult], None] | None = None
+        reported_result_ids: set[int] = set()
+        if response_meta is not None:
+
+            def record_usage(result: AIUsageResult) -> None:
+                reported_result_ids.add(id(result))
+                self.append_billing_segment(response_meta, result)
+
+            on_usage_result = record_usage
+
         provider_result = self.get_chain().complete(
             system_message,
             messages,
             enable_web_search=enable_web_search,
             extra_tools=extra_tools,
             tool_context=tool_context,
+            on_usage_result=on_usage_result,
         )
         if not provider_result.result:
             return None
-        self.append_billing_segment(response_meta, provider_result.result)
+        if id(provider_result.result) not in reported_result_ids:
+            self.append_billing_segment(response_meta, provider_result.result)
         self.logger.info(
             "provider response provider=%s",
             provider_result.provider_name,
