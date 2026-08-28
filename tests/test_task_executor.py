@@ -17,6 +17,9 @@ class _Authorizer:
     def record_provider_segment(self, _segment):
         return None
 
+    def close(self):
+        return None
+
 
 def _configure_authorizer(billing: MagicMock) -> None:
     billing.create_authorizer.side_effect = _Authorizer

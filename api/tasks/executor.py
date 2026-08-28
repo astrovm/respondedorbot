@@ -147,7 +147,7 @@ class TaskExecutor:
             },
         )
         if charge_error:
-            logger.info("task %s no credits, skipping: %s", task_id, charge_error)
+            logger.info("task %s skipped: credit authorization denied", task_id)
             self._send_msg(
                 chat_id,
                 tr(
@@ -184,9 +184,11 @@ class TaskExecutor:
                     segments,
                     f"{reason}_provider_usage",
                 )
+                authorizer.close()
                 return
             for reservation in authorizer.reservations:
                 billing.refund_reserved_ai_credits(reservation, reason=reason)
+            authorizer.close()
 
         fallback_retries = 0
         empty_retries = 0
@@ -246,6 +248,7 @@ class TaskExecutor:
                 else:
                     segments = list(response_meta.get("billing_segments") or [])
                     settle_segments(segments, "task_success")
+                    authorizer.close()
                 return should_delete
 
             except Exception as e:

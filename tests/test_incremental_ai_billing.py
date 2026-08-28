@@ -12,7 +12,11 @@ from api.billing.authorization import (
     AI_SEGMENT_RECORDER_KEY,
     AIAuthorizationDenied,
 )
-from api.billing.reconciliation import AIBillingReconciler
+from api.billing.reconciliation import (
+    AIBillingReconciler,
+    mark_ai_operation_active,
+    mark_ai_operation_inactive,
+)
 from api.services import credits_db
 from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.providers.openrouter import OpenRouterProvider
@@ -467,6 +471,22 @@ def test_reconciler_settles_durable_usage_left_by_a_crash():
     assert result == {"settled": 1, "pending": 0, "unresolved": 0}
     credits.settle_ai_operation_once.assert_called_once()
     assert credits.settle_ai_operation_once.call_args.kwargs["actual_credit_units"] > 0
+
+
+def test_reconciler_does_not_settle_an_active_provider_operation():
+    credits = MagicMock()
+    credits.list_unsettled_ai_operations.return_value = [
+        _operation(_chat_segment(cost=0.0001))
+    ]
+    mark_ai_operation_active("operation-1")
+
+    try:
+        result = _reconciler(credits).run_once()
+    finally:
+        mark_ai_operation_inactive("operation-1")
+
+    assert result == {"settled": 0, "pending": 1, "unresolved": 0}
+    credits.settle_ai_operation_once.assert_not_called()
 
 
 def test_reconciler_recovers_interrupted_openrouter_generation():

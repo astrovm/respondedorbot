@@ -599,6 +599,91 @@ def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     return _run_credit_transaction(operation)
 
 
+def _ai_operation_is_settled(cur: Any, user_id: int, operation_id: str) -> bool:
+    if not operation_id:
+        return False
+    cur.execute(
+        """
+        SELECT 1
+        FROM credit_ledger
+        WHERE user_id = %s
+          AND event_type = 'ai_settlement_result'
+          AND metadata->>'operation_id' = %s
+        LIMIT 1
+        """,
+        (int(user_id), operation_id),
+    )
+    return cur.fetchone() is not None
+
+
+def _existing_ai_charge_result(
+    cur: Any,
+    *,
+    user_id: int,
+    event_type: str,
+    idempotency_key: str,
+    operation_id: str,
+    user_balance: int,
+    chat_balance: int,
+) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT amount, metadata->>'source'
+        FROM credit_ledger
+        WHERE user_id = %s
+          AND event_type = %s
+          AND metadata->>'idempotency_key' = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(user_id), event_type, idempotency_key),
+    )
+    existing = cur.fetchone()
+    if existing is None:
+        return None
+
+    rejection_reason: Optional[str] = None
+    if event_type == "ai_reserve":
+        cur.execute(
+            """
+            SELECT 1
+            FROM credit_ledger
+            WHERE user_id = %s
+              AND event_type = 'ai_refund'
+              AND metadata->>'settlement_id' = %s
+            LIMIT 1
+            """,
+            (int(user_id), idempotency_key),
+        )
+        if cur.fetchone() is not None:
+            rejection_reason = "reservation_refunded"
+        elif _ai_operation_is_settled(cur, user_id, operation_id):
+            rejection_reason = "operation_settled"
+
+    if rejection_reason:
+        return {
+            "ok": False,
+            "applied": False,
+            "reason": rejection_reason,
+            "source": None,
+            "amount": 0,
+            "user_balance": user_balance,
+            "chat_balance": chat_balance,
+            "user_balance_credit_units": user_balance,
+            "chat_balance_credit_units": chat_balance,
+        }
+    return {
+        "ok": True,
+        "applied": False,
+        "source": str(existing[1] or "user"),
+        "amount": max(0, -int(existing[0] or 0)),
+        "user_balance": user_balance,
+        "chat_balance": chat_balance,
+        "user_balance_credit_units": user_balance,
+        "chat_balance_credit_units": chat_balance,
+    }
+
+
 def charge_ai_credits(
     user_id: int,
     chat_id: Optional[int],
@@ -631,44 +716,20 @@ def charge_ai_credits(
         )
 
         if normalized_key:
-            cur.execute(
-                """
-                SELECT amount, metadata->>'source'
-                FROM credit_ledger
-                WHERE user_id = %s
-                  AND event_type = %s
-                  AND metadata->>'idempotency_key' = %s
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (int(user_id), normalized_event_type, normalized_key),
+            existing_result = _existing_ai_charge_result(
+                cur,
+                user_id=user_id,
+                event_type=normalized_event_type,
+                idempotency_key=normalized_key,
+                operation_id=operation_id,
+                user_balance=user_balance,
+                chat_balance=chat_balance,
             )
-            existing = cur.fetchone()
-            if existing is not None:
-                return {
-                    "ok": True,
-                    "applied": False,
-                    "source": str(existing[1] or "user"),
-                    "amount": max(0, -int(existing[0] or 0)),
-                    "user_balance": user_balance,
-                    "chat_balance": chat_balance,
-                    "user_balance_credit_units": user_balance,
-                    "chat_balance_credit_units": chat_balance,
-                }
+            if existing_result is not None:
+                return existing_result
 
-        if normalized_event_type == "ai_reserve" and operation_id:
-            cur.execute(
-                """
-                SELECT 1
-                FROM credit_ledger
-                WHERE user_id = %s
-                  AND event_type = 'ai_settlement_result'
-                  AND metadata->>'operation_id' = %s
-                LIMIT 1
-                """,
-                (int(user_id), operation_id),
-            )
-            if cur.fetchone() is not None:
+        if normalized_event_type == "ai_reserve":
+            if _ai_operation_is_settled(cur, user_id, operation_id):
                 return {
                     "ok": False,
                     "applied": False,
@@ -1217,7 +1278,7 @@ def refund_ai_charge(
     event_type: str = "ai_refund",
     metadata: Optional[Mapping[str, Any]] = None,
     idempotency_key: Optional[str] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """Refund a previously charged AI credit."""
 
     refund_amount = int(amount)
@@ -1226,7 +1287,7 @@ def refund_ai_charge(
     if normalized_key:
         metadata_dict["idempotency_key"] = normalized_key
 
-    def operation(cur: Any) -> Dict[str, int]:
+    def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
             cur, user_id, chat_id
         )
@@ -1247,6 +1308,15 @@ def refund_ai_charge(
                     "user_balance": int(user_balance),
                     "chat_balance": int(chat_balance),
                 }
+
+        operation_id = str(metadata_dict.get("operation_id") or "").strip()
+        if _ai_operation_is_settled(cur, user_id, operation_id):
+            return {
+                "applied": False,
+                "reason": "operation_settled",
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
         if source == "chat" and chat_id is not None:
             updated_chat_balance = chat_balance + refund_amount

@@ -1522,3 +1522,33 @@ def test_refund_reserved_ai_credits_rolls_back_creditless_cap_for_chat_source():
     billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
 
     mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_reservation_refund_preserves_identity_and_is_reason_independent():
+    billing = make_ai_message_billing(
+        message={"message_id": 44, "from": {"first_name": "Ana"}},
+    )
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "applied": True,
+        "source": "user",
+        "amount": 10,
+    }
+    operation_id = billing.operation_id("ai_response")
+    reservation, error = billing.reserve_ai_credits(
+        "ai_response_base",
+        10,
+        metadata={"operation_id": operation_id},
+    )
+    assert error is None
+    assert reservation is not None
+
+    billing.refund_reserved_ai_credits(reservation, reason="first_path")
+    billing.refund_reserved_ai_credits(reservation, reason="second_path")
+
+    calls = billing.credits_db_service.refund_ai_charge.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["metadata"]["operation_id"] == operation_id
+    assert calls[1].kwargs["metadata"]["operation_id"] == operation_id
+    assert calls[0].kwargs["idempotency_key"] == calls[1].kwargs["idempotency_key"]
+    assert calls[0].kwargs["idempotency_key"].endswith(":refund")

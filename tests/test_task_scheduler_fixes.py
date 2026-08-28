@@ -108,6 +108,9 @@ def _build_executor_for_tests(
         def record_provider_segment(self, _segment):
             return None
 
+        def close(self):
+            return None
+
     configured_billing.create_authorizer = MagicMock(side_effect=_Authorizer)
 
     return TaskExecutor(

@@ -11,6 +11,9 @@ class _Authorizer:
     def record_provider_segment(self, _segment):
         return None
 
+    def close(self):
+        return None
+
 
 def _billing_mock():
     billing = MagicMock()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 import os
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 
 import requests
@@ -21,6 +21,40 @@ _DEFAULT_INTERVAL_SECONDS = 60
 _DEFAULT_RETRY_WINDOW_SECONDS = 3_600
 _DEFAULT_SAFETY_CREDIT_UNITS = 10
 _DEFAULT_STALE_SECONDS = 300
+_active_operation_counts: dict[str, int] = {}
+_active_operation_lock = Lock()
+
+
+def mark_ai_operation_active(operation_id: str) -> None:
+    """Prevent reconciliation while provider work is still running."""
+
+    normalized = str(operation_id or "").strip()
+    if not normalized:
+        return
+    with _active_operation_lock:
+        _active_operation_counts[normalized] = (
+            _active_operation_counts.get(normalized, 0) + 1
+        )
+
+
+def mark_ai_operation_inactive(operation_id: str) -> None:
+    """Allow reconciliation after the last live request has finished."""
+
+    normalized = str(operation_id or "").strip()
+    if not normalized:
+        return
+    with _active_operation_lock:
+        remaining = _active_operation_counts.get(normalized, 0) - 1
+        if remaining > 0:
+            _active_operation_counts[normalized] = remaining
+        else:
+            _active_operation_counts.pop(normalized, None)
+
+
+def is_ai_operation_active(operation_id: str) -> bool:
+    normalized = str(operation_id or "").strip()
+    with _active_operation_lock:
+        return _active_operation_counts.get(normalized, 0) > 0
 
 
 def _configured_int(name: str, default: int) -> int:
@@ -219,9 +253,11 @@ class AIBillingReconciler:
         return totals
 
     def _reconcile_operation(self, operation: Mapping[str, Any]) -> str:
+        operation_id = str(operation["operation_id"])
+        if is_ai_operation_active(operation_id):
+            return "pending"
         if self._age_seconds(operation.get("last_activity_at")) < self._stale_seconds:
             return "pending"
-        operation_id = str(operation["operation_id"])
         entries = [dict(item) for item in operation.get("segments") or []]
         segments = [dict(item.get("segment") or {}) for item in entries]
         pending_indexes = [
@@ -323,4 +359,7 @@ __all__ = [
     "AIBillingReconciler",
     "fetch_openrouter_generation",
     "has_unresolved_provider_usage",
+    "is_ai_operation_active",
+    "mark_ai_operation_active",
+    "mark_ai_operation_inactive",
 ]

@@ -97,7 +97,7 @@ def _adjust_media_reservation(
         billing_helper,
         scope,
         required_credits,
-        reason=reason,
+        reason=f"{reason}_measured",
         metadata=metadata,
     )
 

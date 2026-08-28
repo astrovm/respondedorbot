@@ -32,7 +32,11 @@ from api.billing.credit_units import (
 )
 from api.ai.pricing import calculate_billing_for_segments
 from api.ai.random_replies import build_random_reply
-from api.billing.reconciliation import has_unresolved_provider_usage
+from api.billing.reconciliation import (
+    has_unresolved_provider_usage,
+    mark_ai_operation_active,
+    mark_ai_operation_inactive,
+)
 from api.core.logging import get_logger
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
@@ -76,6 +80,25 @@ class AICreditAuthorizer:
     _counts: dict[str, int] = field(default_factory=dict)
     _authorization_keys: set[str] = field(default_factory=set)
     _lock: Lock = field(default_factory=Lock)
+    _closed: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        mark_ai_operation_active(self.operation_id)
+
+    def close(self) -> None:
+        """Release this operation for crash reconciliation."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        mark_ai_operation_inactive(self.operation_id)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __call__(
         self,
@@ -94,6 +117,8 @@ class AICreditAuthorizer:
             f"{normalized_kind}:{hashlib.sha256(encoded_metadata).hexdigest()[:16]}"
         )
         with self._lock:
+            if self._closed:
+                return self.billing.billing_charge_error_message
             if authorization_key in self._authorization_keys:
                 return None
             count = self._counts.get(normalized_kind, 0) + 1
@@ -666,7 +691,10 @@ class AIMessageBilling:
             return None, self.billing_charge_error_message
 
         if not charge_result.get("ok"):
-            if charge_result.get("reason") == "operation_settled":
+            if charge_result.get("reason") in {
+                "operation_settled",
+                "reservation_refunded",
+            }:
                 return None, self.billing_charge_error_message
             return None, self._build_insufficient_credits_reply(charge_result)
 
@@ -1718,6 +1746,17 @@ class AIMessageBilling:
         reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
         source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
+        raw_reservation_metadata = reservation_meta.get("metadata")
+        reservation_metadata = (
+            dict(raw_reservation_metadata)
+            if isinstance(raw_reservation_metadata, Mapping)
+            else {}
+        )
+        reservation_identity = {
+            key: reservation_metadata[key]
+            for key in ("operation_id", "settlement_id")
+            if reservation_metadata.get(key)
+        }
         refund_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
             extra={
@@ -1726,6 +1765,7 @@ class AIMessageBilling:
                 "settled_credit_units": 0,
                 "refunded_credit_units": reserved_credit_units,
                 **dict(metadata or {}),
+                **reservation_identity,
             },
         )
 
@@ -1737,9 +1777,7 @@ class AIMessageBilling:
                 source=source,
                 event_type="ai_refund",
                 metadata=refund_metadata,
-                idempotency_key=(
-                    f"{refund_metadata['settlement_id']}:refund:{reason}"
-                ),
+                idempotency_key=f"{refund_metadata['settlement_id']}:refund",
             )
         except Exception as refund_error:
             self.admin_reporter(
