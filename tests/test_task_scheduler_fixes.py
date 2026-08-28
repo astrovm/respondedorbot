@@ -96,6 +96,22 @@ def _build_executor_for_tests(
     billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
     if billing_factory is None:
         billing_factory = MagicMock(return_value=billing)
+    configured_billing = billing_factory.return_value
+
+    class _Authorizer:
+        def __init__(self, reservations, **_kwargs):
+            self.reservations = [item for item in reservations if item]
+
+        def __call__(self, *_args, **_kwargs):
+            return None
+
+        def record_provider_segment(self, _segment):
+            return None
+
+        def close(self):
+            return None
+
+    configured_billing.create_authorizer = MagicMock(side_effect=_Authorizer)
 
     return TaskExecutor(
         ask_ai=ask_ai_fn,

@@ -326,6 +326,90 @@ def test_charge_ai_credits_locks_user_before_chat():
     assert result["chat_balance"] == 100
 
 
+def test_charge_ai_credits_rejects_a_new_hold_after_operation_settlement():
+    class SettledOperationCursor(_FakeCursor):
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split())
+            if "event_type = 'ai_settlement_result'" in normalized:
+                self.executed.append((normalized, params))
+                self.fetchone_result = (1,)
+                return
+            super().execute(query, params)
+
+    cursor = SettledOperationCursor(
+        hourly_count=0,
+        daily_count=0,
+        insert_granted=False,
+    )
+    cursor.balance = 100
+    connection = _FakeConnection(cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        result = credits_db.charge_ai_credits(
+            user_id=42,
+            chat_id=None,
+            amount=10,
+            event_type="ai_reserve",
+            metadata={"operation_id": "operation-1"},
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "operation_settled"
+    assert cursor.balance == 100
+    assert not any(
+        "INSERT INTO credit_ledger" in query for query, _params in cursor.executed
+    )
+
+
+def test_charge_ai_credits_does_not_reuse_a_refunded_reservation():
+    class RefundedReservationCursor(_FakeCursor):
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split())
+            if "metadata->>'idempotency_key' = %s" in normalized:
+                self.executed.append((normalized, params))
+                self.fetchone_result = (-10, "user")
+                return
+            if "event_type = 'ai_refund'" in normalized:
+                self.executed.append((normalized, params))
+                self.fetchone_result = (1,)
+                return
+            super().execute(query, params)
+
+    cursor = RefundedReservationCursor(
+        hourly_count=0,
+        daily_count=0,
+        insert_granted=False,
+    )
+    cursor.balance = 100
+    connection = _FakeConnection(cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        result = credits_db.charge_ai_credits(
+            user_id=42,
+            chat_id=None,
+            amount=10,
+            event_type="ai_reserve",
+            metadata={
+                "operation_id": "operation-1",
+                "settlement_id": "settlement-1",
+            },
+            idempotency_key="settlement-1",
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "reservation_refunded"
+    assert cursor.balance == 100
+    assert not any(
+        "INSERT INTO credit_ledger" in query for query, _params in cursor.executed
+    )
+
+
 def test_refund_ai_charge_chat_source_locks_user_before_chat():
     fake_cursor = _FakeCursor(hourly_count=0, daily_count=0, insert_granted=False)
     fake_cursor.balance = 110
@@ -344,7 +428,82 @@ def test_refund_ai_charge_chat_source_locks_user_before_chat():
         )
 
     assert _locked_accounts(fake_cursor) == [("user", 42), ("chat", 202)]
-    assert result == {"user_balance": 110, "chat_balance": 520}
+    assert result == {"applied": True, "user_balance": 110, "chat_balance": 520}
+
+
+def test_refund_ai_charge_reports_an_idempotent_replay_as_not_applied():
+    class ReplayedRefundCursor(_FakeCursor):
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split())
+            if "metadata->>'idempotency_key' = %s" in normalized:
+                self.executed.append((normalized, params))
+                self.fetchone_result = (1,)
+                return
+            super().execute(query, params)
+
+    cursor = ReplayedRefundCursor(
+        hourly_count=0,
+        daily_count=0,
+        insert_granted=False,
+    )
+    cursor.balance = 100
+    connection = _FakeConnection(cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        result = credits_db.refund_ai_charge(
+            user_id=42,
+            chat_id=None,
+            amount=10,
+            source="user",
+            idempotency_key="settlement-1:refund",
+        )
+
+    assert result == {"applied": False, "user_balance": 100, "chat_balance": 0}
+    assert cursor.balance == 100
+    assert not any(
+        "INSERT INTO credit_ledger" in query for query, _params in cursor.executed
+    )
+
+
+def test_refund_ai_charge_does_not_mutate_a_settled_operation():
+    class SettledOperationCursor(_FakeCursor):
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split())
+            if "event_type = 'ai_settlement_result'" in normalized:
+                self.executed.append((normalized, params))
+                self.fetchone_result = (1,)
+                return
+            super().execute(query, params)
+
+    cursor = SettledOperationCursor(
+        hourly_count=0,
+        daily_count=0,
+        insert_granted=False,
+    )
+    cursor.balance = 100
+    connection = _FakeConnection(cursor)
+
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch("api.services.credits_db.connect", return_value=connection),
+    ):
+        result = credits_db.refund_ai_charge(
+            user_id=42,
+            chat_id=None,
+            amount=10,
+            source="user",
+            metadata={"operation_id": "operation-1"},
+        )
+
+    assert result["applied"] is False
+    assert result["reason"] == "operation_settled"
+    assert cursor.balance == 100
+    assert not any(
+        "INSERT INTO credit_ledger" in query for query, _params in cursor.executed
+    )
 
 
 def test_settle_ai_reservation_once_is_idempotent():

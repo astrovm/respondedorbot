@@ -7,6 +7,24 @@ from unittest.mock import MagicMock
 from api.tasks.executor import TaskExecutor
 
 
+class _Authorizer:
+    def __init__(self, reservations, **_kwargs):
+        self.reservations = [item for item in reservations if item]
+
+    def __call__(self, *_args, **_kwargs):
+        return None
+
+    def record_provider_segment(self, _segment):
+        return None
+
+    def close(self):
+        return None
+
+
+def _configure_authorizer(billing: MagicMock) -> None:
+    billing.create_authorizer.side_effect = _Authorizer
+
+
 def _build_executor(
     *, ask_ai_return_value: str
 ) -> tuple[TaskExecutor, MagicMock, MagicMock, MagicMock]:
@@ -15,6 +33,7 @@ def _build_executor(
     admin_report = MagicMock()
     billing = MagicMock()
     billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+    _configure_authorizer(billing)
     billing_factory = MagicMock(return_value=billing)
     estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
@@ -82,6 +101,30 @@ class TestTaskExecutor:
             "-100123",
             "@testuser, no pude ejecutar la tarea «mandá las noticias»:\nsaldo insuficiente",
         )
+
+    def test_recurring_task_uses_a_new_billing_identity_for_each_execution(self):
+        executor, _billing, _ask_ai, _send_msg = _build_executor(
+            ask_ai_return_value="hola"
+        )
+        task = {
+            "id": "abc123",
+            "chat_id": "-100123",
+            "text": "mandá las noticias",
+            "user_name": "@testuser",
+            "user_id": 77,
+            "interval_seconds": 3600,
+            "trigger_config": {"type": "interval", "seconds": 3600},
+        }
+
+        executor.execute(task)
+        executor.execute(task)
+
+        factory_calls = executor._billing_factory.call_args_list
+        first_message_id = factory_calls[0].kwargs["message"]["message_id"]
+        second_message_id = factory_calls[1].kwargs["message"]["message_id"]
+        assert first_message_id.startswith("abc123:")
+        assert second_message_id.startswith("abc123:")
+        assert first_message_id != second_message_id
 
     def test_sends_scheduled_ai_message(self):
         executor, billing, ask_ai, send_msg = _build_executor(
@@ -235,6 +278,7 @@ class TestTaskExecutor:
         admin_report = MagicMock()
         billing = MagicMock()
         billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        _configure_authorizer(billing)
         billing_factory = MagicMock(return_value=billing)
         estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
@@ -277,6 +321,7 @@ class TestTaskExecutor:
         admin_report = MagicMock()
         billing = MagicMock()
         billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        _configure_authorizer(billing)
         billing_factory = MagicMock(return_value=billing)
         estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 

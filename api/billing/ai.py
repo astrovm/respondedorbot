@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
+from threading import Lock
 from typing import (
     Any,
     Callable,
@@ -29,8 +32,15 @@ from api.billing.credit_units import (
 )
 from api.ai.pricing import calculate_billing_for_segments
 from api.ai.random_replies import build_random_reply
+from api.billing.reconciliation import (
+    has_unresolved_provider_usage,
+    mark_ai_operation_active,
+    mark_ai_operation_inactive,
+)
+from api.core.logging import get_logger
 
 AdminReporter = Callable[[str, Optional[Exception], Optional[Dict[str, Any]]], None]
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +68,113 @@ class BatchSettlementRecord:
     breakdown: Mapping[str, Any]
     billing_segments: Sequence[Mapping[str, Any]]
     missing_usage_billing: bool = False
+
+
+@dataclass
+class AICreditAuthorizer:
+    """Extend one interaction's holds before each additional external cost."""
+
+    billing: AIMessageBilling
+    operation_id: str
+    reservations: list[dict[str, Any]]
+    initial_model_reserve_credit_units: Optional[int] = None
+    _counts: dict[str, int] = field(default_factory=dict)
+    _authorization_keys: set[str] = field(default_factory=set)
+    _lock: Lock = field(default_factory=Lock)
+    _closed: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if self.initial_model_reserve_credit_units is None:
+            self.initial_model_reserve_credit_units = sum(
+                max(0, int(item.get("reserved_credit_units", 0) or 0))
+                for item in self.reservations
+            )
+        mark_ai_operation_active(self.operation_id)
+
+    def close(self) -> None:
+        """Release this operation for crash reconciliation."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        mark_ai_operation_inactive(self.operation_id)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __call__(
+        self,
+        kind: str,
+        estimated_credit_units: int,
+        metadata: Mapping[str, Any],
+    ) -> str | None:
+        normalized_kind = str(kind or "provider")
+        encoded_metadata = json.dumps(
+            dict(metadata),
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+        ).encode()
+        authorization_key = (
+            f"{normalized_kind}:{hashlib.sha256(encoded_metadata).hexdigest()[:16]}"
+        )
+        with self._lock:
+            if self._closed:
+                return self.billing.billing_charge_error_message
+            if authorization_key in self._authorization_keys:
+                return None
+            count = self._counts.get(normalized_kind, 0) + 1
+            self._counts[normalized_kind] = count
+            self._authorization_keys.add(authorization_key)
+
+            reserve_units = max(0, int(estimated_credit_units or 0))
+            if normalized_kind == "model" and count == 1:
+                reserve_units = max(
+                    0,
+                    reserve_units - int(self.initial_model_reserve_credit_units or 0),
+                )
+                if reserve_units == 0:
+                    return None
+
+            usage_tag = f"ai_extension:{authorization_key}"
+            reservation, error = self.billing.reserve_ai_credits(
+                usage_tag,
+                reserve_units,
+                metadata={
+                    "operation_id": self.operation_id,
+                    "authorization_kind": normalized_kind,
+                    "authorization_sequence": count,
+                    "authorization_key": authorization_key,
+                    **dict(metadata),
+                },
+            )
+            if error:
+                self._authorization_keys.remove(authorization_key)
+                logger.warning(
+                    "AI cost authorization denied operation_id=%s kind=%s sequence=%d units=%d",
+                    self.operation_id,
+                    normalized_kind,
+                    count,
+                    reserve_units,
+                )
+                return error
+            if reservation:
+                self.reservations.append(reservation)
+            logger.info(
+                "AI cost authorization extended operation_id=%s kind=%s sequence=%d units=%d",
+                self.operation_id,
+                normalized_kind,
+                count,
+                reserve_units,
+            )
+            return None
+
+    def record_provider_segment(self, segment: Mapping[str, Any]) -> None:
+        self.billing.record_provider_segment(self.operation_id, segment)
 
 
 class AIBillingPack(TypedDict):
@@ -244,6 +361,8 @@ class AIMessageBilling:
     redis_client: Any = None
     creditless_user_hourly_limit: int = 0
     onboarding_checked: bool = False
+    payer_source: Optional[str] = None
+    message_cap_counted: bool = False
     billing_not_configured_message: str = field(default_factory=lambda: tr("billing.unavailable"))
     billing_missing_scope_message: str = field(default_factory=lambda: tr("billing.missing_scope"))
     billing_charge_error_message: str = field(default_factory=lambda: tr("billing.charge_error"))
@@ -322,10 +441,37 @@ class AIMessageBilling:
             return None
         return f"creditless_cap:{self.chat_id}:{self.user_id}"
 
+    def _count_message_for_cap(
+        self,
+        *,
+        source: str,
+        enforce_message_cap: bool,
+        charge_applied: bool,
+        chat_scope_id: Optional[int],
+        reserve_amount: int,
+        usage_tag: str,
+    ) -> Tuple[bool, Optional[str]]:
+        if source != "chat" or not enforce_message_cap or self.message_cap_counted:
+            return False, None
+
+        self.message_cap_counted = True
+        if not charge_applied:
+            return False, None
+
+        counted = self._creditless_cap_key(chat_scope_id) is not None
+        error = self._check_creditless_cap(
+            chat_scope_id=chat_scope_id,
+            reserve_amount=reserve_amount,
+            usage_tag=usage_tag,
+        )
+        return counted, error
+
     def _rollback_creditless_cap(self, reservation_meta: Optional[Mapping[str, Any]]) -> None:
         if not reservation_meta:
             return
         if str(reservation_meta.get("source") or "user") != "chat":
+            return
+        if reservation_meta.get("message_cap_counted") is False:
             return
 
         key = self._creditless_cap_key(reservation_meta.get("chat_scope_id"))
@@ -334,6 +480,7 @@ class AIMessageBilling:
 
         try:
             self.redis_client.decr(key)
+            self.message_cap_counted = False
         except Exception as error:
             self.admin_reporter(
                 "falló rollback de limite creditless",
@@ -368,6 +515,7 @@ class AIMessageBilling:
             "command": self.command,
             "usage_tag": usage_tag,
             "settlement_id": self._settlement_id(usage_tag),
+            "operation_id": self.operation_id(usage_tag),
             "message_id": self.message.get("message_id"),
             "origin_chat_id": self.chat_id,
             "credit_scale": CREDIT_SCALE,
@@ -375,6 +523,19 @@ class AIMessageBilling:
         if extra:
             metadata.update(dict(extra))
         return metadata
+
+    def operation_id(self, scope: str) -> str:
+        """Return a stable ID for one independently settled interaction."""
+
+        message_id = self.message.get("message_id")
+        return ":".join(
+            (
+                str(self.user_id or "unknown"),
+                self.chat_id,
+                str(message_id if message_id is not None else "unknown"),
+                str(scope or "ai_usage"),
+            )
+        )
 
     def _settlement_id(self, usage_tag: str) -> str:
         message_id = self.message.get("message_id")
@@ -403,6 +564,98 @@ class AIMessageBilling:
             enforce_message_cap=True,
         )
 
+    def create_authorizer(
+        self,
+        reservations: List[Optional[Dict[str, Any]]],
+        *,
+        model_reserve_credit_units: Optional[int] = None,
+    ) -> AICreditAuthorizer:
+        """Create the request-scoped gate used by provider and tool runtimes."""
+
+        active = [reservation for reservation in reservations if reservation]
+        operation_ids = {
+            str(metadata.get("operation_id"))
+            for reservation in active
+            if isinstance((metadata := reservation.get("metadata")), Mapping)
+            and metadata.get("operation_id")
+        }
+        if len(operation_ids) > 1:
+            raise ValueError("AI interaction reservations must use one operation ID")
+        for reservation in active:
+            source = str(reservation.get("source") or "user")
+            if self.payer_source is None:
+                self.payer_source = source
+            elif source != self.payer_source:
+                raise ValueError("AI interaction reservations must use one payer")
+        operation_id = next(iter(operation_ids), self.operation_id("legacy_ai_response"))
+        return AICreditAuthorizer(
+            self,
+            operation_id,
+            active,
+            initial_model_reserve_credit_units=model_reserve_credit_units,
+        )
+
+    def record_provider_segment(
+        self,
+        operation_id: str,
+        segment: Mapping[str, Any],
+    ) -> None:
+        """Persist provider usage before another provider or tool call starts."""
+
+        if self.user_id is None:
+            return
+        durable_segment = dict(segment)
+        metadata = durable_segment.get("metadata")
+        segment_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        if durable_segment.get("kind") != "web_search":
+            segment_metadata.pop("firecrawl_credits_used", None)
+            durable_segment["metadata"] = segment_metadata
+        provider_id = (
+            segment_metadata.get("provider_generation_id")
+            or segment_metadata.get("provider_request_id")
+        )
+        if provider_id:
+            segment_id = f"{durable_segment.get('source', 'provider')}:{provider_id}"
+        elif segment_metadata.get("tool_rounds"):
+            segment_id = ":".join(
+                (
+                    str(durable_segment.get("source") or "provider"),
+                    str(durable_segment.get("kind") or "unknown"),
+                    str(durable_segment.get("model") or "unknown"),
+                    str(segment_metadata["tool_rounds"]),
+                )
+            )
+        else:
+            encoded = json.dumps(
+                durable_segment,
+                sort_keys=True,
+                ensure_ascii=True,
+                default=str,
+            ).encode()
+            segment_id = hashlib.sha256(encoded).hexdigest()
+        try:
+            self.credits_db_service.record_ai_provider_usage(
+                user_id=self.user_id,
+                chat_id=(
+                    self.numeric_chat_id if is_group_chat_type(self.chat_type) else None
+                ),
+                operation_id=operation_id,
+                segment_id=segment_id,
+                segment=durable_segment,
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló persistir uso de proveedor IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "operation_id": operation_id,
+                    "segment_id": segment_id,
+                },
+            )
+            raise
+
     def reserve_background_ai_credits(
         self,
         usage_tag: str,
@@ -419,6 +672,42 @@ class AIMessageBilling:
             enforce_message_cap=False,
         )
 
+    def _restore_persisted_reservation(
+        self,
+        usage_tag: str,
+        chat_scope_id: Optional[int],
+        *,
+        enforce_message_cap: bool,
+    ) -> Optional[Dict[str, Any]]:
+        persisted = self.load_persisted_reservation_fn(usage_tag)
+        if not persisted:
+            return None
+
+        raw_metadata = persisted.get("metadata")
+        persisted_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        persisted_scale = persisted.get(
+            "credit_scale",
+            persisted_metadata.get("credit_scale"),
+        )
+        reservation = {
+            "reserved_credit_units": rescale_credit_units(
+                persisted.get("reserved_credit_units", 0),
+                persisted_scale,
+            ),
+            "chat_scope_id": persisted.get("chat_scope_id", chat_scope_id),
+            "source": str(persisted.get("source") or "user"),
+            "usage_tag": str(persisted.get("usage_tag") or usage_tag),
+            "metadata": persisted_metadata,
+            "credit_scale": CREDIT_SCALE,
+        }
+        if "message_cap_counted" in persisted:
+            reservation["message_cap_counted"] = bool(persisted["message_cap_counted"])
+
+        self.payer_source = str(reservation["source"])
+        if reservation["source"] == "chat" and enforce_message_cap:
+            self.message_cap_counted = True
+        return reservation
+
     def _reserve_ai_credits(
         self,
         usage_tag: str,
@@ -434,25 +723,13 @@ class AIMessageBilling:
         if self.user_id is None:
             return None, self.billing_missing_scope_message
 
-        persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
-        if persisted_reservation:
-            raw_metadata = persisted_reservation.get("metadata")
-            persisted_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-            persisted_scale = persisted_reservation.get(
-                "credit_scale",
-                persisted_metadata.get("credit_scale"),
-            )
-            return {
-                "reserved_credit_units": rescale_credit_units(
-                    persisted_reservation.get("reserved_credit_units", 0),
-                    persisted_scale,
-                ),
-                "chat_scope_id": persisted_reservation.get("chat_scope_id", chat_scope_id),
-                "source": str(persisted_reservation.get("source") or "user"),
-                "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
-                "metadata": persisted_metadata,
-                "credit_scale": CREDIT_SCALE,
-            }, None
+        reservation = self._restore_persisted_reservation(
+            usage_tag,
+            chat_scope_id,
+            enforce_message_cap=enforce_message_cap,
+        )
+        if reservation:
+            return reservation, None
 
         self._ensure_onboarding_checked()
 
@@ -469,6 +746,8 @@ class AIMessageBilling:
                 amount=reserve_amount,
                 event_type="ai_reserve",
                 metadata=reserve_metadata,
+                source=self.payer_source,
+                idempotency_key=str(reserve_metadata["settlement_id"]),
             )
         except Exception as error:
             self.admin_reporter(
@@ -485,11 +764,19 @@ class AIMessageBilling:
             return None, self.billing_charge_error_message
 
         if not charge_result.get("ok"):
+            if charge_result.get("reason") in {
+                "operation_settled",
+                "reservation_refunded",
+            }:
+                return None, self.billing_charge_error_message
             return None, self._build_insufficient_credits_reply(charge_result)
 
         source = str(charge_result.get("source") or "user")
+        if self.payer_source is None:
+            self.payer_source = source
+        charged_amount = max(0, int(charge_result.get("amount", reserve_amount) or 0))
         reservation_payload = {
-            "reserved_credit_units": reserve_amount,
+            "reserved_credit_units": charged_amount,
             "chat_scope_id": chat_scope_id,
             "source": source,
             "usage_tag": usage_tag,
@@ -497,14 +784,17 @@ class AIMessageBilling:
             "credit_scale": CREDIT_SCALE,
         }
 
-        if source == "chat" and enforce_message_cap:
-            cap_error = self._check_creditless_cap(
-                chat_scope_id=chat_scope_id,
-                reserve_amount=reserve_amount,
-                usage_tag=usage_tag,
-            )
-            if cap_error:
-                return None, cap_error
+        counted_for_cap, cap_error = self._count_message_for_cap(
+            source=source,
+            enforce_message_cap=enforce_message_cap,
+            charge_applied=bool(charge_result.get("applied", True)),
+            chat_scope_id=chat_scope_id,
+            reserve_amount=charged_amount,
+            usage_tag=usage_tag,
+        )
+        if cap_error:
+            return None, cap_error
+        reservation_payload["message_cap_counted"] = counted_for_cap
 
         self.persist_reservation_fn(usage_tag, reservation_payload)
         return reservation_payload, None
@@ -1370,6 +1660,99 @@ class AIMessageBilling:
             )
         return breakdown, SettlementAdjustment(actual)
 
+    @staticmethod
+    def _shared_operation_id(
+        reservations: Sequence[Mapping[str, Any]],
+    ) -> Optional[str]:
+        operation_ids = []
+        for reservation in reservations:
+            metadata = reservation.get("metadata")
+            if not isinstance(metadata, Mapping) or not metadata.get("operation_id"):
+                return None
+            operation_ids.append(str(metadata["operation_id"]))
+        unique_ids = set(operation_ids)
+        return next(iter(unique_ids)) if len(unique_ids) == 1 else None
+
+    def _settle_atomic_operation(
+        self,
+        reservations: Sequence[Mapping[str, Any]],
+        billing_segments: Sequence[Mapping[str, Any]],
+        *,
+        reason: str,
+    ) -> bool:
+        """Use the durable operation path for new interaction reservations."""
+
+        operation_id = self._shared_operation_id(reservations)
+        settle_once = getattr(self.credits_db_service, "settle_ai_operation_once", None)
+        if not operation_id or not callable(settle_once) or self.user_id is None:
+            return False
+        if has_unresolved_provider_usage(list(billing_segments)):
+            for segment in billing_segments:
+                self.record_provider_segment(operation_id, segment)
+            return True
+
+        batch = self._build_batch_reservation([dict(item) for item in reservations])
+        breakdown = calculate_billing_for_segments(billing_segments)
+        actual = _billing_summary_int(breakdown, "charged_credit_units")
+        if not _billing_is_complete(breakdown):
+            actual = max(actual, batch.reserved_credit_units)
+        metadata = self._build_settlement_metadata(
+            usage_tag=batch.usage_tag,
+            usage_tags=batch.usage_tags,
+            reserved_credit_units_total=batch.reserved_credit_units,
+            settled_credit_units=actual,
+            refunded_credit_units=max(0, batch.reserved_credit_units - actual),
+            extra_charged_credit_units=0,
+            debt_applied_credit_units=max(0, actual - batch.reserved_credit_units),
+            payer_breakdown=[{"scope": batch.source, "credit_units": actual}],
+            reason=reason,
+            breakdown=breakdown,
+            billing_segments=billing_segments,
+            missing_usage_billing=False,
+            billing_zero_usage_fallback=(
+                _billing_summary_int(breakdown, "raw_usd_micros") == 0
+            ),
+        )
+        try:
+            result = settle_once(
+                user_id=self.user_id,
+                chat_id=batch.chat_scope_id,
+                operation_id=operation_id,
+                actual_credit_units=actual,
+                metadata=metadata,
+            )
+        except Exception as error:
+            # The transaction may have committed before the connection failed.
+            # Do not run the legacy mutations after an uncertain result.
+            self.admin_reporter(
+                "falló liquidación atómica de operación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "operation_id": operation_id,
+                    "reason": reason,
+                },
+            )
+            return True
+
+        debt = int(result.get("debt_applied_credit_units", 0) or 0)
+        if debt > 0:
+            self.admin_reporter(
+                "la liquidación IA superó su autorización",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "operation_id": operation_id,
+                    "authorized_credit_units": result.get("authorized_credit_units"),
+                    "actual_credit_units": actual,
+                    "debt_applied_credit_units": debt,
+                },
+            )
+        self._clear_batch_reservations(batch)
+        return True
+
     def settle_reserved_ai_credits_batch(
         self,
         reservation_metas: Iterable[Optional[Mapping[str, Any]]],
@@ -1379,6 +1762,13 @@ class AIMessageBilling:
     ) -> None:
         reservations = [dict(item) for item in reservation_metas if item]
         if not reservations or self.user_id is None:
+            return
+
+        if billing_segments is not None and self._settle_atomic_operation(
+            reservations,
+            billing_segments,
+            reason=reason,
+        ):
             return
 
         if self._batch_has_mixed_accounts(reservations):
@@ -1432,6 +1822,17 @@ class AIMessageBilling:
         reserved_credit_units = int(reservation_meta.get("reserved_credit_units", 0) or 0)
         source = "chat" if str(reservation_meta.get("source") or "user") == "chat" else "user"
         usage_tag = str(reservation_meta.get("usage_tag") or "ai_usage")
+        raw_reservation_metadata = reservation_meta.get("metadata")
+        reservation_metadata = (
+            dict(raw_reservation_metadata)
+            if isinstance(raw_reservation_metadata, Mapping)
+            else {}
+        )
+        reservation_identity = {
+            key: reservation_metadata[key]
+            for key in ("operation_id", "settlement_id")
+            if reservation_metadata.get(key)
+        }
         refund_metadata = self._build_charge_metadata(
             usage_tag=usage_tag,
             extra={
@@ -1440,17 +1841,19 @@ class AIMessageBilling:
                 "settled_credit_units": 0,
                 "refunded_credit_units": reserved_credit_units,
                 **dict(metadata or {}),
+                **reservation_identity,
             },
         )
 
         try:
-            self.credits_db_service.refund_ai_charge(
+            refund_result = self.credits_db_service.refund_ai_charge(
                 user_id=self.user_id,
                 chat_id=reservation_meta.get("chat_scope_id"),
                 amount=reserved_credit_units,
                 source=source,
                 event_type="ai_refund",
                 metadata=refund_metadata,
+                idempotency_key=f"{refund_metadata['settlement_id']}:refund",
             )
         except Exception as refund_error:
             self.admin_reporter(
@@ -1465,7 +1868,8 @@ class AIMessageBilling:
             )
             return
 
-        self._rollback_creditless_cap(reservation_meta)
+        if refund_result.get("applied", True):
+            self._rollback_creditless_cap(reservation_meta)
         self.clear_persisted_reservation_fn(usage_tag)
 
     def refund_ai_charge_meta(

@@ -34,6 +34,7 @@ ONBOARDING_MAX_GRANTS_PER_DAY = 16
 ONBOARDING_GRANTS_ADVISORY_LOCK_KEY = 48_610_001
 AI_LEDGER_EVENT_TYPES = (
     "ai_reserve",
+    "ai_provider_usage",
     "ai_refund",
     "ai_settlement_charge",
     "ai_settlement_debt",
@@ -209,6 +210,17 @@ def ensure_schema() -> None:
                         idx_credit_ledger_settlement_id
                     ON credit_ledger ((metadata->>'settlement_id'))
                     WHERE metadata ? 'settlement_id'
+                    """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_credit_ledger_unique_ai_provider_segment
+                    ON credit_ledger (
+                        (metadata->>'operation_id'),
+                        (metadata->>'segment_id')
+                    )
+                    WHERE event_type = 'ai_provider_usage'
+                      AND metadata ? 'operation_id'
+                      AND metadata ? 'segment_id'
                     """)
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS
@@ -587,6 +599,91 @@ def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     return _run_credit_transaction(operation)
 
 
+def _ai_operation_is_settled(cur: Any, user_id: int, operation_id: str) -> bool:
+    if not operation_id:
+        return False
+    cur.execute(
+        """
+        SELECT 1
+        FROM credit_ledger
+        WHERE user_id = %s
+          AND event_type = 'ai_settlement_result'
+          AND metadata->>'operation_id' = %s
+        LIMIT 1
+        """,
+        (int(user_id), operation_id),
+    )
+    return cur.fetchone() is not None
+
+
+def _existing_ai_charge_result(
+    cur: Any,
+    *,
+    user_id: int,
+    event_type: str,
+    idempotency_key: str,
+    operation_id: str,
+    user_balance: int,
+    chat_balance: int,
+) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT amount, metadata->>'source'
+        FROM credit_ledger
+        WHERE user_id = %s
+          AND event_type = %s
+          AND metadata->>'idempotency_key' = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(user_id), event_type, idempotency_key),
+    )
+    existing = cur.fetchone()
+    if existing is None:
+        return None
+
+    rejection_reason: Optional[str] = None
+    if event_type == "ai_reserve":
+        cur.execute(
+            """
+            SELECT 1
+            FROM credit_ledger
+            WHERE user_id = %s
+              AND event_type = 'ai_refund'
+              AND metadata->>'settlement_id' = %s
+            LIMIT 1
+            """,
+            (int(user_id), idempotency_key),
+        )
+        if cur.fetchone() is not None:
+            rejection_reason = "reservation_refunded"
+        elif _ai_operation_is_settled(cur, user_id, operation_id):
+            rejection_reason = "operation_settled"
+
+    if rejection_reason:
+        return {
+            "ok": False,
+            "applied": False,
+            "reason": rejection_reason,
+            "source": None,
+            "amount": 0,
+            "user_balance": user_balance,
+            "chat_balance": chat_balance,
+            "user_balance_credit_units": user_balance,
+            "chat_balance_credit_units": chat_balance,
+        }
+    return {
+        "ok": True,
+        "applied": False,
+        "source": str(existing[1] or "user"),
+        "amount": max(0, -int(existing[0] or 0)),
+        "user_balance": user_balance,
+        "chat_balance": chat_balance,
+        "user_balance_credit_units": user_balance,
+        "chat_balance_credit_units": chat_balance,
+    }
+
+
 def charge_ai_credits(
     user_id: int,
     chat_id: Optional[int],
@@ -594,21 +691,58 @@ def charge_ai_credits(
     *,
     event_type: str = "ai_charge",
     metadata: Optional[Mapping[str, Any]] = None,
+    source: Optional[ScopeType] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Charge credits for an AI interaction.
 
-    User balance is consumed first; in groups, chat balance is used as fallback.
+    User balance is consumed first unless an existing interaction pinned its payer.
     """
 
     charge_amount = int(amount)
+    normalized_event_type = str(event_type or "ai_charge")
     metadata_dict = dict(metadata or {})
+    operation_id = str(metadata_dict.get("operation_id") or "").strip()
+    normalized_source: Optional[ScopeType] = (
+        "chat" if source == "chat" else "user" if source == "user" else None
+    )
+    normalized_key = str(idempotency_key or "").strip() or None
+    if normalized_key:
+        metadata_dict["idempotency_key"] = normalized_key
 
     def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
             cur, user_id, chat_id
         )
 
-        if user_balance >= charge_amount:
+        if normalized_key:
+            existing_result = _existing_ai_charge_result(
+                cur,
+                user_id=user_id,
+                event_type=normalized_event_type,
+                idempotency_key=normalized_key,
+                operation_id=operation_id,
+                user_balance=user_balance,
+                chat_balance=chat_balance,
+            )
+            if existing_result is not None:
+                return existing_result
+
+        if normalized_event_type == "ai_reserve":
+            if _ai_operation_is_settled(cur, user_id, operation_id):
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "reason": "operation_settled",
+                    "source": None,
+                    "amount": 0,
+                    "user_balance": user_balance,
+                    "chat_balance": chat_balance,
+                    "user_balance_credit_units": user_balance,
+                    "chat_balance_credit_units": chat_balance,
+                }
+
+        if normalized_source in {None, "user"} and user_balance >= charge_amount:
             updated_user_balance = user_balance - charge_amount
             _set_balance(cur, "user", user_id, updated_user_balance)
             cur.execute(
@@ -624,7 +758,7 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_charge"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id) if chat_id is not None else None,
@@ -634,14 +768,20 @@ def charge_ai_credits(
             )
             return {
                 "ok": True,
+                "applied": True,
                 "source": "user",
+                "amount": charge_amount,
                 "user_balance": updated_user_balance,
                 "chat_balance": chat_balance,
                 "user_balance_credit_units": updated_user_balance,
                 "chat_balance_credit_units": chat_balance,
             }
 
-        if chat_id is not None and chat_balance >= charge_amount:
+        if (
+            normalized_source in {None, "chat"}
+            and chat_id is not None
+            and chat_balance >= charge_amount
+        ):
             updated_chat_balance = chat_balance - charge_amount
             _set_balance(cur, "chat", chat_id, updated_chat_balance)
             cur.execute(
@@ -657,7 +797,7 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_charge"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id),
@@ -667,7 +807,9 @@ def charge_ai_credits(
             )
             return {
                 "ok": True,
+                "applied": True,
                 "source": "chat",
+                "amount": charge_amount,
                 "user_balance": user_balance,
                 "chat_balance": updated_chat_balance,
                 "user_balance_credit_units": user_balance,
@@ -676,11 +818,316 @@ def charge_ai_credits(
 
         return {
             "ok": False,
+            "applied": False,
             "source": None,
+            "amount": 0,
             "user_balance": user_balance,
             "chat_balance": chat_balance,
             "user_balance_credit_units": user_balance,
             "chat_balance_credit_units": chat_balance,
+        }
+
+    return _run_credit_transaction(operation)
+
+
+def record_ai_provider_usage(
+    user_id: int,
+    chat_id: Optional[int],
+    operation_id: str,
+    segment_id: str,
+    segment: Mapping[str, Any],
+) -> bool:
+    """Persist one provider result before the next external call starts."""
+
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO credit_ledger (
+                event_type,
+                actor_user_id,
+                user_id,
+                chat_id,
+                amount,
+                metadata
+            )
+            VALUES ('ai_provider_usage', %s, %s, %s, 0, %s::jsonb)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            (
+                int(user_id),
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                json.dumps(
+                    {
+                        "operation_id": str(operation_id),
+                        "segment_id": str(segment_id),
+                        "segment": dict(segment),
+                    },
+                    default=str,
+                ),
+            ),
+        )
+        inserted = cur.fetchone() is not None
+        conn.commit()
+    return inserted
+
+
+def update_ai_provider_usage(
+    operation_id: str,
+    segment_id: str,
+    segment: Mapping[str, Any],
+) -> bool:
+    """Replace one pending provider segment with reconciled usage."""
+
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE credit_ledger
+            SET metadata = jsonb_set(metadata, '{segment}', %s::jsonb)
+            WHERE event_type = 'ai_provider_usage'
+              AND metadata->>'operation_id' = %s
+              AND metadata->>'segment_id' = %s
+            RETURNING id
+            """,
+            (
+                json.dumps(dict(segment), default=str),
+                str(operation_id),
+                str(segment_id),
+            ),
+        )
+        updated = cur.fetchone() is not None
+        conn.commit()
+    return updated
+
+
+def list_unsettled_ai_operations(limit: int = 100) -> List[Dict[str, Any]]:
+    """Return durable provider usage that still needs final settlement."""
+
+    ensure_schema()
+    normalized_limit = max(1, min(int(limit or 100), 500))
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH pending AS (
+                SELECT
+                    ledger.metadata->>'operation_id' AS operation_id,
+                    MIN(ledger.user_id) AS user_id,
+                    MIN(ledger.chat_id) AS chat_id,
+                    GREATEST(0, COALESCE(SUM(-ledger.amount), 0)) AS authorized,
+                    MIN(ledger.metadata->>'source') AS source,
+                    MIN(ledger.created_at) AS created_at,
+                    MAX(ledger.created_at) AS hold_activity_at,
+                    (ARRAY_AGG(ledger.metadata ORDER BY ledger.id)
+                        FILTER (WHERE ledger.event_type = 'ai_reserve'))[1]
+                        AS reserve_metadata
+                FROM credit_ledger AS ledger
+                WHERE ledger.event_type IN ('ai_reserve', 'ai_refund')
+                  AND ledger.metadata ? 'operation_id'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM credit_ledger AS settled
+                      WHERE settled.event_type = 'ai_settlement_result'
+                        AND settled.metadata->>'operation_id'
+                            = ledger.metadata->>'operation_id'
+                  )
+                GROUP BY ledger.metadata->>'operation_id'
+            )
+            SELECT
+                pending.operation_id,
+                pending.user_id,
+                pending.chat_id,
+                pending.authorized,
+                pending.source,
+                pending.created_at,
+                GREATEST(
+                    pending.hold_activity_at,
+                    COALESCE(
+                        (
+                            SELECT MAX(usage.created_at)
+                            FROM credit_ledger AS usage
+                            WHERE usage.event_type = 'ai_provider_usage'
+                              AND usage.metadata->>'operation_id' = pending.operation_id
+                        ),
+                        pending.hold_activity_at
+                    )
+                ) AS last_activity_at,
+                pending.reserve_metadata,
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'segment_id', usage.metadata->>'segment_id',
+                                'segment', usage.metadata->'segment'
+                            )
+                            ORDER BY usage.id
+                        )
+                        FROM credit_ledger AS usage
+                        WHERE usage.event_type = 'ai_provider_usage'
+                          AND usage.metadata->>'operation_id' = pending.operation_id
+                    ),
+                    '[]'::jsonb
+                ) AS segments
+            FROM pending
+            WHERE pending.authorized > 0
+               OR EXISTS (
+                    SELECT 1
+                    FROM credit_ledger AS usage
+                    WHERE usage.event_type = 'ai_provider_usage'
+                      AND usage.metadata->>'operation_id' = pending.operation_id
+                )
+            ORDER BY pending.created_at
+            LIMIT %s
+            """,
+            (normalized_limit,),
+        )
+        rows = cur.fetchall() or []
+
+    return [
+        {
+            "operation_id": str(row[0]),
+            "user_id": int(row[1]),
+            "chat_id": int(row[2]) if row[2] is not None else None,
+            "authorized_credit_units": int(row[3] or 0),
+            "source": "chat" if row[4] == "chat" else "user",
+            "created_at": row[5],
+            "last_activity_at": row[6],
+            "reserve_metadata": dict(row[7] or {}),
+            "segments": list(row[8] or []),
+        }
+        for row in rows
+    ]
+
+
+def settle_ai_operation_once(
+    user_id: int,
+    chat_id: Optional[int],
+    operation_id: str,
+    actual_credit_units: int,
+    *,
+    metadata: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Settle all holds for one interaction atomically and exactly once."""
+
+    actual = max(0, int(actual_credit_units or 0))
+    normalized_operation_id = str(operation_id)
+
+    def operation(cur: Any) -> Dict[str, Any]:
+        user_balance, chat_balance = _get_user_and_chat_balances_for_update(
+            cur, user_id, chat_id
+        )
+        cur.execute(
+            """
+            SELECT 1
+            FROM credit_ledger
+            WHERE user_id = %s
+              AND event_type = 'ai_settlement_result'
+              AND metadata->>'operation_id' = %s
+            LIMIT 1
+            """,
+            (int(user_id), normalized_operation_id),
+        )
+        if cur.fetchone() is not None:
+            return {
+                "applied": False,
+                "user_balance": user_balance,
+                "chat_balance": chat_balance,
+            }
+
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(-amount), 0),
+                COUNT(DISTINCT metadata->>'source'),
+                MIN(metadata->>'source')
+            FROM credit_ledger
+            WHERE user_id = %s
+              AND event_type IN ('ai_reserve', 'ai_refund')
+              AND metadata->>'operation_id' = %s
+            """,
+            (int(user_id), normalized_operation_id),
+        )
+        hold_row = cur.fetchone() or (0, 0, None)
+        authorized = max(0, int(hold_row[0] or 0))
+        payer_count = int(hold_row[1] or 0)
+        payer: ScopeType = "chat" if hold_row[2] == "chat" else "user"
+        if payer_count > 1:
+            raise CreditsDBError("AI operation has more than one payer")
+        if payer == "chat" and chat_id is None:
+            raise CreditsDBError("chat-funded AI operation requires chat_id")
+
+        adjustment = authorized - actual
+        if payer == "chat":
+            assert chat_id is not None
+            chat_balance += adjustment
+            _set_balance(cur, "chat", chat_id, chat_balance)
+        else:
+            user_balance += adjustment
+            _set_balance(cur, "user", user_id, user_balance)
+
+        settlement_metadata = {
+            **dict(metadata),
+            "operation_id": normalized_operation_id,
+            "source": payer,
+            "payer_scope": payer,
+            "reserved_credit_units_total": authorized,
+            "settled_credit_units": actual,
+            "refunded_credit_units": max(0, adjustment),
+            "debt_applied_credit_units": max(0, -adjustment),
+            "charged_credit_units_total": actual,
+        }
+        if adjustment:
+            cur.execute(
+                """
+                INSERT INTO credit_ledger (
+                    event_type,
+                    actor_user_id,
+                    user_id,
+                    chat_id,
+                    amount,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    "ai_refund" if adjustment > 0 else "ai_settlement_debt",
+                    int(user_id),
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    int(adjustment),
+                    json.dumps(settlement_metadata, default=str),
+                ),
+            )
+        cur.execute(
+            """
+            INSERT INTO credit_ledger (
+                event_type,
+                actor_user_id,
+                user_id,
+                chat_id,
+                amount,
+                metadata
+            )
+            VALUES ('ai_settlement_result', %s, %s, %s, 0, %s::jsonb)
+            """,
+            (
+                int(user_id),
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                json.dumps(settlement_metadata, default=str),
+            ),
+        )
+        return {
+            "applied": True,
+            "source": payer,
+            "authorized_credit_units": authorized,
+            "actual_credit_units": actual,
+            "refunded_credit_units": max(0, adjustment),
+            "debt_applied_credit_units": max(0, -adjustment),
+            "user_balance": user_balance,
+            "chat_balance": chat_balance,
         }
 
     return _run_credit_transaction(operation)
@@ -831,16 +1278,47 @@ def refund_ai_charge(
     *,
     event_type: str = "ai_refund",
     metadata: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, int]:
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Refund a previously charged AI credit."""
 
     refund_amount = int(amount)
     metadata_dict = dict(metadata or {})
+    normalized_key = str(idempotency_key or "").strip() or None
+    if normalized_key:
+        metadata_dict["idempotency_key"] = normalized_key
 
-    def operation(cur: Any) -> Dict[str, int]:
+    def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
             cur, user_id, chat_id
         )
+        if normalized_key:
+            cur.execute(
+                """
+                SELECT 1
+                FROM credit_ledger
+                WHERE user_id = %s
+                  AND event_type = %s
+                  AND metadata->>'idempotency_key' = %s
+                LIMIT 1
+                """,
+                (int(user_id), str(event_type or "ai_refund"), normalized_key),
+            )
+            if cur.fetchone() is not None:
+                return {
+                    "applied": False,
+                    "user_balance": int(user_balance),
+                    "chat_balance": int(chat_balance),
+                }
+
+        operation_id = str(metadata_dict.get("operation_id") or "").strip()
+        if _ai_operation_is_settled(cur, user_id, operation_id):
+            return {
+                "applied": False,
+                "reason": "operation_settled",
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
 
         if source == "chat" and chat_id is not None:
             updated_chat_balance = chat_balance + refund_amount
@@ -867,6 +1345,7 @@ def refund_ai_charge(
                 ),
             )
             return {
+                "applied": True,
                 "user_balance": int(user_balance),
                 "chat_balance": int(updated_chat_balance),
             }
@@ -895,6 +1374,7 @@ def refund_ai_charge(
             ),
         )
         return {
+            "applied": True,
             "user_balance": int(updated_user_balance),
             "chat_balance": int(chat_balance),
         }

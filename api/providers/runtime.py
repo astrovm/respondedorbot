@@ -8,10 +8,21 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
+from uuid import uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
-from api.ai.pricing import AIUsageResult, chat_output_token_limit, ensure_mapping
+from api.ai.pricing import (
+    AIUsageResult,
+    chat_output_token_limit,
+    ensure_mapping,
+    estimate_chat_reserve_credits,
+)
+from api.billing.authorization import (
+    AI_SEGMENT_RECORDER_KEY,
+    AIAuthorizationDenied,
+    authorize_ai_cost,
+)
 from api.core.logging import format_log_context, get_logger
 from api.providers.types import (
     EmptyAssistantMessage,
@@ -114,6 +125,41 @@ class ProviderRuntime:
         self._deps = deps
         self._tool_runtime = tool_runtime
 
+    def authorize_model_request(
+        self,
+        *,
+        system_message: Mapping[str, Any],
+        messages: List[Dict[str, Any]],
+        tool_context: Optional[Dict[str, Any]],
+        round_idx: int,
+        attempt: int,
+        invocation_id: Optional[str] = None,
+    ) -> None:
+        """Authorize one model request before it reaches the provider."""
+
+        authorize_ai_cost(
+            tool_context,
+            "model",
+            estimate_chat_reserve_credits(
+                system_message=system_message,
+                messages=messages,
+                model=self._deps.primary_model,
+            ),
+            metadata={
+                "invocation_id": str(invocation_id or "legacy"),
+                "round": round_idx + 1,
+                "attempt": attempt + 1,
+            },
+        )
+
+    @staticmethod
+    def new_invocation(
+        tool_context: Optional[Mapping[str, Any]],
+    ) -> tuple[Dict[str, Any], str]:
+        """Return the context and identity for one provider invocation."""
+
+        return dict(tool_context or {}), uuid4().hex
+
     def _add_firecrawl_credits(
         self,
         metadata: Dict[str, Any],
@@ -133,7 +179,7 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]] = None,
         on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
-        runtime_tool_context = dict(tool_context or {})
+        runtime_tool_context, invocation_id = self.new_invocation(tool_context)
         log_context = dict(runtime_tool_context)
         log_context["model"] = self._deps.primary_model
         logger.info(
@@ -149,6 +195,7 @@ class ProviderRuntime:
             extra_tools=extra_tools,
             tool_context=runtime_tool_context,
             on_usage_result=on_usage_result,
+            invocation_id=invocation_id,
         )
 
     def _run_chat_completion(
@@ -162,6 +209,8 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
         web_search_max_uses: Optional[int] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[Any]:
         """Build request, retry on transient errors, and return the response."""
         request_kwargs: Dict[str, Any] = {
@@ -182,6 +231,14 @@ class ProviderRuntime:
         try:
             for attempt in range(_MAX_RETRIES):
                 try:
+                    self.authorize_model_request(
+                        system_message=system_message,
+                        messages=current_messages,
+                        tool_context=tool_context,
+                        round_idx=round_idx,
+                        attempt=attempt,
+                        invocation_id=invocation_id,
+                    )
                     if attempt:
                         self._deps.increment_request_count()
                     response = client.chat.completions.create(**request_kwargs)
@@ -219,6 +276,14 @@ class ProviderRuntime:
                     )
                     and attempt < _MAX_RETRIES - 1
                 ):
+                    self._record_retryable_response(
+                        response,
+                        choices[0],
+                        finish_reason,
+                        round_idx,
+                        tool_context,
+                        on_usage_result,
+                    )
                     wait = 2**attempt
                     retry_context = dict(tool_context or {})
                     retry_context.update(
@@ -240,6 +305,8 @@ class ProviderRuntime:
                     time.sleep(wait)
                     continue
                 return response
+        except AIAuthorizationDenied:
+            raise
         except Exception as error:
             error_context = dict(tool_context or {})
             error_context.update({"model": self._deps.primary_model, "tool_round": round_idx + 1})
@@ -262,6 +329,31 @@ class ProviderRuntime:
             )
             return None
         return None
+
+    def _record_retryable_response(
+        self,
+        response: Any,
+        choice: Any,
+        finish_reason: Any,
+        round_idx: int,
+        tool_context: Optional[Dict[str, Any]],
+        on_usage_result: Optional[Callable[[AIUsageResult], None]],
+    ) -> None:
+        """Persist a completed response whose usage may arrive asynchronously."""
+
+        result = self._build_round_result(
+            response,
+            getattr(choice, "message", None),
+            round_idx,
+            metadata={
+                "provider_usage_pending": True,
+                "retryable_finish_reason": finish_reason,
+            },
+        )
+        recorder = (tool_context or {}).get(AI_SEGMENT_RECORDER_KEY)
+        if callable(recorder):
+            recorder(result.billing_segment())
+        self._emit_usage_result(on_usage_result, result)
 
     def _is_retryable_finish_response(
         self,
@@ -392,6 +484,8 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
         web_search_max_uses: Optional[int] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[tuple[Any, Any]]:
         response = self._run_chat_completion(
             client=client,
@@ -402,6 +496,8 @@ class ProviderRuntime:
             tool_context=tool_context,
             round_idx=round_idx,
             web_search_max_uses=web_search_max_uses,
+            on_usage_result=on_usage_result,
+            invocation_id=invocation_id,
         )
         choices = getattr(response, "choices", None) if response is not None else None
         return (response, choices[0]) if choices else None
@@ -678,6 +774,55 @@ class ProviderRuntime:
             )
         )
 
+    def _decide_tool_round(
+        self,
+        *,
+        finish_reason: Any,
+        response: Any,
+        message: Any,
+        round_idx: int,
+        current_messages: List[Dict[str, Any]],
+        extra_tools: Optional[List[Dict[str, Any]]],
+        tool_context: Optional[Dict[str, Any]],
+        total_web_search_requests: int,
+        round_web_search_requests: int,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]],
+    ) -> Optional[ToolRoundDecision]:
+        """Handle a tool-producing round and preserve its usage on denial."""
+
+        if finish_reason not in {"tool_calls", "stop"}:
+            return None
+        try:
+            if finish_reason == "tool_calls":
+                return self._handle_structured_tool_calls(
+                    response=response,
+                    message=message,
+                    round_idx=round_idx,
+                    current_messages=current_messages,
+                    extra_tools=extra_tools,
+                    tool_context=tool_context,
+                    total_web_search_requests=total_web_search_requests,
+                )
+            return self._handle_stop_response(
+                response=response,
+                message=message,
+                round_idx=round_idx,
+                current_messages=current_messages,
+                extra_tools=extra_tools,
+                tool_context=tool_context,
+                total_web_search_requests=total_web_search_requests,
+            )
+        except AIAuthorizationDenied:
+            self._emit_intermediate_round_usage(
+                on_usage_result,
+                response,
+                message,
+                round_idx,
+                round_web_search_requests,
+                tool_context,
+            )
+            raise
+
     def _handle_structured_tool_calls(
         self,
         *,
@@ -711,6 +856,12 @@ class ProviderRuntime:
                 billing_result=billing_result,
             )
 
+        self._persist_round_before_tools(
+            response,
+            message,
+            round_idx,
+            tool_context,
+        )
         updated_messages = self._tool_runtime.apply_tool_calls(
             message,
             known_calls,
@@ -719,6 +870,17 @@ class ProviderRuntime:
         )
         self._deps.increment_request_count()
         return ToolRoundDecision(updated_messages, continue_rounds=True)
+
+    def _persist_round_before_tools(
+        self,
+        response: Any,
+        message: Any,
+        round_idx: int,
+        tool_context: Optional[Dict[str, Any]],
+    ) -> None:
+        recorder = (tool_context or {}).get(AI_SEGMENT_RECORDER_KEY)
+        if callable(recorder):
+            recorder(self._build_round_result(response, message, round_idx).billing_segment())
 
     def _web_search_metadata(self, response: Any, message: Any) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {}
@@ -961,6 +1123,12 @@ class ProviderRuntime:
             extra_tools,
         )
         if pseudo_call is not None:
+            self._persist_round_before_tools(
+                response,
+                message,
+                round_idx,
+                tool_context,
+            )
             updated_messages = self._tool_runtime.apply_tool_calls(
                 EmptyAssistantMessage(),
                 [pseudo_call],
@@ -1037,6 +1205,7 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
         on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[AIUsageResult]:
         client = self._deps.get_client()
         if client is None:
@@ -1055,6 +1224,8 @@ class ProviderRuntime:
                 tool_context=tool_context,
                 round_idx=round_idx,
                 web_search_max_uses=remaining_web_search_uses,
+                on_usage_result=on_usage_result,
+                invocation_id=invocation_id,
             )
             if round_response is None:
                 return None
@@ -1072,16 +1243,19 @@ class ProviderRuntime:
             )
             finish_reason = choice.finish_reason
 
-            if finish_reason == "tool_calls":
-                decision = self._handle_structured_tool_calls(
-                    response=response,
-                    message=message,
-                    round_idx=round_idx,
-                    current_messages=current_messages,
-                    extra_tools=extra_tools,
-                    tool_context=tool_context,
-                    total_web_search_requests=total_web_search_requests,
-                )
+            decision = self._decide_tool_round(
+                finish_reason=finish_reason,
+                response=response,
+                message=message,
+                round_idx=round_idx,
+                current_messages=current_messages,
+                extra_tools=extra_tools,
+                tool_context=tool_context,
+                total_web_search_requests=total_web_search_requests,
+                round_web_search_requests=round_web_search_requests,
+                on_usage_result=on_usage_result,
+            )
+            if decision is not None:
                 if decision.result is not None:
                     self._emit_usage_result(on_usage_result, decision.billing_result)
                     return decision.result
@@ -1097,31 +1271,7 @@ class ProviderRuntime:
                     current_messages = decision.messages
                     continue
                 self._emit_usage_result(on_usage_result, decision.billing_result)
-                break
-
-            if finish_reason == "stop":
-                decision = self._handle_stop_response(
-                    response=response,
-                    message=message,
-                    round_idx=round_idx,
-                    current_messages=current_messages,
-                    extra_tools=extra_tools,
-                    tool_context=tool_context,
-                    total_web_search_requests=total_web_search_requests,
-                )
-                if decision.continue_rounds:
-                    self._emit_intermediate_round_usage(
-                        on_usage_result,
-                        response,
-                        message,
-                        round_idx,
-                        round_web_search_requests,
-                        tool_context,
-                    )
-                    current_messages = decision.messages
-                    continue
-                self._emit_usage_result(on_usage_result, decision.billing_result)
-                return decision.result
+                return None
 
             if finish_reason == "length":
                 metadata = {

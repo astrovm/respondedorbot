@@ -1,6 +1,26 @@
 from tests.support import *
 
 
+class _Authorizer:
+    def __init__(self, reservations, **_kwargs):
+        self.reservations = [item for item in reservations if item]
+
+    def __call__(self, *_args, **_kwargs):
+        return None
+
+    def record_provider_segment(self, _segment):
+        return None
+
+    def close(self):
+        return None
+
+
+def _billing_mock():
+    billing = MagicMock()
+    billing.create_authorizer.side_effect = _Authorizer
+    return billing
+
+
 def test_run_conversation_rejects_before_history_or_prompt_preparation():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage
@@ -22,7 +42,7 @@ def test_run_conversation_rejects_before_history_or_prompt_preparation():
         estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
 
     response = ai_service.run_conversation(
@@ -48,6 +68,66 @@ def test_run_conversation_rejects_before_history_or_prompt_preparation():
     handle_ai_response.assert_not_called()
 
 
+def test_run_conversation_settles_transcription_when_base_reserve_fails():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    segment = {
+        "kind": "transcribe",
+        "model": "whisper-large-v3",
+        "audio_seconds": 10,
+        "source": "groq",
+    }
+    media_reservation = {
+        "reserved_credit_units": 8,
+        "source": "user",
+        "usage_tag": "auto_audio_media",
+    }
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(),
+        has_openrouter_fallback=MagicMock(),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = _billing_mock()
+    billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
+
+    response = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="900",
+            message={"chat": {"id": 900, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage(
+                "transcripción",
+                None,
+                "audio-1",
+                media_charge_meta=media_reservation,
+                media_billing_segments=(segment,),
+            ),
+            billing_helper=billing_helper,
+            prompt_text="transcripción",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert response == ("sin créditos", False)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [media_reservation],
+        [segment],
+        reason="ai_response_base_reserve_failed",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
 def test_run_summary_rejects_before_history_or_provider_checks():
     from api.ai.service import SummaryCommandRequest, build_ai_service
 
@@ -66,7 +146,7 @@ def test_run_summary_rejects_before_history_or_provider_checks():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary_command,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
 
     response = ai_service.run_summary_command_stream(
@@ -116,7 +196,7 @@ def test_run_summary_settles_from_streamed_provider_usage():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -132,11 +212,113 @@ def test_run_summary_settles_from_streamed_provider_usage():
     )
 
     assert result == ("summary", None, False)
+    billing_helper.create_authorizer.assert_called_once_with(
+        [reservation],
+        model_reserve_credit_units=3,
+    )
     billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
         [reservation],
         [segment],
         reason="summary_command_stream_success",
     )
+
+
+def test_run_summary_refunds_first_round_authorization_denial():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    def denied_summary(_chat_id, _redis, _prompt, *, response_meta):
+        response_meta["authorization_denied"] = True
+        response_meta["ai_fallback"] = True
+        return iter([("none", "insufficient credits")]), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=denied_summary,
+    )
+    billing_helper = _billing_mock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("insufficient credits", None, False)
+    billing_helper.refund_reserved_ai_credits.assert_called_once_with(
+        reservation,
+        reason="summary_stream_fallback",
+    )
+    billing_helper.settle_reserved_ai_credits_batch.assert_not_called()
+
+
+def test_run_summary_settles_usage_before_authorization_denial():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    segment = {
+        "kind": "summary",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.001},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def denied_summary(_chat_id, _redis, _prompt, *, response_meta):
+        response_meta["billing_segments"] = [segment]
+        response_meta["authorization_denied"] = True
+        response_meta["ai_fallback"] = True
+        return iter([("none", "insufficient credits")]), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=denied_summary,
+    )
+    billing_helper = _billing_mock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("insufficient credits", None, False)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="summary_stream_provider_usage_before_fallback",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
 
 
 def test_run_summary_settles_usage_when_delivery_fails_after_generation():
@@ -174,7 +356,7 @@ def test_run_summary_settles_usage_when_delivery_fails_after_generation():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -218,7 +400,7 @@ def test_run_summary_refunds_when_stream_provider_is_unavailable():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=unavailable_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -271,7 +453,7 @@ def test_run_conversation_settles_provider_rounds_before_local_fallback():
         estimate_ai_base_reserve_credits=MagicMock(return_value=(16, {})),
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {
         "reserved_credit_units": 16,
         "source": "user",
@@ -328,7 +510,7 @@ def test_run_conversation_rechecks_full_context_before_model_call():
         estimate_ai_base_reserve_credits=estimator,
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     initial_reservation = {
         "reserved_credit_units": 2,
         "source": "user",
@@ -357,13 +539,125 @@ def test_run_conversation_rechecks_full_context_before_model_call():
     assert response == ("sin créditos para el contexto", False)
     assert billing_helper.reserve_ai_credits.call_count == 2
     assert billing_helper.reserve_ai_credits.call_args_list[1].args[:2] == (
-        "ai_response_base",
-        5,
+        "ai_response_context_extension",
+        3,
     )
     billing_helper.refund_reserved_ai_credits.assert_called_once_with(
-        initial_reservation, reason="ai_response_reserve_adjustment"
+        initial_reservation, reason="ai_response_reserve_adjustment_failed"
     )
     handle_ai_response.assert_not_called()
+
+
+def test_image_reserve_failure_refunds_base_and_context_reservations():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    estimator = MagicMock(side_effect=[(2, {}), (5, {})])
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=estimator,
+        estimate_image_context_reserve_credits=MagicMock(return_value=4),
+    )
+    billing_helper = _billing_mock()
+    base_reservation = {"usage_tag": "ai_response_base"}
+    context_reservation = {"usage_tag": "ai_response_context_extension"}
+    billing_helper.reserve_ai_credits.side_effect = [
+        (base_reservation, None),
+        (context_reservation, None),
+        (None, "sin créditos para la imagen"),
+    ]
+
+    result = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="902",
+            message={"chat": {"id": 902, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage(
+                "hola",
+                "photo-1",
+                None,
+                resized_image_data=b"image",
+            ),
+            billing_helper=billing_helper,
+            prompt_text="hola",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert result == ("sin créditos para la imagen", False)
+    refund_calls = billing_helper.refund_reserved_ai_credits.call_args_list
+    assert [item.args[0] for item in refund_calls] == [
+        base_reservation,
+        context_reservation,
+    ]
+    assert {item.kwargs["reason"] for item in refund_calls} == {
+        "image_context_reserve_failed"
+    }
+
+
+def test_local_fallback_refunds_every_incremental_reservation():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    def local_fallback(*_args, **kwargs):
+        kwargs["response_meta"]["ai_fallback"] = True
+        return "fallback"
+
+    estimator = MagicMock(side_effect=[(2, {}), (5, {})])
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=local_fallback,
+        estimate_ai_base_reserve_credits=estimator,
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = _billing_mock()
+    base_reservation = {"usage_tag": "ai_response_base"}
+    context_reservation = {"usage_tag": "ai_response_context_extension"}
+    billing_helper.reserve_ai_credits.side_effect = [
+        (base_reservation, None),
+        (context_reservation, None),
+    ]
+
+    result = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="902",
+            message={"chat": {"id": 902, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage("hola", None, None),
+            billing_helper=billing_helper,
+            prompt_text="hola",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert result == ("fallback", True)
+    refund_calls = billing_helper.refund_reserved_ai_credits.call_args_list
+    assert [item.args[0] for item in refund_calls] == [
+        base_reservation,
+        context_reservation,
+    ]
+    assert {item.kwargs["reason"] for item in refund_calls} == {
+        "ai_response_fallback"
+    }
 
 
 def test_run_ai_flow_keeps_going_when_openrouter_fallback_is_allowed_for_vision():
@@ -534,7 +828,7 @@ def test_run_conversation_schedules_compaction_after_answer_settlement():
         schedule_compaction=(schedule_compaction := MagicMock()),
     )
 
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
 
     ai_service.run_conversation(
@@ -581,7 +875,7 @@ def test_run_conversation_uses_fallback_metadata_not_response_text():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
 
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
 
     response_msg, handled = ai_service.run_conversation(

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, Iterator, List, Optional
 
 from api.ai.pricing import AIUsageResult, chat_output_token_limit
+from api.billing.authorization import AIAuthorizationDenied
 from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.tools.runtime import ToolRuntime
 from api.providers.base import StreamingAIProvider
@@ -104,6 +105,38 @@ class OpenRouterProvider(StreamingAIProvider):
         client = self._get_client()
         return client is not None
 
+    def _authorize_stream_round(
+        self,
+        system_message: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        tool_context: Dict[str, Any],
+        round_idx: int,
+        invocation_id: str,
+    ) -> None:
+        self._runtime.authorize_model_request(
+            system_message=system_message,
+            messages=messages,
+            tool_context=tool_context,
+            round_idx=round_idx,
+            attempt=0,
+            invocation_id=invocation_id,
+        )
+
+    def _stream_web_metadata(
+        self,
+        streamed_round: _StreamRound,
+        usage_response: Any,
+        message: Any,
+    ) -> Dict[str, Any]:
+        metadata = self._runtime._web_search_metadata(usage_response, message)
+        optional_values = {
+            "resolved_model": streamed_round.resolved_model,
+            "upstream_provider": streamed_round.upstream_provider,
+            "service_tier": streamed_round.service_tier,
+        }
+        metadata.update({key: value for key, value in optional_values.items() if value})
+        return metadata
+
     def complete(
         self,
         system_message: Dict[str, Any],
@@ -140,7 +173,7 @@ class OpenRouterProvider(StreamingAIProvider):
 
         output_token_limit = chat_output_token_limit(self._primary_model)
         current_messages = list(messages)
-        runtime_tool_context = dict(tool_context or {})
+        runtime_tool_context, invocation_id = self._runtime.new_invocation(tool_context)
         remaining_web_search_uses = self._runtime._configured_web_search_max_uses(enable_web_search)
         total_web_search_requests = 0
         possible_pseudo_tools = self._extra_tool_names(extra_tools)
@@ -148,6 +181,13 @@ class OpenRouterProvider(StreamingAIProvider):
         try:
             for round_idx in range(self._max_tool_rounds):
                 self._increment_request_count()
+                self._authorize_stream_round(
+                    system_message,
+                    current_messages,
+                    runtime_tool_context,
+                    round_idx,
+                    invocation_id,
+                )
                 request_kwargs = self._build_stream_request(
                     system_message,
                     current_messages,
@@ -182,16 +222,11 @@ class OpenRouterProvider(StreamingAIProvider):
                     or streamed_round.last_response
                     or SimpleNamespace(usage={})
                 )
-                web_metadata = self._runtime._web_search_metadata(
+                web_metadata = self._stream_web_metadata(
+                    streamed_round,
                     usage_response,
                     message,
                 )
-                if streamed_round.resolved_model:
-                    web_metadata["resolved_model"] = streamed_round.resolved_model
-                if streamed_round.upstream_provider:
-                    web_metadata["upstream_provider"] = streamed_round.upstream_provider
-                if streamed_round.service_tier:
-                    web_metadata["service_tier"] = streamed_round.service_tier
                 round_web_search_requests = self._runtime._web_search_request_count(
                     usage_response,
                     message,
@@ -210,12 +245,28 @@ class OpenRouterProvider(StreamingAIProvider):
                     round_idx,
                 )
                 if known_calls:
-                    current_messages = self._tool_runtime.apply_tool_calls(
-                        message,
-                        known_calls,
-                        current_messages,
-                        runtime_tool_context,
-                    )
+                    try:
+                        self._runtime._persist_round_before_tools(
+                            usage_response,
+                            message,
+                            round_idx,
+                            runtime_tool_context,
+                        )
+                        current_messages = self._tool_runtime.apply_tool_calls(
+                            message,
+                            known_calls,
+                            current_messages,
+                            runtime_tool_context,
+                        )
+                    except AIAuthorizationDenied:
+                        self._report_stream_usage(
+                            on_usage_result,
+                            usage_response,
+                            message,
+                            round_idx,
+                            web_metadata,
+                        )
+                        raise
                     self._runtime._add_firecrawl_credits(
                         web_metadata,
                         runtime_tool_context,
@@ -314,6 +365,7 @@ class OpenRouterProvider(StreamingAIProvider):
             streamed_round.text_parts
             or streamed_round.tool_calls
             or streamed_round.usage_response is not None
+            or streamed_round.last_response is not None
         ):
             return
         response = (

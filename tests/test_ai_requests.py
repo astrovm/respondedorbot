@@ -2,6 +2,87 @@ from tests.provider_pipeline_support import *
 from tests.provider_pipeline_support import _build_provider_runtime
 
 
+def test_ask_ai_marks_authorization_denial_as_fallback():
+    from api.ai.request_runtime import ask_ai
+    from api.billing.authorization import AIAuthorizationDenied
+
+    response_meta = {}
+    fallback = MagicMock(return_value="local fallback")
+
+    def deny_request(*_args, **_kwargs):
+        raise AIAuthorizationDenied("insufficient credits")
+
+    response = ask_ai(
+        [{"role": "user", "content": "hello"}],
+        image_data=None,
+        image_file_id=None,
+        response_meta=response_meta,
+        enable_web_search=True,
+        chat_id="1",
+        user_name="astro",
+        user_id=1,
+        timezone_offset=-3,
+        task_mode=False,
+        build_request=MagicMock(
+            return_value=(
+                {"role": "system", "content": "system"},
+                [{"role": "user", "content": "hello"}],
+                None,
+                {},
+            )
+        ),
+        inject_image=MagicMock(),
+        complete=deny_request,
+        fallback=fallback,
+        admin_report=MagicMock(),
+        logger=MagicMock(),
+    )
+
+    assert response == "insufficient credits"
+    assert response_meta["authorization_denied"] is True
+    assert response_meta["ai_fallback"] is True
+    fallback.assert_not_called()
+
+
+def test_ask_ai_stream_marks_lazy_authorization_denial_as_fallback():
+    from api.ai.request_runtime import ask_ai_stream
+    from api.billing.authorization import AIAuthorizationDenied
+
+    response_meta = {}
+
+    def denied_stream(*_args, **_kwargs):
+        def tokens():
+            raise AIAuthorizationDenied("insufficient credits")
+            yield "openrouter", ""
+
+        return tokens()
+
+    iterator = ask_ai_stream(
+        [{"role": "user", "content": "hello"}],
+        enable_web_search=True,
+        chat_id="1",
+        user_name="astro",
+        user_id=1,
+        timezone_offset=-3,
+        response_meta=response_meta,
+        build_request=MagicMock(
+            return_value=(
+                {"role": "system", "content": "system"},
+                [{"role": "user", "content": "hello"}],
+                None,
+                {},
+            )
+        ),
+        stream=denied_stream,
+    )
+
+    with pytest.raises(AIAuthorizationDenied, match="insufficient credits"):
+        list(iterator)
+
+    assert response_meta["authorization_denied"] is True
+    assert response_meta["ai_fallback"] is True
+
+
 def test_provider_usage_result_uses_explicit_provider_as_source():
     from api.index import app_runtime
 
