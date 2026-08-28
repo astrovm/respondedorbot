@@ -236,6 +236,7 @@ def ask_ai(
     except AIAuthorizationDenied as error:
         if response_meta is not None:
             response_meta["authorization_denied"] = True
+            response_meta["ai_fallback"] = True
         return str(error)
     except Exception as error:
         # A provider/config error should not make the Telegram handler crash.
