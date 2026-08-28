@@ -241,6 +241,12 @@ class DurableCompactionQueue:
     def _process(self, client: Any, job: CompactionJob) -> None:
         current_summary = self._get_summary(client, job.chat_id)
         current_marker = self._get_marker(client, job.chat_id) if current_summary else None
+        if self._restore_provider_result(job):
+            client.hset(
+                _JOBS_KEY,
+                job.chat_id,
+                json.dumps(asdict(job), ensure_ascii=False),
+            )
         if (
             job.result_summary
             and current_summary == job.result_summary
@@ -413,6 +419,27 @@ class DurableCompactionQueue:
             if job.result_billing_segment is not None
             else []
         )
+
+    def _restore_provider_result(self, job: CompactionJob) -> bool:
+        if job.result_summary:
+            return False
+        operation_id = _reservation_operation_id(job.reservation)
+        if not operation_id:
+            return False
+        segments = self._list_provider_usage(
+            user_id=job.user_id,
+            operation_id=operation_id,
+        )
+        for segment in reversed(segments):
+            summary = str(segment.get("text") or "").strip()
+            if segment.get("kind") != "summary" or not summary:
+                continue
+            billing = calculate_billing_for_segments(segments)
+            job.result_summary = summary
+            job.result_billing_segment = segment
+            job.result_cost_usd_micros = int(billing.get("raw_usd_micros", 0) or 0)
+            return True
+        return False
 
     def _settle_invalid_job(self, decoded: Any, *, chat_id: str) -> bool:
         if not isinstance(decoded, Mapping):

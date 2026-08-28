@@ -310,27 +310,27 @@ def test_provider_retries_have_distinct_durable_segment_ids():
     assert provider_segment_id(retry) == "openrouter:generation-2"
 
 
-def test_compaction_settles_every_durable_provider_retry():
-    from api.ai.pricing import calculate_billing_for_segments
+def test_compaction_restores_durable_result_without_calling_provider_again():
     from api.memory.background import CompactionJob
 
-    def segment(generation_id):
-        return {
-            "kind": "summary",
-            "model": "deepseek/deepseek-v4-flash-0731",
-            "usage": {"cost": 0.001},
-            "source": "openrouter",
-            "metadata": {"provider_generation_id": generation_id},
-        }
-
-    segments = [segment("generation-1"), segment("generation-2")]
+    segment = {
+        "kind": "summary",
+        "text": "recovered summary",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.001},
+        "source": "openrouter",
+        "metadata": {"provider_generation_id": "generation-1"},
+    }
+    redis_client = _FakeRedis()
+    compact = MagicMock()
+    save_result = MagicMock()
     settle_reservation = MagicMock(return_value={"applied": True})
     queue = _build_queue(
-        _FakeRedis(),
-        compact=MagicMock(),
-        save_result=MagicMock(),
+        redis_client,
+        compact=compact,
+        save_result=save_result,
         settle_reservation=settle_reservation,
-        list_provider_usage=MagicMock(return_value=segments),
+        list_provider_usage=MagicMock(return_value=[segment]),
     )
     job = CompactionJob(
         chat_id="123",
@@ -347,16 +347,24 @@ def test_compaction_settles_every_durable_provider_retry():
         },
         user_id=42,
         message_id="99",
-        result_summary="summary",
-        result_billing_segment=segments[-1],
+    )
+    redis_client.hset(
+        "memory:compaction:jobs",
+        "123",
+        json.dumps(asdict(job)),
     )
 
-    queue._settle(job, reason="memory_compaction_success")
+    assert queue.run_pending_once() == 1
 
-    expected = calculate_billing_for_segments(segments)["charged_credit_units"]
-    assert settle_reservation.call_args.kwargs["actual_credit_units"] == expected
+    compact.assert_not_called()
+    save_result.assert_called_once_with(
+        redis_client,
+        "123",
+        "recovered summary",
+        "m1",
+    )
     assert settle_reservation.call_args.kwargs["metadata"]["billing_segments"] == (
-        segments
+        [segment]
     )
 
 
