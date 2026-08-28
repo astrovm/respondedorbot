@@ -720,7 +720,7 @@ class AIMessageBilling:
         chat_scope_id = reservation_meta.get("chat_scope_id")
         if not _billing_is_complete(breakdown):
             # Missing provider evidence is ambiguous; zero must not imply a free call.
-            actual_credit_units = reserved_credit_units
+            actual_credit_units = max(actual_credit_units, reserved_credit_units)
             self.admin_reporter(
                 "liquidación IA sin costo de proveedor verificable; se mantiene la reserva",
                 None,
@@ -1159,7 +1159,7 @@ class AIMessageBilling:
         breakdown = calculate_billing_for_segments(billing_segments)
         actual = _billing_summary_int(breakdown, "charged_credit_units")
         if not _billing_is_complete(breakdown):
-            actual = batch.reserved_credit_units
+            actual = max(actual, batch.reserved_credit_units)
             self.admin_reporter(
                 "liquidación IA batch sin costo de proveedor verificable; se mantiene la reserva",
                 None,

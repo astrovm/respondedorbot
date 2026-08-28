@@ -238,17 +238,23 @@ class AIService:
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
-        if bool(ai_response_meta.get("ai_fallback")):
-            # The local fallback has no provider usage, so release every reserve.
-            self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="ai_response_fallback"
-            )
-            return response_msg, True
-
         settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
         if media_charge_meta:
             settlement_reservations.append(media_charge_meta)
+
+        if bool(ai_response_meta.get("ai_fallback")):
+            if billing_segments:
+                request.billing_helper.settle_reserved_ai_credits_batch(
+                    settlement_reservations,
+                    billing_segments,
+                    reason="ai_response_provider_usage_before_fallback",
+                )
+            else:
+                self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta, reason="ai_response_fallback"
+                )
+            return response_msg, True
 
         request.billing_helper.settle_reserved_ai_credits_batch(
             settlement_reservations,

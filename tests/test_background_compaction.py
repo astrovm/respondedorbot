@@ -56,7 +56,7 @@ def _build_queue(redis_client, *, compact, save_result, settle_reservation):
     )
 
 
-def test_background_compaction_retains_reserve_when_provider_cost_is_missing():
+def test_background_compaction_preserves_known_overage_when_model_cost_is_missing():
     from api.memory.background import CompactionJob, DurableCompactionQueue
 
     settle_reservation = MagicMock(return_value={"applied": True})
@@ -92,13 +92,17 @@ def test_background_compaction_retains_reserve_when_provider_cost_is_missing():
             "model": "unknown/model",
             "usage": {},
             "source": "openrouter",
-            "metadata": {"provider": "openrouter"},
+            "metadata": {
+                "provider": "openrouter",
+                "web_search_requests": 1,
+                "firecrawl_credits_used": 1,
+            },
         },
     )
 
     queue._settle(job, reason="memory_compaction_success")
 
-    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 3
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 17
     admin_report.assert_called_once()
 
 

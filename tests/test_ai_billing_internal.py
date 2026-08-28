@@ -710,6 +710,89 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
     assert metadata["refunded_credit_units"] == 0
 
 
+def test_incomplete_pricing_never_reduces_known_overage_to_reserve():
+    billing = _build_billing_helper()
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "source": "user",
+    }
+    reserved_credit_units = 16
+    segments = [
+        {
+            "kind": "chat",
+            "model": "~deepseek/deepseek-v4-flash-latest",
+            "usage": {"cost": "0.0019"},
+            "metadata": {"provider": "openrouter"},
+        },
+        {
+            "kind": "chat",
+            "model": "unknown/model",
+            "usage": {},
+            "metadata": {"provider": "openrouter"},
+        },
+    ]
+
+    billing.settle_reserved_ai_credits(
+        {
+            "reserved_credit_units": reserved_credit_units,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "ai_response_base",
+        },
+        segments,
+        reason="ok",
+    )
+
+    billing.credits_db_service.charge_ai_credits.assert_called_once()
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 22
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["settled_credit_units"] == 38
+    assert metadata["pricing_complete"] is False
+
+
+def test_incomplete_batch_pricing_never_reduces_known_overage_to_reserve():
+    billing = _build_billing_helper()
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "source": "user",
+    }
+    reservations = [
+        {
+            "reserved_credit_units": 8,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "ai_response_base",
+        },
+        {
+            "reserved_credit_units": 8,
+            "chat_scope_id": 1,
+            "source": "user",
+            "usage_tag": "image_context_media",
+        },
+    ]
+    segments = [
+        {
+            "kind": "chat",
+            "model": "~deepseek/deepseek-v4-flash-latest",
+            "usage": {"cost": "0.0019"},
+            "metadata": {"provider": "openrouter"},
+        },
+        {
+            "kind": "vision",
+            "model": "unknown/model",
+            "usage": {},
+            "metadata": {"provider": "openrouter"},
+        },
+    ]
+
+    billing.settle_reserved_ai_credits_batch(reservations, segments, reason="ok")
+
+    billing.credits_db_service.charge_ai_credits.assert_called_once()
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 22
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["settled_credit_units"] == 38
+
+
 def test_settle_reserved_ai_credits_refunds_cache_only_usage():
     billing = _build_billing_helper()
 

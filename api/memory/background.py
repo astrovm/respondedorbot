@@ -289,16 +289,17 @@ class DurableCompactionQueue:
             _reservation_credit_scale(job.reservation),
         )
         pricing_complete = billing is None or billing.get("pricing_complete") is True
+        billed_credit_units = (
+            int(billing["charged_credit_units"])
+            if billing is not None
+            else credit_units_from_usd_micros(job.result_cost_usd_micros)
+        )
         actual = (
             max(0, int(actual_credit_units))
             if actual_credit_units is not None
-            else (
-                reserved
-                if not pricing_complete
-                else int(billing["charged_credit_units"])
-                if billing is not None
-                else credit_units_from_usd_micros(job.result_cost_usd_micros)
-            )
+            else max(reserved, billed_credit_units)
+            if not pricing_complete
+            else billed_credit_units
         )
         if not pricing_complete and self._admin_report is not None:
             self._admin_report(

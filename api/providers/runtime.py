@@ -99,6 +99,7 @@ class ProviderRuntimeDeps:
 class ToolRoundDecision:
     messages: List[Dict[str, Any]]
     result: Optional[AIUsageResult] = None
+    billing_result: Optional[AIUsageResult] = None
     continue_rounds: bool = False
 
 
@@ -681,17 +682,17 @@ class ProviderRuntime:
             text = str(getattr(message, "content", "") or "").strip()
             metadata = {"web_search_requests": total_web_search_requests}
             self._add_firecrawl_credits(metadata, tool_context)
-            result = (
-                self._build_round_result(
-                    response,
-                    message,
-                    round_idx,
-                    metadata=metadata,
-                )
-                if text
-                else None
+            billing_result = self._build_round_result(
+                response,
+                message,
+                round_idx,
+                metadata=metadata,
             )
-            return ToolRoundDecision(current_messages, result=result)
+            return ToolRoundDecision(
+                current_messages,
+                result=billing_result if text else None,
+                billing_result=billing_result,
+            )
 
         updated_messages = self._tool_runtime.apply_tool_calls(
             message,
@@ -965,18 +966,16 @@ class ProviderRuntime:
             )
         self._add_firecrawl_credits(web_metadata, tool_context)
 
+        billing_result = self._build_round_result(
+            response,
+            message,
+            round_idx,
+            metadata=web_metadata,
+        )
         return ToolRoundDecision(
             current_messages,
-            result=(
-                self._build_round_result(
-                    response,
-                    message,
-                    round_idx,
-                    metadata=web_metadata,
-                )
-                if text.strip()
-                else None
-            ),
+            result=billing_result if text.strip() else None,
+            billing_result=billing_result,
         )
 
     def _report_unexpected_finish(
@@ -1067,7 +1066,7 @@ class ProviderRuntime:
                     total_web_search_requests=total_web_search_requests,
                 )
                 if decision.result is not None:
-                    self._emit_usage_result(on_usage_result, decision.result)
+                    self._emit_usage_result(on_usage_result, decision.billing_result)
                     return decision.result
                 if decision.continue_rounds:
                     self._emit_intermediate_round_usage(
@@ -1080,6 +1079,7 @@ class ProviderRuntime:
                     )
                     current_messages = decision.messages
                     continue
+                self._emit_usage_result(on_usage_result, decision.billing_result)
                 break
 
             if finish_reason == "stop":
@@ -1103,7 +1103,7 @@ class ProviderRuntime:
                     )
                     current_messages = decision.messages
                     continue
-                self._emit_usage_result(on_usage_result, decision.result)
+                self._emit_usage_result(on_usage_result, decision.billing_result)
                 return decision.result
 
             if finish_reason == "length":
@@ -1121,6 +1121,20 @@ class ProviderRuntime:
                 self._emit_usage_result(on_usage_result, result)
                 return result
 
+            metadata = {
+                "unexpected_finish_reason": finish_reason,
+                "web_search_requests": total_web_search_requests,
+            }
+            self._add_firecrawl_credits(metadata, tool_context)
+            self._emit_usage_result(
+                on_usage_result,
+                self._build_round_result(
+                    response,
+                    message,
+                    round_idx,
+                    metadata=metadata,
+                ),
+            )
             self._report_unexpected_finish(
                 response,
                 choice,

@@ -139,6 +139,68 @@ def test_run_summary_settles_from_streamed_provider_usage():
     )
 
 
+def test_run_conversation_settles_provider_rounds_before_local_fallback():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    segment = {
+        "kind": "chat",
+        "model": "~deepseek/deepseek-v4-flash-latest",
+        "usage": {"cost": "0.0019"},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def fallback_after_provider_usage(*_args, **kwargs):
+        response_meta = kwargs["response_meta"]
+        response_meta["billing_segments"] = [segment]
+        response_meta["ai_fallback"] = True
+        return "local fallback"
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hello"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=fallback_after_provider_usage,
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(16, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = MagicMock()
+    reservation = {
+        "reserved_credit_units": 16,
+        "source": "user",
+        "usage_tag": "ai_response_base",
+    }
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="902",
+            message={"chat": {"id": 902, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage("hello", None, None),
+            billing_helper=billing_helper,
+            prompt_text="hello",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert result == ("local fallback", True)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="ai_response_provider_usage_before_fallback",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
 def test_run_conversation_rechecks_full_context_before_model_call():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage

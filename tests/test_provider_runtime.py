@@ -1053,7 +1053,7 @@ def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
                 kind=kwargs["kind"],
                 text=kwargs["text"],
                 model=kwargs["model"],
-                usage={},
+                usage=extract_usage(kwargs["response"]),
                 metadata=kwargs.get("metadata") or {},
             ),
             extract_usage_map=extract_usage,
@@ -1079,17 +1079,52 @@ def test_provider_runtime_returns_none_for_billable_empty_stop():
         extract_usage=lambda _response: {"prompt_tokens": 10},
     )
 
+    recorded = []
     result = runtime.complete(
         {"role": "system", "content": "sys"},
         [{"role": "user", "content": "research this"}],
         enable_web_search=True,
         tool_context={"chat_id": "123"},
+        on_usage_result=recorded.append,
     )
 
     assert result is None
     assert len(client.calls) == 1
     assert request_count.call_count == 1
+    assert len(recorded) == 1
+    assert recorded[0].text == ""
+    assert recorded[0].usage == {"prompt_tokens": 10}
     admin_report.assert_not_called()
+
+
+def test_provider_runtime_records_billable_unexpected_finish():
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "content_filter",
+                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    runtime, _client, admin_report, _request_count = _build_retry_runtime(
+        [response],
+        extract_usage=lambda _response: {"prompt_tokens": 10},
+    )
+    recorded = []
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "research this"}],
+        enable_web_search=True,
+        tool_context={"chat_id": "123"},
+        on_usage_result=recorded.append,
+    )
+
+    assert result is None
+    assert len(recorded) == 1
+    assert recorded[0].usage == {"prompt_tokens": 10}
+    assert recorded[0].metadata["unexpected_finish_reason"] == "content_filter"
+    admin_report.assert_called_once()
 
 
 @pytest.mark.parametrize(
