@@ -90,7 +90,7 @@ def test_run_summary_settles_from_streamed_provider_usage():
 
     segment = {
         "kind": "summary",
-        "model": "~deepseek/deepseek-v4-flash-latest",
+        "model": "deepseek/deepseek-v4-flash-0731",
         "usage": {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.001},
         "source": "openrouter",
         "metadata": {"provider": "openrouter"},
@@ -247,7 +247,7 @@ def test_run_conversation_settles_provider_rounds_before_local_fallback():
 
     segment = {
         "kind": "chat",
-        "model": "~deepseek/deepseek-v4-flash-latest",
+        "model": "deepseek/deepseek-v4-flash-0731",
         "usage": {"cost": "0.0019"},
         "source": "openrouter",
         "metadata": {"provider": "openrouter"},

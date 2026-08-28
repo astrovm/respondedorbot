@@ -22,10 +22,6 @@ from api.providers.errors import (
     extract_rate_limit_backoff_seconds,
     is_rate_limit_error,
 )
-from api.providers.pricing import (
-    get_openrouter_provider_pricing,
-    needs_published_provider_pricing,
-)
 from api.providers import OpenRouterProvider, ProviderChain
 from api.tools.runtime import ToolRuntime
 
@@ -205,35 +201,7 @@ class ProviderService:
             metadata=metadata,
             extract_usage=self.extract_usage_map,
         )
-        upstream_provider = str(result.metadata.get("upstream_provider") or "").strip()
-        service_tier = str(result.metadata.get("service_tier") or "").strip() or None
-        if (
-            result.source == "openrouter"
-            and upstream_provider
-            and needs_published_provider_pricing(result.usage)
-        ):
-            provider_pricing = self.get_openrouter_provider_pricing(
-                result.model,
-                upstream_provider,
-                service_tier,
-            )
-            if provider_pricing:
-                result.metadata["provider_pricing"] = provider_pricing
-                result.metadata["provider_pricing_source"] = "openrouter_endpoints"
         return result
-
-    def get_openrouter_provider_pricing(
-        self,
-        model: str,
-        upstream_provider: str,
-        service_tier: str | None = None,
-    ) -> dict[str, int] | None:
-        return get_openrouter_provider_pricing(
-            model,
-            upstream_provider,
-            service_tier,
-            base_url=str(self.get_openrouter_base_url() or ""),
-        )
 
     def log_groq_request_result(
         self,

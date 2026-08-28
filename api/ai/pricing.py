@@ -42,11 +42,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "audio_input_per_million": 500_000,
         "output_per_million": 1_500_000,
     },
-    "~deepseek/deepseek-v4-flash-latest": {
-        "input_per_million": 35_000,
-        "cached_input_per_million": 7_000,
-        "output_per_million": 280_000,
-    },
     "deepseek/deepseek-v4-flash": {
         "input_per_million": 90_000,
         "cached_input_per_million": 18_000,
@@ -71,7 +66,7 @@ PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
 def chat_output_token_limit(model: str) -> int:
     """Return a larger budget only for chat models that use hidden reasoning."""
 
-    if str(model or "").split(":", 1)[0] == "~deepseek/deepseek-v4-flash-latest":
+    if str(model or "").split(":", 1)[0] == "deepseek/deepseek-v4-flash-0731":
         return REASONING_CHAT_OUTPUT_TOKEN_LIMIT
     return CHAT_OUTPUT_TOKEN_LIMIT
 
@@ -166,10 +161,10 @@ def estimate_chat_reserve_credits(
     messages: Sequence[Mapping[str, Any]],
     max_output_tokens: Optional[int] = None,
     extra_input_tokens: int = 0,
-    model: str = "~deepseek/deepseek-v4-flash-latest",
+    model: str = "deepseek/deepseek-v4-flash-0731",
 ) -> int:
     pricing = MODEL_PRICING_USD_MICROS.get(
-        model, MODEL_PRICING_USD_MICROS["~deepseek/deepseek-v4-flash-latest"]
+        model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash-0731"]
     )
     output_token_limit = (
         chat_output_token_limit(model) if max_output_tokens is None else max_output_tokens
@@ -265,7 +260,6 @@ def _calculate_model_token_cost(
     *,
     provider: str = "",
     upstream_provider: str = "",
-    provider_pricing: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_provider = str(provider or "").strip().lower()
     normalized_upstream = str(upstream_provider or "").strip().lower()
@@ -282,20 +276,12 @@ def _calculate_model_token_cost(
         }
 
     reported_cost = _reported_cost_usd_micros_exact(usage)
-    normalized_published_pricing = ensure_mapping(provider_pricing) or {}
     exact_provider_pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_upstream, model))
-    pricing: Mapping[str, Any] | None
-    if normalized_provider == "openrouter" and reported_cost is None:
-        # OpenRouter routes one model across differently priced providers. A
-        # model-wide headline rate is not a safe substitute for the routed endpoint.
-        pricing = normalized_published_pricing
-    else:
-        pricing = (
-            normalized_published_pricing
-            or exact_provider_pricing
-            or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
-            or MODEL_PRICING_USD_MICROS.get(model)
-        )
+    pricing = (
+        exact_provider_pricing
+        or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
+        or MODEL_PRICING_USD_MICROS.get(model)
+    )
     if not pricing:
         exact_cost = (
             reported_cost if reported_cost is not None and reported_cost > 0 else Decimal(0)
@@ -479,7 +465,6 @@ def calculate_billing_for_segments(
             usage,
             provider=provider,
             upstream_provider=upstream_provider,
-            provider_pricing=ensure_mapping(metadata.get("provider_pricing")),
         )
         exact_model_cost = model_cost.pop("_usd_micros_exact")
         pricing_basis = str(model_cost.pop("_pricing_basis"))
@@ -511,7 +496,6 @@ def calculate_billing_for_segments(
                 "upstream_provider": upstream_provider or None,
                 "provider_request_id": metadata.get("provider_request_id"),
                 "provider_generation_id": metadata.get("provider_generation_id"),
-                "provider_pricing_source": metadata.get("provider_pricing_source"),
                 "pricing_basis": pricing_basis,
                 "tool_pricing_basis": "firecrawl_standard" if tool_cost else None,
                 "cost_complete": cost_complete,

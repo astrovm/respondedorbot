@@ -35,7 +35,7 @@ class GordoBenchmark:
         self.models = [
             "qwen/qwen3.6-plus",
             "minimax/minimax-m2.7",
-            "~deepseek/deepseek-v4-flash-latest",
+            "deepseek/deepseek-v4-flash-0731",
         ]
 
         self.model_pricing = {
@@ -45,9 +45,9 @@ class GordoBenchmark:
                 "output": 0.96,
                 "context": "205K",
             },
-            "~deepseek/deepseek-v4-flash-latest": {
-                "input": 0.03,
-                "output": 0.075,
+            "deepseek/deepseek-v4-flash-0731": {
+                "input": 0.035,
+                "output": 0.28,
                 "context": "1.31M",
             },
         }

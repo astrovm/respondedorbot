@@ -48,11 +48,11 @@ def test_build_insufficient_credits_message_mentions_group_balances():
 
 def test_chat_output_token_limit_is_model_specific():
     assert (
-        chat_output_token_limit("~deepseek/deepseek-v4-flash-latest")
+        chat_output_token_limit("deepseek/deepseek-v4-flash-0731")
         == REASONING_CHAT_OUTPUT_TOKEN_LIMIT
         == 8192
     )
-    assert chat_output_token_limit("~deepseek/deepseek-v4-flash-latest:exacto") == 8192
+    assert chat_output_token_limit("deepseek/deepseek-v4-flash-0731:exacto") == 8192
     assert chat_output_token_limit("other/model") == CHAT_OUTPUT_TOKEN_LIMIT == 1024
 
 
@@ -76,7 +76,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 1_000,
                     "input_cached_tokens": 900,
@@ -93,7 +93,7 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
-            "model": "~deepseek/deepseek-v4-flash-latest",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "usd_micros": 149,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
@@ -108,12 +108,12 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
             {
@@ -136,8 +136,8 @@ def test_calculate_billing_for_segments_normalizes_billing_model_ids():
 
     assert breakdown["raw_usd_micros"] > 0
     assert [item["model"] for item in breakdown["model_breakdown"]] == [
-        "~deepseek/deepseek-v4-flash-latest",
-        "~deepseek/deepseek-v4-flash-latest",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
         "google/gemini-3.1-flash-lite-preview",
         "google/gemini-3.1-flash-lite-preview",
         "groq/whisper-large-v3",
@@ -149,7 +149,7 @@ def test_calculate_billing_for_segments_bumps_pricing_version_for_deepseek_searc
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
                 "metadata": {"web_search_requests": 1},
             }
@@ -164,7 +164,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 2_000,
                     "completion_tokens": 100,
@@ -180,7 +180,7 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
-            "model": "~deepseek/deepseek-v4-flash-latest",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "usd_micros": 56,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
@@ -196,7 +196,7 @@ def test_calculate_billing_for_segments_skips_cached_source_segments():
             {
                 "kind": "chat",
                 "source": "cache",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 10_000,
                     "output_tokens": 500,
@@ -218,7 +218,7 @@ def test_calculate_billing_for_segments_bills_successful_firecrawl_credits():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
                 "metadata": {
                     "web_search_requests": 2,
@@ -238,7 +238,7 @@ def test_calculate_billing_for_segments_refunds_cache_only_usage_to_zero():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "source": "cache",
                 "usage": {
                     "input_tokens": 10_000,
@@ -291,7 +291,7 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -324,7 +324,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 40_000,
                     "output_tokens": 55_000,
@@ -460,7 +460,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 40_000,
                     "output_tokens": 55_000,
@@ -503,7 +503,7 @@ def test_settle_reserved_ai_credits_batch_converts_to_credits_once_and_refunds_o
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 1,
                     "output_tokens": 1,
@@ -548,7 +548,7 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -666,7 +666,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
             },
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 4000,
                     "output_tokens": 2000,
@@ -695,7 +695,7 @@ def test_settle_reserved_ai_credits_keeps_reserve_when_groq_reports_zero_usage()
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -724,7 +724,7 @@ def test_incomplete_pricing_never_reduces_known_overage_to_reserve():
     segments = [
         {
             "kind": "chat",
-            "model": "~deepseek/deepseek-v4-flash-latest",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "usage": {"cost": "0.0019"},
             "metadata": {"provider": "openrouter"},
         },
@@ -777,7 +777,7 @@ def test_incomplete_batch_pricing_never_reduces_known_overage_to_reserve():
     segments = [
         {
             "kind": "chat",
-            "model": "~deepseek/deepseek-v4-flash-latest",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "usage": {"cost": "0.0019"},
             "metadata": {"provider": "openrouter"},
         },
@@ -810,7 +810,7 @@ def test_settle_reserved_ai_credits_refunds_cache_only_usage():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 1_000,
                     "prompt_tokens_details": {"cached_tokens": 900},
@@ -853,7 +853,7 @@ def test_settle_reserved_ai_credits_batch_keeps_full_reserve_when_total_usage_is
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -902,7 +902,7 @@ def test_settle_reserved_ai_credits_batch_ignores_none_segments():
             None,
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -973,7 +973,7 @@ def test_settle_reserved_ai_credits_refunds_partial_chat_usage():
     segments = [
         {
             "kind": "chat",
-            "model": "~deepseek/deepseek-v4-flash-latest",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "usage": {
                 "input_tokens": 1_000,
                 "output_tokens": 100,
@@ -1058,7 +1058,7 @@ def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 1_000,
                     "completion_tokens": 50,
@@ -1077,7 +1077,7 @@ def test_calculate_billing_uses_reported_gateway_cost_when_lower_than_local():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 4_000,
                     "completion_tokens": 2_000,
@@ -1096,7 +1096,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
@@ -1109,7 +1109,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
     assert breakdown["model_breakdown"][0]["usd_micros"] == 17
 
 
-def test_zero_reported_gateway_cost_uses_current_published_rate():
+def test_zero_reported_gateway_cost_uses_static_model_rate():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -1123,18 +1123,12 @@ def test_zero_reported_gateway_cost_uses_current_published_rate():
                 "metadata": {
                     "provider": "openrouter",
                     "upstream_provider": "DeepInfra",
-                    "provider_pricing": {
-                        "input_per_million": 80_000,
-                        "cached_input_per_million": 16_000,
-                        "output_per_million": 180_000,
-                    },
-                    "provider_pricing_source": "openrouter_endpoints",
                 },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 89
+    assert breakdown["raw_usd_micros"] == 49
     assert breakdown["pricing_complete"] is True
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
 
@@ -1185,7 +1179,7 @@ def test_upstream_inference_cost_wins_over_discounted_gateway_cost():
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
 
 
-def test_free_upstream_cost_uses_concrete_published_rate():
+def test_free_upstream_cost_uses_static_model_rate():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -1200,20 +1194,13 @@ def test_free_upstream_cost_uses_concrete_published_rate():
                 "metadata": {
                     "provider": "openrouter",
                     "upstream_provider": "DeepInfra",
-                    "provider_pricing": {
-                        "input_per_million": 80_000,
-                        "cached_input_per_million": 16_000,
-                        "output_per_million": 180_000,
-                    },
-                    "provider_pricing_source": "openrouter_endpoints",
                 },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros_exact"] == "89"
+    assert breakdown["raw_usd_micros_exact"] == "49"
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
-    assert breakdown["segment_breakdown"][0]["provider_pricing_source"] == "openrouter_endpoints"
 
 
 def test_internal_cache_is_authoritative_zero_cost():
@@ -1221,7 +1208,7 @@ def test_internal_cache_is_authoritative_zero_cost():
         [
             {
                 "kind": "summary",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "source": "cache",
                 "cached": True,
             }
@@ -1238,7 +1225,7 @@ def test_calculate_billing_adds_direct_firecrawl_cost_to_reported_model_cost():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
@@ -1261,7 +1248,7 @@ def test_calculate_billing_does_not_bill_failed_firecrawl_search():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
@@ -1348,12 +1335,6 @@ def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
                 "metadata": {
                     "provider": "openrouter",
                     "upstream_provider": "Groq",
-                    "provider_pricing": {
-                        "input_per_million": 150_000,
-                        "cached_input_per_million": 75_000,
-                        "output_per_million": 600_000,
-                    },
-                    "provider_pricing_source": "openrouter_endpoints",
                 },
             }
         ]

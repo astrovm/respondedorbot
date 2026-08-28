@@ -978,7 +978,7 @@ def test_openrouter_stream_records_incomplete_usage_after_partial_stream_error()
             metadata=kwargs.get("metadata") or {},
         ),
         extract_usage_map=lambda response: getattr(response, "usage", None),
-        primary_model="~deepseek/deepseek-v4-flash-latest",
+        primary_model="deepseek/deepseek-v4-flash-0731",
     )
 
     with pytest.raises(RuntimeError, match="stream interrupted"):
@@ -1135,7 +1135,7 @@ def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
                 metadata=kwargs.get("metadata") or {},
             ),
             extract_usage_map=extract_usage,
-            primary_model="~deepseek/deepseek-v4-flash-latest",
+            primary_model="deepseek/deepseek-v4-flash-0731",
             max_tool_rounds=5,
         ),
         ToolRuntime(),
@@ -1258,7 +1258,7 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
     assert result.text == "done"
     assert len(client.calls) == 2
     assert all(
-        call["max_tokens"] == chat_output_token_limit("~deepseek/deepseek-v4-flash-latest")
+        call["max_tokens"] == chat_output_token_limit("deepseek/deepseek-v4-flash-0731")
         for call in client.calls
     )
     assert request_count.call_count == 2
@@ -1341,7 +1341,7 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
     assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
     report_context = admin_report.call_args.kwargs["extra_context"]
     assert report_context == {
-        "model": "~deepseek/deepseek-v4-flash-latest",
+        "model": "deepseek/deepseek-v4-flash-0731",
         "enable_web_search": True,
         "tool_round": 1,
         "response_id": "gen-1",

@@ -31,7 +31,7 @@ def test_summary_model_uses_openrouter_reported_cost():
         get_client=lambda: client,
         estimate_tokens=lambda _messages: 100,
         estimate_cost=lambda *_args: 999_999,
-        model="~deepseek/deepseek-v4-flash-latest",
+        model="deepseek/deepseek-v4-flash-0731",
         max_tokens=100,
         logger=MagicMock(),
     )
@@ -40,12 +40,12 @@ def test_summary_model_uses_openrouter_reported_cost():
     assert cost == 105
     assert segment is not None
     assert segment["model"] == "deepseek/deepseek-v4-flash"
-    assert segment["metadata"]["requested_model"] == "~deepseek/deepseek-v4-flash-latest"
+    assert segment["metadata"]["requested_model"] == "deepseek/deepseek-v4-flash-0731"
     assert segment["metadata"]["upstream_provider"] == "DeepInfra"
     assert segment["usage"]["cost"] == "0.00010442124"
 
 
-def test_summary_model_uses_routed_endpoint_price_when_upstream_cost_is_free():
+def test_summary_model_uses_static_model_price_when_upstream_cost_is_free():
     from api.memory.summary import call_summary_model
 
     response = SimpleNamespace(
@@ -68,30 +68,19 @@ def test_summary_model_uses_routed_endpoint_price_when_upstream_cost_is_free():
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response)))
     )
-    lookup = MagicMock(
-        return_value={
-            "input_per_million": 80_000,
-            "cached_input_per_million": 16_000,
-            "output_per_million": 180_000,
-        }
-    )
-
     _text, cost, segment = call_summary_model(
         [{"role": "user", "content": "summarize"}],
         get_client=lambda: client,
         estimate_tokens=lambda _messages: 1_000,
         estimate_cost=lambda *_args: 999_999,
-        model="~deepseek/deepseek-v4-flash-latest",
+        model="deepseek/deepseek-v4-flash-0731",
         max_tokens=100,
         logger=MagicMock(),
-        get_provider_pricing=lookup,
     )
 
-    assert cost == 89
+    assert cost == 49
     assert segment is not None
-    assert segment["metadata"]["provider_pricing_source"] == "openrouter_endpoints"
     assert segment["metadata"]["service_tier"] == "default"
-    lookup.assert_called_once_with("deepseek/deepseek-v4-flash-0731", "DeepInfra", "default")
 
 
 def test_incremental_summary_helper_uses_only_messages_after_marker():
