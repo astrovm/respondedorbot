@@ -63,17 +63,24 @@ def call_summary_model(
             input_tokens = int(usage.get("prompt_tokens", 0) or 0)
             output_tokens = int(usage.get("completion_tokens", 0) or 0)
             finish_reason = response.choices[0].finish_reason
+            resolved_model = str(getattr(response, "model", None) or model)
+            upstream_provider = getattr(response, "provider", None)
+            response_metadata = {
+                "provider": "openrouter",
+                "provider_generation_id": getattr(response, "id", None),
+                "provider_request_id": getattr(response, "_request_id", None),
+            }
+            if resolved_model != model:
+                response_metadata["requested_model"] = model
+            if upstream_provider:
+                response_metadata["upstream_provider"] = str(upstream_provider)
             segment = AIUsageResult(
                 kind="summary",
                 text=text,
-                model=model,
+                model=resolved_model,
                 usage=usage,
                 source="openrouter",
-                metadata={
-                    "provider": "openrouter",
-                    "provider_generation_id": getattr(response, "id", None),
-                    "provider_request_id": getattr(response, "_request_id", None),
-                },
+                metadata=response_metadata,
             ).billing_segment()
             billing = calculate_billing_for_segments([segment])
             cost = int(

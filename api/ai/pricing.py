@@ -43,16 +43,31 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "output_per_million": 1_500_000,
     },
     "~deepseek/deepseek-v4-flash-latest": {
-        "input_per_million": 30_000,
+        "input_per_million": 35_000,
         "cached_input_per_million": 7_000,
-        "output_per_million": 75_000,
+        "output_per_million": 280_000,
+    },
+    "deepseek/deepseek-v4-flash": {
+        "input_per_million": 90_000,
+        "cached_input_per_million": 18_000,
+        "output_per_million": 180_000,
+    },
+    "deepseek/deepseek-v4-flash-0731": {
+        "input_per_million": 35_000,
+        "cached_input_per_million": 7_000,
+        "output_per_million": 280_000,
     },
 }
 
 PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
     ("openrouter", "openai/gpt-oss-120b"): {
-        "input_per_million": 37_000,
+        "input_per_million": 30_000,
         "output_per_million": 170_000,
+    },
+    ("groq", "openai/gpt-oss-120b"): {
+        "input_per_million": 150_000,
+        "cached_input_per_million": 75_000,
+        "output_per_million": 600_000,
     },
 }
 
@@ -253,10 +268,15 @@ def _calculate_model_token_cost(
     usage: Optional[Mapping[str, Any]],
     *,
     provider: str = "",
+    upstream_provider: str = "",
 ) -> Dict[str, Any]:
-    pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get(
-        (str(provider or "").strip().lower(), model)
-    ) or MODEL_PRICING_USD_MICROS.get(model)
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_upstream = str(upstream_provider or "").strip().lower()
+    pricing = (
+        PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_upstream, model))
+        or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
+        or MODEL_PRICING_USD_MICROS.get(model)
+    )
     if not usage:
         return {
             "model": model,
@@ -322,14 +342,28 @@ def _calculate_model_token_cost(
 def _reported_cost_usd_micros_exact(
     usage: Mapping[str, Any],
 ) -> Optional[Decimal]:
-    """Return a reported request cost in USD micros without float rounding."""
+    """Return provider-price cost in USD micros without float rounding."""
 
-    if "cost" not in usage or usage.get("cost") is None:
+    cost_details = ensure_mapping(usage.get("cost_details")) or {}
+    if "upstream_inference_cost" in cost_details:
+        raw_cost = cost_details.get("upstream_inference_cost")
+        try:
+            cost = Decimal(str(raw_cost)) * Decimal(1_000_000)
+        except InvalidOperation, TypeError, ValueError:
+            return None
+        if cost > 0:
+            return cost
         return None
-    try:
-        return max(Decimal(0), Decimal(str(usage["cost"])) * Decimal(1_000_000))
-    except InvalidOperation, TypeError, ValueError:
-        return None
+
+    raw_cost = usage.get("cost")
+    if raw_cost is not None:
+        try:
+            cost = Decimal(str(raw_cost)) * Decimal(1_000_000)
+        except InvalidOperation, TypeError, ValueError:
+            return None
+        if cost > 0:
+            return cost
+    return None
 
 
 def _credit_units_from_exact_usd_micros(total_usd_micros: Decimal) -> int:
@@ -397,6 +431,7 @@ def calculate_billing_for_segments(
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
         metadata = ensure_mapping(segment.get("metadata")) or {}
         provider = str(metadata.get("provider") or segment.get("source") or "").strip().lower()
+        upstream_provider = str(metadata.get("upstream_provider") or "").strip().lower()
         reported_cost = _reported_cost_usd_micros_exact(usage)
 
         pricing = MODEL_PRICING_USD_MICROS.get(model) or {}
@@ -432,7 +467,12 @@ def calculate_billing_for_segments(
                 )
             continue
 
-        model_cost = _calculate_model_token_cost(model, usage, provider=provider)
+        model_cost = _calculate_model_token_cost(
+            model,
+            usage,
+            provider=provider,
+            upstream_provider=upstream_provider,
+        )
         exact_model_cost = model_cost.pop("_usd_micros_exact")
         pricing_basis = str(model_cost.pop("_pricing_basis"))
         model_cost["kind"] = kind
@@ -460,6 +500,7 @@ def calculate_billing_for_segments(
                 "kind": kind,
                 "model": model,
                 "provider": provider or "unknown",
+                "upstream_provider": upstream_provider or None,
                 "provider_request_id": metadata.get("provider_request_id"),
                 "provider_generation_id": metadata.get("provider_generation_id"),
                 "pricing_basis": pricing_basis,

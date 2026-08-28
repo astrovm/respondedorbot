@@ -87,14 +87,14 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 46
-    assert breakdown["charged_credit_units"] == 1
-    assert breakdown["charged_credits_display"] == "0.01"
+    assert breakdown["raw_usd_micros"] == 149
+    assert breakdown["charged_credit_units"] == 3
+    assert breakdown["charged_credits_display"] == "0.03"
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
             "model": "~deepseek/deepseek-v4-flash-latest",
-            "usd_micros": 46,
+            "usd_micros": 149,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -174,14 +174,14 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 33
-    assert breakdown["charged_credit_units"] == 1
-    assert breakdown["charged_credits_display"] == "0.01"
+    assert breakdown["raw_usd_micros"] == 56
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.02"
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
             "model": "~deepseek/deepseek-v4-flash-latest",
-            "usd_micros": 33,
+            "usd_micros": 56,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -228,7 +228,7 @@ def test_calculate_billing_for_segments_bills_successful_firecrawl_credits():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 3_326
+    assert breakdown["raw_usd_micros"] == 3_337
     assert breakdown["charged_credit_units"] == 67
     assert breakdown["tool_breakdown"] == [{"tool": "web_search", "count": 2, "usd_micros": 3_320}]
 
@@ -335,7 +335,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 7
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 236
     assert (
         billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
         == "ai_settlement_charge"
@@ -346,7 +346,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     assert metadata["payer_scope"] == "mixed"
     assert metadata["payer_breakdown"] == [
         {"scope": "user", "credit_units": 100},
-        {"scope": "chat", "credit_units": 7},
+        {"scope": "chat", "credit_units": 236},
     ]
 
 
@@ -472,7 +472,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 7
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 236
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert (
         billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
@@ -674,7 +674,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 194
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 185
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -1101,8 +1101,8 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 6
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 6
+    assert breakdown["raw_usd_micros"] == 17
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 17
 
 
 def test_zero_reported_gateway_cost_uses_current_published_rate():
@@ -1110,7 +1110,7 @@ def test_zero_reported_gateway_cost_uses_current_published_rate():
         [
             {
                 "kind": "chat",
-                "model": "~deepseek/deepseek-v4-flash-latest",
+                "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
@@ -1121,7 +1121,7 @@ def test_zero_reported_gateway_cost_uses_current_published_rate():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 6
+    assert breakdown["raw_usd_micros"] == 17
     assert breakdown["pricing_complete"] is True
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
 
@@ -1148,6 +1148,49 @@ def test_submicro_provider_costs_are_summed_before_final_rounding():
     assert breakdown["raw_usd_micros_exact"] == "0.06000000"
     assert breakdown["charged_credit_units"] == 1
     assert breakdown["pricing_complete"] is True
+
+
+def test_upstream_inference_cost_wins_over_discounted_gateway_cost():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "deepseek/deepseek-v4-flash-0731",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": "0.000001",
+                    "cost_details": {"upstream_inference_cost": "0.00010442124"},
+                },
+                "metadata": {"provider": "openrouter"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros_exact"] == "104.42124000000"
+    assert breakdown["charged_credit_units"] == 3
+    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
+
+
+def test_free_upstream_cost_uses_concrete_published_rate():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "deepseek/deepseek-v4-flash-0731",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cost": "0.000001",
+                    "cost_details": {"upstream_inference_cost": 0},
+                },
+                "metadata": {"provider": "openrouter"},
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros_exact"] == "17.5"
+    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
 
 
 def test_internal_cache_is_authoritative_zero_cost():
@@ -1265,7 +1308,26 @@ def test_openrouter_gpt_oss_local_fallback_uses_provider_rates():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 122
+    assert breakdown["raw_usd_micros"] == 115
+
+
+def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
+    breakdown = calculate_billing_for_segments(
+        [
+            {
+                "kind": "chat",
+                "model": "openai/gpt-oss-120b",
+                "usage": {"prompt_tokens": 1_000, "completion_tokens": 500, "cost": 0},
+                "metadata": {
+                    "provider": "openrouter",
+                    "upstream_provider": "Groq",
+                },
+            }
+        ]
+    )
+
+    assert breakdown["raw_usd_micros"] == 450
+    assert breakdown["segment_breakdown"][0]["upstream_provider"] == "groq"
 
 
 def test_groq_transcription_applies_ten_second_minimum():

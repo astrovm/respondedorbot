@@ -179,6 +179,8 @@ def test_nonstream_runtime_reports_every_tool_round_for_billing():
     ]
     for index, response in enumerate(responses, start=1):
         response.id = f"generation-{index}"
+        response.model = "deepseek/deepseek-v4-flash-0731"
+        response.provider = "DeepInfra"
         response.usage = {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}
     runtime = ProviderRuntime(
         ProviderRuntimeDeps(
@@ -219,6 +221,14 @@ def test_nonstream_runtime_reports_every_tool_round_for_billing():
         "generation-2",
     ]
     assert [item.usage["cost"] for item in recorded] == [0.001, 0.001]
+    assert [item.model for item in recorded] == [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+    ]
+    assert [item.metadata["upstream_provider"] for item in recorded] == [
+        "DeepInfra",
+        "DeepInfra",
+    ]
 
 
 def test_provider_runtime_executes_tool_calls_until_stop():

@@ -8,6 +8,8 @@ def test_summary_model_uses_openrouter_reported_cost():
 
     response = SimpleNamespace(
         id="generation-summary",
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content="summary"),
@@ -37,6 +39,9 @@ def test_summary_model_uses_openrouter_reported_cost():
     assert text == "summary"
     assert cost == 105
     assert segment is not None
+    assert segment["model"] == "deepseek/deepseek-v4-flash"
+    assert segment["metadata"]["requested_model"] == "~deepseek/deepseek-v4-flash-latest"
+    assert segment["metadata"]["upstream_provider"] == "DeepInfra"
     assert segment["usage"]["cost"] == "0.00010442124"
 
 
@@ -196,6 +201,8 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     response_meta = {}
     stream_chunk = SimpleNamespace(
         id="generation-summary",
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
         choices=[
             SimpleNamespace(
                 finish_reason="stop",
@@ -256,6 +263,8 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     }
     assert request["messages"][2]["content"] == "msg 2"
     assert response_meta["billing_segments"][0]["kind"] == "summary"
+    assert response_meta["billing_segments"][0]["model"] == "deepseek/deepseek-v4-flash"
+    assert response_meta["billing_segments"][0]["metadata"]["upstream_provider"] == "DeepInfra"
     assert response_meta["billing_segments"][0]["usage"]["cost"] == 0.00001
 
 

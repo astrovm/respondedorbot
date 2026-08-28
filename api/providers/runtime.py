@@ -619,6 +619,18 @@ class ProviderRuntime:
             "provider_request_id": getattr(response, "_request_id", None),
             **(metadata or {}),
         }
+        resolved_model = str(
+            result_metadata.pop("resolved_model", None)
+            or getattr(response, "model", None)
+            or self._deps.primary_model
+        )
+        if resolved_model != self._deps.primary_model:
+            result_metadata.setdefault("requested_model", self._deps.primary_model)
+        upstream_provider = result_metadata.get("upstream_provider") or getattr(
+            response, "provider", None
+        )
+        if upstream_provider:
+            result_metadata["upstream_provider"] = str(upstream_provider)
         return self._deps.build_usage_result(
             kind="chat",
             text=(
@@ -626,7 +638,7 @@ class ProviderRuntime:
                 if text_override is not None
                 else str(getattr(message, "content", "") or "")
             ),
-            model=self._deps.primary_model,
+            model=resolved_model,
             response=response,
             metadata=result_metadata,
         )

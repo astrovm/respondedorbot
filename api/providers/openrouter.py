@@ -40,6 +40,8 @@ class _StreamRound:
     finish_reason: Any = None
     usage_response: Any = None
     last_response: Any = None
+    resolved_model: str = ""
+    upstream_provider: str = ""
 
     @property
     def text(self) -> str:
@@ -173,6 +175,10 @@ class OpenRouterProvider(StreamingAIProvider):
                     usage_response,
                     message,
                 )
+                if streamed_round.resolved_model:
+                    web_metadata["resolved_model"] = streamed_round.resolved_model
+                if streamed_round.upstream_provider:
+                    web_metadata["upstream_provider"] = streamed_round.upstream_provider
                 round_web_search_requests = self._runtime._web_search_request_count(
                     usage_response,
                     message,
@@ -328,6 +334,12 @@ class OpenRouterProvider(StreamingAIProvider):
             if stream_error:
                 raise RuntimeError(f"OpenRouter stream failed: {stream_error}")
             streamed_round.last_response = chunk
+            response_model = self._field(chunk, "model")
+            if response_model:
+                streamed_round.resolved_model = str(response_model)
+            response_provider = self._field(chunk, "provider")
+            if response_provider:
+                streamed_round.upstream_provider = str(response_provider)
             if getattr(chunk, "usage", None) is not None:
                 streamed_round.usage_response = chunk
             choices = getattr(chunk, "choices", None) or []

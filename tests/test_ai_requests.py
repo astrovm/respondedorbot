@@ -18,6 +18,27 @@ def test_provider_usage_result_uses_explicit_provider_as_source():
     assert result.metadata["provider"] == "openrouter"
 
 
+def test_provider_usage_result_preserves_resolved_model_and_upstream_provider():
+    from api.index import app_runtime
+
+    response = SimpleNamespace(
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
+        usage={"prompt_tokens": 3, "cost": 0},
+    )
+    result = app_runtime.providers.build_usage_result(
+        kind="chat",
+        text="ok",
+        model="~deepseek/deepseek-v4-flash-latest",
+        response=response,
+        metadata={"provider": "openrouter"},
+    )
+
+    assert result.model == "deepseek/deepseek-v4-flash"
+    assert result.metadata["requested_model"] == "~deepseek/deepseek-v4-flash-latest"
+    assert result.metadata["upstream_provider"] == "DeepInfra"
+
+
 def test_build_ai_messages():
     from api.index import build_ai_messages
 
@@ -155,7 +176,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["status"] == "success"
     assert log_entry["request_scope"] == "chat"
     assert log_entry["usage"] == {"input_tokens": 100, "output_tokens": 50}
-    assert log_entry["local_billing"]["raw_usd_micros"] == 6
+    assert log_entry["local_billing"]["raw_usd_micros"] == 17
     assert log_entry["local_billing"]["charged_credit_units"] == 1
     assert log_entry["local_billing"]["charged_credits_display"] == "0.01"
 
