@@ -47,10 +47,10 @@ uv run --locked python run_polling.py
 
 | Use | Provider | Model |
 |---|---|---|
-| Chat | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
+| Chat | OpenRouter | `deepseek/deepseek-v4-flash-0731` |
 | Vision | OpenRouter | `google/gemini-3.1-flash-lite-preview` |
 | Transcription | Groq, then OpenRouter | `whisper-large-v3`, then `google/gemini-3.1-flash-lite-preview` |
-| Summary | OpenRouter | `~deepseek/deepseek-v4-flash-latest` |
+| Summary | OpenRouter | `deepseek/deepseek-v4-flash-0731` |
 
 Text responses stream to Telegram. Tool calls run when their arguments are complete, then the response continues.
 

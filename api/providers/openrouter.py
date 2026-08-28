@@ -40,6 +40,9 @@ class _StreamRound:
     finish_reason: Any = None
     usage_response: Any = None
     last_response: Any = None
+    resolved_model: str = ""
+    upstream_provider: str = ""
+    service_tier: str = ""
 
     @property
     def text(self) -> str:
@@ -109,6 +112,7 @@ class OpenRouterProvider(StreamingAIProvider):
         enable_web_search: bool = True,
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
         return self._runtime.complete(
             system_message,
@@ -116,6 +120,7 @@ class OpenRouterProvider(StreamingAIProvider):
             enable_web_search=enable_web_search,
             extra_tools=extra_tools,
             tool_context=tool_context,
+            on_usage_result=on_usage_result,
         )
 
     def stream(
@@ -152,14 +157,24 @@ class OpenRouterProvider(StreamingAIProvider):
                     extra_tools=extra_tools,
                     web_search_max_uses=remaining_web_search_uses,
                 )
-                streamed_round, held_text, text_released = yield from (
-                    self._consume_stream_round(
-                        client,
-                        request_kwargs,
-                        possible_pseudo_tools,
-                        hold_all_text=total_web_search_requests > 0,
+                streamed_round = _StreamRound()
+                try:
+                    streamed_round, held_text, text_released = yield from (
+                        self._consume_stream_round(
+                            client,
+                            request_kwargs,
+                            possible_pseudo_tools,
+                            hold_all_text=total_web_search_requests > 0,
+                            streamed_round=streamed_round,
+                        )
                     )
-                )
+                except Exception:
+                    self._report_interrupted_stream_usage(
+                        on_usage_result,
+                        streamed_round,
+                        round_idx,
+                    )
+                    raise
 
                 message = streamed_round.message()
                 usage_response = (
@@ -171,6 +186,12 @@ class OpenRouterProvider(StreamingAIProvider):
                     usage_response,
                     message,
                 )
+                if streamed_round.resolved_model:
+                    web_metadata["resolved_model"] = streamed_round.resolved_model
+                if streamed_round.upstream_provider:
+                    web_metadata["upstream_provider"] = streamed_round.upstream_provider
+                if streamed_round.service_tier:
+                    web_metadata["service_tier"] = streamed_round.service_tier
                 round_web_search_requests = self._runtime._web_search_request_count(
                     usage_response,
                     message,
@@ -283,6 +304,38 @@ class OpenRouterProvider(StreamingAIProvider):
             )
         )
 
+    def _report_interrupted_stream_usage(
+        self,
+        callback: Optional[Callable[[AIUsageResult], None]],
+        streamed_round: _StreamRound,
+        round_idx: int,
+    ) -> None:
+        if not (
+            streamed_round.text_parts
+            or streamed_round.tool_calls
+            or streamed_round.usage_response is not None
+        ):
+            return
+        response = (
+            streamed_round.usage_response
+            or streamed_round.last_response
+            or SimpleNamespace(usage={})
+        )
+        metadata: Dict[str, Any] = {"stream_interrupted": True}
+        if streamed_round.resolved_model:
+            metadata["resolved_model"] = streamed_round.resolved_model
+        if streamed_round.upstream_provider:
+            metadata["upstream_provider"] = streamed_round.upstream_provider
+        if streamed_round.service_tier:
+            metadata["service_tier"] = streamed_round.service_tier
+        self._report_stream_usage(
+            callback,
+            response,
+            streamed_round.message(),
+            round_idx,
+            metadata,
+        )
+
     def _build_stream_request(
         self,
         system_message: Dict[str, Any],
@@ -317,8 +370,9 @@ class OpenRouterProvider(StreamingAIProvider):
         possible_pseudo_tools: set[str],
         *,
         hold_all_text: bool = False,
+        streamed_round: _StreamRound | None = None,
     ) -> Generator[str, None, tuple[_StreamRound, str, bool]]:
-        streamed_round = _StreamRound()
+        streamed_round = streamed_round or _StreamRound()
         held_text = ""
         text_released = False
         for chunk in client.chat.completions.create(**request_kwargs):
@@ -326,6 +380,15 @@ class OpenRouterProvider(StreamingAIProvider):
             if stream_error:
                 raise RuntimeError(f"OpenRouter stream failed: {stream_error}")
             streamed_round.last_response = chunk
+            response_model = self._field(chunk, "model")
+            if response_model:
+                streamed_round.resolved_model = str(response_model)
+            response_provider = self._field(chunk, "provider")
+            if response_provider:
+                streamed_round.upstream_provider = str(response_provider)
+            response_service_tier = self._field(chunk, "service_tier")
+            if response_service_tier:
+                streamed_round.service_tier = str(response_service_tier)
             if getattr(chunk, "usage", None) is not None:
                 streamed_round.usage_response = chunk
             choices = getattr(chunk, "choices", None) or []

@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import math
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from api.billing.credit_units import CREDIT_SCALE, format_credit_units
 
-PRICING_VERSION = "2026-08-26"
+PRICING_VERSION = "2026-08-28"
 CREDIT_USD_MICROS = 10_000
 BILLING_MARKUP_MULTIPLIER = 2.0
 CREDIT_CEIL_DIVISOR_USD_MICROS = int(CREDIT_USD_MICROS / BILLING_MARKUP_MULTIPLIER)
@@ -23,8 +24,7 @@ SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE = 4_000
 FIRECRAWL_STANDARD_PLAN_USD_MICROS = 83_000_000
 FIRECRAWL_STANDARD_PLAN_CREDITS = 100_000
 FIRECRAWL_USD_MICROS_PER_CREDIT = (
-    FIRECRAWL_STANDARD_PLAN_USD_MICROS
-    // FIRECRAWL_STANDARD_PLAN_CREDITS
+    FIRECRAWL_STANDARD_PLAN_USD_MICROS // FIRECRAWL_STANDARD_PLAN_CREDITS
 )
 
 
@@ -42,17 +42,18 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "audio_input_per_million": 500_000,
         "output_per_million": 1_500_000,
     },
-    "~deepseek/deepseek-v4-flash-latest": {
+    "deepseek/deepseek-v4-flash-0731": {
         "input_per_million": 30_000,
         "cached_input_per_million": 7_000,
-        "output_per_million": 75_000,
+        "output_per_million": 100_000,
     },
 }
 
 PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
-    ("openrouter", "openai/gpt-oss-120b"): {
-        "input_per_million": 37_000,
-        "output_per_million": 170_000,
+    ("groq", "openai/gpt-oss-120b"): {
+        "input_per_million": 150_000,
+        "cached_input_per_million": 75_000,
+        "output_per_million": 600_000,
     },
 }
 
@@ -60,7 +61,7 @@ PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
 def chat_output_token_limit(model: str) -> int:
     """Return a larger budget only for chat models that use hidden reasoning."""
 
-    if str(model or "").split(":", 1)[0] == "~deepseek/deepseek-v4-flash-latest":
+    if str(model or "").split(":", 1)[0] == "deepseek/deepseek-v4-flash-0731":
         return REASONING_CHAT_OUTPUT_TOKEN_LIMIT
     return CHAT_OUTPUT_TOKEN_LIMIT
 
@@ -104,9 +105,7 @@ def ensure_mapping(value: Any) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
     if hasattr(value, "__dict__"):
-        data = {
-            key: item for key, item in vars(value).items() if not key.startswith("_")
-        }
+        data = {key: item for key, item in vars(value).items() if not key.startswith("_")}
         if data:
             return data
     return None
@@ -157,13 +156,13 @@ def estimate_chat_reserve_credits(
     messages: Sequence[Mapping[str, Any]],
     max_output_tokens: Optional[int] = None,
     extra_input_tokens: int = 0,
-    model: str = "~deepseek/deepseek-v4-flash-latest",
+    model: str = "deepseek/deepseek-v4-flash-0731",
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["~deepseek/deepseek-v4-flash-latest"])
+    pricing = MODEL_PRICING_USD_MICROS.get(
+        model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash-0731"]
+    )
     output_token_limit = (
-        chat_output_token_limit(model)
-        if max_output_tokens is None
-        else max_output_tokens
+        chat_output_token_limit(model) if max_output_tokens is None else max_output_tokens
     )
     input_tokens = estimate_message_tokens(messages) + extra_input_tokens
     if system_message:
@@ -183,7 +182,9 @@ def estimate_vision_reserve_credits(
     max_output_tokens: int = VISION_OUTPUT_TOKEN_LIMIT,
     model: str = "google/gemini-3.1-flash-lite-preview",
 ) -> int:
-    pricing = MODEL_PRICING_USD_MICROS.get(model, MODEL_PRICING_USD_MICROS["google/gemini-3.1-flash-lite-preview"])
+    pricing = MODEL_PRICING_USD_MICROS.get(
+        model, MODEL_PRICING_USD_MICROS["google/gemini-3.1-flash-lite-preview"]
+    )
     image_url = ""
     if image_data:
         image_base64 = base64.b64encode(image_data).decode("utf-8")
@@ -233,17 +234,11 @@ def _calculate_transcription_usd_micros(audio_seconds: float) -> int:
 def _extract_token_usage(usage: Optional[Mapping[str, Any]]) -> Dict[str, int]:
     usage_map = dict(usage or {})
     prompt_tokens_details = ensure_mapping(usage_map.get("prompt_tokens_details")) or {}
-    input_tokens = int(
-        usage_map.get("input_tokens") or usage_map.get("prompt_tokens") or 0
-    )
+    input_tokens = int(usage_map.get("input_tokens") or usage_map.get("prompt_tokens") or 0)
     input_cached_tokens = int(
-        usage_map.get("input_cached_tokens")
-        or prompt_tokens_details.get("cached_tokens")
-        or 0
+        usage_map.get("input_cached_tokens") or prompt_tokens_details.get("cached_tokens") or 0
     )
-    output_tokens = int(
-        usage_map.get("output_tokens") or usage_map.get("completion_tokens") or 0
-    )
+    output_tokens = int(usage_map.get("output_tokens") or usage_map.get("completion_tokens") or 0)
     input_cached_tokens = max(0, min(input_tokens, input_cached_tokens))
     input_non_cached_tokens = max(0, input_tokens - input_cached_tokens)
     return {
@@ -260,10 +255,8 @@ def _calculate_model_token_cost(
     *,
     provider: str = "",
 ) -> Dict[str, Any]:
-    pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get(
-        (str(provider or "").strip().lower(), model)
-    ) or MODEL_PRICING_USD_MICROS.get(model)
-    if not pricing or not usage:
+    normalized_provider = str(provider or "").strip().lower()
+    if not usage:
         return {
             "model": model,
             "usd_micros": 0,
@@ -271,88 +264,173 @@ def _calculate_model_token_cost(
             "input_cached_tokens": 0,
             "input_non_cached_tokens": 0,
             "output_tokens": 0,
+            "_usd_micros_exact": Decimal(0),
+            "_pricing_basis": "missing",
+        }
+
+    reported_cost = _reported_cost_usd_micros_exact(usage)
+    if reported_cost is not None and reported_cost > 0:
+        return {
+            "model": model,
+            "usd_micros": int(reported_cost.to_integral_value(rounding=ROUND_FLOOR)),
+            **_extract_token_usage(usage),
+            "_usd_micros_exact": reported_cost,
+            "_pricing_basis": "provider_reported",
+        }
+
+    # OpenRouter reports the completed request cost. If it does not, a local
+    # model price cannot identify the routed provider's actual rate.
+    pricing = None
+    if normalized_provider != "openrouter":
+        pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get(
+            (normalized_provider, model)
+        ) or MODEL_PRICING_USD_MICROS.get(model)
+    if not pricing:
+        return {
+            "model": model,
+            "usd_micros": 0,
+            **_extract_token_usage(usage),
+            "_usd_micros_exact": Decimal(0),
+            "_pricing_basis": "missing",
         }
 
     tokens = _extract_token_usage(usage)
     prompt_token_details = ensure_mapping(usage.get("prompt_tokens_details")) or {}
     audio_input_tokens = max(0, int(prompt_token_details.get("audio_tokens") or 0))
-    cache_write_tokens = max(
-        0, int(prompt_token_details.get("cache_write_tokens") or 0)
-    )
+    cache_write_tokens = max(0, int(prompt_token_details.get("cache_write_tokens") or 0))
     non_cached_tokens = tokens["input_non_cached_tokens"]
     audio_input_tokens = min(non_cached_tokens, audio_input_tokens)
     cache_write_tokens = min(
         non_cached_tokens - audio_input_tokens,
         cache_write_tokens,
     )
-    regular_input_tokens = max(
-        0, non_cached_tokens - audio_input_tokens - cache_write_tokens
-    )
+    regular_input_tokens = max(0, non_cached_tokens - audio_input_tokens - cache_write_tokens)
     cached_input_per_million = pricing.get(
         "cached_input_per_million",
         pricing.get("input_per_million", 0),
     )
-    usd_micros = (
-        regular_input_tokens * pricing.get("input_per_million", 0)
+    usd_micros_exact = Decimal(
+        pricing.get("request_usd_micros", 0) * 1_000_000
+        + regular_input_tokens * pricing.get("input_per_million", 0)
         + tokens["input_cached_tokens"] * cached_input_per_million
         + audio_input_tokens
-        * pricing.get(
-            "audio_input_per_million", pricing.get("input_per_million", 0)
-        )
+        * pricing.get("audio_input_per_million", pricing.get("input_per_million", 0))
         + cache_write_tokens
-        * pricing.get(
-            "cache_write_per_million", pricing.get("input_per_million", 0)
-        )
+        * pricing.get("cache_write_per_million", pricing.get("input_per_million", 0))
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
-    ) // 1_000_000
-    reported_cost = _reported_cost_usd_micros(usage)
-    if reported_cost is not None:
-        usd_micros = reported_cost
+    ) / Decimal(1_000_000)
     return {
         "model": model,
-        "usd_micros": int(usd_micros),
+        "usd_micros": int(usd_micros_exact.to_integral_value(rounding=ROUND_FLOOR)),
         **tokens,
+        "_usd_micros_exact": usd_micros_exact,
+        "_pricing_basis": "published_rate",
     }
 
 
-def _reported_cost_usd_micros(usage: Mapping[str, Any]) -> Optional[int]:
-    """Return the provider's complete request cost when it is reported."""
+def _reported_cost_usd_micros_exact(
+    usage: Mapping[str, Any],
+) -> Optional[Decimal]:
+    """Return provider-price cost in USD micros without float rounding."""
 
-    if "cost" not in usage or usage.get("cost") is None:
-        return None
+    cost_details = ensure_mapping(usage.get("cost_details")) or {}
+    if "upstream_inference_cost" in cost_details:
+        raw_cost = cost_details.get("upstream_inference_cost")
+        try:
+            cost = Decimal(str(raw_cost)) * Decimal(1_000_000)
+        except InvalidOperation, TypeError, ValueError:
+            pass
+        else:
+            if cost > 0:
+                return cost
+
+    raw_cost = usage.get("cost")
+    if raw_cost is not None:
+        try:
+            cost = Decimal(str(raw_cost)) * Decimal(1_000_000)
+        except InvalidOperation, TypeError, ValueError:
+            return None
+        if cost > 0:
+            return cost
+    return None
+
+
+def _credit_units_from_exact_usd_micros(total_usd_micros: Decimal) -> int:
+    if total_usd_micros <= 0:
+        return 0
+    return int(
+        (total_usd_micros / Decimal(CREDIT_UNIT_USD_MICROS)).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+    )
+
+
+def _calculate_firecrawl_cost(
+    metadata: Mapping[str, Any],
+) -> tuple[int, Optional[Dict[str, Any]]]:
     try:
-        return max(0, round(float(usage["cost"]) * 1_000_000))
-    except (TypeError, ValueError):
-        return None
+        web_search_requests = int(metadata.get("web_search_requests") or 0)
+    except TypeError, ValueError:
+        web_search_requests = 0
+    try:
+        firecrawl_credits = max(0, int(metadata.get("firecrawl_credits_used") or 0))
+    except TypeError, ValueError:
+        firecrawl_credits = 0
+    if firecrawl_credits <= 0:
+        return 0, None
+    usd_micros = firecrawl_credits * FIRECRAWL_USD_MICROS_PER_CREDIT
+    return usd_micros, {
+        "tool": "web_search",
+        "count": web_search_requests,
+        "usd_micros": usd_micros,
+    }
 
 
 def calculate_billing_for_segments(
-    segments: Iterable[Mapping[str, Any]],
+    segments: Iterable[Optional[Mapping[str, Any]]],
 ) -> Dict[str, Any]:
     """Calculate raw and marked-up billing totals for AI usage segments."""
 
-    total_usd_micros = 0
+    total_usd_micros = Decimal(0)
     model_breakdown: List[Dict[str, Any]] = []
     tool_breakdown: List[Dict[str, Any]] = []
+    segment_breakdown: List[Dict[str, Any]] = []
     unsupported_notes: List[str] = []
 
-    for raw_segment in segments:
+    for segment_index, raw_segment in enumerate(segments):
+        if raw_segment is None:
+            continue
         segment = dict(raw_segment or {})
         if str(segment.get("source") or "").strip().lower() == "cache":
+            segment_breakdown.append(
+                {
+                    "segment_index": segment_index,
+                    "kind": str(segment.get("kind") or ""),
+                    "model": str(segment.get("model") or ""),
+                    "provider": "internal",
+                    "pricing_basis": "internal_cache",
+                    "cost_complete": True,
+                    "usd_micros_exact": "0",
+                }
+            )
             continue
         kind = str(segment.get("kind") or "")
         model = str(segment.get("model") or "")
         usage = ensure_mapping(segment.get("usage")) or {}
         audio_seconds = float(segment.get("audio_seconds") or 0.0)
         metadata = ensure_mapping(segment.get("metadata")) or {}
-        provider = str(
-            metadata.get("provider") or segment.get("source") or ""
-        ).strip().lower()
+        provider = str(metadata.get("provider") or segment.get("source") or "").strip().lower()
+        upstream_provider = str(metadata.get("upstream_provider") or "").strip().lower()
+        reported_cost = _reported_cost_usd_micros_exact(usage)
 
         pricing = MODEL_PRICING_USD_MICROS.get(model) or {}
-        if kind == "transcribe" and "audio_per_hour" in pricing:
+        if (
+            kind == "transcribe"
+            and "audio_per_hour" in pricing
+            and not (provider == "openrouter" and reported_cost is not None and reported_cost > 0)
+        ):
             usd_micros = _calculate_transcription_usd_micros(audio_seconds)
-            total_usd_micros += usd_micros
+            total_usd_micros += Decimal(usd_micros)
             model_breakdown.append(
                 {
                     "kind": kind,
@@ -361,42 +439,77 @@ def calculate_billing_for_segments(
                     "audio_seconds": audio_seconds,
                 }
             )
-            continue
-
-        model_cost = _calculate_model_token_cost(model, usage, provider=provider)
-        model_cost["kind"] = kind
-        total_usd_micros += int(model_cost["usd_micros"])
-        model_breakdown.append(model_cost)
-
-        try:
-            web_search_requests = int(metadata.get("web_search_requests") or 0)
-        except (TypeError, ValueError):
-            web_search_requests = 0
-        try:
-            firecrawl_credits = max(
-                0, int(metadata.get("firecrawl_credits_used") or 0)
-            )
-        except (TypeError, ValueError):
-            firecrawl_credits = 0
-        if firecrawl_credits > 0:
-            search_usd_micros = firecrawl_credits * FIRECRAWL_USD_MICROS_PER_CREDIT
-            total_usd_micros += search_usd_micros
-            tool_breakdown.append(
+            segment_breakdown.append(
                 {
-                    "tool": "web_search",
-                    "count": web_search_requests,
-                    "usd_micros": search_usd_micros,
+                    "segment_index": segment_index,
+                    "kind": kind,
+                    "model": model or "whisper-large-v3",
+                    "provider": provider or "groq",
+                    "pricing_basis": "published_rate",
+                    "cost_complete": audio_seconds > 0,
+                    "usd_micros_exact": str(usd_micros),
                 }
             )
+            if audio_seconds <= 0:
+                unsupported_notes.append(
+                    f"missing_usage_or_cost:segment={segment_index}:provider={provider or 'groq'}:model={model}"
+                )
+            continue
 
-    charged_credit_units = credit_units_from_usd_micros(int(total_usd_micros))
+        model_cost = _calculate_model_token_cost(
+            model,
+            usage,
+            provider=provider,
+        )
+        exact_model_cost = model_cost.pop("_usd_micros_exact")
+        pricing_basis = str(model_cost.pop("_pricing_basis"))
+        model_cost["kind"] = kind
+        total_usd_micros += exact_model_cost
+        model_breakdown.append(model_cost)
+
+        search_usd_micros, tool_cost = _calculate_firecrawl_cost(metadata)
+        total_usd_micros += Decimal(search_usd_micros)
+        if tool_cost is not None:
+            tool_breakdown.append(tool_cost)
+
+        token_usage = _extract_token_usage(usage)
+        has_token_usage = bool(token_usage["input_tokens"] or token_usage["output_tokens"])
+        cost_complete = bool(
+            (reported_cost is not None and reported_cost > 0)
+            or (has_token_usage and pricing_basis == "published_rate")
+        )
+        if not cost_complete:
+            unsupported_notes.append(
+                f"missing_usage_or_cost:segment={segment_index}:provider={provider or 'unknown'}:model={model or 'unknown'}"
+            )
+        segment_breakdown.append(
+            {
+                "segment_index": segment_index,
+                "kind": kind,
+                "model": model,
+                "provider": provider or "unknown",
+                "upstream_provider": upstream_provider or None,
+                "provider_request_id": metadata.get("provider_request_id"),
+                "provider_generation_id": metadata.get("provider_generation_id"),
+                "pricing_basis": pricing_basis,
+                "tool_pricing_basis": "firecrawl_standard" if tool_cost else None,
+                "cost_complete": cost_complete,
+                "usd_micros_exact": format(exact_model_cost, "f"),
+            }
+        )
+
+    charged_credit_units = _credit_units_from_exact_usd_micros(total_usd_micros)
+    raw_usd_micros = int(total_usd_micros.to_integral_value(rounding=ROUND_FLOOR))
     return {
         "pricing_version": PRICING_VERSION,
         "markup_multiplier": BILLING_MARKUP_MULTIPLIER,
-        "raw_usd_micros": int(total_usd_micros),
+        "raw_usd_micros": raw_usd_micros,
+        "raw_usd_micros_exact": format(total_usd_micros, "f"),
         "charged_credit_units": charged_credit_units,
         "charged_credits_display": format_credit_units(charged_credit_units),
         "model_breakdown": model_breakdown,
         "tool_breakdown": tool_breakdown,
+        "segment_breakdown": segment_breakdown,
+        "pricing_complete": bool(segment_breakdown) and not unsupported_notes,
         "unsupported_notes": unsupported_notes,
     }

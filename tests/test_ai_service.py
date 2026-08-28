@@ -85,6 +85,224 @@ def test_run_summary_rejects_before_history_or_provider_checks():
     stream_summary_command.assert_not_called()
 
 
+def test_run_summary_settles_from_streamed_provider_usage():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    segment = {
+        "kind": "summary",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.001},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def stream_summary(_chat_id, _redis, _prompt, *, response_meta):
+        def tokens():
+            response_meta.setdefault("billing_segments", []).append(segment)
+            yield "openrouter", "summary"
+
+        return tokens(), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=stream_summary,
+    )
+    billing_helper = MagicMock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("summary", None, False)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="summary_command_stream_success",
+    )
+
+
+def test_run_summary_settles_usage_when_delivery_fails_after_generation():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    segment = {
+        "kind": "summary",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.001},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def stream_summary(_chat_id, _redis, _prompt, *, response_meta):
+        def tokens():
+            response_meta.setdefault("billing_segments", []).append(segment)
+            yield "openrouter", "summary"
+
+        return tokens(), None
+
+    def consume_then_fail(iterator):
+        list(iterator)
+        raise RuntimeError("telegram edit failed")
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=stream_summary,
+    )
+    billing_helper = MagicMock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=consume_then_fail,
+    )
+
+    assert result[2] is True
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="summary_stream_provider_usage_before_delivery_failure",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
+def test_run_summary_refunds_when_stream_provider_is_unavailable():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    def unavailable_summary(_chat_id, _redis, _prompt, *, response_meta):
+        response_meta["provider_unavailable"] = True
+        return iter([("none", "summary error")]), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=False),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=unavailable_summary,
+    )
+    billing_helper = MagicMock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("summary error", None, False)
+    billing_helper.refund_reserved_ai_credits.assert_called_once_with(
+        reservation,
+        reason="summary_provider_unavailable",
+    )
+    billing_helper.settle_reserved_ai_credits_batch.assert_not_called()
+
+
+def test_run_conversation_settles_provider_rounds_before_local_fallback():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    segment = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": "0.0019"},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def fallback_after_provider_usage(*_args, **kwargs):
+        response_meta = kwargs["response_meta"]
+        response_meta["billing_segments"] = [segment]
+        response_meta["ai_fallback"] = True
+        return "local fallback"
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(return_value=[]),
+        prepare_chat_memory=MagicMock(return_value=([], None, [], 0)),
+        build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hello"}]),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=fallback_after_provider_usage,
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(16, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = MagicMock()
+    reservation = {
+        "reserved_credit_units": 16,
+        "source": "user",
+        "usage_tag": "ai_response_base",
+    }
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="902",
+            message={"chat": {"id": 902, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage("hello", None, None),
+            billing_helper=billing_helper,
+            prompt_text="hello",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert result == ("local fallback", True)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="ai_response_provider_usage_before_fallback",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
 def test_run_conversation_rechecks_full_context_before_model_call():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage
@@ -93,9 +311,7 @@ def test_run_conversation_rechecks_full_context_before_model_call():
     handle_ai_response = MagicMock()
     ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
-        get_chat_history=MagicMock(
-            return_value=[{"role": "user", "text": "historial largo"}]
-        ),
+        get_chat_history=MagicMock(return_value=[{"role": "user", "text": "historial largo"}]),
         prepare_chat_memory=MagicMock(
             return_value=([{"role": "user", "text": "historial largo"}], None, [], 0)
         ),
@@ -307,9 +523,7 @@ def test_run_conversation_schedules_compaction_after_answer_settlement():
     ai_service = build_ai_service(
         credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
         get_chat_history=MagicMock(return_value=[]),
-        prepare_chat_memory=MagicMock(
-            return_value=([], "summary abc", [], 0, "compaction-plan")
-        ),
+        prepare_chat_memory=MagicMock(return_value=([], "summary abc", [], 0, "compaction-plan")),
         build_ai_messages=MagicMock(return_value=[{"role": "user", "content": "hola"}]),
         check_provider_available=MagicMock(return_value=True),
         has_openrouter_fallback=MagicMock(return_value=False),

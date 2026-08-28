@@ -158,6 +158,77 @@ class TestTaskExecutor:
         billing.refund_reserved_ai_credits.assert_called_once()
         billing.settle_reserved_ai_credits.assert_not_called()
 
+    def test_settles_provider_usage_before_terminal_fallback(self):
+        segment = {"kind": "chat", "usage": {"cost": 0.001}}
+
+        def _fallback_ask_ai(messages, response_meta=None, **_kwargs):
+            if response_meta is not None:
+                response_meta["ai_fallback"] = True
+                response_meta.setdefault("billing_segments", []).append(segment)
+            return "respuesta"
+
+        executor, billing, ask_ai, _send_msg = _build_executor(ask_ai_return_value="respuesta")
+        ask_ai.side_effect = _fallback_ask_ai
+
+        executor.execute(
+            {
+                "id": "abc123",
+                "chat_id": "123",
+                "text": "recordame algo",
+                "user_name": "astro",
+                "user_id": 77,
+                "interval_seconds": None,
+                "trigger_config": None,
+            }
+        )
+
+        billing.settle_reserved_ai_credits.assert_called_once_with(
+            {"reservation": "ok"},
+            [segment, segment],
+            reason="task_fallback_provider_usage",
+        )
+        billing.refund_reserved_ai_credits.assert_not_called()
+
+    def test_clears_fallback_state_between_task_attempts(self):
+        fallback_segment = {"kind": "chat", "usage": {"cost": 0.001}}
+        success_segment = {"kind": "chat", "usage": {"cost": 0.002}}
+        call_count = 0
+
+        def _ask_ai(messages, response_meta=None, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            assert response_meta is not None
+            if call_count == 1:
+                response_meta["ai_fallback"] = True
+                response_meta.setdefault("billing_segments", []).append(fallback_segment)
+                return "fallback"
+            response_meta.setdefault("billing_segments", []).append(success_segment)
+            return "respuesta paga"
+
+        executor, billing, ask_ai, send_msg = _build_executor(ask_ai_return_value="respuesta")
+        ask_ai.side_effect = _ask_ai
+
+        executor.execute(
+            {
+                "id": "abc123",
+                "chat_id": "123",
+                "text": "recordame algo",
+                "user_name": "astro",
+                "user_id": 77,
+                "interval_seconds": None,
+                "trigger_config": None,
+            }
+        )
+
+        assert ask_ai.call_count == 2
+        send_msg.assert_called_once_with("123", "astro, tarea «recordame algo»:\nrespuesta paga")
+        billing.settle_reserved_ai_credits.assert_called_once_with(
+            {"reservation": "ok"},
+            [fallback_segment, success_segment],
+            reason="task_success",
+        )
+        billing.refund_reserved_ai_credits.assert_not_called()
+
     def test_refunds_reserved_credits_when_ask_ai_raises(self):
         ask_ai = MagicMock(side_effect=RuntimeError("boom"))
         send_msg = MagicMock()

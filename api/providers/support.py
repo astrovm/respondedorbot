@@ -142,10 +142,30 @@ def build_usage_result(
     extract_usage: Callable[[Any], dict[str, Any] | None],
 ) -> AIUsageResult:
     normalized_metadata = dict(metadata or {})
+    response_model = (
+        response.get("model") if isinstance(response, Mapping) else getattr(response, "model", None)
+    )
+    resolved_model = str(response_model or model)
+    if resolved_model != model:
+        normalized_metadata.setdefault("requested_model", model)
+    response_provider = (
+        response.get("provider")
+        if isinstance(response, Mapping)
+        else getattr(response, "provider", None)
+    )
+    if response_provider:
+        normalized_metadata.setdefault("upstream_provider", str(response_provider))
+    response_service_tier = (
+        response.get("service_tier")
+        if isinstance(response, Mapping)
+        else getattr(response, "service_tier", None)
+    )
+    if response_service_tier:
+        normalized_metadata.setdefault("service_tier", str(response_service_tier))
     return AIUsageResult(
         kind=kind,
         text=text,
-        model=model,
+        model=resolved_model,
         usage=extract_usage(response),
         audio_seconds=audio_seconds,
         cached=cached,

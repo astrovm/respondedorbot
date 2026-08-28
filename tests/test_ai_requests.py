@@ -18,6 +18,29 @@ def test_provider_usage_result_uses_explicit_provider_as_source():
     assert result.metadata["provider"] == "openrouter"
 
 
+def test_provider_usage_result_preserves_resolved_model_and_upstream_provider():
+    from api.index import app_runtime
+
+    response = SimpleNamespace(
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
+        service_tier="default",
+        usage={"prompt_tokens": 3, "cost": 0},
+    )
+    result = app_runtime.providers.build_usage_result(
+        kind="chat",
+        text="ok",
+        model="deepseek/deepseek-v4-flash-0731",
+        response=response,
+        metadata={"provider": "openrouter"},
+    )
+
+    assert result.model == "deepseek/deepseek-v4-flash"
+    assert result.metadata["requested_model"] == "deepseek/deepseek-v4-flash-0731"
+    assert result.metadata["upstream_provider"] == "DeepInfra"
+    assert result.metadata["service_tier"] == "default"
+
+
 def test_build_ai_messages():
     from api.index import build_ai_messages
 
@@ -134,7 +157,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     result = AIUsageResult(
         kind="chat",
         text="respuesta",
-        model="~deepseek/deepseek-v4-flash-latest",
+        model="deepseek/deepseek-v4-flash-0731",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"groq_account": "primary"},
     )
@@ -155,7 +178,7 @@ def test_log_groq_request_result_logs_local_billing_details():
     assert log_entry["status"] == "success"
     assert log_entry["request_scope"] == "chat"
     assert log_entry["usage"] == {"input_tokens": 100, "output_tokens": 50}
-    assert log_entry["local_billing"]["raw_usd_micros"] == 6
+    assert log_entry["local_billing"]["raw_usd_micros"] == 8
     assert log_entry["local_billing"]["charged_credit_units"] == 1
     assert log_entry["local_billing"]["charged_credits_display"] == "0.01"
 
@@ -199,7 +222,7 @@ def test_execute_groq_request_with_fallback_retries_next_account_on_request_too_
         return AIUsageResult(
             kind="chat",
             text="respuesta chat",
-            model="~deepseek/deepseek-v4-flash-latest",
+            model="deepseek/deepseek-v4-flash-0731",
             metadata={"groq_account": account},
         )
 
@@ -540,7 +563,7 @@ def test_complete_with_providers_openrouter_success():
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="~deepseek/deepseek-v4-flash-latest",
+        model="deepseek/deepseek-v4-flash-0731",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )
@@ -586,7 +609,7 @@ def test_complete_with_providers_records_openrouter_billing_on_success(monkeypat
     openrouter_result = AIUsageResult(
         kind="chat",
         text="OpenRouter response",
-        model="~deepseek/deepseek-v4-flash-latest",
+        model="deepseek/deepseek-v4-flash-0731",
         usage={"input_tokens": 100, "output_tokens": 50},
         metadata={"provider": "openrouter"},
     )
