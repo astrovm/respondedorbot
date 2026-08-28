@@ -1,6 +1,32 @@
 from tests.support import *
 
 
+def test_cached_media_results_use_cache_source():
+    with (
+        patch(
+            "api.index.app_runtime.media_cache.get_transcription",
+            return_value="cached audio",
+        ),
+        patch(
+            "api.index.app_runtime.media_cache.get_description",
+            return_value="cached image",
+        ),
+    ):
+        transcription = index.app_runtime.media.transcribe_audio_result(
+            b"audio",
+            "audio-id",
+        )
+        description = index.app_runtime.media.describe_image_result(
+            b"image",
+            file_id="image-id",
+        )
+
+    assert transcription is not None
+    assert transcription.source == "cache"
+    assert description is not None
+    assert description.source == "cache"
+
+
 def test_handle_transcribe_with_message_no_reply():
     from api.index import handle_transcribe_with_message
 

@@ -119,6 +119,7 @@ def describe_image_result(
                 text=str(cached),
                 model=model,
                 cached=True,
+                source="cache",
                 metadata={"file_id": file_id, "cache_hit": True},
             )
 
@@ -291,6 +292,7 @@ def transcribe_audio_result(
                 text=str(cached),
                 model=model,
                 cached=True,
+                source="cache",
                 metadata={"file_id": file_id, "cache_hit": True},
             )
 
@@ -326,6 +328,7 @@ def transcribe_audio_result(
                 metadata={
                     "file_id": file_id,
                     "cache_hit": False,
+                    "provider": "groq",
                     "groq_account": account,
                 },
             )
