@@ -26,6 +26,7 @@ FIRECRAWL_STANDARD_PLAN_CREDITS = 100_000
 FIRECRAWL_USD_MICROS_PER_CREDIT = (
     FIRECRAWL_STANDARD_PLAN_USD_MICROS // FIRECRAWL_STANDARD_PLAN_CREDITS
 )
+FIRECRAWL_SEARCH_MAX_CREDITS = 2
 
 
 MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
@@ -213,6 +214,17 @@ def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
     return max(1, credit_units_from_usd_micros(usd_micros))
 
 
+def estimate_firecrawl_reserve_credits() -> int:
+    """Reserve the published maximum cost of one application web search."""
+
+    return max(
+        1,
+        credit_units_from_usd_micros(
+            FIRECRAWL_SEARCH_MAX_CREDITS * FIRECRAWL_USD_MICROS_PER_CREDIT
+        ),
+    )
+
+
 def credit_units_from_usd_micros(usd_micros: int) -> int:
     """Convert raw USD micros into hundredths of credits with markup."""
 
@@ -386,6 +398,34 @@ def _calculate_firecrawl_cost(
     }
 
 
+def _standalone_firecrawl_breakdown(
+    *,
+    kind: str,
+    model: str,
+    provider: str,
+    metadata: Mapping[str, Any],
+    segment_index: int,
+    tool_breakdown: List[Dict[str, Any]],
+    segment_breakdown: List[Dict[str, Any]],
+) -> int | None:
+    usd_micros, tool_cost = _calculate_firecrawl_cost(metadata)
+    if kind != "web_search" or tool_cost is None:
+        return None
+    tool_breakdown.append(tool_cost)
+    segment_breakdown.append(
+        {
+            "segment_index": segment_index,
+            "kind": kind,
+            "model": model,
+            "provider": provider or "firecrawl",
+            "pricing_basis": "firecrawl_standard",
+            "cost_complete": True,
+            "usd_micros_exact": str(usd_micros),
+        }
+    )
+    return usd_micros
+
+
 def calculate_billing_for_segments(
     segments: Iterable[Optional[Mapping[str, Any]]],
 ) -> Dict[str, Any]:
@@ -397,9 +437,8 @@ def calculate_billing_for_segments(
     segment_breakdown: List[Dict[str, Any]] = []
     unsupported_notes: List[str] = []
 
-    for segment_index, raw_segment in enumerate(segments):
-        if raw_segment is None:
-            continue
+    present_segments = (segment for segment in segments if segment is not None)
+    for segment_index, raw_segment in enumerate(present_segments):
         segment = dict(raw_segment or {})
         if str(segment.get("source") or "").strip().lower() == "cache":
             segment_breakdown.append(
@@ -422,6 +461,19 @@ def calculate_billing_for_segments(
         provider = str(metadata.get("provider") or segment.get("source") or "").strip().lower()
         upstream_provider = str(metadata.get("upstream_provider") or "").strip().lower()
         reported_cost = _reported_cost_usd_micros_exact(usage)
+
+        standalone_search = _standalone_firecrawl_breakdown(
+            kind=kind,
+            model=model,
+            provider=provider,
+            metadata=metadata,
+            segment_index=segment_index,
+            tool_breakdown=tool_breakdown,
+            segment_breakdown=segment_breakdown,
+        )
+        if standalone_search is not None:
+            total_usd_micros += Decimal(standalone_search)
+            continue
 
         pricing = MODEL_PRICING_USD_MICROS.get(model) or {}
         if (

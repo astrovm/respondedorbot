@@ -13,6 +13,7 @@ from typing import Any, Callable
 from api.admin.service import AdminService
 from api.ai.request_runtime import AIRequestService
 from api.billing.service import BillingService
+from api.billing.reconciliation import AIBillingReconciler
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
 from api.markets.dollar import DollarService
@@ -55,6 +56,7 @@ class ApplicationRuntime:
     summary: SummaryService
     responses: ResponseService
     billing: BillingService
+    billing_reconciler: AIBillingReconciler
     media_cache: MediaCacheService
     media: MediaService
     images: ImageService

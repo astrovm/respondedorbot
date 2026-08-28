@@ -307,6 +307,85 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
+def test_unresolved_operation_persists_every_segment_before_reconciliation():
+    billing = _build_billing_helper()
+    reservation = {
+        "reserved_credit_units": 20,
+        "chat_scope_id": None,
+        "source": "user",
+        "usage_tag": "ai_response_base",
+        "metadata": {"operation_id": "operation-1"},
+    }
+    pending = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "source": "openrouter",
+        "metadata": {
+            "provider_generation_id": "generation-pending",
+            "provider_usage_pending": True,
+        },
+    }
+    completed = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "source": "openrouter",
+        "usage": {"cost": 0.0001},
+        "metadata": {"provider_generation_id": "generation-complete"},
+    }
+
+    billing.settle_reserved_ai_credits_batch(
+        [reservation],
+        [pending, completed],
+        reason="ai_response_success",
+    )
+
+    persisted = billing.credits_db_service.record_ai_provider_usage.call_args_list
+    assert [call.kwargs["segment"] for call in persisted] == [pending, completed]
+    billing.credits_db_service.settle_ai_operation_once.assert_not_called()
+
+
+def test_durable_usage_does_not_duplicate_firecrawl_cost_on_model_segment():
+    billing = _build_billing_helper()
+    firecrawl_segment = {
+        "kind": "web_search",
+        "model": "",
+        "usage": {},
+        "source": "firecrawl",
+        "metadata": {
+            "provider": "firecrawl",
+            "tool_call_id": "search-1",
+            "web_search_requests": 1,
+            "firecrawl_credits_used": 2,
+        },
+    }
+    combined_segment = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.0001},
+        "source": "openrouter",
+        "metadata": {
+            "provider": "openrouter",
+            "provider_generation_id": "generation-1",
+            "web_search_requests": 1,
+            "firecrawl_credits_used": 2,
+        },
+    }
+
+    billing.record_provider_segment("operation-1", firecrawl_segment)
+    billing.record_provider_segment("operation-1", combined_segment)
+
+    persisted = [
+        call.kwargs["segment"]
+        for call in billing.credits_db_service.record_ai_provider_usage.call_args_list
+    ]
+    assert persisted[0] == firecrawl_segment
+    assert "firecrawl_credits_used" not in persisted[1]["metadata"]
+    assert (
+        calculate_billing_for_segments(persisted)["charged_credit_units"]
+        == (calculate_billing_for_segments([combined_segment])["charged_credit_units"])
+    )
+
+
 def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     billing = _build_billing_helper()
     billing.credits_db_service.charge_ai_credits.return_value = {
@@ -1414,6 +1493,83 @@ def test_creditless_cap_allows_under_limit():
     mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 3600)
 
 
+def test_creditless_cap_counts_once_for_incremental_reservations():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    base, base_error = billing.reserve_ai_credits("ai_response_base", 10)
+    extension, extension_error = billing.reserve_ai_credits(
+        "ai_response_context_extension",
+        5,
+    )
+
+    assert base_error is None
+    assert extension_error is None
+    assert base is not None
+    assert extension is not None
+    assert base["message_cap_counted"] is True
+    assert extension["message_cap_counted"] is False
+    mock_redis.incr.assert_called_once_with("creditless_cap:-100:42")
+
+    billing.refund_reserved_ai_credits(base, reason="ai_response_fallback")
+    billing.refund_reserved_ai_credits(extension, reason="ai_response_fallback")
+
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_idempotent_reservation_replay_does_not_increment_message_cap():
+    mock_redis = MagicMock()
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "applied": False,
+        "source": "chat",
+        "amount": 10,
+    }
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert reservation is not None
+    assert reservation["message_cap_counted"] is False
+    mock_redis.incr.assert_not_called()
+
+
+def test_reloaded_idempotent_reservation_does_not_roll_back_message_cap():
+    mock_redis = MagicMock()
+    persisted_reservation = {
+        "reserved_credit_units": 10,
+        "chat_scope_id": 100,
+        "source": "chat",
+        "usage_tag": "ai_response_base",
+        "metadata": {},
+        "credit_scale": CREDIT_SCALE,
+        "message_cap_counted": False,
+    }
+    billing = make_ai_message_billing(
+        command="/ask",
+        chat_id="-100",
+        chat_type="group",
+        user_id=42,
+        numeric_chat_id=100,
+        credits_db_service=MagicMock(),
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        redis_client=mock_redis,
+        creditless_user_hourly_limit=3,
+        load_persisted_reservation_fn=lambda _usage_tag: persisted_reservation,
+    )
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+    billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
+
+    assert error is None
+    assert reservation is not None
+    assert reservation["message_cap_counted"] is False
+    mock_redis.incr.assert_not_called()
+    mock_redis.decr.assert_not_called()
+
+
 def test_background_reservation_does_not_consume_message_cap():
     mock_redis = MagicMock()
     billing = _make_group_billing(limit=0, redis_client=mock_redis)
@@ -1485,3 +1641,75 @@ def test_refund_reserved_ai_credits_rolls_back_creditless_cap_for_chat_source():
     billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
 
     mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_replacement_reservation_reclaims_refunded_message_cap():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    initial, initial_error = billing.reserve_ai_credits("ai_response_base", 10)
+    assert initial_error is None
+    assert initial is not None
+
+    billing.refund_reserved_ai_credits(initial, reason="replace_estimate")
+    replacement, replacement_error = billing.reserve_ai_credits(
+        "ai_response_measured",
+        20,
+    )
+
+    assert replacement_error is None
+    assert replacement is not None
+    assert replacement["message_cap_counted"] is True
+    assert mock_redis.incr.call_count == 2
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_replayed_reservation_refund_does_not_roll_back_creditless_cap_twice():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+    billing.credits_db_service.refund_ai_charge.side_effect = [
+        {"applied": True},
+        {"applied": False},
+    ]
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert reservation is not None
+
+    billing.refund_reserved_ai_credits(reservation, reason="first_path")
+    billing.refund_reserved_ai_credits(reservation, reason="retry_path")
+
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_reservation_refund_preserves_identity_and_is_reason_independent():
+    billing = make_ai_message_billing(
+        message={"message_id": 44, "from": {"first_name": "Ana"}},
+    )
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "applied": True,
+        "source": "user",
+        "amount": 10,
+    }
+    operation_id = billing.operation_id("ai_response")
+    reservation, error = billing.reserve_ai_credits(
+        "ai_response_base",
+        10,
+        metadata={"operation_id": operation_id},
+    )
+    assert error is None
+    assert reservation is not None
+
+    billing.refund_reserved_ai_credits(reservation, reason="first_path")
+    billing.refund_reserved_ai_credits(reservation, reason="second_path")
+
+    calls = billing.credits_db_service.refund_ai_charge.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["metadata"]["operation_id"] == operation_id
+    assert calls[1].kwargs["metadata"]["operation_id"] == operation_id
+    assert calls[0].kwargs["idempotency_key"] == calls[1].kwargs["idempotency_key"]
+    assert calls[0].kwargs["idempotency_key"].endswith(":refund")

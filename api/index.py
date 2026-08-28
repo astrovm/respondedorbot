@@ -85,6 +85,7 @@ from api.markets import weather as weather_context
 from api.markets import hacker_news
 from api.admin.service import AdminService
 from api.application import ApplicationRuntime
+from api.billing.reconciliation import AIBillingReconciler
 from api.cache.service import CacheService
 from api.ai.system_prompt import build_system_message as _build_system_message
 from api.media import images as image_processing
@@ -1119,6 +1120,10 @@ _billing_service = BillingService(
     answer_pre_checkout=_answer_pre_checkout_query,
     extract_user_id=_extract_user_id,
 )
+_billing_reconciler = AIBillingReconciler(
+    credits=credits_db_service,
+    admin_report=_admin_service.report,
+)
 
 
 def handle_task_callback(callback_query: Dict[str, Any]) -> None:
@@ -1354,6 +1359,7 @@ app_runtime = ApplicationRuntime(
     summary=_summary_service,
     responses=_response_service,
     billing=_billing_service,
+    billing_reconciler=_billing_reconciler,
     media_cache=_media_cache_service,
     media=_media_service,
     images=_image_service,

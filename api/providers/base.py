@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from api.ai.pricing import AIUsageResult
+from api.billing.authorization import AIAuthorizationDenied
 
 
 class AIProvider(Protocol):
@@ -109,6 +110,8 @@ class ProviderChain:
                         provider_name=provider.name,
                         fallback_used=idx > 0,
                     )
+            except AIAuthorizationDenied:
+                raise
             except Exception as e:
                 print(f"Provider {provider.name} failed: {e}")
                 continue
@@ -158,6 +161,8 @@ class ProviderChain:
                 for token in token_iterator:
                     yield provider.name, token
                 return
+            except AIAuthorizationDenied:
+                raise
             except Exception as e:
                 print(f"Streaming provider {provider.name} failed: {e}")
                 continue

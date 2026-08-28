@@ -4,6 +4,7 @@ import json
 import httpx
 from openai import APIStatusError
 
+from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
 from tests.support import *
 from tests.support import assert_no_raw_tool_syntax
 
@@ -1245,13 +1246,19 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
     runtime, client, admin_report, request_count = _build_retry_runtime(
         [incomplete_response, complete_response]
     )
+    recorder = MagicMock()
+    recorded = []
 
     with patch("api.providers.runtime.time.sleep") as sleep:
         result = runtime.complete(
             {"role": "system", "content": "sys"},
             [{"role": "user", "content": "research this"}],
             enable_web_search=True,
-            tool_context={"chat_id": "123"},
+            tool_context={
+                "chat_id": "123",
+                AI_SEGMENT_RECORDER_KEY: recorder,
+            },
+            on_usage_result=recorded.append,
         )
 
     assert result is not None
@@ -1262,8 +1269,51 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
         for call in client.calls
     )
     assert request_count.call_count == 2
+    pending_segment = recorder.call_args.args[0]
+    assert pending_segment["metadata"]["provider_generation_id"] == "gen-incomplete"
+    assert pending_segment["metadata"]["provider_usage_pending"] is True
+    assert [item.metadata["provider_generation_id"] for item in recorded] == [
+        "gen-incomplete",
+        getattr(complete_response, "id", None),
+    ]
     sleep.assert_called_once_with(1)
     admin_report.assert_not_called()
+
+
+def test_provider_runtime_assigns_a_new_identity_to_each_complete_call():
+    responses = [
+        _FakeResponse(
+            [_FakeChoice("stop", SimpleNamespace(content="first", tool_calls=[]))]
+        ),
+        _FakeResponse(
+            [_FakeChoice("stop", SimpleNamespace(content="second", tool_calls=[]))]
+        ),
+    ]
+    runtime, _client, _admin_report, _request_count = _build_retry_runtime(responses)
+    authorizations = []
+    context = {
+        AI_COST_AUTHORIZER_KEY: lambda _kind, _units, metadata: (
+            authorizations.append(dict(metadata)) or None
+        )
+    }
+
+    runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "first"}],
+        enable_web_search=False,
+        tool_context=context,
+    )
+    runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "second"}],
+        enable_web_search=False,
+        tool_context=context,
+    )
+
+    assert len(authorizations) == 2
+    assert authorizations[0]["round"] == authorizations[1]["round"] == 1
+    assert authorizations[0]["attempt"] == authorizations[1]["attempt"] == 1
+    assert authorizations[0]["invocation_id"] != authorizations[1]["invocation_id"]
 
 
 @pytest.mark.parametrize(

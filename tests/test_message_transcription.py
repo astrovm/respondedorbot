@@ -500,6 +500,9 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
     assert mock_charge.call_count == 2
     assert mock_charge.call_args_list[0].kwargs["amount"] == 7
+    persisted = mock_credits.record_ai_provider_usage.call_args.kwargs
+    assert persisted["operation_id"] == "88:123:1:ai_response"
+    assert persisted["segment"]["kind"] == "transcribe"
     mock_send_msg.assert_called_once()
 
 
@@ -590,6 +593,12 @@ def test_handle_msg_auto_audio_measures_duration_when_missing_in_message(monkeyp
     assert mock_charge.call_count == 3
     assert mock_charge.call_args_list[0].kwargs["amount"] == 7
     assert mock_charge.call_args_list[1].kwargs["amount"] == 8
+    assert mock_charge.call_args_list[0].kwargs["metadata"]["usage_tag"] == (
+        "auto_audio_media"
+    )
+    assert mock_charge.call_args_list[1].kwargs["metadata"]["usage_tag"] == (
+        "auto_audio_media_measured"
+    )
     mock_send_msg.assert_called_once()
 
 

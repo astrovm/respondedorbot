@@ -22,6 +22,7 @@ from api.ai.pricing import (
     credit_units_from_usd_micros,
     ensure_mapping,
 )
+from api.billing.authorization import AI_SEGMENT_RECORDER_KEY, AIAuthorizationDenied
 from api.memory.background import DurableCompactionQueue
 from api.memory.compaction import CompactionPlan, IncrementalSummarySource
 
@@ -204,10 +205,16 @@ def wrap_provider_stream(
     token_iter: Iterator[str],
     *,
     logger: Any,
+    response_meta: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, str]]:
     try:
         for token in token_iter:
             yield provider_name, token
+    except AIAuthorizationDenied:
+        if response_meta is not None:
+            response_meta["authorization_denied"] = True
+            response_meta["ai_fallback"] = True
+        raise
     except Exception:
         logger.exception("summary_stream: provider=%s failed", provider_name)
         raise
@@ -216,6 +223,20 @@ def wrap_provider_stream(
 def _mark_provider_unavailable(response_meta: dict[str, Any] | None) -> None:
     if response_meta is not None:
         response_meta["provider_unavailable"] = True
+
+
+def _record_summary_usage(
+    response_meta: dict[str, Any] | None,
+    result: AIUsageResult,
+) -> None:
+    if response_meta is None:
+        return
+    segment = result.billing_segment()
+    segment["kind"] = "summary"
+    response_meta.setdefault("billing_segments", []).append(segment)
+    recorder = response_meta.get(AI_SEGMENT_RECORDER_KEY)
+    if callable(recorder):
+        recorder(segment)
 
 
 def stream_summary_command(
@@ -242,11 +263,7 @@ def stream_summary_command(
     history = get_history(chat_id, redis_client)
 
     def record_usage(result: AIUsageResult) -> None:
-        if response_meta is None:
-            return
-        segment = result.billing_segment()
-        segment["kind"] = "summary"
-        response_meta.setdefault("billing_segments", []).append(segment)
+        _record_summary_usage(response_meta, result)
 
     def record_internal_cache(text: str) -> None:
         record_usage(
@@ -330,9 +347,15 @@ def stream_summary_command(
         enable_web_search=False,
         max_tokens=max_tokens,
         on_usage_result=record_usage,
+        tool_context=response_meta,
     )
     return (
-        wrap_provider_stream(provider.name, stream, logger=logger),
+        wrap_provider_stream(
+            provider.name,
+            stream,
+            logger=logger,
+            response_meta=response_meta,
+        ),
         None,
     )
 

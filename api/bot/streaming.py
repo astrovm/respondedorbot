@@ -6,6 +6,7 @@ from contextvars import ContextVar
 import time
 from typing import Callable, Iterator, Optional, Tuple
 
+from api.billing.authorization import AIAuthorizationDenied
 
 SendMessageFn = Callable[[str, str, Optional[str]], Optional[int]]
 EditMessageFn = Callable[[str, str, str], None]
@@ -146,9 +147,13 @@ def stream_to_telegram(
     )
     streamer.start()
 
-    for _provider_name, token in token_iterator:
-        if token:
-            streamer.feed(token)
+    try:
+        for _provider_name, token in token_iterator:
+            if token:
+                streamer.feed(token)
+    except AIAuthorizationDenied as error:
+        final_text = streamer.finalize(str(error))
+        return final_text, streamer.message_id or ""
 
     final_text = streamer.finalize()
     message_id = streamer.message_id or ""

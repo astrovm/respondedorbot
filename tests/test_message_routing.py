@@ -267,6 +267,43 @@ def test_handle_non_ai_command_summary_fallback_returns_text():
     assert response == ("no pude generar el resumen", None, False, "/resumen")
 
 
+def test_handle_non_ai_command_does_not_resend_delivered_summary_denial():
+    from api.bot.message_handler import (
+        CommandDispatchContext,
+        PreparedMessage,
+        _handle_non_ai_command,
+    )
+
+    deps = MagicMock()
+    deps.ai_service.run_summary_command_stream.return_value = (
+        "insufficient credits",
+        None,
+        False,
+    )
+    commands = {"/resumen": (MagicMock(), False, True)}
+
+    response = _handle_non_ai_command(
+        deps,
+        CommandDispatchContext(
+            commands=commands,
+            command="/resumen",
+            sanitized_message_text="",
+            message={"message_id": "10"},
+            chat_id="123",
+            chat_type="private",
+            user_id=7,
+            numeric_chat_id=123,
+            prepared_message=PreparedMessage("/resumen", None, None),
+            billing_helper=MagicMock(),
+            reply_context_text=None,
+            user_identity="Ana (ana)",
+            redis_client=MagicMock(),
+        ),
+    )
+
+    assert response == (None, None, True, "/resumen")
+
+
 def test_handle_known_command_preserves_ai_flag_from_summary_non_ai_branch():
     from api.bot.message_handler import (
         CommandDispatchContext,

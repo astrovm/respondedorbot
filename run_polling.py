@@ -76,6 +76,8 @@ def main() -> int:
     runtime = index.app_runtime
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
     runtime.summary.start_background_worker()
+    runtime.billing_reconciler.start()
+    exit_code = 0
     try:
         init_scheduler(
             redis_factory=runtime.config.redis,
@@ -108,14 +110,14 @@ def main() -> int:
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
-        index.app_runtime.summary.stop_background_worker()
-        return 0
     except Exception as error:
-        index.app_runtime.summary.stop_background_worker()
         print(f"FATAL: {error}", file=sys.stderr)
-        return 1
+        exit_code = 1
+    finally:
+        runtime.summary.stop_background_worker()
+        runtime.billing_reconciler.stop()
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

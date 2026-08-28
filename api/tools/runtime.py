@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
+from api.ai.pricing import estimate_firecrawl_reserve_credits
+from api.billing.authorization import AI_SEGMENT_RECORDER_KEY, authorize_ai_cost
 from api.core.logging import format_log_context, get_logger
 from api.providers.types import AssistantMessageLike, ToolCallLike
 from api.tools.registry import TOOL_REGISTRY, execute_tool, parse_tool_call_arguments
@@ -66,6 +68,36 @@ class ToolRuntime:
             current = ToolRuntime.take_firecrawl_credits(tool_context)
             tool_context[_FIRECRAWL_CREDITS_CONTEXT_KEY] = current + credits_used
 
+    @staticmethod
+    def _persist_firecrawl_usage(
+        tool_call_id: str,
+        result: Any,
+        tool_context: Mapping[str, Any],
+    ) -> None:
+        recorder = tool_context.get(AI_SEGMENT_RECORDER_KEY)
+        metadata = getattr(result, "metadata", None)
+        if not callable(recorder) or not isinstance(metadata, Mapping):
+            return
+        try:
+            credits_used = max(0, int(metadata.get("credits_used") or 0))
+        except TypeError, ValueError:
+            return
+        if credits_used:
+            recorder(
+                {
+                    "kind": "web_search",
+                    "model": "",
+                    "usage": {},
+                    "source": "firecrawl",
+                    "metadata": {
+                        "provider": "firecrawl",
+                        "tool_call_id": tool_call_id,
+                        "web_search_requests": 1,
+                        "firecrawl_credits_used": credits_used,
+                    },
+                }
+            )
+
     def apply_tool_calls(
         self,
         message: AssistantMessageLike,
@@ -100,8 +132,17 @@ class ToolRuntime:
             )
             execution_context = dict(tool_context)
             execution_context.pop(_FIRECRAWL_CREDITS_CONTEXT_KEY, None)
+            if tool_name == "web_search":
+                authorize_ai_cost(
+                    tool_context,
+                    "web_search",
+                    estimate_firecrawl_reserve_credits(),
+                    metadata={"tool_call_id": tc_id},
+                )
             result = self._execute_tool_fn(tool_name, tool_params, execution_context)
             self._record_firecrawl_credits(tool_name, result, tool_context)
+            if tool_name == "web_search":
+                self._persist_firecrawl_usage(tc_id, result, tool_context)
             self._print_fn(
                 f"tool result: {tool_name} output={result.output[:200]!r}"
                 f"{format_log_context(tool_context)}"

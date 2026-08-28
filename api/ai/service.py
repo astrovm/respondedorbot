@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
 from api.i18n import tr
 
 
@@ -33,14 +34,34 @@ class AIService:
     schedule_compaction: Callable[[Any, Any], bool]
 
     @staticmethod
-    def _refund_if_present(
+    def _refund_reservations(
         request: AIConversationRequest,
-        reservation: Optional[Dict[str, Any]],
+        reservations: Sequence[Optional[Mapping[str, Any]]],
         *,
         reason: str,
     ) -> None:
-        if reservation:
-            request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
+        for reservation in reservations:
+            if reservation:
+                request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
+
+    @staticmethod
+    def _settle_incurred_media(
+        request: AIConversationRequest,
+        reservation: Optional[Dict[str, Any]],
+        billing_segments: List[Mapping[str, Any]],
+        *,
+        reason: str,
+    ) -> None:
+        if not reservation:
+            return
+        if billing_segments:
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                [reservation],
+                billing_segments,
+                reason=reason,
+            )
+            return
+        request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
 
     def _prepare_conversation_messages(
         self, request: AIConversationRequest
@@ -77,8 +98,8 @@ class AIService:
     def _reserve_image_context(
         self,
         request: AIConversationRequest,
-        base_charge_meta: Dict[str, Any],
         existing_charge_meta: Optional[Dict[str, Any]],
+        reservations_to_refund: Sequence[Optional[Mapping[str, Any]]],
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[str, bool]]]:
         if (
             existing_charge_meta
@@ -88,8 +109,10 @@ class AIService:
             return existing_charge_meta, None
 
         if not self.check_provider_available(scope="vision") and not self.has_openrouter_fallback():
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="image_context_local_rate_limit"
+            self._refund_reservations(
+                request,
+                reservations_to_refund,
+                reason="image_context_local_rate_limit",
             )
             rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             response = "ok" if request.is_spontaneous else rate_limit_msg
@@ -102,13 +125,18 @@ class AIService:
                 request.prepared_message.resized_image_data,
                 image_prompt,
             ),
-            metadata={"photo_file_id": request.prepared_message.photo_file_id},
+            metadata={
+                "operation_id": request.billing_helper.operation_id("ai_response"),
+                "photo_file_id": request.prepared_message.photo_file_id,
+            },
         )
         if not media_charge_error:
             return media_charge_meta, None
 
-        request.billing_helper.refund_reserved_ai_credits(
-            base_charge_meta, reason="image_context_reserve_failed"
+        self._refund_reservations(
+            request,
+            reservations_to_refund,
+            reason="image_context_reserve_failed",
         )
         response = "ok" if request.is_spontaneous else media_charge_error
         return None, (response, False)
@@ -131,6 +159,87 @@ class AIService:
             **reserve_meta,
         }
 
+    @staticmethod
+    def _start_billing_session(
+        request: AIConversationRequest,
+        reservations: List[Optional[Dict[str, Any]]],
+        initial_segments: List[Mapping[str, Any]],
+        model_reserve_credit_units: int,
+    ) -> tuple[Any, Dict[str, Any]]:
+        session = request.billing_helper.create_authorizer(
+            reservations,
+            model_reserve_credit_units=model_reserve_credit_units,
+        )
+        for segment in initial_segments:
+            session.record_provider_segment(segment)
+        return session, {
+            AI_COST_AUTHORIZER_KEY: session,
+            AI_SEGMENT_RECORDER_KEY: session.record_provider_segment,
+            "billing_segments": initial_segments,
+        }
+
+    def _finish_conversation_session(
+        self,
+        request: AIConversationRequest,
+        ai_messages: List[Dict[str, Any]],
+        compaction_plan: Any,
+        authorizer: Any,
+        response_meta: Dict[str, Any],
+    ) -> Tuple[str, bool]:
+        response_msg = self.handle_ai_response(
+            request.chat_id,
+            request.handler_func,
+            ai_messages,
+            image_data=(
+                request.prepared_message.resized_image_data
+                if request.prepared_message.photo_file_id
+                else None
+            ),
+            image_file_id=request.prepared_message.photo_file_id,
+            context_texts=[request.reply_context_text],
+            user_identity=request.user_identity,
+            response_meta=response_meta,
+            user_id=request.user_id,
+            timezone_offset=request.timezone_offset,
+            reply_to_message_id=request.reply_to_message_id,
+        )
+
+        response_meta.pop(AI_COST_AUTHORIZER_KEY, None)
+        response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
+        billing_segments = list(response_meta.get("billing_segments") or [])
+        reservations = list(authorizer.reservations)
+
+        if bool(response_meta.get("ai_fallback")):
+            if billing_segments:
+                request.billing_helper.settle_reserved_ai_credits_batch(
+                    reservations,
+                    billing_segments,
+                    reason="ai_response_provider_usage_before_fallback",
+                )
+            else:
+                self._refund_reservations(
+                    request,
+                    reservations,
+                    reason="ai_response_fallback",
+                )
+            return response_msg, True
+
+        request.billing_helper.settle_reserved_ai_credits_batch(
+            reservations,
+            billing_segments,
+            reason="ai_response_success",
+        )
+        try:
+            self.schedule_compaction(compaction_plan, request.billing_helper)
+        except Exception:
+            # Compaction is maintenance. It must not turn a successful answer
+            # into an error or add a model call to the foreground path.
+            _summary_logger.exception(
+                "compaction: failed to schedule chat_id=%s",
+                request.chat_id,
+            )
+        return response_msg, True
+
     def run_conversation(
         self,
         request: AIConversationRequest,
@@ -144,10 +253,11 @@ class AIService:
 
         admission_messages = [{"role": "user", "content": request.prompt_text}]
         media_charge_meta: Optional[Dict[str, Any]] = (
-            dict(request.prepared_message.image_charge_meta)
-            if getattr(request.prepared_message, "image_charge_meta", None)
+            dict(request.prepared_message.media_charge_meta)
+            if getattr(request.prepared_message, "media_charge_meta", None)
             else None
         )
+        media_billing_segments = list(request.prepared_message.media_billing_segments)
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
             admission_messages,
             extra_input_tokens=(
@@ -159,14 +269,16 @@ class AIService:
             "ai_response_base",
             main_reserve_credits,
             metadata={
+                "operation_id": request.billing_helper.operation_id("ai_response"),
                 "estimated_prompt_messages": len(admission_messages),
                 **reserve_meta,
             },
         )
         if base_charge_error:
-            self._refund_if_present(
+            self._settle_incurred_media(
                 request,
                 media_charge_meta,
+                media_billing_segments,
                 reason="ai_response_base_reserve_failed",
             )
             return ("ok", False) if request.is_spontaneous else (base_charge_error, False)
@@ -175,7 +287,12 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="chat_provider_unavailable"
             )
-            self._refund_if_present(request, media_charge_meta, reason="chat_provider_unavailable")
+            self._settle_incurred_media(
+                request,
+                media_charge_meta,
+                media_billing_segments,
+                reason="chat_provider_unavailable",
+            )
             rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             return ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
 
@@ -185,8 +302,11 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_request_preparation_failed"
             )
-            self._refund_if_present(
-                request, media_charge_meta, reason="ai_request_preparation_failed"
+            self._settle_incurred_media(
+                request,
+                media_charge_meta,
+                media_billing_segments,
+                reason="ai_request_preparation_failed",
             )
             raise
 
@@ -194,85 +314,98 @@ class AIService:
             request,
             ai_messages,
         )
+        context_charge_meta: Optional[Dict[str, Any]] = None
         if full_reserve_credits > main_reserve_credits:
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="ai_response_reserve_adjustment"
-            )
-            base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
-                "ai_response_base",
-                full_reserve_credits,
-                metadata=full_reserve_meta,
+            context_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
+                "ai_response_context_extension",
+                full_reserve_credits - main_reserve_credits,
+                metadata={
+                    "operation_id": request.billing_helper.operation_id("ai_response"),
+                    **full_reserve_meta,
+                },
             )
             if base_charge_error:
-                self._refund_if_present(
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta,
+                    reason="ai_response_reserve_adjustment_failed",
+                )
+                self._settle_incurred_media(
                     request,
                     media_charge_meta,
+                    media_billing_segments,
                     reason="ai_response_reserve_adjustment_failed",
                 )
                 response = "ok" if request.is_spontaneous else base_charge_error
                 return response, False
 
         media_charge_meta, image_error = self._reserve_image_context(
-            request, base_charge_meta, media_charge_meta
+            request,
+            media_charge_meta,
+            [base_charge_meta, context_charge_meta],
         )
         if image_error:
             return image_error
 
-        ai_response_meta: Dict[str, Any] = {}
-        response_msg = self.handle_ai_response(
-            request.chat_id,
-            request.handler_func,
-            ai_messages,
-            image_data=(
-                request.prepared_message.resized_image_data
-                if request.prepared_message.photo_file_id
-                else None
-            ),
-            image_file_id=request.prepared_message.photo_file_id,
-            context_texts=[request.reply_context_text],
-            user_identity=request.user_identity,
-            response_meta=ai_response_meta,
-            user_id=request.user_id,
-            timezone_offset=request.timezone_offset,
-            reply_to_message_id=request.reply_to_message_id,
-        )
-
-        billing_segments = list(ai_response_meta.get("billing_segments") or [])
-        settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
+        settlement_reservations: List[Optional[Dict[str, Any]]] = [
+            base_charge_meta,
+            context_charge_meta,
+        ]
         if media_charge_meta:
             settlement_reservations.append(media_charge_meta)
-
-        if bool(ai_response_meta.get("ai_fallback")):
-            if billing_segments:
-                request.billing_helper.settle_reserved_ai_credits_batch(
-                    settlement_reservations,
-                    billing_segments,
-                    reason="ai_response_provider_usage_before_fallback",
-                )
-            else:
-                self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
-                request.billing_helper.refund_reserved_ai_credits(
-                    base_charge_meta, reason="ai_response_fallback"
-                )
-            return response_msg, True
-
-        request.billing_helper.settle_reserved_ai_credits_batch(
+        authorizer, ai_response_meta = self._start_billing_session(
+            request,
             settlement_reservations,
-            billing_segments,
-            reason="ai_response_success",
+            media_billing_segments,
+            sum(
+                int(reservation.get("reserved_credit_units", 0) or 0)
+                for reservation in (base_charge_meta, context_charge_meta)
+                if reservation
+            ),
         )
-
         try:
-            self.schedule_compaction(compaction_plan, request.billing_helper)
-        except Exception:
-            # Compaction is maintenance. It must not turn a successful answer
-            # into an error or add a model call to the foreground path.
-            _summary_logger.exception(
-                "compaction: failed to schedule chat_id=%s",
-                request.chat_id,
+            return self._finish_conversation_session(
+                request,
+                ai_messages,
+                compaction_plan,
+                authorizer,
+                ai_response_meta,
             )
+        finally:
+            authorizer.close()
 
-        return response_msg, True
+    @staticmethod
+    def _finish_summary_non_success(
+        request: SummaryCommandRequest,
+        authorizer: Any,
+        response_meta: Mapping[str, Any],
+        final_text: str,
+        pending_marker: Optional[str],
+    ) -> Optional[Tuple[str, Optional[str], bool]]:
+        if response_meta.get("provider_unavailable"):
+            for reservation in authorizer.reservations:
+                request.billing_helper.refund_reserved_ai_credits(
+                    reservation,
+                    reason="summary_provider_unavailable",
+                )
+            return final_text, pending_marker, False
+
+        if not response_meta.get("ai_fallback"):
+            return None
+
+        billing_segments = list(response_meta.get("billing_segments") or [])
+        if billing_segments:
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                authorizer.reservations,
+                billing_segments,
+                reason="summary_stream_provider_usage_before_fallback",
+            )
+        else:
+            for reservation in authorizer.reservations:
+                request.billing_helper.refund_reserved_ai_credits(
+                    reservation,
+                    reason="summary_stream_fallback",
+                )
+        return final_text, pending_marker, False
 
     def run_summary_command_stream(
         self,
@@ -289,7 +422,11 @@ class AIService:
         base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
             "ai_response_base",
             main_reserve_credits,
-            metadata={"estimated_prompt_messages": 1, **reserve_meta},
+            metadata={
+                "operation_id": request.billing_helper.operation_id("summary"),
+                "estimated_prompt_messages": 1,
+                **reserve_meta,
+            },
         )
         if base_charge_error:
             return base_charge_error, None, True
@@ -300,8 +437,18 @@ class AIService:
             )
             return self.handle_rate_limit(request.chat_id, request.message), None, True
 
+        authorizer = None
         try:
-            response_meta: dict[str, Any] = {}
+            authorizer = request.billing_helper.create_authorizer(
+                [base_charge_meta],
+                model_reserve_credit_units=int(
+                    (base_charge_meta or {}).get("reserved_credit_units", 0) or 0
+                ),
+            )
+            response_meta: dict[str, Any] = {
+                AI_COST_AUTHORIZER_KEY: authorizer,
+                AI_SEGMENT_RECORDER_KEY: authorizer.record_provider_segment,
+            }
             token_iterator, pending_marker = self.stream_summary_command(
                 request.chat_id,
                 request.redis_client,
@@ -316,39 +463,54 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="summary_preparation_failed"
             )
+            if authorizer is not None:
+                authorizer.close()
             return tr("summary.error"), None, True
 
         try:
-            final_text = stream_consumer(token_iterator)
-        except Exception:
-            _summary_logger.exception("summary_stream: failed for chat_id=%s", request.chat_id)
-            billing_segments = list(response_meta.get("billing_segments") or [])
-            if billing_segments:
-                request.billing_helper.settle_reserved_ai_credits_batch(
-                    [base_charge_meta],
-                    billing_segments,
-                    reason="summary_stream_provider_usage_before_delivery_failure",
+            try:
+                final_text = stream_consumer(token_iterator)
+            except Exception:
+                _summary_logger.exception(
+                    "summary_stream: failed for chat_id=%s", request.chat_id
                 )
-            else:
-                request.billing_helper.refund_reserved_ai_credits(
-                    base_charge_meta, reason="summary_stream_failed"
-                )
-            return tr("summary.error"), None, True
+                billing_segments = list(response_meta.get("billing_segments") or [])
+                if billing_segments:
+                    request.billing_helper.settle_reserved_ai_credits_batch(
+                        authorizer.reservations,
+                        billing_segments,
+                        reason="summary_stream_provider_usage_before_delivery_failure",
+                    )
+                else:
+                    for reservation in authorizer.reservations:
+                        request.billing_helper.refund_reserved_ai_credits(
+                            reservation,
+                            reason="summary_stream_failed",
+                        )
+                return tr("summary.error"), None, True
 
-        if response_meta.get("provider_unavailable"):
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta,
-                reason="summary_provider_unavailable",
+            response_meta.pop(AI_COST_AUTHORIZER_KEY, None)
+            response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
+
+            non_success = self._finish_summary_non_success(
+                request,
+                authorizer,
+                response_meta,
+                final_text,
+                pending_marker,
             )
+            if non_success is not None:
+                return non_success
+
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                authorizer.reservations,
+                response_meta.get("billing_segments", []),
+                reason="summary_command_stream_success",
+            )
+
             return final_text, pending_marker, False
-
-        request.billing_helper.settle_reserved_ai_credits_batch(
-            [base_charge_meta],
-            response_meta.get("billing_segments", []),
-            reason="summary_command_stream_success",
-        )
-
-        return final_text, pending_marker, False
+        finally:
+            authorizer.close()
 
 
 @dataclass(frozen=True)
