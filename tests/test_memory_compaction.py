@@ -45,6 +45,53 @@ def test_summary_model_uses_openrouter_reported_cost():
     assert segment["usage"]["cost"] == "0.00010442124"
 
 
+def test_summary_model_uses_routed_endpoint_price_when_upstream_cost_is_free():
+    from api.memory.summary import call_summary_model
+
+    response = SimpleNamespace(
+        model="deepseek/deepseek-v4-flash-0731",
+        provider="DeepInfra",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="summary"),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=1_000,
+            completion_tokens=50,
+            cost="0.000001",
+            cost_details={"upstream_inference_cost": 0},
+        ),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response)))
+    )
+    lookup = MagicMock(
+        return_value={
+            "input_per_million": 80_000,
+            "cached_input_per_million": 16_000,
+            "output_per_million": 180_000,
+        }
+    )
+
+    _text, cost, segment = call_summary_model(
+        [{"role": "user", "content": "summarize"}],
+        get_client=lambda: client,
+        estimate_tokens=lambda _messages: 1_000,
+        estimate_cost=lambda *_args: 999_999,
+        model="~deepseek/deepseek-v4-flash-latest",
+        max_tokens=100,
+        logger=MagicMock(),
+        get_provider_pricing=lookup,
+    )
+
+    assert cost == 89
+    assert segment is not None
+    assert segment["metadata"]["provider_pricing_source"] == "openrouter_endpoints"
+    lookup.assert_called_once_with("deepseek/deepseek-v4-flash-0731", "DeepInfra")
+
+
 def test_incremental_summary_helper_uses_only_messages_after_marker():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 

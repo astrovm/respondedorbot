@@ -60,10 +60,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 }
 
 PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
-    ("openrouter", "openai/gpt-oss-120b"): {
-        "input_per_million": 30_000,
-        "output_per_million": 170_000,
-    },
     ("groq", "openai/gpt-oss-120b"): {
         "input_per_million": 150_000,
         "cached_input_per_million": 75_000,
@@ -269,14 +265,10 @@ def _calculate_model_token_cost(
     *,
     provider: str = "",
     upstream_provider: str = "",
+    provider_pricing: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_provider = str(provider or "").strip().lower()
     normalized_upstream = str(upstream_provider or "").strip().lower()
-    pricing = (
-        PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_upstream, model))
-        or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
-        or MODEL_PRICING_USD_MICROS.get(model)
-    )
     if not usage:
         return {
             "model": model,
@@ -290,6 +282,20 @@ def _calculate_model_token_cost(
         }
 
     reported_cost = _reported_cost_usd_micros_exact(usage)
+    normalized_published_pricing = ensure_mapping(provider_pricing) or {}
+    exact_provider_pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_upstream, model))
+    pricing: Mapping[str, Any] | None
+    if normalized_provider == "openrouter" and reported_cost is None:
+        # OpenRouter routes one model across differently priced providers. A
+        # model-wide headline rate is not a safe substitute for the routed endpoint.
+        pricing = normalized_published_pricing
+    else:
+        pricing = (
+            normalized_published_pricing
+            or exact_provider_pricing
+            or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
+            or MODEL_PRICING_USD_MICROS.get(model)
+        )
     if not pricing:
         exact_cost = (
             reported_cost if reported_cost is not None and reported_cost > 0 else Decimal(0)
@@ -318,7 +324,8 @@ def _calculate_model_token_cost(
         pricing.get("input_per_million", 0),
     )
     usd_micros_exact = Decimal(
-        regular_input_tokens * pricing.get("input_per_million", 0)
+        pricing.get("request_usd_micros", 0) * 1_000_000
+        + regular_input_tokens * pricing.get("input_per_million", 0)
         + tokens["input_cached_tokens"] * cached_input_per_million
         + audio_input_tokens
         * pricing.get("audio_input_per_million", pricing.get("input_per_million", 0))
@@ -472,6 +479,7 @@ def calculate_billing_for_segments(
             usage,
             provider=provider,
             upstream_provider=upstream_provider,
+            provider_pricing=ensure_mapping(metadata.get("provider_pricing")),
         )
         exact_model_cost = model_cost.pop("_usd_micros_exact")
         pricing_basis = str(model_cost.pop("_pricing_basis"))
@@ -503,6 +511,7 @@ def calculate_billing_for_segments(
                 "upstream_provider": upstream_provider or None,
                 "provider_request_id": metadata.get("provider_request_id"),
                 "provider_generation_id": metadata.get("provider_generation_id"),
+                "provider_pricing_source": metadata.get("provider_pricing_source"),
                 "pricing_basis": pricing_basis,
                 "tool_pricing_basis": "firecrawl_standard" if tool_cost else None,
                 "cost_complete": cost_complete,

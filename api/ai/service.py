@@ -322,9 +322,17 @@ class AIService:
             final_text = stream_consumer(token_iterator)
         except Exception:
             _summary_logger.exception("summary_stream: failed for chat_id=%s", request.chat_id)
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="summary_stream_failed"
-            )
+            billing_segments = list(response_meta.get("billing_segments") or [])
+            if billing_segments:
+                request.billing_helper.settle_reserved_ai_credits_batch(
+                    [base_charge_meta],
+                    billing_segments,
+                    reason="summary_stream_provider_usage_before_delivery_failure",
+                )
+            else:
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta, reason="summary_stream_failed"
+                )
             return tr("summary.error"), None, True
 
         request.billing_helper.settle_reserved_ai_credits_batch(

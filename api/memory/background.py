@@ -218,7 +218,11 @@ class DurableCompactionQueue:
             self._settle(job, reason="memory_compaction_success")
             return
         if current_summary != job.prior_summary or current_marker != job.expected_marker:
-            self._settle(job, actual_credit_units=0, reason="memory_compaction_obsolete")
+            self._settle(
+                job,
+                actual_credit_units=(None if job.result_billing_segment is not None else 0),
+                reason="memory_compaction_obsolete",
+            )
             return
 
         if not job.result_summary:
@@ -262,7 +266,11 @@ class DurableCompactionQueue:
             error,
         )
         if job.attempts >= _MAX_ATTEMPTS:
-            self._settle(job, actual_credit_units=0, reason="memory_compaction_failed")
+            self._settle(
+                job,
+                actual_credit_units=(None if job.result_billing_segment is not None else 0),
+                reason="memory_compaction_failed",
+            )
             client.hdel(_JOBS_KEY, job.chat_id)
             return
         job.next_attempt_at = time.time() + 30 * (2 ** (job.attempts - 1))

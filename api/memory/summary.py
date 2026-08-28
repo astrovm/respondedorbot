@@ -22,6 +22,7 @@ from api.ai.pricing import (
     credit_units_from_usd_micros,
     ensure_mapping,
 )
+from api.providers.pricing import needs_published_provider_pricing
 from api.memory.background import DurableCompactionQueue
 from api.memory.compaction import CompactionPlan, IncrementalSummarySource
 
@@ -35,6 +36,7 @@ def call_summary_model(
     model: str,
     max_tokens: int,
     logger: Any,
+    get_provider_pricing: Callable[[str, str], Mapping[str, int] | None] | None = None,
 ) -> tuple[str | None, int, dict[str, Any] | None]:
     """Ask the summary model for text and return its measured credit cost."""
 
@@ -74,6 +76,14 @@ def call_summary_model(
                 response_metadata["requested_model"] = model
             if upstream_provider:
                 response_metadata["upstream_provider"] = str(upstream_provider)
+                if get_provider_pricing is not None and needs_published_provider_pricing(usage):
+                    provider_pricing = get_provider_pricing(
+                        resolved_model,
+                        str(upstream_provider),
+                    )
+                    if provider_pricing:
+                        response_metadata["provider_pricing"] = dict(provider_pricing)
+                        response_metadata["provider_pricing_source"] = "openrouter_endpoints"
             segment = AIUsageResult(
                 kind="summary",
                 text=text,
@@ -408,6 +418,7 @@ class SummaryService:
             model=self._deps.model,
             max_tokens=self._deps.max_tokens,
             logger=self._deps.logger,
+            get_provider_pricing=self._deps.provider.get_openrouter_provider_pricing,
         )
 
     def load_personality(self) -> str:

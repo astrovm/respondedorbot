@@ -1056,7 +1056,7 @@ def test_calculate_billing_uses_gateway_cost_when_higher_than_local():
                 "kind": "chat",
                 "model": "~deepseek/deepseek-v4-flash-latest",
                 "usage": {
-                    "prompt_tokens": 100,
+                    "prompt_tokens": 1_000,
                     "completion_tokens": 50,
                     "cost": 0.005,
                 },
@@ -1112,16 +1112,25 @@ def test_zero_reported_gateway_cost_uses_current_published_rate():
                 "kind": "chat",
                 "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
-                    "prompt_tokens": 100,
+                    "prompt_tokens": 1_000,
                     "completion_tokens": 50,
                     "cost": 0,
                 },
-                "metadata": {"provider": "openrouter"},
+                "metadata": {
+                    "provider": "openrouter",
+                    "upstream_provider": "DeepInfra",
+                    "provider_pricing": {
+                        "input_per_million": 80_000,
+                        "cached_input_per_million": 16_000,
+                        "output_per_million": 180_000,
+                    },
+                    "provider_pricing_source": "openrouter_endpoints",
+                },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 17
+    assert breakdown["raw_usd_micros"] == 89
     assert breakdown["pricing_complete"] is True
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
 
@@ -1179,18 +1188,28 @@ def test_free_upstream_cost_uses_concrete_published_rate():
                 "kind": "chat",
                 "model": "deepseek/deepseek-v4-flash-0731",
                 "usage": {
-                    "prompt_tokens": 100,
+                    "prompt_tokens": 1_000,
                     "completion_tokens": 50,
                     "cost": "0.000001",
                     "cost_details": {"upstream_inference_cost": 0},
                 },
-                "metadata": {"provider": "openrouter"},
+                "metadata": {
+                    "provider": "openrouter",
+                    "upstream_provider": "DeepInfra",
+                    "provider_pricing": {
+                        "input_per_million": 80_000,
+                        "cached_input_per_million": 16_000,
+                        "output_per_million": 180_000,
+                    },
+                    "provider_pricing_source": "openrouter_endpoints",
+                },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros_exact"] == "17.5"
+    assert breakdown["raw_usd_micros_exact"] == "89"
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
+    assert breakdown["segment_breakdown"][0]["provider_pricing_source"] == "openrouter_endpoints"
 
 
 def test_internal_cache_is_authoritative_zero_cost():
@@ -1296,19 +1315,23 @@ def test_gemini_local_fallback_prices_cache_audio_and_cache_writes():
     assert breakdown["raw_usd_micros"] == 413
 
 
-def test_openrouter_gpt_oss_local_fallback_uses_provider_rates():
+def test_openrouter_local_fallback_without_current_endpoint_price_is_incomplete():
     breakdown = calculate_billing_for_segments(
         [
             {
                 "kind": "chat",
                 "model": "openai/gpt-oss-120b",
                 "usage": {"prompt_tokens": 1_000, "completion_tokens": 500},
-                "metadata": {"provider": "openrouter"},
+                "metadata": {
+                    "provider": "openrouter",
+                    "upstream_provider": "DeepInfra",
+                },
             }
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 115
+    assert breakdown["raw_usd_micros"] == 0
+    assert breakdown["pricing_complete"] is False
 
 
 def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
@@ -1321,6 +1344,12 @@ def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
                 "metadata": {
                     "provider": "openrouter",
                     "upstream_provider": "Groq",
+                    "provider_pricing": {
+                        "input_per_million": 150_000,
+                        "cached_input_per_million": 75_000,
+                        "output_per_million": 600_000,
+                    },
+                    "provider_pricing_source": "openrouter_endpoints",
                 },
             }
         ]

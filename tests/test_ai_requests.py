@@ -18,9 +18,17 @@ def test_provider_usage_result_uses_explicit_provider_as_source():
     assert result.metadata["provider"] == "openrouter"
 
 
-def test_provider_usage_result_preserves_resolved_model_and_upstream_provider():
+def test_provider_usage_result_preserves_resolved_model_and_upstream_provider(monkeypatch):
     from api.index import app_runtime
 
+    lookup = MagicMock(
+        return_value={
+            "input_per_million": 80_000,
+            "cached_input_per_million": 16_000,
+            "output_per_million": 180_000,
+        }
+    )
+    monkeypatch.setattr(app_runtime.providers, "get_openrouter_provider_pricing", lookup)
     response = SimpleNamespace(
         model="deepseek/deepseek-v4-flash",
         provider="DeepInfra",
@@ -37,6 +45,9 @@ def test_provider_usage_result_preserves_resolved_model_and_upstream_provider():
     assert result.model == "deepseek/deepseek-v4-flash"
     assert result.metadata["requested_model"] == "~deepseek/deepseek-v4-flash-latest"
     assert result.metadata["upstream_provider"] == "DeepInfra"
+    assert result.metadata["provider_pricing_source"] == "openrouter_endpoints"
+    assert result.metadata["provider_pricing"]["input_per_million"] == 80_000
+    lookup.assert_called_once_with("deepseek/deepseek-v4-flash", "DeepInfra")
 
 
 def test_build_ai_messages():
