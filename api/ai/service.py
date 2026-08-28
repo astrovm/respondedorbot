@@ -29,7 +29,7 @@ class AIService:
     handle_ai_response: Callable[..., str]
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]]
     estimate_image_context_reserve_credits: Callable[[bytes, str], int]
-    stream_summary_command: Callable[[str, Any, str], Any]
+    stream_summary_command: Callable[..., Any]
     schedule_compaction: Callable[[Any, Any], bool]
 
     @staticmethod
@@ -238,17 +238,23 @@ class AIService:
         )
 
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
-        if bool(ai_response_meta.get("ai_fallback")):
-            # The local fallback has no provider usage, so release every reserve.
-            self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="ai_response_fallback"
-            )
-            return response_msg, True
-
         settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
         if media_charge_meta:
             settlement_reservations.append(media_charge_meta)
+
+        if bool(ai_response_meta.get("ai_fallback")):
+            if billing_segments:
+                request.billing_helper.settle_reserved_ai_credits_batch(
+                    settlement_reservations,
+                    billing_segments,
+                    reason="ai_response_provider_usage_before_fallback",
+                )
+            else:
+                self._refund_if_present(request, media_charge_meta, reason="ai_response_fallback")
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta, reason="ai_response_fallback"
+                )
+            return response_msg, True
 
         request.billing_helper.settle_reserved_ai_credits_batch(
             settlement_reservations,
@@ -295,10 +301,12 @@ class AIService:
             return self.handle_rate_limit(request.chat_id, request.message), None, True
 
         try:
+            response_meta: dict[str, Any] = {}
             token_iterator, pending_marker = self.stream_summary_command(
                 request.chat_id,
                 request.redis_client,
                 request.prompt_text,
+                response_meta=response_meta,
             )
         except Exception:
             _summary_logger.exception(
@@ -314,14 +322,29 @@ class AIService:
             final_text = stream_consumer(token_iterator)
         except Exception:
             _summary_logger.exception("summary_stream: failed for chat_id=%s", request.chat_id)
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="summary_stream_failed"
-            )
+            billing_segments = list(response_meta.get("billing_segments") or [])
+            if billing_segments:
+                request.billing_helper.settle_reserved_ai_credits_batch(
+                    [base_charge_meta],
+                    billing_segments,
+                    reason="summary_stream_provider_usage_before_delivery_failure",
+                )
+            else:
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta, reason="summary_stream_failed"
+                )
             return tr("summary.error"), None, True
+
+        if response_meta.get("provider_unavailable"):
+            request.billing_helper.refund_reserved_ai_credits(
+                base_charge_meta,
+                reason="summary_provider_unavailable",
+            )
+            return final_text, pending_marker, False
 
         request.billing_helper.settle_reserved_ai_credits_batch(
             [base_charge_meta],
-            [],
+            response_meta.get("billing_segments", []),
             reason="summary_command_stream_success",
         )
 
@@ -376,7 +399,10 @@ def build_ai_service(
     handle_ai_response: Callable[..., str],
     estimate_ai_base_reserve_credits: Callable[..., Tuple[int, Dict[str, Any]]],
     estimate_image_context_reserve_credits: Callable[[bytes, str], int],
-    stream_summary_command: Callable[[str, Any, str], Any] = lambda _a, _b, _c: (iter([]), None),
+    stream_summary_command: Callable[..., Any] = lambda _a, _b, _c, **_kwargs: (
+        iter([]),
+        None,
+    ),
     schedule_compaction: Callable[[Any, Any], bool] = lambda _plan, _billing: False,
 ) -> AIService:
     return AIService(

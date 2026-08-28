@@ -162,6 +162,80 @@ def test_provider_runtime_keeps_direct_search_answer_unchanged():
     assert result.metadata["firecrawl_credits_used"] == 2
 
 
+def test_nonstream_runtime_reports_every_tool_round_for_billing():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
+    from api.tools.runtime import ToolRuntime
+
+    tool_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(name="calc", arguments='{"value":1}'),
+    )
+    responses = [
+        _FakeResponse(
+            [_FakeChoice("tool_calls", SimpleNamespace(content="", tool_calls=[tool_call]))]
+        ),
+        _FakeResponse([_FakeChoice("stop", SimpleNamespace(content="done", tool_calls=[]))]),
+    ]
+    for index, response in enumerate(responses, start=1):
+        response.id = f"generation-{index}"
+        response.model = "deepseek/deepseek-v4-flash-0731"
+        response.provider = "DeepInfra"
+        response.service_tier = "priority"
+        response.usage = {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}
+    runtime = ProviderRuntime(
+        ProviderRuntimeDeps(
+            get_client=lambda: _FakeClient(responses),
+            admin_report=MagicMock(),
+            increment_request_count=MagicMock(),
+            build_web_search_tool=lambda: {},
+            build_usage_result=lambda **kwargs: AIUsageResult(
+                kind=kwargs["kind"],
+                text=kwargs["text"],
+                model=kwargs["model"],
+                usage=dict(kwargs["response"].usage),
+                metadata=kwargs.get("metadata") or {},
+            ),
+            extract_usage_map=lambda response: dict(response.usage),
+            primary_model="test/model",
+            max_tool_rounds=5,
+        ),
+        ToolRuntime(
+            execute_tool_fn=MagicMock(return_value=SimpleNamespace(output="1", metadata={})),
+            tool_registry={"calc": object()},
+            print_fn=lambda *_args: None,
+        ),
+    )
+    recorded = []
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "calculate"}],
+        enable_web_search=False,
+        extra_tools=[{"name": "calc"}],
+        on_usage_result=recorded.append,
+    )
+
+    assert result is not None
+    assert [item.metadata["provider_generation_id"] for item in recorded] == [
+        "generation-1",
+        "generation-2",
+    ]
+    assert [item.usage["cost"] for item in recorded] == [0.001, 0.001]
+    assert [item.model for item in recorded] == [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+    ]
+    assert [item.metadata["upstream_provider"] for item in recorded] == [
+        "DeepInfra",
+        "DeepInfra",
+    ]
+    assert [item.metadata["service_tier"] for item in recorded] == [
+        "priority",
+        "priority",
+    ]
+
+
 def test_provider_runtime_executes_tool_calls_until_stop():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -325,12 +399,8 @@ def test_provider_runtime_shares_web_search_budget_across_tool_rounds(
 
     assert result is not None
     assert result.metadata["web_search_requests"] == total_requests
-    assert client.calls[0]["tools"] == [
-        {"type": "function", "function": {"name": "calc"}}
-    ]
-    assert client.calls[1]["tools"] == [
-        {"type": "function", "function": {"name": "calc"}}
-    ]
+    assert client.calls[0]["tools"] == [{"type": "function", "function": {"name": "calc"}}]
+    assert client.calls[1]["tools"] == [{"type": "function", "function": {"name": "calc"}}]
     assert "extra_body" not in client.calls[0]
     assert "extra_body" not in client.calls[1]
 
@@ -866,6 +936,69 @@ def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call(
     assert "tools" in client.calls[1]
 
 
+def test_openrouter_stream_records_incomplete_usage_after_partial_stream_error():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+
+    partial_chunk = SimpleNamespace(
+        id="generation-partial",
+        model="deepseek/deepseek-v4-flash-0731",
+        provider="DeepInfra",
+        choices=[
+            SimpleNamespace(
+                finish_reason=None,
+                delta=SimpleNamespace(
+                    content="respuesta parcial",
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ],
+        usage=None,
+    )
+
+    def interrupted_stream():
+        yield partial_chunk
+        raise RuntimeError("stream interrupted")
+
+    client = _FakeClient([interrupted_stream()])
+    admin_report = MagicMock()
+    recorded = []
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=admin_report,
+        increment_request_count=MagicMock(),
+        build_web_search_tool=lambda: {},
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage=getattr(kwargs["response"], "usage", None),
+            source="openrouter",
+            metadata=kwargs.get("metadata") or {},
+        ),
+        extract_usage_map=lambda response: getattr(response, "usage", None),
+        primary_model="deepseek/deepseek-v4-flash-0731",
+    )
+
+    with pytest.raises(RuntimeError, match="stream interrupted"):
+        list(
+            provider.stream(
+                {"role": "system", "content": "sys"},
+                [{"role": "user", "content": "hola"}],
+                enable_web_search=False,
+                on_usage_result=recorded.append,
+            )
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0].text == "respuesta parcial"
+    assert recorded[0].model == "deepseek/deepseek-v4-flash-0731"
+    assert recorded[0].metadata["stream_interrupted"] is True
+    assert recorded[0].metadata["upstream_provider"] == "DeepInfra"
+    admin_report.assert_called_once()
+
+
 def test_provider_runtime_shared_tool_loop_matches_complete():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
@@ -911,9 +1044,7 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
                             tool_calls=[
                                 SimpleNamespace(
                                     id="call_1",
-                                    function=SimpleNamespace(
-                                        name="calc", arguments='{"x": 1}'
-                                    ),
+                                    function=SimpleNamespace(name="calc", arguments='{"x": 1}'),
                                 )
                             ],
                             annotations=[],
@@ -954,9 +1085,7 @@ def test_provider_runtime_shared_tool_loop_matches_complete():
     system_message = {"role": "system", "content": "sys"}
     user_messages = [{"role": "user", "content": "hola"}]
 
-    runtime_from_complete, complete_execute_tool_fn = _build_runtime(
-        _tool_then_stop_responses()
-    )
+    runtime_from_complete, complete_execute_tool_fn = _build_runtime(_tool_then_stop_responses())
     complete_result = runtime_from_complete.complete(
         system_message,
         user_messages,
@@ -1002,11 +1131,11 @@ def _build_retry_runtime(responses, *, extract_usage=lambda _response: {}):
                 kind=kwargs["kind"],
                 text=kwargs["text"],
                 model=kwargs["model"],
-                usage={},
+                usage=extract_usage(kwargs["response"]),
                 metadata=kwargs.get("metadata") or {},
             ),
             extract_usage_map=extract_usage,
-            primary_model="~deepseek/deepseek-v4-flash-latest",
+            primary_model="deepseek/deepseek-v4-flash-0731",
             max_tool_rounds=5,
         ),
         ToolRuntime(),
@@ -1028,17 +1157,52 @@ def test_provider_runtime_returns_none_for_billable_empty_stop():
         extract_usage=lambda _response: {"prompt_tokens": 10},
     )
 
+    recorded = []
     result = runtime.complete(
         {"role": "system", "content": "sys"},
         [{"role": "user", "content": "research this"}],
         enable_web_search=True,
         tool_context={"chat_id": "123"},
+        on_usage_result=recorded.append,
     )
 
     assert result is None
     assert len(client.calls) == 1
     assert request_count.call_count == 1
+    assert len(recorded) == 1
+    assert recorded[0].text == ""
+    assert recorded[0].usage == {"prompt_tokens": 10}
     admin_report.assert_not_called()
+
+
+def test_provider_runtime_records_billable_unexpected_finish():
+    response = _FakeResponse(
+        [
+            _FakeChoice(
+                "content_filter",
+                SimpleNamespace(content="", tool_calls=[], annotations=[]),
+            )
+        ]
+    )
+    runtime, _client, admin_report, _request_count = _build_retry_runtime(
+        [response],
+        extract_usage=lambda _response: {"prompt_tokens": 10},
+    )
+    recorded = []
+
+    result = runtime.complete(
+        {"role": "system", "content": "sys"},
+        [{"role": "user", "content": "research this"}],
+        enable_web_search=True,
+        tool_context={"chat_id": "123"},
+        on_usage_result=recorded.append,
+    )
+
+    assert result is None
+    assert len(recorded) == 1
+    assert recorded[0].usage == {"prompt_tokens": 10}
+    assert recorded[0].metadata["unexpected_finish_reason"] == "content_filter"
+    admin_report.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -1094,7 +1258,7 @@ def test_provider_runtime_retries_invalid_finish_reason_then_returns_result(
     assert result.text == "done"
     assert len(client.calls) == 2
     assert all(
-        call["max_tokens"] == chat_output_token_limit("~deepseek/deepseek-v4-flash-latest")
+        call["max_tokens"] == chat_output_token_limit("deepseek/deepseek-v4-flash-0731")
         for call in client.calls
     )
     assert request_count.call_count == 2
@@ -1177,7 +1341,7 @@ def test_provider_runtime_reports_null_finish_reason_after_retries_exhausted():
     assert admin_report.call_args.args[0] == "OpenRouter unexpected finish_reason=None"
     report_context = admin_report.call_args.kwargs["extra_context"]
     assert report_context == {
-        "model": "~deepseek/deepseek-v4-flash-latest",
+        "model": "deepseek/deepseek-v4-flash-0731",
         "enable_web_search": True,
         "tool_round": 1,
         "response_id": "gen-1",
@@ -1254,10 +1418,7 @@ def test_provider_runtime_keeps_tools_when_json_decode_retries_exhausted():
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
     from api.tools.runtime import ToolRuntime
 
-    decode_errors = [
-        json.JSONDecodeError("Expecting value", "\n         \n", 0)
-        for _ in range(5)
-    ]
+    decode_errors = [json.JSONDecodeError("Expecting value", "\n         \n", 0) for _ in range(5)]
     client = _FakeClient(decode_errors)
     admin_report = MagicMock()
 

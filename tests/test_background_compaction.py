@@ -56,6 +56,143 @@ def _build_queue(redis_client, *, compact, save_result, settle_reservation):
     )
 
 
+def test_background_compaction_preserves_known_overage_when_model_cost_is_missing():
+    from api.memory.background import CompactionJob, DurableCompactionQueue
+
+    settle_reservation = MagicMock(return_value={"applied": True})
+    admin_report = MagicMock()
+    queue = DurableCompactionQueue(
+        redis_factory=lambda: _FakeRedis(),
+        compact=MagicMock(),
+        get_summary=MagicMock(),
+        get_marker=MagicMock(),
+        save_result=MagicMock(),
+        estimate_reserve=MagicMock(),
+        settle_reservation=settle_reservation,
+        logger=MagicMock(),
+        admin_report=admin_report,
+    )
+    job = CompactionJob(
+        chat_id="123",
+        messages=[],
+        prior_summary=None,
+        expected_marker=None,
+        target_marker="m1",
+        reservation={
+            "reserved_credit_units": 3,
+            "credit_scale": 100,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        user_id=42,
+        message_id="99",
+        result_summary="summary",
+        result_billing_segment={
+            "kind": "summary",
+            "model": "unknown/model",
+            "usage": {},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "web_search_requests": 1,
+                "firecrawl_credits_used": 1,
+            },
+        },
+    )
+
+    queue._settle(job, reason="memory_compaction_success")
+
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 17
+    admin_report.assert_called_once()
+
+
+def test_failed_compaction_settles_persisted_provider_usage():
+    from api.memory.background import CompactionJob
+
+    redis_client = _FakeRedis()
+    settle_reservation = MagicMock(return_value={"applied": True})
+    queue = _build_queue(
+        redis_client,
+        compact=MagicMock(),
+        save_result=MagicMock(),
+        settle_reservation=settle_reservation,
+    )
+    job = CompactionJob(
+        chat_id="123",
+        messages=[],
+        prior_summary=None,
+        expected_marker=None,
+        target_marker="m1",
+        reservation={
+            "reserved_credit_units": 3,
+            "credit_scale": 100,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        user_id=42,
+        message_id="99",
+        attempts=2,
+        result_summary="summary",
+        result_billing_segment={
+            "kind": "summary",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": 0.001},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter"},
+        },
+    )
+    redis_client.hset("memory:compaction:jobs", "123", "stored")
+
+    queue._retry_or_refund(redis_client, job, RuntimeError("save failed"))
+
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 20
+    assert redis_client.hgetall("memory:compaction:jobs") == {}
+
+
+def test_obsolete_compaction_settles_persisted_provider_usage():
+    from api.memory.background import CompactionJob, DurableCompactionQueue
+
+    redis_client = _FakeRedis()
+    settle_reservation = MagicMock(return_value={"applied": True})
+    queue = DurableCompactionQueue(
+        redis_factory=lambda: redis_client,
+        compact=MagicMock(),
+        get_summary=MagicMock(return_value="newer summary"),
+        get_marker=MagicMock(return_value="newer-marker"),
+        save_result=MagicMock(),
+        estimate_reserve=MagicMock(),
+        settle_reservation=settle_reservation,
+        logger=MagicMock(),
+    )
+    job = CompactionJob(
+        chat_id="123",
+        messages=[],
+        prior_summary="old summary",
+        expected_marker="old-marker",
+        target_marker="m1",
+        reservation={
+            "reserved_credit_units": 3,
+            "credit_scale": 100,
+            "source": "user",
+            "usage_tag": "memory_compaction:123:m1",
+        },
+        user_id=42,
+        message_id="99",
+        result_summary="generated summary",
+        result_billing_segment={
+            "kind": "summary",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": 0.001},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter"},
+        },
+    )
+
+    queue._process(redis_client, job)
+
+    assert settle_reservation.call_args.kwargs["actual_credit_units"] == 20
+
+
 def test_compaction_is_persisted_before_the_model_runs_and_survives_queue_restart():
     from api.memory.compaction import CompactionPlan
 

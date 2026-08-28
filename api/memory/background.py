@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 from uuid import uuid4
 
-from api.ai.pricing import credit_units_from_usd_micros
+from api.ai.pricing import calculate_billing_for_segments, credit_units_from_usd_micros
 from api.billing.credit_units import CREDIT_SCALE, rescale_credit_units
 from api.i18n import current_locale, normalize_locale, use_locale
 from api.memory.compaction import CompactionPlan
@@ -26,17 +26,13 @@ _MAX_ATTEMPTS = 3
 
 def _reservation_credit_scale(reservation: Mapping[str, Any]) -> Any:
     metadata = reservation.get("metadata")
-    metadata_scale = (
-        metadata.get("credit_scale") if isinstance(metadata, Mapping) else None
-    )
+    metadata_scale = metadata.get("credit_scale") if isinstance(metadata, Mapping) else None
     return reservation.get("credit_scale") or metadata_scale
 
 
 def _reservation_settlement_id(reservation: Mapping[str, Any]) -> str:
     metadata = reservation.get("metadata")
-    metadata_id = (
-        metadata.get("settlement_id") if isinstance(metadata, Mapping) else None
-    )
+    metadata_id = metadata.get("settlement_id") if isinstance(metadata, Mapping) else None
     return str(reservation.get("settlement_id") or metadata_id or "")
 
 
@@ -55,6 +51,7 @@ class CompactionJob:
     next_attempt_at: float = 0.0
     result_summary: str | None = None
     result_cost_usd_micros: int = 0
+    result_billing_segment: dict[str, Any] | None = None
 
 
 class DurableCompactionQueue:
@@ -64,13 +61,17 @@ class DurableCompactionQueue:
         self,
         *,
         redis_factory: Callable[[], Any],
-        compact: Callable[[list[dict[str, Any]], str | None], tuple[str, int]],
+        compact: Callable[
+            [list[dict[str, Any]], str | None],
+            tuple[str, int] | tuple[str, int, dict[str, Any] | None],
+        ],
         get_summary: Callable[[Any, str], str | None],
         get_marker: Callable[[Any, str], str | None],
         save_result: Callable[[Any, str, str, str], None],
         estimate_reserve: Callable[[CompactionPlan], int],
         settle_reservation: Callable[..., Mapping[str, Any]],
         logger: Any,
+        admin_report: Callable[..., Any] | None = None,
     ) -> None:
         self._redis_factory = redis_factory
         self._compact = compact
@@ -80,6 +81,7 @@ class DurableCompactionQueue:
         self._estimate_reserve = estimate_reserve
         self._settle_reservation = settle_reservation
         self._logger = logger
+        self._admin_report = admin_report
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -95,9 +97,7 @@ class DurableCompactionQueue:
             return False
 
         reserve_units = max(1, self._estimate_reserve(plan))
-        usage_tag = (
-            f"memory_compaction:{plan.chat_id}:{plan.target_marker}:{uuid4().hex}"
-        )
+        usage_tag = f"memory_compaction:{plan.chat_id}:{plan.target_marker}:{uuid4().hex}"
         reservation, error_message = billing.reserve_background_ai_credits(
             usage_tag,
             reserve_units,
@@ -139,9 +139,7 @@ class DurableCompactionQueue:
                 user_id=int(billing.user_id),
                 chat_id=reservation.get("chat_scope_id"),
                 source=str(reservation.get("source") or "user"),
-                reserved_credit_units=int(
-                    reservation.get("reserved_credit_units") or 0
-                ),
+                reserved_credit_units=int(reservation.get("reserved_credit_units") or 0),
                 actual_credit_units=0,
                 usage_tag=str(reservation.get("usage_tag") or usage_tag),
                 metadata={"reason": "memory_compaction_enqueue_failed"},
@@ -175,7 +173,7 @@ class DurableCompactionQueue:
                 continue
             try:
                 decoded = json.loads(payload)
-            except (TypeError, json.JSONDecodeError):
+            except TypeError, json.JSONDecodeError:
                 self._quarantine_job(
                     client,
                     chat_id=chat_id,
@@ -185,7 +183,7 @@ class DurableCompactionQueue:
                 continue
             try:
                 job = CompactionJob(**decoded)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 self._logger.exception("compaction: incompatible job chat_id=%s", chat_id)
                 if self._settle_invalid_job(decoded, chat_id=chat_id):
                     client.hdel(_JOBS_KEY, chat_id)
@@ -193,9 +191,7 @@ class DurableCompactionQueue:
             if job.next_attempt_at > time.time():
                 continue
             token = uuid4().hex
-            if not client.set(
-                f"{_LOCK_PREFIX}{chat_id}", token, nx=True, ex=_LOCK_TTL_SECONDS
-            ):
+            if not client.set(f"{_LOCK_PREFIX}{chat_id}", token, nx=True, ex=_LOCK_TTL_SECONDS):
                 continue
             try:
                 self._process(client, job)
@@ -222,16 +218,23 @@ class DurableCompactionQueue:
             self._settle(job, reason="memory_compaction_success")
             return
         if current_summary != job.prior_summary or current_marker != job.expected_marker:
-            self._settle(job, actual_credit_units=0, reason="memory_compaction_obsolete")
+            self._settle(
+                job,
+                actual_credit_units=(None if job.result_billing_segment is not None else 0),
+                reason="memory_compaction_obsolete",
+            )
             return
 
         if not job.result_summary:
             with use_locale(normalize_locale(job.locale)):
-                summary, cost = self._compact(job.messages, job.prior_summary)
-            if not summary or cost <= 0:
+                result = self._compact(job.messages, job.prior_summary)
+            summary, cost = result[:2]
+            billing_segment = result[2] if len(result) > 2 else None
+            if not summary or (cost <= 0 and billing_segment is None):
                 raise RuntimeError("summary provider did not produce billable output")
             job.result_summary = summary
             job.result_cost_usd_micros = cost
+            job.result_billing_segment = billing_segment
             client.hset(
                 _JOBS_KEY,
                 job.chat_id,
@@ -263,7 +266,11 @@ class DurableCompactionQueue:
             error,
         )
         if job.attempts >= _MAX_ATTEMPTS:
-            self._settle(job, actual_credit_units=0, reason="memory_compaction_failed")
+            self._settle(
+                job,
+                actual_credit_units=(None if job.result_billing_segment is not None else 0),
+                reason="memory_compaction_failed",
+            )
             client.hdel(_JOBS_KEY, job.chat_id)
             return
         job.next_attempt_at = time.time() + 30 * (2 ** (job.attempts - 1))
@@ -280,15 +287,39 @@ class DurableCompactionQueue:
         reason: str,
         actual_credit_units: int | None = None,
     ) -> None:
-        actual = (
-            credit_units_from_usd_micros(job.result_cost_usd_micros)
-            if actual_credit_units is None
-            else max(0, int(actual_credit_units))
+        billing = (
+            calculate_billing_for_segments([job.result_billing_segment])
+            if job.result_billing_segment is not None
+            else None
         )
         reserved = rescale_credit_units(
             job.reservation.get("reserved_credit_units"),
             _reservation_credit_scale(job.reservation),
         )
+        pricing_complete = billing is None or billing.get("pricing_complete") is True
+        billed_credit_units = (
+            int(billing["charged_credit_units"])
+            if billing is not None
+            else credit_units_from_usd_micros(job.result_cost_usd_micros)
+        )
+        actual = (
+            max(0, int(actual_credit_units))
+            if actual_credit_units is not None
+            else max(reserved, billed_credit_units)
+            if not pricing_complete
+            else billed_credit_units
+        )
+        if not pricing_complete and self._admin_report is not None:
+            self._admin_report(
+                "compactación de memoria sin costo de proveedor verificable; se mantiene la reserva",
+                None,
+                {
+                    "chat_id": job.chat_id,
+                    "user_id": job.user_id,
+                    "reserved_credit_units": reserved,
+                    "billing_segment": job.result_billing_segment,
+                },
+            )
         self._settle_reservation(
             user_id=job.user_id,
             chat_id=job.reservation.get("chat_scope_id"),
@@ -301,6 +332,10 @@ class DurableCompactionQueue:
                 "message_id": job.message_id,
                 "settlement_id": _reservation_settlement_id(job.reservation),
                 "credit_scale": CREDIT_SCALE,
+                "billing_segments": [job.result_billing_segment]
+                if job.result_billing_segment is not None
+                else [],
+                "pricing_breakdown": billing or {},
             },
         )
 

@@ -1,13 +1,92 @@
+from types import SimpleNamespace
+
 from tests.support import *
+
+
+def test_summary_model_uses_openrouter_reported_cost():
+    from api.memory.summary import call_summary_model
+
+    response = SimpleNamespace(
+        id="generation-summary",
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="summary"),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=25,
+            cost="0.00010442124",
+        ),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response)))
+    )
+
+    text, cost, segment = call_summary_model(
+        [{"role": "user", "content": "summarize"}],
+        get_client=lambda: client,
+        estimate_tokens=lambda _messages: 100,
+        estimate_cost=lambda *_args: 999_999,
+        model="deepseek/deepseek-v4-flash-0731",
+        max_tokens=100,
+        logger=MagicMock(),
+    )
+
+    assert text == "summary"
+    assert cost == 105
+    assert segment is not None
+    assert segment["model"] == "deepseek/deepseek-v4-flash"
+    assert segment["metadata"]["requested_model"] == "deepseek/deepseek-v4-flash-0731"
+    assert segment["metadata"]["upstream_provider"] == "DeepInfra"
+    assert segment["usage"]["cost"] == "0.00010442124"
+
+
+def test_summary_model_uses_reported_cost_when_upstream_cost_is_zero():
+    from api.memory.summary import call_summary_model
+
+    response = SimpleNamespace(
+        model="deepseek/deepseek-v4-flash-0731",
+        provider="DeepInfra",
+        service_tier="default",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="summary"),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=1_000,
+            completion_tokens=50,
+            cost="0.000001",
+            cost_details={"upstream_inference_cost": 0},
+        ),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response)))
+    )
+    _text, cost, segment = call_summary_model(
+        [{"role": "user", "content": "summarize"}],
+        get_client=lambda: client,
+        estimate_tokens=lambda _messages: 1_000,
+        estimate_cost=lambda *_args: 999_999,
+        model="deepseek/deepseek-v4-flash-0731",
+        max_tokens=100,
+        logger=MagicMock(),
+    )
+
+    assert cost == 1
+    assert segment is not None
+    assert segment["metadata"]["service_tier"] == "default"
 
 
 def test_incremental_summary_helper_uses_only_messages_after_marker():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 6)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 6)]
 
     source = _build_incremental_summary_source(history, "old summary", "m3")
 
@@ -19,10 +98,7 @@ def test_incremental_summary_helper_uses_only_messages_after_marker():
 def test_incremental_summary_helper_reports_zero_delta_without_history_fallback():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 4)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 4)]
 
     source = _build_incremental_summary_source(history, "old summary", "m3")
 
@@ -34,10 +110,7 @@ def test_incremental_summary_helper_reports_zero_delta_without_history_fallback(
 def test_incremental_summary_helper_falls_back_to_all_history_when_marker_missing():
     _build_incremental_summary_source = index.app_runtime.summary.build_incremental_source
 
-    history = [
-        {"id": f"m{i}", "role": "user", "content": f"msg {i}"}
-        for i in range(1, 4)
-    ]
+    history = [{"id": f"m{i}", "role": "user", "content": f"msg {i}"} for i in range(1, 4)]
 
     source = _build_incremental_summary_source(history, "old summary", "m99")
 
@@ -51,8 +124,7 @@ def test_compact_chat_memory_absorbs_only_uncompacted_messages_once():
 
     redis_client = MagicMock()
     messages = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 21)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 21)
     ]
 
     summary, kept, marker, cost = compact_chat_memory(
@@ -101,12 +173,10 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     recent_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(81, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(81, 101)
     ]
     full_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 101)
     ]
 
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
@@ -117,7 +187,9 @@ def test_prepare_chat_memory_uses_searchable_full_history_for_long_gap(monkeypat
     )
     monkeypatch.setattr(
         "api.index.app_runtime.state.search_history",
-        lambda *_args, **_kwargs: [{"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}],
+        lambda *_args, **_kwargs: [
+            {"id": "m12", "role": "user", "text": "old hit", "timestamp": 12}
+        ],
     )
     visible_history, summary_text, retrieved_messages, summary_cost, plan = prepare_chat_memory(
         MagicMock(),
@@ -139,8 +211,7 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
     prepare_chat_memory = index.app_runtime.summary.prepare_memory
 
     chat_history = [
-        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i}
-        for i in range(1, 101)
+        {"id": f"m{i}", "role": "user", "text": f"msg {i}", "timestamp": i} for i in range(1, 101)
     ]
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_summary", lambda *_: None)
     monkeypatch.setattr("api.index.app_runtime.state.get_chat_compacted_until", lambda *_: "m80")
@@ -165,7 +236,34 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
         {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1},
         {"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2},
     ]
-    captured = {}
+    response_meta = {}
+    stream_chunk = SimpleNamespace(
+        id="generation-summary",
+        model="deepseek/deepseek-v4-flash",
+        provider="DeepInfra",
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                delta=SimpleNamespace(
+                    content="resumen",
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ],
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "cost": 0.00001,
+        },
+    )
+    create_completion = MagicMock(return_value=iter([stream_chunk]))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create_completion),
+        )
+    )
 
     monkeypatch.setattr("api.index.app_runtime.state.get_history", lambda *_: history)
     monkeypatch.setattr(
@@ -178,30 +276,66 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
         ),
     )
     monkeypatch.setattr("api.index.app_runtime.summary.load_personality", lambda: "bot")
+    monkeypatch.setattr(
+        "api.index.app_runtime.summary._deps.provider.get_openrouter_client",
+        lambda **_kwargs: client,
+    )
 
-    class FakeProvider:
-        name = "openrouter"
-
-        def is_available(self):
-            return True
-
-        def stream(self, system_message, messages, **kwargs):
-            captured["system_message"] = system_message
-            captured["messages"] = messages
-            yield "resumen"
-
-    monkeypatch.setattr("api.index.app_runtime.summary.build_provider", lambda: FakeProvider())
-
-    iterator, pending_marker = stream_summary_command("123", redis_client, "resumen")
+    iterator, pending_marker = stream_summary_command(
+        "123",
+        redis_client,
+        "resumen",
+        response_meta=response_meta,
+    )
 
     assert list(iterator) == [("openrouter", "resumen")]
     assert pending_marker is None
-    assert captured["system_message"] == {"role": "system", "content": "bot"}
-    assert captured["messages"][0] == {
+    create_completion.assert_called_once()
+    request = create_completion.call_args.kwargs
+    assert request["stream"] is True
+    assert "tools" not in request
+    assert request["messages"][0] == {"role": "system", "content": "bot"}
+    assert request["messages"][1] == {
         "role": "assistant",
         "content": "[contexto anterior: msg 1]",
     }
-    assert captured["messages"][1]["content"] == "msg 2"
+    assert request["messages"][2]["content"] == "msg 2"
+    assert response_meta["billing_segments"][0]["kind"] == "summary"
+    assert response_meta["billing_segments"][0]["model"] == "deepseek/deepseek-v4-flash"
+    assert response_meta["billing_segments"][0]["metadata"]["upstream_provider"] == "DeepInfra"
+    assert response_meta["billing_segments"][0]["usage"]["cost"] == 0.00001
+
+
+def test_stream_summary_command_marks_unavailable_provider_for_refund():
+    from api.memory.summary import stream_summary_command
+
+    response_meta = {}
+    provider = SimpleNamespace(is_available=lambda: False, name="openrouter")
+
+    iterator, pending_marker = stream_summary_command(
+        "123",
+        MagicMock(),
+        "resumen",
+        get_history=lambda *_args: [{"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}],
+        prepare_memory=lambda *_args, **_kwargs: (
+            [{"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}],
+            None,
+            [],
+            0,
+        ),
+        load_personality=lambda: "bot",
+        build_provider=lambda: provider,
+        sanitize_text=str,
+        max_tokens=100,
+        logger=MagicMock(),
+        model="test/model",
+        response_meta=response_meta,
+    )
+
+    assert [source for source, _text in iterator] == ["none"]
+    assert pending_marker is None
+    assert response_meta["provider_unavailable"] is True
+    assert "billing_segments" not in response_meta
 
 
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():

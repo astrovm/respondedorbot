@@ -93,7 +93,7 @@ def test_english_creditlog_has_no_spanish_labels():
         "metadata": {
             "model_breakdown": [
                 {
-                    "model": "~deepseek/deepseek-v4-flash-latest",
+                    "model": "deepseek/deepseek-v4-flash-0731",
                     "input_cached_tokens": 1_000,
                 }
             ]
@@ -106,7 +106,7 @@ def test_english_creditlog_has_no_spanish_labels():
     assert "no date | cmd=no command | status=ok" in text
     assert "reserved=0.00 charged=0.00 refund=0.00 extra=0.00 debt=0.00" in text
     assert "requests: no segments" in text
-    assert "models: ~deepseek/deepseek-v4-flash-latest=0" in text
+    assert "models: deepseek/deepseek-v4-flash-0731=0" in text
     assert "cached_tokens=1000 cache_savings=" in text
     assert "sin fecha" not in text
     assert "reservado=" not in text
