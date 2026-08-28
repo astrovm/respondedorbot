@@ -229,6 +229,8 @@ def test_prepare_chat_memory_ignores_marker_without_internal_summary(monkeypatch
 
 
 def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
+    from api.billing.authorization import AI_SEGMENT_RECORDER_KEY
+
     stream_summary_command = index.app_runtime.summary.stream_command
 
     redis_client = MagicMock()
@@ -236,7 +238,8 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
         {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1},
         {"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2},
     ]
-    response_meta = {}
+    recorder = MagicMock()
+    response_meta = {AI_SEGMENT_RECORDER_KEY: recorder}
     stream_chunk = SimpleNamespace(
         id="generation-summary",
         model="deepseek/deepseek-v4-flash",
@@ -304,6 +307,7 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     assert response_meta["billing_segments"][0]["model"] == "deepseek/deepseek-v4-flash"
     assert response_meta["billing_segments"][0]["metadata"]["upstream_provider"] == "DeepInfra"
     assert response_meta["billing_segments"][0]["usage"]["cost"] == 0.00001
+    recorder.assert_called_once_with(response_meta["billing_segments"][0])
 
 
 def test_stream_summary_command_marks_unavailable_provider_for_refund():

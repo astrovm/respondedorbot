@@ -22,6 +22,7 @@ from api.ai.pricing import (
     credit_units_from_usd_micros,
     ensure_mapping,
 )
+from api.billing.authorization import AI_SEGMENT_RECORDER_KEY
 from api.memory.background import DurableCompactionQueue
 from api.memory.compaction import CompactionPlan, IncrementalSummarySource
 
@@ -218,6 +219,20 @@ def _mark_provider_unavailable(response_meta: dict[str, Any] | None) -> None:
         response_meta["provider_unavailable"] = True
 
 
+def _record_summary_usage(
+    response_meta: dict[str, Any] | None,
+    result: AIUsageResult,
+) -> None:
+    if response_meta is None:
+        return
+    segment = result.billing_segment()
+    segment["kind"] = "summary"
+    response_meta.setdefault("billing_segments", []).append(segment)
+    recorder = response_meta.get(AI_SEGMENT_RECORDER_KEY)
+    if callable(recorder):
+        recorder(segment)
+
+
 def stream_summary_command(
     chat_id: str,
     redis_client: redis.Redis,
@@ -242,11 +257,7 @@ def stream_summary_command(
     history = get_history(chat_id, redis_client)
 
     def record_usage(result: AIUsageResult) -> None:
-        if response_meta is None:
-            return
-        segment = result.billing_segment()
-        segment["kind"] = "summary"
-        response_meta.setdefault("billing_segments", []).append(segment)
+        _record_summary_usage(response_meta, result)
 
     def record_internal_cache(text: str) -> None:
         record_usage(

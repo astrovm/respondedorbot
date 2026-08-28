@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
 from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
@@ -34,14 +34,15 @@ class AIService:
     schedule_compaction: Callable[[Any, Any], bool]
 
     @staticmethod
-    def _refund_if_present(
+    def _refund_reservations(
         request: AIConversationRequest,
-        reservation: Optional[Dict[str, Any]],
+        reservations: Sequence[Optional[Mapping[str, Any]]],
         *,
         reason: str,
     ) -> None:
-        if reservation:
-            request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
+        for reservation in reservations:
+            if reservation:
+                request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
 
     @staticmethod
     def _settle_incurred_media(
@@ -97,8 +98,8 @@ class AIService:
     def _reserve_image_context(
         self,
         request: AIConversationRequest,
-        base_charge_meta: Dict[str, Any],
         existing_charge_meta: Optional[Dict[str, Any]],
+        reservations_to_refund: Sequence[Optional[Mapping[str, Any]]],
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[str, bool]]]:
         if (
             existing_charge_meta
@@ -108,8 +109,10 @@ class AIService:
             return existing_charge_meta, None
 
         if not self.check_provider_available(scope="vision") and not self.has_openrouter_fallback():
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="image_context_local_rate_limit"
+            self._refund_reservations(
+                request,
+                reservations_to_refund,
+                reason="image_context_local_rate_limit",
             )
             rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             response = "ok" if request.is_spontaneous else rate_limit_msg
@@ -130,8 +133,10 @@ class AIService:
         if not media_charge_error:
             return media_charge_meta, None
 
-        request.billing_helper.refund_reserved_ai_credits(
-            base_charge_meta, reason="image_context_reserve_failed"
+        self._refund_reservations(
+            request,
+            reservations_to_refund,
+            reason="image_context_reserve_failed",
         )
         response = "ok" if request.is_spontaneous else media_charge_error
         return None, (response, False)
@@ -176,8 +181,6 @@ class AIService:
         compaction_plan: Any,
         authorizer: Any,
         response_meta: Dict[str, Any],
-        base_charge_meta: Optional[Dict[str, Any]],
-        media_charge_meta: Optional[Dict[str, Any]],
     ) -> Tuple[str, bool]:
         response_msg = self.handle_ai_response(
             request.chat_id,
@@ -210,13 +213,10 @@ class AIService:
                     reason="ai_response_provider_usage_before_fallback",
                 )
             else:
-                self._refund_if_present(
+                self._refund_reservations(
                     request,
-                    media_charge_meta,
+                    reservations,
                     reason="ai_response_fallback",
-                )
-                request.billing_helper.refund_reserved_ai_credits(
-                    base_charge_meta, reason="ai_response_fallback"
                 )
             return response_msg, True
 
@@ -335,7 +335,9 @@ class AIService:
                 return response, False
 
         media_charge_meta, image_error = self._reserve_image_context(
-            request, base_charge_meta, media_charge_meta
+            request,
+            media_charge_meta,
+            [base_charge_meta, context_charge_meta],
         )
         if image_error:
             return image_error
@@ -358,8 +360,6 @@ class AIService:
                 compaction_plan,
                 authorizer,
                 ai_response_meta,
-                base_charge_meta,
-                media_charge_meta,
             )
         finally:
             authorizer.close()

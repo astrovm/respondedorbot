@@ -1451,6 +1451,83 @@ def test_creditless_cap_allows_under_limit():
     mock_redis.expire.assert_called_once_with("creditless_cap:-100:42", 3600)
 
 
+def test_creditless_cap_counts_once_for_incremental_reservations():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    base, base_error = billing.reserve_ai_credits("ai_response_base", 10)
+    extension, extension_error = billing.reserve_ai_credits(
+        "ai_response_context_extension",
+        5,
+    )
+
+    assert base_error is None
+    assert extension_error is None
+    assert base is not None
+    assert extension is not None
+    assert base["message_cap_counted"] is True
+    assert extension["message_cap_counted"] is False
+    mock_redis.incr.assert_called_once_with("creditless_cap:-100:42")
+
+    billing.refund_reserved_ai_credits(base, reason="ai_response_fallback")
+    billing.refund_reserved_ai_credits(extension, reason="ai_response_fallback")
+
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_idempotent_reservation_replay_does_not_increment_message_cap():
+    mock_redis = MagicMock()
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+    billing.credits_db_service.charge_ai_credits.return_value = {
+        "ok": True,
+        "applied": False,
+        "source": "chat",
+        "amount": 10,
+    }
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert reservation is not None
+    assert reservation["message_cap_counted"] is False
+    mock_redis.incr.assert_not_called()
+
+
+def test_reloaded_idempotent_reservation_does_not_roll_back_message_cap():
+    mock_redis = MagicMock()
+    persisted_reservation = {
+        "reserved_credit_units": 10,
+        "chat_scope_id": 100,
+        "source": "chat",
+        "usage_tag": "ai_response_base",
+        "metadata": {},
+        "credit_scale": CREDIT_SCALE,
+        "message_cap_counted": False,
+    }
+    billing = make_ai_message_billing(
+        command="/ask",
+        chat_id="-100",
+        chat_type="group",
+        user_id=42,
+        numeric_chat_id=100,
+        credits_db_service=MagicMock(),
+        build_insufficient_credits_message_fn=build_insufficient_credits_message,
+        redis_client=mock_redis,
+        creditless_user_hourly_limit=3,
+        load_persisted_reservation_fn=lambda _usage_tag: persisted_reservation,
+    )
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+    billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
+
+    assert error is None
+    assert reservation is not None
+    assert reservation["message_cap_counted"] is False
+    mock_redis.incr.assert_not_called()
+    mock_redis.decr.assert_not_called()
+
+
 def test_background_reservation_does_not_consume_message_cap():
     mock_redis = MagicMock()
     billing = _make_group_billing(limit=0, redis_client=mock_redis)

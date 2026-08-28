@@ -351,6 +351,7 @@ class AIMessageBilling:
     creditless_user_hourly_limit: int = 0
     onboarding_checked: bool = False
     payer_source: Optional[str] = None
+    message_cap_counted: bool = False
     billing_not_configured_message: str = field(default_factory=lambda: tr("billing.unavailable"))
     billing_missing_scope_message: str = field(default_factory=lambda: tr("billing.missing_scope"))
     billing_charge_error_message: str = field(default_factory=lambda: tr("billing.charge_error"))
@@ -429,10 +430,37 @@ class AIMessageBilling:
             return None
         return f"creditless_cap:{self.chat_id}:{self.user_id}"
 
+    def _count_message_for_cap(
+        self,
+        *,
+        source: str,
+        enforce_message_cap: bool,
+        charge_applied: bool,
+        chat_scope_id: Optional[int],
+        reserve_amount: int,
+        usage_tag: str,
+    ) -> Tuple[bool, Optional[str]]:
+        if source != "chat" or not enforce_message_cap or self.message_cap_counted:
+            return False, None
+
+        self.message_cap_counted = True
+        if not charge_applied:
+            return False, None
+
+        counted = self._creditless_cap_key(chat_scope_id) is not None
+        error = self._check_creditless_cap(
+            chat_scope_id=chat_scope_id,
+            reserve_amount=reserve_amount,
+            usage_tag=usage_tag,
+        )
+        return counted, error
+
     def _rollback_creditless_cap(self, reservation_meta: Optional[Mapping[str, Any]]) -> None:
         if not reservation_meta:
             return
         if str(reservation_meta.get("source") or "user") != "chat":
+            return
+        if reservation_meta.get("message_cap_counted") is False:
             return
 
         key = self._creditless_cap_key(reservation_meta.get("chat_scope_id"))
@@ -621,6 +649,42 @@ class AIMessageBilling:
             enforce_message_cap=False,
         )
 
+    def _restore_persisted_reservation(
+        self,
+        usage_tag: str,
+        chat_scope_id: Optional[int],
+        *,
+        enforce_message_cap: bool,
+    ) -> Optional[Dict[str, Any]]:
+        persisted = self.load_persisted_reservation_fn(usage_tag)
+        if not persisted:
+            return None
+
+        raw_metadata = persisted.get("metadata")
+        persisted_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        persisted_scale = persisted.get(
+            "credit_scale",
+            persisted_metadata.get("credit_scale"),
+        )
+        reservation = {
+            "reserved_credit_units": rescale_credit_units(
+                persisted.get("reserved_credit_units", 0),
+                persisted_scale,
+            ),
+            "chat_scope_id": persisted.get("chat_scope_id", chat_scope_id),
+            "source": str(persisted.get("source") or "user"),
+            "usage_tag": str(persisted.get("usage_tag") or usage_tag),
+            "metadata": persisted_metadata,
+            "credit_scale": CREDIT_SCALE,
+        }
+        if "message_cap_counted" in persisted:
+            reservation["message_cap_counted"] = bool(persisted["message_cap_counted"])
+
+        self.payer_source = str(reservation["source"])
+        if reservation["source"] == "chat" and enforce_message_cap:
+            self.message_cap_counted = True
+        return reservation
+
     def _reserve_ai_credits(
         self,
         usage_tag: str,
@@ -636,26 +700,12 @@ class AIMessageBilling:
         if self.user_id is None:
             return None, self.billing_missing_scope_message
 
-        persisted_reservation = self.load_persisted_reservation_fn(usage_tag)
-        if persisted_reservation:
-            raw_metadata = persisted_reservation.get("metadata")
-            persisted_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-            persisted_scale = persisted_reservation.get(
-                "credit_scale",
-                persisted_metadata.get("credit_scale"),
-            )
-            reservation = {
-                "reserved_credit_units": rescale_credit_units(
-                    persisted_reservation.get("reserved_credit_units", 0),
-                    persisted_scale,
-                ),
-                "chat_scope_id": persisted_reservation.get("chat_scope_id", chat_scope_id),
-                "source": str(persisted_reservation.get("source") or "user"),
-                "usage_tag": str(persisted_reservation.get("usage_tag") or usage_tag),
-                "metadata": persisted_metadata,
-                "credit_scale": CREDIT_SCALE,
-            }
-            self.payer_source = str(reservation["source"])
+        reservation = self._restore_persisted_reservation(
+            usage_tag,
+            chat_scope_id,
+            enforce_message_cap=enforce_message_cap,
+        )
+        if reservation:
             return reservation, None
 
         self._ensure_onboarding_checked()
@@ -711,14 +761,17 @@ class AIMessageBilling:
             "credit_scale": CREDIT_SCALE,
         }
 
-        if source == "chat" and enforce_message_cap:
-            cap_error = self._check_creditless_cap(
-                chat_scope_id=chat_scope_id,
-                reserve_amount=charged_amount,
-                usage_tag=usage_tag,
-            )
-            if cap_error:
-                return None, cap_error
+        counted_for_cap, cap_error = self._count_message_for_cap(
+            source=source,
+            enforce_message_cap=enforce_message_cap,
+            charge_applied=bool(charge_result.get("applied", True)),
+            chat_scope_id=chat_scope_id,
+            reserve_amount=charged_amount,
+            usage_tag=usage_tag,
+        )
+        if cap_error:
+            return None, cap_error
+        reservation_payload["message_cap_counted"] = counted_for_cap
 
         self.persist_reservation_fn(usage_tag, reservation_payload)
         return reservation_payload, None

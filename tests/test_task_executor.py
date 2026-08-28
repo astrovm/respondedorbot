@@ -102,6 +102,30 @@ class TestTaskExecutor:
             "@testuser, no pude ejecutar la tarea «mandá las noticias»:\nsaldo insuficiente",
         )
 
+    def test_recurring_task_uses_a_new_billing_identity_for_each_execution(self):
+        executor, _billing, _ask_ai, _send_msg = _build_executor(
+            ask_ai_return_value="hola"
+        )
+        task = {
+            "id": "abc123",
+            "chat_id": "-100123",
+            "text": "mandá las noticias",
+            "user_name": "@testuser",
+            "user_id": 77,
+            "interval_seconds": 3600,
+            "trigger_config": {"type": "interval", "seconds": 3600},
+        }
+
+        executor.execute(task)
+        executor.execute(task)
+
+        factory_calls = executor._billing_factory.call_args_list
+        first_message_id = factory_calls[0].kwargs["message"]["message_id"]
+        second_message_id = factory_calls[1].kwargs["message"]["message_id"]
+        assert first_message_id.startswith("abc123:")
+        assert second_message_id.startswith("abc123:")
+        assert first_message_id != second_message_id
+
     def test_sends_scheduled_ai_message(self):
         executor, billing, ask_ai, send_msg = _build_executor(
             ask_ai_return_value="hola"

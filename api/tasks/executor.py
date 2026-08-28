@@ -6,6 +6,7 @@ import concurrent.futures
 import json
 import re
 from typing import Any, Callable, Dict, List, Mapping, Tuple
+from uuid import uuid4
 
 from api.billing.ai import AIMessageBilling
 from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
@@ -94,6 +95,7 @@ class TaskExecutor:
 
     def _execute_localized(self, task: Mapping[str, Any]) -> bool:
         task_id = str(task.get("id", ""))
+        execution_id = uuid4().hex
         chat_id = str(task.get("chat_id", ""))
         text = str(task.get("text", ""))
         user_name = str(task.get("user_name", ""))
@@ -112,7 +114,7 @@ class TaskExecutor:
 
         display = user_name
         task_message: dict[str, Any] = {
-            "message_id": task_id,
+            "message_id": f"{task_id}:{execution_id}",
             "from": {"id": user_id},
         }
         billing = self._billing_factory(
@@ -142,6 +144,7 @@ class TaskExecutor:
             metadata={
                 "operation_id": billing.operation_id("task_ai"),
                 "task_id": task_id,
+                "execution_id": execution_id,
                 "chat_id": chat_id,
                 **reserve_meta,
             },
