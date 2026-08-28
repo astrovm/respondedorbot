@@ -287,11 +287,22 @@ def ask_ai_stream(
     }
     if response_meta is not None:
         stream_kwargs["response_meta"] = response_meta
-    return stream(
+    token_iterator = stream(
         system_message,
         messages,
         **stream_kwargs,
     )
+
+    def track_authorization_denial() -> Iterator[tuple[str, str]]:
+        try:
+            yield from token_iterator
+        except AIAuthorizationDenied:
+            if response_meta is not None:
+                response_meta["authorization_denied"] = True
+                response_meta["ai_fallback"] = True
+            raise
+
+    return track_authorization_denial()
 
 
 @dataclass

@@ -373,6 +373,40 @@ class AIService:
         finally:
             authorizer.close()
 
+    @staticmethod
+    def _finish_summary_non_success(
+        request: SummaryCommandRequest,
+        authorizer: Any,
+        response_meta: Mapping[str, Any],
+        final_text: str,
+        pending_marker: Optional[str],
+    ) -> Optional[Tuple[str, Optional[str], bool]]:
+        if response_meta.get("provider_unavailable"):
+            for reservation in authorizer.reservations:
+                request.billing_helper.refund_reserved_ai_credits(
+                    reservation,
+                    reason="summary_provider_unavailable",
+                )
+            return final_text, pending_marker, False
+
+        if not response_meta.get("ai_fallback"):
+            return None
+
+        billing_segments = list(response_meta.get("billing_segments") or [])
+        if billing_segments:
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                authorizer.reservations,
+                billing_segments,
+                reason="summary_stream_provider_usage_before_fallback",
+            )
+        else:
+            for reservation in authorizer.reservations:
+                request.billing_helper.refund_reserved_ai_credits(
+                    reservation,
+                    reason="summary_stream_fallback",
+                )
+        return final_text, pending_marker, True
+
     def run_summary_command_stream(
         self,
         request: SummaryCommandRequest,
@@ -458,13 +492,15 @@ class AIService:
             response_meta.pop(AI_COST_AUTHORIZER_KEY, None)
             response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
 
-            if response_meta.get("provider_unavailable"):
-                for reservation in authorizer.reservations:
-                    request.billing_helper.refund_reserved_ai_credits(
-                        reservation,
-                        reason="summary_provider_unavailable",
-                    )
-                return final_text, pending_marker, False
+            non_success = self._finish_summary_non_success(
+                request,
+                authorizer,
+                response_meta,
+                final_text,
+                pending_marker,
+            )
+            if non_success is not None:
+                return non_success
 
             request.billing_helper.settle_reserved_ai_credits_batch(
                 authorizer.reservations,

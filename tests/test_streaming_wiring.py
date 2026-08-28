@@ -250,7 +250,7 @@ def test_ask_ai_stream_forwards_extra_tools_and_tool_context():
                 timezone_offset=-3,
             )
 
-    assert result is stream_result
+    assert list(result) == [("openrouter", "ok")]
     stream_call.assert_called_once_with(
         system_message,
         rewritten_messages,

@@ -44,6 +44,45 @@ def test_ask_ai_marks_authorization_denial_as_fallback():
     fallback.assert_not_called()
 
 
+def test_ask_ai_stream_marks_lazy_authorization_denial_as_fallback():
+    from api.ai.request_runtime import ask_ai_stream
+    from api.billing.authorization import AIAuthorizationDenied
+
+    response_meta = {}
+
+    def denied_stream(*_args, **_kwargs):
+        def tokens():
+            raise AIAuthorizationDenied("insufficient credits")
+            yield "openrouter", ""
+
+        return tokens()
+
+    iterator = ask_ai_stream(
+        [{"role": "user", "content": "hello"}],
+        enable_web_search=True,
+        chat_id="1",
+        user_name="astro",
+        user_id=1,
+        timezone_offset=-3,
+        response_meta=response_meta,
+        build_request=MagicMock(
+            return_value=(
+                {"role": "system", "content": "system"},
+                [{"role": "user", "content": "hello"}],
+                None,
+                {},
+            )
+        ),
+        stream=denied_stream,
+    )
+
+    with pytest.raises(AIAuthorizationDenied, match="insufficient credits"):
+        list(iterator)
+
+    assert response_meta["authorization_denied"] is True
+    assert response_meta["ai_fallback"] is True
+
+
 def test_provider_usage_result_uses_explicit_provider_as_source():
     from api.index import app_runtime
 

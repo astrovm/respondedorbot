@@ -223,6 +223,104 @@ def test_run_summary_settles_from_streamed_provider_usage():
     )
 
 
+def test_run_summary_refunds_first_round_authorization_denial():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    def denied_summary(_chat_id, _redis, _prompt, *, response_meta):
+        response_meta["authorization_denied"] = True
+        response_meta["ai_fallback"] = True
+        return iter([("none", "insufficient credits")]), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=denied_summary,
+    )
+    billing_helper = _billing_mock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("insufficient credits", None, True)
+    billing_helper.refund_reserved_ai_credits.assert_called_once_with(
+        reservation,
+        reason="summary_stream_fallback",
+    )
+    billing_helper.settle_reserved_ai_credits_batch.assert_not_called()
+
+
+def test_run_summary_settles_usage_before_authorization_denial():
+    from api.ai.service import SummaryCommandRequest, build_ai_service
+
+    segment = {
+        "kind": "summary",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.001},
+        "source": "openrouter",
+        "metadata": {"provider": "openrouter"},
+    }
+
+    def denied_summary(_chat_id, _redis, _prompt, *, response_meta):
+        response_meta["billing_segments"] = [segment]
+        response_meta["authorization_denied"] = True
+        response_meta["ai_fallback"] = True
+        return iter([("none", "insufficient credits")]), None
+
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(return_value=True),
+        has_openrouter_fallback=MagicMock(return_value=True),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+        stream_summary_command=denied_summary,
+    )
+    billing_helper = _billing_mock()
+    reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
+    billing_helper.reserve_ai_credits.return_value = (reservation, None)
+
+    result = ai_service.run_summary_command_stream(
+        SummaryCommandRequest(
+            chat_id="901",
+            message={"chat": {"id": 901, "type": "private"}},
+            billing_helper=billing_helper,
+            prompt_text="summarize",
+            redis_client=MagicMock(),
+        ),
+        stream_consumer=lambda iterator: "".join(token for _provider, token in iterator),
+    )
+
+    assert result == ("insufficient credits", None, True)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [reservation],
+        [segment],
+        reason="summary_stream_provider_usage_before_fallback",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
 def test_run_summary_settles_usage_when_delivery_fails_after_generation():
     from api.ai.service import SummaryCommandRequest, build_ai_service
 

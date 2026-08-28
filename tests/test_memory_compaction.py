@@ -342,6 +342,59 @@ def test_stream_summary_command_marks_unavailable_provider_for_refund():
     assert "billing_segments" not in response_meta
 
 
+def test_stream_summary_command_authorizes_and_marks_denial():
+    from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AIAuthorizationDenied
+    from api.memory.summary import stream_summary_command
+
+    def denied_stream(*_args, tool_context=None, **_kwargs):
+        assert tool_context is response_meta
+
+        def tokens():
+            error = tool_context[AI_COST_AUTHORIZER_KEY]("model", 5, {})
+            if error:
+                raise AIAuthorizationDenied(error)
+            yield "unused"
+
+        return tokens()
+
+    response_meta = {
+        AI_COST_AUTHORIZER_KEY: MagicMock(return_value="insufficient credits")
+    }
+    provider = SimpleNamespace(
+        is_available=lambda: True,
+        name="openrouter",
+        stream=denied_stream,
+    )
+    iterator, pending_marker = stream_summary_command(
+        "123",
+        MagicMock(),
+        "resumen",
+        get_history=lambda *_args: [
+            {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}
+        ],
+        prepare_memory=lambda *_args, **_kwargs: (
+            [{"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}],
+            None,
+            [],
+            0,
+        ),
+        load_personality=lambda: "bot",
+        build_provider=lambda: provider,
+        sanitize_text=str,
+        max_tokens=100,
+        logger=MagicMock(),
+        model="test/model",
+        response_meta=response_meta,
+    )
+
+    with pytest.raises(AIAuthorizationDenied, match="insufficient credits"):
+        list(iterator)
+
+    assert pending_marker is None
+    assert response_meta["authorization_denied"] is True
+    assert response_meta["ai_fallback"] is True
+
+
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     from api.memory.state import fetch_chat_messages_for_compaction
 

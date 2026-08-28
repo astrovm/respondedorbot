@@ -22,7 +22,7 @@ from api.ai.pricing import (
     credit_units_from_usd_micros,
     ensure_mapping,
 )
-from api.billing.authorization import AI_SEGMENT_RECORDER_KEY
+from api.billing.authorization import AI_SEGMENT_RECORDER_KEY, AIAuthorizationDenied
 from api.memory.background import DurableCompactionQueue
 from api.memory.compaction import CompactionPlan, IncrementalSummarySource
 
@@ -205,10 +205,16 @@ def wrap_provider_stream(
     token_iter: Iterator[str],
     *,
     logger: Any,
+    response_meta: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, str]]:
     try:
         for token in token_iter:
             yield provider_name, token
+    except AIAuthorizationDenied:
+        if response_meta is not None:
+            response_meta["authorization_denied"] = True
+            response_meta["ai_fallback"] = True
+        raise
     except Exception:
         logger.exception("summary_stream: provider=%s failed", provider_name)
         raise
@@ -341,9 +347,15 @@ def stream_summary_command(
         enable_web_search=False,
         max_tokens=max_tokens,
         on_usage_result=record_usage,
+        tool_context=response_meta,
     )
     return (
-        wrap_provider_stream(provider.name, stream, logger=logger),
+        wrap_provider_stream(
+            provider.name,
+            stream,
+            logger=logger,
+            response_meta=response_meta,
+        ),
         None,
     )
 
