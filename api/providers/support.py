@@ -141,6 +141,7 @@ def build_usage_result(
     metadata: Mapping[str, Any] | None,
     extract_usage: Callable[[Any], dict[str, Any] | None],
 ) -> AIUsageResult:
+    normalized_metadata = dict(metadata or {})
     return AIUsageResult(
         kind=kind,
         text=text,
@@ -148,5 +149,6 @@ def build_usage_result(
         usage=extract_usage(response),
         audio_seconds=audio_seconds,
         cached=cached,
-        metadata=dict(metadata or {}),
+        source=str(normalized_metadata.get("provider") or "unknown"),
+        metadata=normalized_metadata,
     )

@@ -463,7 +463,7 @@ def test_stream_with_providers_forwards_extra_tools_and_tool_context():
             "usage": {"prompt_tokens": 7, "completion_tokens": 2},
             "audio_seconds": None,
             "cached": False,
-            "source": "groq",
+            "source": "unknown",
             "metadata": {},
         }
     ]

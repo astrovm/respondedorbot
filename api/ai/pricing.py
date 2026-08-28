@@ -50,11 +50,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
 }
 
 PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
-    ("groq", "openai/gpt-oss-120b"): {
-        "input_per_million": 150_000,
-        "cached_input_per_million": 75_000,
-        "output_per_million": 600_000,
-    },
     ("openrouter", "openai/gpt-oss-120b"): {
         "input_per_million": 37_000,
         "output_per_million": 170_000,
@@ -80,7 +75,7 @@ class AIUsageResult:
     usage: Optional[Dict[str, Any]] = None
     audio_seconds: Optional[float] = None
     cached: bool = False
-    source: str = "groq"
+    source: str = "unknown"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def billing_segment(self) -> Dict[str, Any]:

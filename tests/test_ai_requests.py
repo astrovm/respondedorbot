@@ -2,6 +2,22 @@ from tests.provider_pipeline_support import *
 from tests.provider_pipeline_support import _build_provider_runtime
 
 
+def test_provider_usage_result_uses_explicit_provider_as_source():
+    from api.index import app_runtime
+
+    response = SimpleNamespace(usage={"prompt_tokens": 3})
+    result = app_runtime.providers.build_usage_result(
+        kind="chat",
+        text="ok",
+        model="test-model",
+        response=response,
+        metadata={"provider": "openrouter"},
+    )
+
+    assert result.source == "openrouter"
+    assert result.metadata["provider"] == "openrouter"
+
+
 def test_build_ai_messages():
     from api.index import build_ai_messages
 

@@ -3,7 +3,6 @@ from tests.support import assert_no_raw_tool_syntax
 
 from api.providers.base import ProviderChain
 from api.providers.openrouter import OpenRouterProvider
-from api.providers.groq import GroqChatProvider
 
 
 class FakeProvider:
@@ -118,40 +117,6 @@ def test_openrouter_provider_not_available_when_client_none():
     )
 
     assert provider.is_available() is False
-
-
-def test_groq_provider_not_available_when_cooled_down():
-    from api.providers.backoff import mark_provider_cooldown
-
-    mark_provider_cooldown("groq:test", 60)
-
-    provider = GroqChatProvider(
-        get_client=lambda: MagicMock(),
-        admin_report=lambda *a, **k: None,
-        increment_request_count=lambda: None,
-        build_usage_result=lambda **kwargs: MagicMock(),
-        extract_usage_map=lambda r: {},
-        backoff_key="groq:test",
-    )
-
-    assert provider.is_available() is False
-
-
-def test_groq_provider_available_when_not_cooled_down():
-    from api.providers.backoff import clear_provider_cooldown
-
-    clear_provider_cooldown("groq:test2")
-
-    provider = GroqChatProvider(
-        get_client=lambda: MagicMock(),
-        admin_report=lambda *a, **k: None,
-        increment_request_count=lambda: None,
-        build_usage_result=lambda **kwargs: MagicMock(),
-        extract_usage_map=lambda r: {},
-        backoff_key="groq:test2",
-    )
-
-    assert provider.is_available() is True
 
 
 def test_provider_chain_stream_forwards_extra_tools_and_tool_context():

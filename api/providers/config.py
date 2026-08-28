@@ -54,26 +54,6 @@ def build_openrouter_client(
     return client_factory(**kwargs)
 
 
-def build_groq_openai_client(
-    account: str,
-    *,
-    get_api_key: Callable[[str], str | None],
-    client_factory: Callable[..., Any],
-    default_headers: Mapping[str, str] | None = None,
-) -> Any | None:
-    api_key = get_api_key(account)
-    if not api_key:
-        print(f"Groq API key not configured for account={account}")
-        return None
-    kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "base_url": "https://api.groq.com/openai/v1",
-    }
-    if default_headers:
-        kwargs["default_headers"] = dict(default_headers)
-    return client_factory(**kwargs)
-
-
 def build_groq_native_client(
     account: str,
     *,

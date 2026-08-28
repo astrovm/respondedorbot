@@ -129,19 +129,6 @@ class ProviderService:
             timeout=timeout,
         )
 
-    def get_groq_client(
-        self,
-        account: str,
-        *,
-        default_headers: Mapping[str, str] | None = None,
-    ) -> Any | None:
-        return provider_config.build_groq_openai_client(
-            account,
-            get_api_key=self.get_groq_api_key,
-            client_factory=self.openai_client_factory,
-            default_headers=default_headers,
-        )
-
     def get_groq_native_client(self, account: str) -> Any | None:
         return provider_config.build_groq_native_client(
             account,
