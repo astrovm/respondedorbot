@@ -929,6 +929,44 @@ def test_unsettled_operations_ignore_legacy_compaction_settlements():
     assert "settled.metadata->>'usage_tag'" in cursor.query
 
 
+def test_list_ai_provider_segments_returns_all_calls_in_order():
+    class Cursor:
+        def __init__(self):
+            self.executed = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, query, params=None):
+            PostgresQuery(Transformer(None)).convert(query, params)
+            self.executed = (" ".join(str(query).split()), params)
+
+        def fetchall(self):
+            return [
+                ({"metadata": {"provider_generation_id": "generation-1"}},),
+                ({"metadata": {"provider_generation_id": "generation-2"}},),
+            ]
+
+    cursor = Cursor()
+    with (
+        patch("api.services.credits_db.ensure_schema"),
+        patch(
+            "api.services.credits_db.connect",
+            return_value=_FakeConnection(cursor),
+        ),
+    ):
+        segments = credits_db.list_ai_provider_segments(42, "operation-1")
+
+    assert [
+        segment["metadata"]["provider_generation_id"] for segment in segments
+    ] == ["generation-1", "generation-2"]
+    assert cursor.executed[1] == (42, "operation-1")
+    assert "ORDER BY id" in cursor.executed[0]
+
+
 def test_list_user_ai_charge_page_reverses_newer_results_and_keeps_groups():
     def row(entry_id, group_key, group_cursor):
         return (

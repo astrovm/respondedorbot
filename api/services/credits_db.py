@@ -976,6 +976,29 @@ def record_ai_provider_usage(
     return inserted
 
 
+def list_ai_provider_segments(
+    user_id: int,
+    operation_id: str,
+) -> List[Dict[str, Any]]:
+    """Return every durable provider segment for one operation in call order."""
+
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT metadata->'segment'
+            FROM credit_ledger
+            WHERE user_id = %s
+              AND event_type = 'ai_provider_usage'
+              AND metadata->>'operation_id' = %s
+            ORDER BY id
+            """,
+            (int(user_id), str(operation_id)),
+        )
+        rows = cur.fetchall() or []
+    return [dict(row[0]) for row in rows if isinstance(row[0], Mapping)]
+
+
 def update_ai_provider_usage(
     operation_id: str,
     segment_id: str,
