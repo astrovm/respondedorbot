@@ -339,9 +339,10 @@ def _reported_cost_usd_micros_exact(
         try:
             cost = Decimal(str(raw_cost)) * Decimal(1_000_000)
         except InvalidOperation, TypeError, ValueError:
-            return None
-        if cost > 0:
-            return cost
+            pass
+        else:
+            if cost > 0:
+                return cost
 
     raw_cost = usage.get("cost")
     if raw_cost is not None:

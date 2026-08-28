@@ -1203,6 +1203,29 @@ def test_zero_upstream_cost_uses_reported_gateway_cost():
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
 
 
+def test_invalid_upstream_cost_uses_reported_gateway_cost():
+    for upstream_cost in (None, "invalid"):
+        breakdown = calculate_billing_for_segments(
+            [
+                {
+                    "kind": "chat",
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 50,
+                        "cost": "0.000001",
+                        "cost_details": {"upstream_inference_cost": upstream_cost},
+                    },
+                    "metadata": {"provider": "openrouter"},
+                }
+            ]
+        )
+
+        assert breakdown["raw_usd_micros_exact"] == "1.000000"
+        assert breakdown["pricing_complete"] is True
+        assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
+
+
 def test_internal_cache_is_authoritative_zero_cost():
     breakdown = calculate_billing_for_segments(
         [
