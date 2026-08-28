@@ -155,6 +155,13 @@ def build_usage_result(
     )
     if response_provider:
         normalized_metadata.setdefault("upstream_provider", str(response_provider))
+    response_service_tier = (
+        response.get("service_tier")
+        if isinstance(response, Mapping)
+        else getattr(response, "service_tier", None)
+    )
+    if response_service_tier:
+        normalized_metadata.setdefault("service_tier", str(response_service_tier))
     return AIUsageResult(
         kind=kind,
         text=text,

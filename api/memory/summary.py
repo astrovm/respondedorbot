@@ -36,7 +36,7 @@ def call_summary_model(
     model: str,
     max_tokens: int,
     logger: Any,
-    get_provider_pricing: Callable[[str, str], Mapping[str, int] | None] | None = None,
+    get_provider_pricing: Callable[[str, str, str | None], Mapping[str, int] | None] | None = None,
 ) -> tuple[str | None, int, dict[str, Any] | None]:
     """Ask the summary model for text and return its measured credit cost."""
 
@@ -67,6 +67,7 @@ def call_summary_model(
             finish_reason = response.choices[0].finish_reason
             resolved_model = str(getattr(response, "model", None) or model)
             upstream_provider = getattr(response, "provider", None)
+            service_tier = getattr(response, "service_tier", None)
             response_metadata = {
                 "provider": "openrouter",
                 "provider_generation_id": getattr(response, "id", None),
@@ -76,10 +77,14 @@ def call_summary_model(
                 response_metadata["requested_model"] = model
             if upstream_provider:
                 response_metadata["upstream_provider"] = str(upstream_provider)
+                response_metadata.update(
+                    {"service_tier": str(service_tier)} if service_tier else {}
+                )
                 if get_provider_pricing is not None and needs_published_provider_pricing(usage):
                     provider_pricing = get_provider_pricing(
                         resolved_model,
                         str(upstream_provider),
+                        str(service_tier) if service_tier else None,
                     )
                     if provider_pricing:
                         response_metadata["provider_pricing"] = dict(provider_pricing)

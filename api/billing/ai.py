@@ -896,23 +896,192 @@ class AIMessageBilling:
         scopes = {item.get("chat_scope_id") for item in reservations}
         return len(sources) > 1 or len(scopes) > 1
 
-    def _settle_reservations_individually(
+    def _settle_mixed_reservations(
         self,
         reservations: Sequence[Mapping[str, Any]],
         billing_segments: Optional[List[Mapping[str, Any]]],
         *,
         reason: str,
     ) -> None:
-        print(
-            "settle_batch: mixed credit accounts, falling back to individual "
-            f"settlement (count={len(reservations)})"
-        )
-        for index, reservation in enumerate(reservations):
-            self._settle_single_reservation(
-                reservation,
-                billing_segments if index == 0 else [],
+        """Settle one priced result across reservations from different accounts."""
+
+        items = [dict(item) for item in reservations]
+        batch = self._build_batch_reservation(items)
+        payer_totals: dict[str, int] = {}
+
+        if billing_segments is None:
+            for item in items:
+                source = "chat" if str(item.get("source") or "user") == "chat" else "user"
+                payer_totals[source] = payer_totals.get(source, 0) + int(
+                    item.get("reserved_credit_units", 0) or 0
+                )
+            self._record_batch_settlement(
+                batch,
+                SettlementAdjustment(batch.reserved_credit_units),
+                BatchSettlementRecord(
+                    reason=reason,
+                    breakdown=self._missing_usage_breakdown(),
+                    billing_segments=[],
+                    missing_usage_billing=True,
+                ),
+                payer_breakdown=self._payer_totals_breakdown(payer_totals),
+            )
+            self.admin_reporter(
+                "respuesta IA exitosa sin usage billing; se mantiene cobro por reserva (sin reintegro)",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                },
+            )
+            return
+
+        breakdown = calculate_billing_for_segments(billing_segments)
+        actual = _billing_summary_int(breakdown, "charged_credit_units")
+        if not _billing_is_complete(breakdown):
+            actual = max(actual, batch.reserved_credit_units)
+            self.admin_reporter(
+                "liquidación IA batch sin costo de proveedor verificable; se mantiene la reserva",
+                None,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "reason": reason,
+                    "reserved_credit_units": batch.reserved_credit_units,
+                    "unsupported_notes": breakdown.get("unsupported_notes", []),
+                    "billing_segments": list(billing_segments),
+                },
+            )
+
+        allocations = self._allocate_mixed_reserve(items, actual)
+        refunded = 0
+        for item, allocated in zip(items, allocations, strict=True):
+            reserved = int(item.get("reserved_credit_units", 0) or 0)
+            source = "chat" if str(item.get("source") or "user") == "chat" else "user"
+            successful_refund = self._refund_mixed_reservation(
+                item,
+                refund=max(0, reserved - allocated),
+                batch=batch,
+                actual_credit_units=actual,
                 reason=reason,
             )
+            refunded += successful_refund
+            payer_totals[source] = payer_totals.get(source, 0) + reserved - successful_refund
+
+        extra = 0
+        debt = 0
+        extra_payer_scope: Optional[str] = None
+        if actual > batch.reserved_credit_units:
+            extra, debt, extra_payer_scope = self._charge_batch_overage(
+                batch,
+                billing_segments,
+                actual_credit_units=actual,
+                reason=reason,
+            )
+            if extra > 0:
+                payer_scope = extra_payer_scope or batch.source
+                payer_totals[payer_scope] = payer_totals.get(payer_scope, 0) + extra
+            if debt > 0:
+                payer_totals[batch.source] = payer_totals.get(batch.source, 0) + debt
+
+        self._record_batch_settlement(
+            batch,
+            SettlementAdjustment(
+                actual,
+                refunded_credit_units=refunded,
+                extra_charged_credit_units=extra,
+                debt_applied_credit_units=debt,
+                extra_payer_scope=extra_payer_scope,
+            ),
+            BatchSettlementRecord(
+                reason=reason,
+                breakdown=breakdown,
+                billing_segments=billing_segments,
+            ),
+            payer_breakdown=self._payer_totals_breakdown(payer_totals),
+        )
+
+    @staticmethod
+    def _allocate_mixed_reserve(
+        reservations: Sequence[Mapping[str, Any]],
+        actual_credit_units: int,
+    ) -> list[int]:
+        """Allocate the covered total proportionally without creating extra units."""
+
+        reserved = [max(0, int(item.get("reserved_credit_units", 0) or 0)) for item in reservations]
+        total = sum(reserved)
+        covered = min(max(0, actual_credit_units), total)
+        if total == 0:
+            return [0] * len(reserved)
+
+        products = [covered * amount for amount in reserved]
+        allocations = [product // total for product in products]
+        remainder = covered - sum(allocations)
+        ranked = sorted(
+            range(len(reserved)),
+            key=lambda index: (products[index] % total, -index),
+            reverse=True,
+        )
+        for index in ranked[:remainder]:
+            allocations[index] += 1
+        return allocations
+
+    def _refund_mixed_reservation(
+        self,
+        reservation: Mapping[str, Any],
+        *,
+        refund: int,
+        batch: BatchReservation,
+        actual_credit_units: int,
+        reason: str,
+    ) -> int:
+        if refund <= 0:
+            return 0
+        usage_tag = str(reservation.get("usage_tag") or "ai_usage")
+        source = "chat" if str(reservation.get("source") or "user") == "chat" else "user"
+        try:
+            self.credits_db_service.refund_ai_charge(
+                user_id=self.user_id,
+                chat_id=reservation.get("chat_scope_id"),
+                amount=refund,
+                source=source,
+                event_type="ai_refund",
+                metadata=self._build_charge_metadata(
+                    usage_tag=usage_tag,
+                    extra={
+                        "reason": reason,
+                        "reserved_credit_units_total": batch.reserved_credit_units,
+                        "settled_credit_units": actual_credit_units,
+                        "refunded_credit_units": refund,
+                        "usage_tags": list(batch.usage_tags),
+                    },
+                ),
+            )
+        except Exception as error:
+            self.admin_reporter(
+                "falló el reintegro batch de liquidación IA",
+                error,
+                {
+                    "chat_id": self.chat_id,
+                    "user_id": self.user_id,
+                    "usage_tag": usage_tag,
+                    "refund_credit_units": refund,
+                    "actual_credit_units": actual_credit_units,
+                    "reason": reason,
+                },
+            )
+            return 0
+        return refund
+
+    @staticmethod
+    def _payer_totals_breakdown(payer_totals: Mapping[str, int]) -> list[dict[str, Any]]:
+        return [
+            {"scope": scope, "credit_units": credit_units}
+            for scope, credit_units in payer_totals.items()
+            if credit_units > 0
+        ]
 
     def _clear_batch_reservations(self, batch: BatchReservation) -> None:
         for usage_tag in batch.usage_tags:
@@ -934,6 +1103,8 @@ class AIMessageBilling:
         batch: BatchReservation,
         adjustment: SettlementAdjustment,
         record: BatchSettlementRecord,
+        *,
+        payer_breakdown: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         metadata = self._build_settlement_metadata(
             usage_tag=batch.usage_tag,
@@ -943,13 +1114,17 @@ class AIMessageBilling:
             refunded_credit_units=adjustment.refunded_credit_units,
             extra_charged_credit_units=adjustment.extra_charged_credit_units,
             debt_applied_credit_units=adjustment.debt_applied_credit_units,
-            payer_breakdown=self._payer_breakdown_for_settlement(
-                source=batch.source,
-                reserved_credit_units=batch.reserved_credit_units,
-                refunded_credit_units=adjustment.refunded_credit_units,
-                debt_applied_credit_units=adjustment.debt_applied_credit_units,
-                extra_charged_credit_units=adjustment.extra_charged_credit_units,
-                extra_payer_scope=adjustment.extra_payer_scope,
+            payer_breakdown=(
+                list(payer_breakdown)
+                if payer_breakdown is not None
+                else self._payer_breakdown_for_settlement(
+                    source=batch.source,
+                    reserved_credit_units=batch.reserved_credit_units,
+                    refunded_credit_units=adjustment.refunded_credit_units,
+                    debt_applied_credit_units=adjustment.debt_applied_credit_units,
+                    extra_charged_credit_units=adjustment.extra_charged_credit_units,
+                    extra_payer_scope=adjustment.extra_payer_scope,
+                )
             ),
             reason=record.reason,
             breakdown=record.breakdown,
@@ -1207,7 +1382,7 @@ class AIMessageBilling:
             return
 
         if self._batch_has_mixed_accounts(reservations):
-            self._settle_reservations_individually(
+            self._settle_mixed_reservations(
                 reservations,
                 billing_segments,
                 reason=reason,

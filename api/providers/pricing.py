@@ -34,6 +34,7 @@ def needs_published_provider_pricing(usage: Mapping[str, Any] | None) -> bool:
 def get_openrouter_provider_pricing(
     model: str,
     upstream_provider: str,
+    service_tier: str | None = None,
     *,
     base_url: str,
     request_get: Callable[..., Any] = http_client.get,
@@ -43,6 +44,7 @@ def get_openrouter_provider_pricing(
 
     normalized_model = str(model or "").strip()
     normalized_provider = str(upstream_provider or "").strip().casefold()
+    normalized_service_tier = str(service_tier or "").strip().casefold()
     if not normalized_model or not normalized_provider or normalized_model.startswith("~"):
         return None
 
@@ -62,6 +64,8 @@ def get_openrouter_provider_pricing(
         provider_name = str(endpoint.get("provider_name") or "").strip().casefold()
         if provider_name != normalized_provider:
             continue
+        if not _endpoint_matches_service_tier(endpoint, normalized_service_tier):
+            continue
         pricing = _current_endpoint_pricing(
             ensure_mapping(endpoint.get("pricing")) or {},
             now=now or datetime.now(UTC),
@@ -75,6 +79,21 @@ def get_openrouter_provider_pricing(
         # Provider name alone cannot identify one price when it has several variants.
         return None
     return dict(unique_prices.pop())
+
+
+def _endpoint_matches_service_tier(
+    endpoint: Mapping[str, Any],
+    service_tier: str,
+) -> bool:
+    if not service_tier:
+        return True
+    tag = str(endpoint.get("tag") or "").strip().casefold()
+    tag_tier = tag.rsplit("/", 1)[-1] if "/" in tag else "default"
+    if service_tier in {"default", "standard"}:
+        return tag_tier not in {"flex", "priority"}
+    if service_tier in {"flex", "priority"}:
+        return tag_tier == service_tier
+    return False
 
 
 def _get_model_endpoints(

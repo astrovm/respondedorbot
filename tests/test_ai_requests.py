@@ -32,6 +32,7 @@ def test_provider_usage_result_preserves_resolved_model_and_upstream_provider(mo
     response = SimpleNamespace(
         model="deepseek/deepseek-v4-flash",
         provider="DeepInfra",
+        service_tier="default",
         usage={"prompt_tokens": 3, "cost": 0},
     )
     result = app_runtime.providers.build_usage_result(
@@ -45,9 +46,10 @@ def test_provider_usage_result_preserves_resolved_model_and_upstream_provider(mo
     assert result.model == "deepseek/deepseek-v4-flash"
     assert result.metadata["requested_model"] == "~deepseek/deepseek-v4-flash-latest"
     assert result.metadata["upstream_provider"] == "DeepInfra"
+    assert result.metadata["service_tier"] == "default"
     assert result.metadata["provider_pricing_source"] == "openrouter_endpoints"
     assert result.metadata["provider_pricing"]["input_per_million"] == 80_000
-    lookup.assert_called_once_with("deepseek/deepseek-v4-flash", "DeepInfra")
+    lookup.assert_called_once_with("deepseek/deepseek-v4-flash", "DeepInfra", "default")
 
 
 def test_build_ai_messages():

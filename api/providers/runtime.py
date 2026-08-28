@@ -631,6 +631,11 @@ class ProviderRuntime:
         )
         if upstream_provider:
             result_metadata["upstream_provider"] = str(upstream_provider)
+        service_tier = result_metadata.get("service_tier") or getattr(
+            response, "service_tier", None
+        )
+        if service_tier:
+            result_metadata["service_tier"] = str(service_tier)
         return self._deps.build_usage_result(
             kind="chat",
             text=(

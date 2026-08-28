@@ -125,6 +125,67 @@ def test_openrouter_provider_pricing_rejects_ambiguous_provider_variants():
         )
     )
 
+
+def test_openrouter_provider_pricing_selects_returned_service_tier():
+    clear_openrouter_pricing_cache()
+    request_get = MagicMock(
+        return_value=_response(
+            {
+                "data": {
+                    "endpoints": [
+                        {
+                            "provider_name": "Google AI Studio",
+                            "tag": "google-ai-studio",
+                            "pricing": {"prompt": "0.00000025", "completion": "0.0000015"},
+                        },
+                        {
+                            "provider_name": "Google AI Studio",
+                            "tag": "google-ai-studio/flex",
+                            "pricing": {"prompt": "0.000000125", "completion": "0.00000075"},
+                        },
+                        {
+                            "provider_name": "Google AI Studio",
+                            "tag": "google-ai-studio/priority",
+                            "pricing": {"prompt": "0.00000045", "completion": "0.0000027"},
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    assert get_openrouter_provider_pricing(
+        "google/gemini-3.1-flash-lite-preview",
+        "Google AI Studio",
+        "flex",
+        base_url="https://openrouter.ai/api/v1",
+        request_get=request_get,
+    ) == {
+        "input_per_million": 125_000,
+        "output_per_million": 750_000,
+    }
+    assert get_openrouter_provider_pricing(
+        "google/gemini-3.1-flash-lite-preview",
+        "Google AI Studio",
+        "priority",
+        base_url="https://openrouter.ai/api/v1",
+        request_get=request_get,
+    ) == {
+        "input_per_million": 450_000,
+        "output_per_million": 2_700_000,
+    }
+    assert get_openrouter_provider_pricing(
+        "google/gemini-3.1-flash-lite-preview",
+        "Google AI Studio",
+        "default",
+        base_url="https://openrouter.ai/api/v1",
+        request_get=request_get,
+    ) == {
+        "input_per_million": 250_000,
+        "output_per_million": 1_500_000,
+    }
+    request_get.assert_called_once()
+
     assert (
         get_openrouter_provider_pricing(
             "author/model",

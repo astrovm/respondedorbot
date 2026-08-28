@@ -558,10 +558,18 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_refunds_later_reserves()
         reason="ai_response_success",
     )
 
-    billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 99
+    assert billing.credits_db_service.refund_ai_charge.call_count == 2
+    refunds = billing.credits_db_service.refund_ai_charge.call_args_list
+    assert [call.kwargs["amount"] for call in refunds] == [99, 100]
+    assert [call.kwargs["source"] for call in refunds] == ["user", "chat"]
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    assert billing.credits_db_service.record_ai_settlement_result.call_count == 2
+    billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["charged_credit_units_total"] == 1
+    assert metadata["settlement_ids"] == [
+        "1:1:unknown:ai_response_base",
+        "1:1:unknown:image_context_media",
+    ]
 
 
 def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_keeps_reserved_charge():
@@ -588,21 +596,17 @@ def test_settle_reserved_ai_credits_batch_mixed_sources_with_missing_billing_kee
 
     billing.credits_db_service.refund_ai_charge.assert_not_called()
     billing.credits_db_service.charge_ai_credits.assert_not_called()
-    assert billing.credits_db_service.record_ai_settlement_result.call_count == 2
-    first_metadata = billing.credits_db_service.record_ai_settlement_result.call_args_list[
-        0
-    ].kwargs["metadata"]
-    second_metadata = billing.credits_db_service.record_ai_settlement_result.call_args_list[
-        1
-    ].kwargs["metadata"]
-    assert first_metadata["missing_usage_billing"] is True
-    assert first_metadata["refunded_credit_units"] == 0
-    assert first_metadata["payer_scope"] == "user"
-    assert first_metadata["charged_credit_units_total"] == 100
-    assert second_metadata["billing_zero_usage_fallback"] is True
-    assert second_metadata["refunded_credit_units"] == 0
-    assert second_metadata["payer_scope"] == "chat"
-    assert second_metadata["charged_credit_units_total"] == 100
+    billing.credits_db_service.record_ai_settlement_result.assert_called_once()
+    metadata = billing.credits_db_service.record_ai_settlement_result.call_args.kwargs["metadata"]
+    assert metadata["missing_usage_billing"] is True
+    assert metadata["billing_zero_usage_fallback"] is False
+    assert metadata["refunded_credit_units"] == 0
+    assert metadata["payer_scope"] == "mixed"
+    assert metadata["payer_breakdown"] == [
+        {"scope": "user", "credit_units": 100},
+        {"scope": "chat", "credit_units": 100},
+    ]
+    assert metadata["charged_credit_units_total"] == 200
 
 
 def test_settle_reserved_ai_credits_batch_empty_segments_keeps_reserved_charge():

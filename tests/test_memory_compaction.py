@@ -51,6 +51,7 @@ def test_summary_model_uses_routed_endpoint_price_when_upstream_cost_is_free():
     response = SimpleNamespace(
         model="deepseek/deepseek-v4-flash-0731",
         provider="DeepInfra",
+        service_tier="default",
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content="summary"),
@@ -89,7 +90,8 @@ def test_summary_model_uses_routed_endpoint_price_when_upstream_cost_is_free():
     assert cost == 89
     assert segment is not None
     assert segment["metadata"]["provider_pricing_source"] == "openrouter_endpoints"
-    lookup.assert_called_once_with("deepseek/deepseek-v4-flash-0731", "DeepInfra")
+    assert segment["metadata"]["service_tier"] == "default"
+    lookup.assert_called_once_with("deepseek/deepseek-v4-flash-0731", "DeepInfra", "default")
 
 
 def test_incremental_summary_helper_uses_only_messages_after_marker():

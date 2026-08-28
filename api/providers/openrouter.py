@@ -42,6 +42,7 @@ class _StreamRound:
     last_response: Any = None
     resolved_model: str = ""
     upstream_provider: str = ""
+    service_tier: str = ""
 
     @property
     def text(self) -> str:
@@ -179,6 +180,8 @@ class OpenRouterProvider(StreamingAIProvider):
                     web_metadata["resolved_model"] = streamed_round.resolved_model
                 if streamed_round.upstream_provider:
                     web_metadata["upstream_provider"] = streamed_round.upstream_provider
+                if streamed_round.service_tier:
+                    web_metadata["service_tier"] = streamed_round.service_tier
                 round_web_search_requests = self._runtime._web_search_request_count(
                     usage_response,
                     message,
@@ -340,6 +343,9 @@ class OpenRouterProvider(StreamingAIProvider):
             response_provider = self._field(chunk, "provider")
             if response_provider:
                 streamed_round.upstream_provider = str(response_provider)
+            response_service_tier = self._field(chunk, "service_tier")
+            if response_service_tier:
+                streamed_round.service_tier = str(response_service_tier)
             if getattr(chunk, "usage", None) is not None:
                 streamed_round.usage_response = chunk
             choices = getattr(chunk, "choices", None) or []

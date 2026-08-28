@@ -181,6 +181,7 @@ def test_nonstream_runtime_reports_every_tool_round_for_billing():
         response.id = f"generation-{index}"
         response.model = "deepseek/deepseek-v4-flash-0731"
         response.provider = "DeepInfra"
+        response.service_tier = "priority"
         response.usage = {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001}
     runtime = ProviderRuntime(
         ProviderRuntimeDeps(
@@ -228,6 +229,10 @@ def test_nonstream_runtime_reports_every_tool_round_for_billing():
     assert [item.metadata["upstream_provider"] for item in recorded] == [
         "DeepInfra",
         "DeepInfra",
+    ]
+    assert [item.metadata["service_tier"] for item in recorded] == [
+        "priority",
+        "priority",
     ]
 
 
