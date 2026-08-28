@@ -9,6 +9,7 @@ import importlib
 import logging
 import os
 import time
+from collections import deque
 from typing import Any, Mapping, Optional, Sequence, cast
 
 from api.bot.types import TelegramUpdate
@@ -17,7 +18,11 @@ from api.index import app_runtime
 logger = logging.getLogger(__name__)
 _HANDLER_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _POLLING_NETWORK_REPORT_INTERVAL_SECONDS = 300.0
+_POLLING_CONFLICT_WINDOW_SECONDS = 60.0
+_POLLING_CONFLICT_REPORT_THRESHOLD = 3
 _last_polling_network_report = 0.0
+_polling_conflict_timestamps: deque[float] = deque()
+_polling_conflict_reported = False
 
 
 def _update_to_dict(update: Any) -> TelegramUpdate:
@@ -127,11 +132,32 @@ def _is_polling_network_error(update_id: Any, error: BaseException) -> bool:
     return update_id == "unknown" and error.__class__.__name__ == "NetworkError"
 
 
+def _is_polling_conflict(update_id: Any, error: BaseException) -> bool:
+    return update_id == "unknown" and error.__class__.__name__ == "Conflict"
+
+
 def _should_log_polling_network_error(now: float) -> bool:
     global _last_polling_network_report
     if now - _last_polling_network_report < _POLLING_NETWORK_REPORT_INTERVAL_SECONDS:
         return False
     _last_polling_network_report = now
+    return True
+
+
+def _should_report_polling_conflict(now: float) -> bool:
+    global _polling_conflict_reported
+    cutoff = now - _POLLING_CONFLICT_WINDOW_SECONDS
+    while _polling_conflict_timestamps and _polling_conflict_timestamps[0] < cutoff:
+        _polling_conflict_timestamps.popleft()
+    if not _polling_conflict_timestamps:
+        _polling_conflict_reported = False
+    _polling_conflict_timestamps.append(now)
+    if (
+        _polling_conflict_reported
+        or len(_polling_conflict_timestamps) < _POLLING_CONFLICT_REPORT_THRESHOLD
+    ):
+        return False
+    _polling_conflict_reported = True
     return True
 
 
@@ -144,6 +170,37 @@ async def _error_handler(update: object, context: Any) -> None:
                 "PTB polling network error; polling will retry: %s",
                 error,
             )
+        return
+
+    if error is not None and _is_polling_conflict(update_id, error):
+        now = time.monotonic()
+        should_report = _should_report_polling_conflict(now)
+        if _should_log_polling_network_error(now):
+            logger.warning(
+                "PTB polling conflict; polling will retry: %s",
+                error,
+            )
+        if not should_report:
+            return
+
+        logger.error(
+            "PTB polling conflict repeated %d times within %.0f seconds",
+            _POLLING_CONFLICT_REPORT_THRESHOLD,
+            _POLLING_CONFLICT_WINDOW_SECONDS,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        try:
+            await _run_sync(
+                app_runtime.admin.report,
+                "PTB repeated polling conflicts",
+                error,
+                {
+                    "conflict_count": _POLLING_CONFLICT_REPORT_THRESHOLD,
+                    "window_seconds": _POLLING_CONFLICT_WINDOW_SECONDS,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to report repeated PTB polling conflicts")
         return
 
     logger.exception(
