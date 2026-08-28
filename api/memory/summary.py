@@ -224,6 +224,11 @@ def wrap_provider_stream(
         raise
 
 
+def _mark_provider_unavailable(response_meta: dict[str, Any] | None) -> None:
+    if response_meta is not None:
+        response_meta["provider_unavailable"] = True
+
+
 def stream_summary_command(
     chat_id: str,
     redis_client: redis.Redis,
@@ -321,6 +326,7 @@ def stream_summary_command(
         len(api_messages),
     )
     if not provider.is_available():
+        _mark_provider_unavailable(response_meta)
 
         def unavailable() -> Iterator[tuple[str, str]]:
             yield "none", tr("summary.error")

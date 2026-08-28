@@ -936,6 +936,69 @@ def test_openrouter_stream_uses_tool_runtime_result_without_final_no_tools_call(
     assert "tools" in client.calls[1]
 
 
+def test_openrouter_stream_records_incomplete_usage_after_partial_stream_error():
+    from api.ai.pricing import AIUsageResult
+    from api.providers.openrouter import OpenRouterProvider
+
+    partial_chunk = SimpleNamespace(
+        id="generation-partial",
+        model="deepseek/deepseek-v4-flash-0731",
+        provider="DeepInfra",
+        choices=[
+            SimpleNamespace(
+                finish_reason=None,
+                delta=SimpleNamespace(
+                    content="respuesta parcial",
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ],
+        usage=None,
+    )
+
+    def interrupted_stream():
+        yield partial_chunk
+        raise RuntimeError("stream interrupted")
+
+    client = _FakeClient([interrupted_stream()])
+    admin_report = MagicMock()
+    recorded = []
+    provider = OpenRouterProvider(
+        get_client=lambda: client,
+        admin_report=admin_report,
+        increment_request_count=MagicMock(),
+        build_web_search_tool=lambda: {},
+        build_usage_result=lambda **kwargs: AIUsageResult(
+            kind=kwargs["kind"],
+            text=kwargs["text"],
+            model=kwargs["model"],
+            usage=getattr(kwargs["response"], "usage", None),
+            source="openrouter",
+            metadata=kwargs.get("metadata") or {},
+        ),
+        extract_usage_map=lambda response: getattr(response, "usage", None),
+        primary_model="~deepseek/deepseek-v4-flash-latest",
+    )
+
+    with pytest.raises(RuntimeError, match="stream interrupted"):
+        list(
+            provider.stream(
+                {"role": "system", "content": "sys"},
+                [{"role": "user", "content": "hola"}],
+                enable_web_search=False,
+                on_usage_result=recorded.append,
+            )
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0].text == "respuesta parcial"
+    assert recorded[0].model == "deepseek/deepseek-v4-flash-0731"
+    assert recorded[0].metadata["stream_interrupted"] is True
+    assert recorded[0].metadata["upstream_provider"] == "DeepInfra"
+    admin_report.assert_called_once()
+
+
 def test_provider_runtime_shared_tool_loop_matches_complete():
     from api.ai.pricing import AIUsageResult
     from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps

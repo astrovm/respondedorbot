@@ -335,6 +335,13 @@ class AIService:
                 )
             return tr("summary.error"), None, True
 
+        if response_meta.get("provider_unavailable"):
+            request.billing_helper.refund_reserved_ai_credits(
+                base_charge_meta,
+                reason="summary_provider_unavailable",
+            )
+            return final_text, pending_marker, False
+
         request.billing_helper.settle_reserved_ai_credits_batch(
             [base_charge_meta],
             response_meta.get("billing_segments", []),

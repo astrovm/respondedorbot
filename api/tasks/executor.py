@@ -150,6 +150,17 @@ class TaskExecutor:
             )
             return should_delete
 
+        def settle_usage_or_refund(reason: str) -> None:
+            segments = list(response_meta.get("billing_segments") or [])
+            if segments:
+                billing.settle_reserved_ai_credits(
+                    charge_meta,
+                    segments,
+                    reason=f"{reason}_provider_usage",
+                )
+                return
+            billing.refund_reserved_ai_credits(charge_meta, reason=reason)
+
         fallback_retries = 0
         empty_retries = 0
 
@@ -158,6 +169,7 @@ class TaskExecutor:
         while True:
             try:
                 logger.info("task %s calling ask_ai", task_id)
+                response_meta.pop("ai_fallback", None)
                 response = self._ask_ai(
                     messages,
                     response_meta=response_meta,
@@ -180,7 +192,7 @@ class TaskExecutor:
                         messages.append({"role": "system", "content": tr("task.force_response")})
                         continue
                     logger.warning("task %s empty after retries", task_id)
-                    billing.refund_reserved_ai_credits(charge_meta, reason="task_empty")
+                    settle_usage_or_refund("task_empty")
                     return should_delete
 
                 is_fallback = response_meta.get("ai_fallback", False)
@@ -203,7 +215,7 @@ class TaskExecutor:
                 logger.info("task %s completed successfully", task_id)
 
                 if is_fallback:
-                    billing.refund_reserved_ai_credits(charge_meta, reason="task_fallback")
+                    settle_usage_or_refund("task_fallback")
                 else:
                     segments = list(response_meta.get("billing_segments") or [])
                     billing.settle_reserved_ai_credits(
@@ -227,9 +239,7 @@ class TaskExecutor:
                     self._admin_report(
                         f"task_scheduler {task_id} ask_ai error", e, {"chat_id": chat_id}
                     )
-                billing.refund_reserved_ai_credits(
-                    charge_meta, reason="task_json_error" if is_json_error else "task_error"
-                )
+                settle_usage_or_refund("task_json_error" if is_json_error else "task_error")
                 return should_delete
 
     def execute_many(self, tasks: List[Mapping[str, Any]]) -> List[bool]:

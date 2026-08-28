@@ -317,6 +317,38 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
     assert response_meta["billing_segments"][0]["usage"]["cost"] == 0.00001
 
 
+def test_stream_summary_command_marks_unavailable_provider_for_refund():
+    from api.memory.summary import stream_summary_command
+
+    response_meta = {}
+    provider = SimpleNamespace(is_available=lambda: False, name="openrouter")
+
+    iterator, pending_marker = stream_summary_command(
+        "123",
+        MagicMock(),
+        "resumen",
+        get_history=lambda *_args: [{"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}],
+        prepare_memory=lambda *_args, **_kwargs: (
+            [{"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1}],
+            None,
+            [],
+            0,
+        ),
+        load_personality=lambda: "bot",
+        build_provider=lambda: provider,
+        sanitize_text=str,
+        max_tokens=100,
+        logger=MagicMock(),
+        model="test/model",
+        response_meta=response_meta,
+    )
+
+    assert [source for source, _text in iterator] == ["none"]
+    assert pending_marker is None
+    assert response_meta["provider_unavailable"] is True
+    assert "billing_segments" not in response_meta
+
+
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():
     from api.memory.state import fetch_chat_messages_for_compaction
 
