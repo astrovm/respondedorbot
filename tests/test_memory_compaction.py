@@ -193,7 +193,32 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
         {"id": "m1", "role": "user", "text": "msg 1", "timestamp": 1},
         {"id": "m2", "role": "user", "text": "msg 2", "timestamp": 2},
     ]
-    captured = {}
+    response_meta = {}
+    stream_chunk = SimpleNamespace(
+        id="generation-summary",
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                delta=SimpleNamespace(
+                    content="resumen",
+                    tool_calls=[],
+                    annotations=[],
+                ),
+            )
+        ],
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "cost": 0.00001,
+        },
+    )
+    create_completion = MagicMock(return_value=iter([stream_chunk]))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create_completion),
+        )
+    )
 
     monkeypatch.setattr("api.index.app_runtime.state.get_history", lambda *_: history)
     monkeypatch.setattr(
@@ -206,30 +231,32 @@ def test_stream_summary_command_uses_internal_chat_memory(monkeypatch):
         ),
     )
     monkeypatch.setattr("api.index.app_runtime.summary.load_personality", lambda: "bot")
+    monkeypatch.setattr(
+        "api.index.app_runtime.summary._deps.provider.get_openrouter_client",
+        lambda **_kwargs: client,
+    )
 
-    class FakeProvider:
-        name = "openrouter"
-
-        def is_available(self):
-            return True
-
-        def stream(self, system_message, messages, **kwargs):
-            captured["system_message"] = system_message
-            captured["messages"] = messages
-            yield "resumen"
-
-    monkeypatch.setattr("api.index.app_runtime.summary.build_provider", lambda: FakeProvider())
-
-    iterator, pending_marker = stream_summary_command("123", redis_client, "resumen")
+    iterator, pending_marker = stream_summary_command(
+        "123",
+        redis_client,
+        "resumen",
+        response_meta=response_meta,
+    )
 
     assert list(iterator) == [("openrouter", "resumen")]
     assert pending_marker is None
-    assert captured["system_message"] == {"role": "system", "content": "bot"}
-    assert captured["messages"][0] == {
+    create_completion.assert_called_once()
+    request = create_completion.call_args.kwargs
+    assert request["stream"] is True
+    assert "tools" not in request
+    assert request["messages"][0] == {"role": "system", "content": "bot"}
+    assert request["messages"][1] == {
         "role": "assistant",
         "content": "[contexto anterior: msg 1]",
     }
-    assert captured["messages"][1]["content"] == "msg 2"
+    assert request["messages"][2]["content"] == "msg 2"
+    assert response_meta["billing_segments"][0]["kind"] == "summary"
+    assert response_meta["billing_segments"][0]["usage"]["cost"] == 0.00001
 
 
 def test_fetch_chat_messages_for_compaction_uses_tag_only_query():

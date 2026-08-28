@@ -485,7 +485,7 @@ class SummaryService:
     def build_provider(self) -> Any:
         return self._deps.provider.build_provider(
             model=self._deps.model,
-            max_tool_rounds=0,
+            max_tool_rounds=1,
         )
 
     def stream_command(
