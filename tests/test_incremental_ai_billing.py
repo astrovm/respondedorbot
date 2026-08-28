@@ -624,6 +624,38 @@ def test_reconciler_retains_safety_amount_after_retry_window():
     admin_report.assert_called_once()
 
 
+def test_reconciler_never_caps_finalized_usage_at_authorized_amount():
+    credits = MagicMock()
+    known_segment = _chat_segment(cost=0.005)
+    known_segment["metadata"]["provider_generation_id"] = "generation-known"
+    pending_segment = _chat_segment(interrupted=True)
+    pending_segment["metadata"]["provider_generation_id"] = "generation-pending"
+    operation = _operation(
+        pending_segment,
+        created_at=datetime.now(UTC) - timedelta(minutes=2),
+        authorized=50,
+    )
+    operation["segments"].insert(
+        0,
+        {"segment_id": "openrouter:generation-known", "segment": known_segment},
+    )
+    credits.list_unsettled_ai_operations.return_value = [operation]
+    credits.is_configured.return_value = True
+    reconciler = AIBillingReconciler(
+        credits=credits,
+        admin_report=MagicMock(),
+        get_generation=MagicMock(return_value=None),
+        retry_window_seconds=60,
+        safety_credit_units=10,
+        stale_seconds=30,
+    )
+
+    result = reconciler.run_once()
+
+    assert result == {"settled": 0, "pending": 0, "unresolved": 1}
+    assert credits.settle_ai_operation_once.call_args.kwargs["actual_credit_units"] == 100
+
+
 def test_reconciler_retains_authorization_when_pricing_is_incomplete():
     credits = MagicMock()
     segment = {

@@ -326,7 +326,10 @@ class AIBillingReconciler:
             bool(segments) and breakdown.get("pricing_complete") is not True
         )
         if still_pending:
-            actual = min(authorized, actual + self._safety_credit_units)
+            actual = max(
+                actual,
+                min(authorized, actual + self._safety_credit_units),
+            )
             self._admin_report(
                 "uso OpenRouter interrumpido no pudo reconciliarse",
                 None,
