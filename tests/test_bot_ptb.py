@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from collections import deque
 from unittest.mock import MagicMock, patch
 
 from api.bot import ptb as bot_ptb
@@ -185,6 +186,74 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
             patch("api.bot.ptb._last_polling_network_report", 900.0),
         ):
             await bot_ptb._error_handler(object(), context)
+
+        run_sync.assert_not_called()
+
+    async def test_isolated_polling_conflict_is_warning_only(self):
+        class Conflict(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = Conflict("terminated by other getUpdates request")
+
+        with (
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch("api.bot.ptb.time.monotonic", return_value=1000.0),
+            patch("api.bot.ptb._last_polling_network_report", 0.0),
+            patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+            self.assertLogs("api.bot.ptb", level="WARNING") as logs,
+        ):
+            await bot_ptb._error_handler(object(), context)
+
+        run_sync.assert_not_called()
+        self.assertIn("PTB polling conflict; polling will retry", logs.output[0])
+
+    async def test_repeated_polling_conflicts_are_reported_once(self):
+        class Conflict(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = Conflict("terminated by other getUpdates request")
+        runtime = MagicMock()
+
+        with (
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch("api.bot.ptb.app_runtime", runtime),
+            patch(
+                "api.bot.ptb.time.monotonic",
+                side_effect=[1000.0, 1010.0, 1020.0, 1030.0],
+            ),
+            patch("api.bot.ptb._last_polling_network_report", 0.0),
+            patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+        ):
+            for _ in range(4):
+                await bot_ptb._error_handler(object(), context)
+
+        run_sync.assert_awaited_once_with(
+            runtime.admin.report,
+            "PTB repeated polling conflicts",
+            context.error,
+            {"conflict_count": 3, "window_seconds": 60.0},
+        )
+
+    async def test_polling_conflicts_outside_window_are_not_reported(self):
+        class Conflict(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = Conflict("terminated by other getUpdates request")
+
+        with (
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch(
+                "api.bot.ptb.time.monotonic",
+                side_effect=[1000.0, 1061.0, 1122.0],
+            ),
+            patch("api.bot.ptb._last_polling_network_report", 0.0),
+            patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+        ):
+            for _ in range(3):
+                await bot_ptb._error_handler(object(), context)
 
         run_sync.assert_not_called()
 
