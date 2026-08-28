@@ -87,14 +87,14 @@ def test_calculate_billing_for_segments_applies_cached_token_discount():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 149
-    assert breakdown["charged_credit_units"] == 3
-    assert breakdown["charged_credits_display"] == "0.03"
+    assert breakdown["raw_usd_micros"] == 59
+    assert breakdown["charged_credit_units"] == 2
+    assert breakdown["charged_credits_display"] == "0.02"
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
             "model": "deepseek/deepseek-v4-flash-0731",
-            "usd_micros": 149,
+            "usd_micros": 59,
             "input_tokens": 1_000,
             "input_cached_tokens": 900,
             "input_non_cached_tokens": 100,
@@ -174,14 +174,14 @@ def test_calculate_billing_for_segments_reads_cached_tokens_from_prompt_token_de
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 56
-    assert breakdown["charged_credit_units"] == 2
-    assert breakdown["charged_credits_display"] == "0.02"
+    assert breakdown["raw_usd_micros"] == 35
+    assert breakdown["charged_credit_units"] == 1
+    assert breakdown["charged_credits_display"] == "0.01"
     assert breakdown["model_breakdown"] == [
         {
             "kind": "chat",
             "model": "deepseek/deepseek-v4-flash-0731",
-            "usd_micros": 56,
+            "usd_micros": 35,
             "input_tokens": 2_000,
             "input_cached_tokens": 1_500,
             "input_non_cached_tokens": 500,
@@ -228,7 +228,7 @@ def test_calculate_billing_for_segments_bills_successful_firecrawl_credits():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 3_337
+    assert breakdown["raw_usd_micros"] == 3_328
     assert breakdown["charged_credit_units"] == 67
     assert breakdown["tool_breakdown"] == [{"tool": "web_search", "count": 2, "usd_micros": 3_320}]
 
@@ -335,7 +335,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     )
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
-    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 236
+    assert billing.credits_db_service.charge_ai_credits.call_args.kwargs["amount"] == 34
     assert (
         billing.credits_db_service.charge_ai_credits.call_args.kwargs["event_type"]
         == "ai_settlement_charge"
@@ -346,7 +346,7 @@ def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     assert metadata["payer_scope"] == "mixed"
     assert metadata["payer_breakdown"] == [
         {"scope": "user", "credit_units": 100},
-        {"scope": "chat", "credit_units": 236},
+        {"scope": "chat", "credit_units": 34},
     ]
 
 
@@ -472,7 +472,7 @@ def test_settle_reserved_ai_credits_records_debt_when_extra_charge_fails():
 
     billing.credits_db_service.charge_ai_credits.assert_called_once()
     billing.credits_db_service.apply_ai_debt.assert_called_once()
-    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 236
+    assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["amount"] == 34
     assert billing.credits_db_service.apply_ai_debt.call_args.kwargs["source"] == "user"
     assert (
         billing.credits_db_service.apply_ai_debt.call_args.kwargs["event_type"]
@@ -678,7 +678,7 @@ def test_settle_reserved_ai_credits_batch_charges_extra_once_when_total_exceeds_
 
     billing.credits_db_service.charge_ai_credits.assert_not_called()
     billing.credits_db_service.refund_ai_charge.assert_called_once()
-    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 185
+    assert billing.credits_db_service.refund_ai_charge.call_args.kwargs["amount"] == 193
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
@@ -1105,8 +1105,8 @@ def test_calculate_billing_without_gateway_cost_uses_local():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 17
-    assert breakdown["model_breakdown"][0]["usd_micros"] == 17
+    assert breakdown["raw_usd_micros"] == 8
+    assert breakdown["model_breakdown"][0]["usd_micros"] == 8
 
 
 def test_zero_reported_openrouter_cost_is_incomplete():

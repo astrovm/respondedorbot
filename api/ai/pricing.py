@@ -43,9 +43,9 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "output_per_million": 1_500_000,
     },
     "deepseek/deepseek-v4-flash-0731": {
-        "input_per_million": 35_000,
+        "input_per_million": 30_000,
         "cached_input_per_million": 7_000,
-        "output_per_million": 280_000,
+        "output_per_million": 100_000,
     },
 }
 

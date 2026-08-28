@@ -46,8 +46,8 @@ class GordoBenchmark:
                 "context": "205K",
             },
             "deepseek/deepseek-v4-flash-0731": {
-                "input": 0.035,
-                "output": 0.28,
+                "input": 0.03,
+                "output": 0.10,
                 "context": "1.31M",
             },
         }
