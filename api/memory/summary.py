@@ -408,6 +408,8 @@ class SummaryService:
             save_result=deps.state.save_chat_compaction_result,
             estimate_reserve=self.estimate_compaction_reserve,
             settle_reservation=deps.credits.settle_ai_reservation_once,
+            record_provider_usage=deps.credits.record_ai_provider_usage,
+            list_provider_usage=deps.credits.list_ai_provider_segments,
             logger=deps.logger,
             admin_report=deps.provider.admin_report,
         )

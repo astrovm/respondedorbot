@@ -30,6 +30,7 @@ from api.billing.credit_units import (
     rescale_credit_units,
     whole_credits_to_units,
 )
+from api.billing.provider_usage import provider_segment_id
 from api.ai.pricing import calculate_billing_for_segments
 from api.ai.random_replies import build_random_reply
 from api.billing.reconciliation import (
@@ -610,29 +611,7 @@ class AIMessageBilling:
         if durable_segment.get("kind") != "web_search":
             segment_metadata.pop("firecrawl_credits_used", None)
             durable_segment["metadata"] = segment_metadata
-        provider_id = (
-            segment_metadata.get("provider_generation_id")
-            or segment_metadata.get("provider_request_id")
-        )
-        if provider_id:
-            segment_id = f"{durable_segment.get('source', 'provider')}:{provider_id}"
-        elif segment_metadata.get("tool_rounds"):
-            segment_id = ":".join(
-                (
-                    str(durable_segment.get("source") or "provider"),
-                    str(durable_segment.get("kind") or "unknown"),
-                    str(durable_segment.get("model") or "unknown"),
-                    str(segment_metadata["tool_rounds"]),
-                )
-            )
-        else:
-            encoded = json.dumps(
-                durable_segment,
-                sort_keys=True,
-                ensure_ascii=True,
-                default=str,
-            ).encode()
-            segment_id = hashlib.sha256(encoded).hexdigest()
+        segment_id = provider_segment_id(durable_segment)
         try:
             self.credits_db_service.record_ai_provider_usage(
                 user_id=self.user_id,
