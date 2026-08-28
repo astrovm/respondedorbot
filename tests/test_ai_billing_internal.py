@@ -1601,6 +1601,26 @@ def test_refund_reserved_ai_credits_rolls_back_creditless_cap_for_chat_source():
     mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
 
 
+def test_replayed_reservation_refund_does_not_roll_back_creditless_cap_twice():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+    billing.credits_db_service.refund_ai_charge.side_effect = [
+        {"applied": True},
+        {"applied": False},
+    ]
+
+    reservation, error = billing.reserve_ai_credits("ai_response_base", 10)
+
+    assert error is None
+    assert reservation is not None
+
+    billing.refund_reserved_ai_credits(reservation, reason="first_path")
+    billing.refund_reserved_ai_credits(reservation, reason="retry_path")
+
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
 def test_reservation_refund_preserves_identity_and_is_reason_independent():
     billing = make_ai_message_billing(
         message={"message_id": 44, "from": {"first_name": "Ana"}},

@@ -1306,6 +1306,7 @@ def refund_ai_charge(
             )
             if cur.fetchone() is not None:
                 return {
+                    "applied": False,
                     "user_balance": int(user_balance),
                     "chat_balance": int(chat_balance),
                 }
@@ -1344,6 +1345,7 @@ def refund_ai_charge(
                 ),
             )
             return {
+                "applied": True,
                 "user_balance": int(user_balance),
                 "chat_balance": int(updated_chat_balance),
             }
@@ -1372,6 +1374,7 @@ def refund_ai_charge(
             ),
         )
         return {
+            "applied": True,
             "user_balance": int(updated_user_balance),
             "chat_balance": int(chat_balance),
         }

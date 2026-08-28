@@ -1841,7 +1841,7 @@ class AIMessageBilling:
         )
 
         try:
-            self.credits_db_service.refund_ai_charge(
+            refund_result = self.credits_db_service.refund_ai_charge(
                 user_id=self.user_id,
                 chat_id=reservation_meta.get("chat_scope_id"),
                 amount=reserved_credit_units,
@@ -1863,7 +1863,8 @@ class AIMessageBilling:
             )
             return
 
-        self._rollback_creditless_cap(reservation_meta)
+        if refund_result.get("applied", True):
+            self._rollback_creditless_cap(reservation_meta)
         self.clear_persisted_reservation_fn(usage_tag)
 
     def refund_ai_charge_meta(

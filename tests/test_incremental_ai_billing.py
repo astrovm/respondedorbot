@@ -533,7 +533,8 @@ def test_reconciler_recovers_interrupted_openrouter_generation():
     ]
     get_generation = MagicMock(
         return_value={
-            "total_cost": 0.0002,
+            "total_cost": 0,
+            "upstream_inference_cost": 0.0002,
             "tokens_prompt": 100,
             "tokens_completion": 20,
             "model": "deepseek/deepseek-v4-flash-0731",
@@ -545,9 +546,39 @@ def test_reconciler_recovers_interrupted_openrouter_generation():
 
     assert result == {"settled": 1, "pending": 0, "unresolved": 0}
     credits.update_ai_provider_usage.assert_called_once()
+    reconciled = credits.update_ai_provider_usage.call_args.args[2]
+    assert reconciled["usage"]["cost"] == 0.0002
+    assert reconciled["usage"]["cost_details"] == {
+        "upstream_inference_cost": 0.0002
+    }
     settled = credits.settle_ai_operation_once.call_args.kwargs
     assert settled["actual_credit_units"] > 0
     assert settled["metadata"]["reconciliation_unresolved"] is False
+
+
+def test_reconciler_does_not_use_gateway_total_as_upstream_cost():
+    credits = MagicMock()
+    credits.list_unsettled_ai_operations.return_value = [
+        _operation(
+            _chat_segment(interrupted=True),
+            created_at=datetime.now(UTC) - timedelta(seconds=45),
+        )
+    ]
+    get_generation = MagicMock(
+        return_value={
+            "total_cost": 0.0002,
+            "tokens_prompt": 100,
+            "tokens_completion": 20,
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "provider_name": "DeepSeek",
+        }
+    )
+
+    result = _reconciler(credits, get_generation=get_generation).run_once()
+
+    assert result == {"settled": 0, "pending": 1, "unresolved": 0}
+    credits.update_ai_provider_usage.assert_not_called()
+    credits.settle_ai_operation_once.assert_not_called()
 
 
 def test_reconciler_keeps_recent_missing_generation_pending():

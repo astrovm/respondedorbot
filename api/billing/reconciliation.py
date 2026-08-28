@@ -118,13 +118,17 @@ def _reconciled_segment(
     segment: Mapping[str, Any],
     generation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    cost = generation.get("total_cost", generation.get("cost"))
-    if not _positive_number(cost):
+    upstream_cost = generation.get("upstream_inference_cost")
+    if not _positive_number(upstream_cost):
         return None
+    total_cost = generation.get("total_cost", generation.get("cost"))
     usage = dict(segment.get("usage") or {})
+    cost_details = dict(usage.get("cost_details") or {})
+    cost_details["upstream_inference_cost"] = upstream_cost
     usage.update(
         {
-            "cost": cost,
+            "cost": total_cost if _positive_number(total_cost) else upstream_cost,
+            "cost_details": cost_details,
             "prompt_tokens": generation.get(
                 "tokens_prompt", usage.get("prompt_tokens", 0)
             ),
