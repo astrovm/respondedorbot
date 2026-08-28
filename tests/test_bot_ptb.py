@@ -201,6 +201,7 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
             patch("api.bot.ptb.time.monotonic", return_value=1000.0),
             patch("api.bot.ptb._last_polling_network_report", 0.0),
             patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+            patch.object(bot_ptb, "_polling_conflict_reported", False),
             self.assertLogs("api.bot.ptb", level="WARNING") as logs,
         ):
             await bot_ptb._error_handler(object(), context)
@@ -221,12 +222,13 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
             patch("api.bot.ptb.app_runtime", runtime),
             patch(
                 "api.bot.ptb.time.monotonic",
-                side_effect=[1000.0, 1010.0, 1020.0, 1030.0],
+                side_effect=[1000.0, 1001.0, 1002.0, 1032.0, 1062.0],
             ),
             patch("api.bot.ptb._last_polling_network_report", 0.0),
             patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+            patch.object(bot_ptb, "_polling_conflict_reported", False),
         ):
-            for _ in range(4):
+            for _ in range(5):
                 await bot_ptb._error_handler(object(), context)
 
         run_sync.assert_awaited_once_with(
@@ -251,11 +253,36 @@ class BotPtbAsyncTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("api.bot.ptb._last_polling_network_report", 0.0),
             patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+            patch.object(bot_ptb, "_polling_conflict_reported", False),
         ):
             for _ in range(3):
                 await bot_ptb._error_handler(object(), context)
 
         run_sync.assert_not_called()
+
+    async def test_polling_conflict_report_rearms_after_quiet_window(self):
+        class Conflict(Exception):
+            pass
+
+        context = MagicMock()
+        context.error = Conflict("terminated by other getUpdates request")
+        runtime = MagicMock()
+
+        with (
+            patch("api.bot.ptb._run_sync") as run_sync,
+            patch("api.bot.ptb.app_runtime", runtime),
+            patch(
+                "api.bot.ptb.time.monotonic",
+                side_effect=[1000.0, 1001.0, 1002.0, 1063.0, 1064.0, 1065.0],
+            ),
+            patch("api.bot.ptb._last_polling_network_report", 0.0),
+            patch.object(bot_ptb, "_polling_conflict_timestamps", deque()),
+            patch.object(bot_ptb, "_polling_conflict_reported", False),
+        ):
+            for _ in range(6):
+                await bot_ptb._error_handler(object(), context)
+
+        self.assertEqual(run_sync.await_count, 2)
 
 
 class PollingEntrypointTests(unittest.TestCase):

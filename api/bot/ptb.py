@@ -22,6 +22,7 @@ _POLLING_CONFLICT_WINDOW_SECONDS = 60.0
 _POLLING_CONFLICT_REPORT_THRESHOLD = 3
 _last_polling_network_report = 0.0
 _polling_conflict_timestamps: deque[float] = deque()
+_polling_conflict_reported = False
 
 
 def _update_to_dict(update: Any) -> TelegramUpdate:
@@ -144,11 +145,20 @@ def _should_log_polling_network_error(now: float) -> bool:
 
 
 def _should_report_polling_conflict(now: float) -> bool:
+    global _polling_conflict_reported
     cutoff = now - _POLLING_CONFLICT_WINDOW_SECONDS
     while _polling_conflict_timestamps and _polling_conflict_timestamps[0] < cutoff:
         _polling_conflict_timestamps.popleft()
+    if not _polling_conflict_timestamps:
+        _polling_conflict_reported = False
     _polling_conflict_timestamps.append(now)
-    return len(_polling_conflict_timestamps) == _POLLING_CONFLICT_REPORT_THRESHOLD
+    if (
+        _polling_conflict_reported
+        or len(_polling_conflict_timestamps) < _POLLING_CONFLICT_REPORT_THRESHOLD
+    ):
+        return False
+    _polling_conflict_reported = True
+    return True
 
 
 async def _error_handler(update: object, context: Any) -> None:
