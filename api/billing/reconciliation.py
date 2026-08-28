@@ -252,7 +252,27 @@ class AIBillingReconciler:
             return {"settled": 0, "pending": 0, "unresolved": 0}
         totals = {"settled": 0, "pending": 0, "unresolved": 0}
         for operation in self._credits.list_unsettled_ai_operations():
-            outcome = self._reconcile_operation(operation)
+            try:
+                outcome = self._reconcile_operation(operation)
+            except Exception as error:
+                operation_id = str(operation.get("operation_id") or "unknown")
+                logger.exception(
+                    "AI operation reconciliation failed operation_id=%s",
+                    operation_id,
+                )
+                try:
+                    self._admin_report(
+                        "falló reconciliar operación IA",
+                        error,
+                        {"operation_id": operation_id},
+                    )
+                except Exception:
+                    logger.exception(
+                        "AI operation reconciliation report failed operation_id=%s",
+                        operation_id,
+                    )
+                totals["pending"] += 1
+                continue
             totals[outcome] += 1
         return totals
 
@@ -301,8 +321,11 @@ class AIBillingReconciler:
 
         breakdown = calculate_billing_for_segments(segments)
         actual = int(breakdown.get("charged_credit_units", 0) or 0)
+        authorized = int(operation.get("authorized_credit_units", 0) or 0)
+        incomplete_pricing = (
+            bool(segments) and breakdown.get("pricing_complete") is not True
+        )
         if still_pending:
-            authorized = int(operation.get("authorized_credit_units", 0) or 0)
             actual = min(authorized, actual + self._safety_credit_units)
             self._admin_report(
                 "uso OpenRouter interrumpido no pudo reconciliarse",
@@ -313,14 +336,24 @@ class AIBillingReconciler:
                     "safety_credit_units": self._safety_credit_units,
                 },
             )
+        elif incomplete_pricing:
+            actual = max(actual, authorized)
+            self._admin_report(
+                "reconciliación IA sin costo de proveedor verificable; se mantiene la reserva",
+                None,
+                {
+                    "operation_id": operation_id,
+                    "authorized_credit_units": authorized,
+                    "unsupported_notes": breakdown.get("unsupported_notes", []),
+                },
+            )
 
         reserve_metadata = dict(operation.get("reserve_metadata") or {})
-        settlement_reason = (
-            "reconciliation_timeout"
-            if still_pending
-            else "recovered_provider_usage"
-            if segments
-            else "unused_stale_reservation"
+        unresolved = still_pending or incomplete_pricing
+        settlement_reason = self._settlement_reason(
+            still_pending=still_pending,
+            incomplete_pricing=incomplete_pricing,
+            has_segments=bool(segments),
         )
         settlement_metadata = {
             **reserve_metadata,
@@ -333,8 +366,9 @@ class AIBillingReconciler:
             "model_breakdown": breakdown.get("model_breakdown", []),
             "tool_breakdown": breakdown.get("tool_breakdown", []),
             "segment_breakdown": breakdown.get("segment_breakdown", []),
-            "pricing_complete": not still_pending and breakdown.get("pricing_complete", False),
-            "reconciliation_unresolved": still_pending,
+            "pricing_complete": not unresolved
+            and breakdown.get("pricing_complete", False),
+            "reconciliation_unresolved": unresolved,
         }
         self._credits.settle_ai_operation_once(
             user_id=int(operation["user_id"]),
@@ -348,9 +382,24 @@ class AIBillingReconciler:
             operation_id,
             int(operation.get("authorized_credit_units", 0) or 0),
             actual,
-            still_pending,
+            unresolved,
         )
-        return "unresolved" if still_pending else "settled"
+        return "unresolved" if unresolved else "settled"
+
+    @staticmethod
+    def _settlement_reason(
+        *,
+        still_pending: bool,
+        incomplete_pricing: bool,
+        has_segments: bool,
+    ) -> str:
+        if still_pending:
+            return "reconciliation_timeout"
+        if incomplete_pricing:
+            return "reconciliation_incomplete_pricing"
+        if has_segments:
+            return "recovered_provider_usage"
+        return "unused_stale_reservation"
 
     @staticmethod
     def _age_seconds(created_at: Any) -> float:

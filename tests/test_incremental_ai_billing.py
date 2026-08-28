@@ -624,6 +624,66 @@ def test_reconciler_retains_safety_amount_after_retry_window():
     admin_report.assert_called_once()
 
 
+def test_reconciler_retains_authorization_when_pricing_is_incomplete():
+    credits = MagicMock()
+    segment = {
+        "kind": "chat",
+        "model": "openai/gpt-oss-120b",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        "source": "openrouter",
+        "metadata": {
+            "provider": "openrouter",
+            "upstream_provider": "DeepInfra",
+        },
+    }
+    credits.list_unsettled_ai_operations.return_value = [_operation(segment, authorized=20)]
+    admin_report = MagicMock()
+    credits.is_configured.return_value = True
+    reconciler = AIBillingReconciler(
+        credits=credits,
+        admin_report=admin_report,
+        retry_window_seconds=60,
+        stale_seconds=30,
+    )
+
+    result = reconciler.run_once()
+
+    assert result == {"settled": 0, "pending": 0, "unresolved": 1}
+    settlement = credits.settle_ai_operation_once.call_args.kwargs
+    assert settlement["actual_credit_units"] == 20
+    assert settlement["metadata"]["pricing_complete"] is False
+    assert settlement["metadata"]["reconciliation_unresolved"] is True
+    assert settlement["metadata"]["reason"] == "reconciliation_incomplete_pricing"
+    admin_report.assert_called_once()
+
+
+def test_reconciler_continues_after_one_operation_fails():
+    credits = MagicMock()
+    failed = _operation(_chat_segment(interrupted=True))
+    recoverable = _operation(_chat_segment())
+    recoverable["operation_id"] = "operation-2"
+    recoverable["segments"] = []
+    credits.list_unsettled_ai_operations.return_value = [failed, recoverable]
+    credits.is_configured.return_value = True
+    admin_report = MagicMock()
+    reconciler = AIBillingReconciler(
+        credits=credits,
+        admin_report=admin_report,
+        get_generation=MagicMock(side_effect=RuntimeError("provider unavailable")),
+        retry_window_seconds=60,
+        stale_seconds=30,
+    )
+
+    result = reconciler.run_once()
+
+    assert result == {"settled": 1, "pending": 1, "unresolved": 0}
+    credits.settle_ai_operation_once.assert_called_once()
+    assert credits.settle_ai_operation_once.call_args.kwargs["operation_id"] == (
+        "operation-2"
+    )
+    assert admin_report.call_args.args[2] == {"operation_id": "operation-1"}
+
+
 def test_atomic_operation_settlement_is_idempotent():
     class SettlementCursor(_FakeCursor):
         def __init__(self):

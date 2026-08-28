@@ -480,6 +480,7 @@ class AIMessageBilling:
 
         try:
             self.redis_client.decr(key)
+            self.message_cap_counted = False
         except Exception as error:
             self.admin_reporter(
                 "falló rollback de limite creditless",
@@ -603,26 +604,30 @@ class AIMessageBilling:
 
         if self.user_id is None:
             return
-        metadata = segment.get("metadata")
+        durable_segment = dict(segment)
+        metadata = durable_segment.get("metadata")
         segment_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        if durable_segment.get("kind") != "web_search":
+            segment_metadata.pop("firecrawl_credits_used", None)
+            durable_segment["metadata"] = segment_metadata
         provider_id = (
             segment_metadata.get("provider_generation_id")
             or segment_metadata.get("provider_request_id")
         )
         if provider_id:
-            segment_id = f"{segment.get('source', 'provider')}:{provider_id}"
+            segment_id = f"{durable_segment.get('source', 'provider')}:{provider_id}"
         elif segment_metadata.get("tool_rounds"):
             segment_id = ":".join(
                 (
-                    str(segment.get("source") or "provider"),
-                    str(segment.get("kind") or "unknown"),
-                    str(segment.get("model") or "unknown"),
+                    str(durable_segment.get("source") or "provider"),
+                    str(durable_segment.get("kind") or "unknown"),
+                    str(durable_segment.get("model") or "unknown"),
                     str(segment_metadata["tool_rounds"]),
                 )
             )
         else:
             encoded = json.dumps(
-                dict(segment),
+                durable_segment,
                 sort_keys=True,
                 ensure_ascii=True,
                 default=str,
@@ -636,7 +641,7 @@ class AIMessageBilling:
                 ),
                 operation_id=operation_id,
                 segment_id=segment_id,
-                segment=dict(segment),
+                segment=durable_segment,
             )
         except Exception as error:
             self.admin_reporter(

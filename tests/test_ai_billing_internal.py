@@ -344,6 +344,48 @@ def test_unresolved_operation_persists_every_segment_before_reconciliation():
     billing.credits_db_service.settle_ai_operation_once.assert_not_called()
 
 
+def test_durable_usage_does_not_duplicate_firecrawl_cost_on_model_segment():
+    billing = _build_billing_helper()
+    firecrawl_segment = {
+        "kind": "web_search",
+        "model": "",
+        "usage": {},
+        "source": "firecrawl",
+        "metadata": {
+            "provider": "firecrawl",
+            "tool_call_id": "search-1",
+            "web_search_requests": 1,
+            "firecrawl_credits_used": 2,
+        },
+    }
+    combined_segment = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.0001},
+        "source": "openrouter",
+        "metadata": {
+            "provider": "openrouter",
+            "provider_generation_id": "generation-1",
+            "web_search_requests": 1,
+            "firecrawl_credits_used": 2,
+        },
+    }
+
+    billing.record_provider_segment("operation-1", firecrawl_segment)
+    billing.record_provider_segment("operation-1", combined_segment)
+
+    persisted = [
+        call.kwargs["segment"]
+        for call in billing.credits_db_service.record_ai_provider_usage.call_args_list
+    ]
+    assert persisted[0] == firecrawl_segment
+    assert "firecrawl_credits_used" not in persisted[1]["metadata"]
+    assert (
+        calculate_billing_for_segments(persisted)["charged_credit_units"]
+        == (calculate_billing_for_segments([combined_segment])["charged_credit_units"])
+    )
+
+
 def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     billing = _build_billing_helper()
     billing.credits_db_service.charge_ai_credits.return_value = {
@@ -1598,6 +1640,28 @@ def test_refund_reserved_ai_credits_rolls_back_creditless_cap_for_chat_source():
 
     billing.refund_reserved_ai_credits(reservation, reason="ai_response_fallback")
 
+    mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
+
+
+def test_replacement_reservation_reclaims_refunded_message_cap():
+    mock_redis = MagicMock()
+    mock_redis.incr.return_value = 1
+    billing = _make_group_billing(limit=3, redis_client=mock_redis)
+
+    initial, initial_error = billing.reserve_ai_credits("ai_response_base", 10)
+    assert initial_error is None
+    assert initial is not None
+
+    billing.refund_reserved_ai_credits(initial, reason="replace_estimate")
+    replacement, replacement_error = billing.reserve_ai_credits(
+        "ai_response_measured",
+        20,
+    )
+
+    assert replacement_error is None
+    assert replacement is not None
+    assert replacement["message_cap_counted"] is True
+    assert mock_redis.incr.call_count == 2
     mock_redis.decr.assert_called_once_with("creditless_cap:-100:42")
 
 
