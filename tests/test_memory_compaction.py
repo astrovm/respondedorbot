@@ -45,7 +45,7 @@ def test_summary_model_uses_openrouter_reported_cost():
     assert segment["usage"]["cost"] == "0.00010442124"
 
 
-def test_summary_model_uses_static_model_price_when_upstream_cost_is_free():
+def test_summary_model_uses_reported_cost_when_upstream_cost_is_zero():
     from api.memory.summary import call_summary_model
 
     response = SimpleNamespace(
@@ -78,7 +78,7 @@ def test_summary_model_uses_static_model_price_when_upstream_cost_is_free():
         logger=MagicMock(),
     )
 
-    assert cost == 49
+    assert cost == 1
     assert segment is not None
     assert segment["metadata"]["service_tier"] == "default"
 

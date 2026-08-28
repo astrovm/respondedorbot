@@ -1109,7 +1109,7 @@ def test_calculate_billing_without_gateway_cost_uses_local():
     assert breakdown["model_breakdown"][0]["usd_micros"] == 17
 
 
-def test_zero_reported_gateway_cost_uses_static_model_rate():
+def test_zero_reported_openrouter_cost_is_incomplete():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -1128,9 +1128,9 @@ def test_zero_reported_gateway_cost_uses_static_model_rate():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 49
-    assert breakdown["pricing_complete"] is True
-    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
+    assert breakdown["raw_usd_micros"] == 0
+    assert breakdown["pricing_complete"] is False
+    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "missing"
 
 
 def test_submicro_provider_costs_are_summed_before_final_rounding():
@@ -1179,7 +1179,7 @@ def test_upstream_inference_cost_wins_over_discounted_gateway_cost():
     assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
 
 
-def test_free_upstream_cost_uses_static_model_rate():
+def test_zero_upstream_cost_uses_reported_gateway_cost():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -1199,8 +1199,8 @@ def test_free_upstream_cost_uses_static_model_rate():
         ]
     )
 
-    assert breakdown["raw_usd_micros_exact"] == "49"
-    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "published_rate"
+    assert breakdown["raw_usd_micros_exact"] == "1.000000"
+    assert breakdown["segment_breakdown"][0]["pricing_basis"] == "provider_reported"
 
 
 def test_internal_cache_is_authoritative_zero_cost():
@@ -1325,7 +1325,7 @@ def test_openrouter_local_fallback_without_current_endpoint_price_is_incomplete(
     assert breakdown["pricing_complete"] is False
 
 
-def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
+def test_openrouter_without_reported_cost_does_not_use_upstream_provider_rate():
     breakdown = calculate_billing_for_segments(
         [
             {
@@ -1340,7 +1340,8 @@ def test_openrouter_local_fallback_uses_routed_upstream_provider_rate():
         ]
     )
 
-    assert breakdown["raw_usd_micros"] == 450
+    assert breakdown["raw_usd_micros"] == 0
+    assert breakdown["pricing_complete"] is False
     assert breakdown["segment_breakdown"][0]["upstream_provider"] == "groq"
 
 

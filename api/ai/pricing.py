@@ -42,11 +42,6 @@ MODEL_PRICING_USD_MICROS: Dict[str, Dict[str, int]] = {
         "audio_input_per_million": 500_000,
         "output_per_million": 1_500_000,
     },
-    "deepseek/deepseek-v4-flash": {
-        "input_per_million": 90_000,
-        "cached_input_per_million": 18_000,
-        "output_per_million": 180_000,
-    },
     "deepseek/deepseek-v4-flash-0731": {
         "input_per_million": 35_000,
         "cached_input_per_million": 7_000,
@@ -259,10 +254,8 @@ def _calculate_model_token_cost(
     usage: Optional[Mapping[str, Any]],
     *,
     provider: str = "",
-    upstream_provider: str = "",
 ) -> Dict[str, Any]:
     normalized_provider = str(provider or "").strip().lower()
-    normalized_upstream = str(upstream_provider or "").strip().lower()
     if not usage:
         return {
             "model": model,
@@ -276,22 +269,29 @@ def _calculate_model_token_cost(
         }
 
     reported_cost = _reported_cost_usd_micros_exact(usage)
-    exact_provider_pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_upstream, model))
-    pricing = (
-        exact_provider_pricing
-        or PROVIDER_MODEL_PRICING_USD_MICROS.get((normalized_provider, model))
-        or MODEL_PRICING_USD_MICROS.get(model)
-    )
-    if not pricing:
-        exact_cost = (
-            reported_cost if reported_cost is not None and reported_cost > 0 else Decimal(0)
-        )
+    if reported_cost is not None and reported_cost > 0:
         return {
             "model": model,
-            "usd_micros": int(exact_cost.to_integral_value(rounding=ROUND_FLOOR)),
+            "usd_micros": int(reported_cost.to_integral_value(rounding=ROUND_FLOOR)),
             **_extract_token_usage(usage),
-            "_usd_micros_exact": exact_cost,
-            "_pricing_basis": "provider_reported" if exact_cost > 0 else "missing",
+            "_usd_micros_exact": reported_cost,
+            "_pricing_basis": "provider_reported",
+        }
+
+    # OpenRouter reports the completed request cost. If it does not, a local
+    # model price cannot identify the routed provider's actual rate.
+    pricing = None
+    if normalized_provider != "openrouter":
+        pricing = PROVIDER_MODEL_PRICING_USD_MICROS.get(
+            (normalized_provider, model)
+        ) or MODEL_PRICING_USD_MICROS.get(model)
+    if not pricing:
+        return {
+            "model": model,
+            "usd_micros": 0,
+            **_extract_token_usage(usage),
+            "_usd_micros_exact": Decimal(0),
+            "_pricing_basis": "missing",
         }
 
     tokens = _extract_token_usage(usage)
@@ -319,16 +319,12 @@ def _calculate_model_token_cost(
         * pricing.get("cache_write_per_million", pricing.get("input_per_million", 0))
         + tokens["output_tokens"] * pricing.get("output_per_million", 0)
     ) / Decimal(1_000_000)
-    pricing_basis = "published_rate"
-    if reported_cost is not None and reported_cost > 0:
-        usd_micros_exact = reported_cost
-        pricing_basis = "provider_reported"
     return {
         "model": model,
         "usd_micros": int(usd_micros_exact.to_integral_value(rounding=ROUND_FLOOR)),
         **tokens,
         "_usd_micros_exact": usd_micros_exact,
-        "_pricing_basis": pricing_basis,
+        "_pricing_basis": "published_rate",
     }
 
 
@@ -346,7 +342,6 @@ def _reported_cost_usd_micros_exact(
             return None
         if cost > 0:
             return cost
-        return None
 
     raw_cost = usage.get("cost")
     if raw_cost is not None:
@@ -464,7 +459,6 @@ def calculate_billing_for_segments(
             model,
             usage,
             provider=provider,
-            upstream_provider=upstream_provider,
         )
         exact_model_cost = model_cost.pop("_usd_micros_exact")
         pricing_basis = str(model_cost.pop("_pricing_basis"))
