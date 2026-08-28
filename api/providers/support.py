@@ -8,6 +8,7 @@ from logging import Logger
 from typing import Any
 
 from api.ai.pricing import AIUsageResult
+from api.billing.authorization import AI_SEGMENT_RECORDER_KEY
 
 
 def invoke_provider(
@@ -49,9 +50,11 @@ def append_billing_segment(
     result: AIUsageResult | None,
 ) -> None:
     if response_meta is not None and result is not None:
-        response_meta.setdefault("billing_segments", []).append(
-            result.billing_segment()
-        )
+        segment = result.billing_segment()
+        response_meta.setdefault("billing_segments", []).append(segment)
+        recorder = response_meta.get(AI_SEGMENT_RECORDER_KEY)
+        if callable(recorder):
+            recorder(segment)
 
 
 def log_groq_request_result(

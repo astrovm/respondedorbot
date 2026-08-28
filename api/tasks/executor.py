@@ -8,6 +8,7 @@ import re
 from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from api.billing.ai import AIMessageBilling
+from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
 from api.ai.pipeline import (
     clean_duplicate_response,
     remove_gordo_prefix,
@@ -110,7 +111,10 @@ class TaskExecutor:
             return False
 
         display = user_name
-        task_message = {"from": {"id": user_id}} if user_id else {}
+        task_message: dict[str, Any] = {
+            "message_id": task_id,
+            "from": {"id": user_id},
+        }
         billing = self._billing_factory(
             credits_db_service=self._credits_db_service,
             admin_reporter=self._admin_report,
@@ -135,7 +139,12 @@ class TaskExecutor:
         charge_meta, charge_error = billing.reserve_ai_credits(
             "task_ai",
             reserve_credits,
-            metadata={"task_id": task_id, "chat_id": chat_id, **reserve_meta},
+            metadata={
+                "operation_id": billing.operation_id("task_ai"),
+                "task_id": task_id,
+                "chat_id": chat_id,
+                **reserve_meta,
+            },
         )
         if charge_error:
             logger.info("task %s no credits, skipping: %s", task_id, charge_error)
@@ -150,16 +159,34 @@ class TaskExecutor:
             )
             return should_delete
 
+        authorizer = billing.create_authorizer([charge_meta])
+        response_meta[AI_COST_AUTHORIZER_KEY] = authorizer
+        response_meta[AI_SEGMENT_RECORDER_KEY] = authorizer.record_provider_segment
+
+        def settle_segments(segments: list[Mapping[str, Any]], reason: str) -> None:
+            if len(authorizer.reservations) == 1:
+                billing.settle_reserved_ai_credits(
+                    authorizer.reservations[0],
+                    segments,
+                    reason=reason,
+                )
+                return
+            billing.settle_reserved_ai_credits_batch(
+                authorizer.reservations,
+                segments,
+                reason=reason,
+            )
+
         def settle_usage_or_refund(reason: str) -> None:
             segments = list(response_meta.get("billing_segments") or [])
             if segments:
-                billing.settle_reserved_ai_credits(
-                    charge_meta,
+                settle_segments(
                     segments,
-                    reason=f"{reason}_provider_usage",
+                    f"{reason}_provider_usage",
                 )
                 return
-            billing.refund_reserved_ai_credits(charge_meta, reason=reason)
+            for reservation in authorizer.reservations:
+                billing.refund_reserved_ai_credits(reservation, reason=reason)
 
         fallback_retries = 0
         empty_retries = 0
@@ -218,11 +245,7 @@ class TaskExecutor:
                     settle_usage_or_refund("task_fallback")
                 else:
                     segments = list(response_meta.get("billing_segments") or [])
-                    billing.settle_reserved_ai_credits(
-                        charge_meta,
-                        segments,
-                        reason="task_success",
-                    )
+                    settle_segments(segments, "task_success")
                 return should_delete
 
             except Exception as e:

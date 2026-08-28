@@ -395,7 +395,8 @@ class PreparedMessage:
     resized_image_data: Optional[bytes] = None
     early_response: Optional[str] = None
     audio_duration_seconds: float = 0.0
-    image_charge_meta: Optional[Mapping[str, Any]] = None
+    media_charge_meta: Optional[Mapping[str, Any]] = None
+    media_billing_segments: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -898,7 +899,10 @@ def _process_audio_media(
         "transcribe",
         reserved_credits,
         reason="auto_audio_media",
-        metadata={"estimated_audio_seconds": estimated_duration},
+        metadata={
+            "operation_id": billing_helper.operation_id("ai_response"),
+            "estimated_audio_seconds": estimated_duration,
+        },
     )
     reserve_error_response = _media_reserve_error_response(
         prepared,
@@ -935,7 +939,10 @@ def _process_audio_media(
             reserved_credits=reserved_credits,
             required_credits=required_credits,
             reason="auto_audio_media",
-            metadata={"estimated_audio_seconds": duration},
+            metadata={
+                "operation_id": billing_helper.operation_id("ai_response"),
+                "estimated_audio_seconds": duration,
+            },
         )
         reserve_error_response = _media_reserve_error_response(
             prepared,
@@ -951,14 +958,11 @@ def _process_audio_media(
         audio_file_id,
         use_cache=False,
     )
-    _settle_media_result(
-        billing_helper,
-        media_charge_meta,
-        [billing_segment] if billing_segment else [],
-        bool(transcription),
-        settle_reason="auto_audio_media_success",
-        refund_reason="auto_audio_transcribe_failed",
-    )
+    if not transcription:
+        billing_helper.refund_reserved_ai_credits(
+            media_charge_meta,
+            reason="auto_audio_transcribe_failed",
+        )
     message_text = transcription or (
         deps._transcription_error_message(
             error,
@@ -971,6 +975,21 @@ def _process_audio_media(
         prepared,
         message_text=message_text,
         audio_duration_seconds=duration,
+        media_charge_meta=media_charge_meta if transcription else None,
+        media_billing_segments=(
+            (billing_segment,)
+            if billing_segment
+            else (
+                {
+                    "kind": "transcribe",
+                    "model": "",
+                    "source": "unknown",
+                    "metadata": {"missing_provider_usage": True},
+                },
+            )
+            if transcription
+            else ()
+        ),
     )
 
 
@@ -991,7 +1010,10 @@ def _process_photo_media(
         "vision",
         deps.estimate_image_context_reserve_credits(b"", image_prompt),
         reason="image_context_media",
-        metadata={"photo_file_id": prepared.photo_file_id},
+        metadata={
+            "operation_id": billing_helper.operation_id("ai_response"),
+            "photo_file_id": prepared.photo_file_id,
+        },
     )
     if reserve_error == "rate_limited":
         chat_id = str(cast(Mapping[str, Any], message.get("chat") or {}).get("id") or "")
@@ -1016,7 +1038,7 @@ def _process_photo_media(
             prepared,
             message_text=prepared.message_text or tr("media.photo_default"),
             resized_image_data=resized_image,
-            image_charge_meta=media_charge_meta,
+            media_charge_meta=media_charge_meta,
         )
 
     billing_helper.refund_reserved_ai_credits(

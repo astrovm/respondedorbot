@@ -1,6 +1,23 @@
 from tests.support import *
 
 
+class _Authorizer:
+    def __init__(self, reservations):
+        self.reservations = [item for item in reservations if item]
+
+    def __call__(self, *_args, **_kwargs):
+        return None
+
+    def record_provider_segment(self, _segment):
+        return None
+
+
+def _billing_mock():
+    billing = MagicMock()
+    billing.create_authorizer.side_effect = _Authorizer
+    return billing
+
+
 def test_run_conversation_rejects_before_history_or_prompt_preparation():
     from api.ai.service import AIConversationRequest, build_ai_service
     from api.bot.message_handler import PreparedMessage
@@ -22,7 +39,7 @@ def test_run_conversation_rejects_before_history_or_prompt_preparation():
         estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
 
     response = ai_service.run_conversation(
@@ -66,7 +83,7 @@ def test_run_summary_rejects_before_history_or_provider_checks():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary_command,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
 
     response = ai_service.run_summary_command_stream(
@@ -116,7 +133,7 @@ def test_run_summary_settles_from_streamed_provider_usage():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -174,7 +191,7 @@ def test_run_summary_settles_usage_when_delivery_fails_after_generation():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=stream_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -218,7 +235,7 @@ def test_run_summary_refunds_when_stream_provider_is_unavailable():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
         stream_summary_command=unavailable_summary,
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {"reserved_credit_units": 3, "usage_tag": "ai_response_base"}
     billing_helper.reserve_ai_credits.return_value = (reservation, None)
 
@@ -271,7 +288,7 @@ def test_run_conversation_settles_provider_rounds_before_local_fallback():
         estimate_ai_base_reserve_credits=MagicMock(return_value=(16, {})),
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     reservation = {
         "reserved_credit_units": 16,
         "source": "user",
@@ -328,7 +345,7 @@ def test_run_conversation_rechecks_full_context_before_model_call():
         estimate_ai_base_reserve_credits=estimator,
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     initial_reservation = {
         "reserved_credit_units": 2,
         "source": "user",
@@ -357,11 +374,11 @@ def test_run_conversation_rechecks_full_context_before_model_call():
     assert response == ("sin créditos para el contexto", False)
     assert billing_helper.reserve_ai_credits.call_count == 2
     assert billing_helper.reserve_ai_credits.call_args_list[1].args[:2] == (
-        "ai_response_base",
-        5,
+        "ai_response_context_extension",
+        3,
     )
     billing_helper.refund_reserved_ai_credits.assert_called_once_with(
-        initial_reservation, reason="ai_response_reserve_adjustment"
+        initial_reservation, reason="ai_response_reserve_adjustment_failed"
     )
     handle_ai_response.assert_not_called()
 
@@ -534,7 +551,7 @@ def test_run_conversation_schedules_compaction_after_answer_settlement():
         schedule_compaction=(schedule_compaction := MagicMock()),
     )
 
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
 
     ai_service.run_conversation(
@@ -581,7 +598,7 @@ def test_run_conversation_uses_fallback_metadata_not_response_text():
         estimate_image_context_reserve_credits=MagicMock(return_value=1),
     )
 
-    billing_helper = MagicMock()
+    billing_helper = _billing_mock()
     billing_helper.reserve_ai_credits.return_value = ({"reserved_credit_units": 1}, None)
 
     response_msg, handled = ai_service.run_conversation(

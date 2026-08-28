@@ -7,6 +7,21 @@ from unittest.mock import MagicMock
 from api.tasks.executor import TaskExecutor
 
 
+class _Authorizer:
+    def __init__(self, reservations):
+        self.reservations = [item for item in reservations if item]
+
+    def __call__(self, *_args, **_kwargs):
+        return None
+
+    def record_provider_segment(self, _segment):
+        return None
+
+
+def _configure_authorizer(billing: MagicMock) -> None:
+    billing.create_authorizer.side_effect = _Authorizer
+
+
 def _build_executor(
     *, ask_ai_return_value: str
 ) -> tuple[TaskExecutor, MagicMock, MagicMock, MagicMock]:
@@ -15,6 +30,7 @@ def _build_executor(
     admin_report = MagicMock()
     billing = MagicMock()
     billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+    _configure_authorizer(billing)
     billing_factory = MagicMock(return_value=billing)
     estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
@@ -235,6 +251,7 @@ class TestTaskExecutor:
         admin_report = MagicMock()
         billing = MagicMock()
         billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        _configure_authorizer(billing)
         billing_factory = MagicMock(return_value=billing)
         estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 
@@ -277,6 +294,7 @@ class TestTaskExecutor:
         admin_report = MagicMock()
         billing = MagicMock()
         billing.reserve_ai_credits.return_value = ({"reservation": "ok"}, None)
+        _configure_authorizer(billing)
         billing_factory = MagicMock(return_value=billing)
         estimate_ai_base_reserve_credits = MagicMock(return_value=(10, {}))
 

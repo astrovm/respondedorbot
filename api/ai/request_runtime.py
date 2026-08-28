@@ -6,7 +6,23 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from api.billing.authorization import (
+    AI_COST_AUTHORIZER_KEY,
+    AI_SEGMENT_RECORDER_KEY,
+    AIAuthorizationDenied,
+)
 from api.i18n import current_locale, tr
+
+
+def _copy_billing_context(
+    response_meta: dict[str, Any] | None,
+    tool_context: dict[str, Any],
+) -> None:
+    if response_meta is None:
+        return
+    for key in (AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY):
+        if key in response_meta:
+            tool_context[key] = response_meta[key]
 
 
 def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +208,7 @@ def ask_ai(
             task_mode=task_mode,
             enable_web_search=enable_web_search,
         )
+        _copy_billing_context(response_meta, tool_context)
 
         if image_data is not None:
             inject_image(messages, image_data, image_file_id, response_meta)
@@ -216,6 +233,10 @@ def ask_ai(
         if response_meta is not None:
             response_meta["ai_fallback"] = True
         return fallback(messages)
+    except AIAuthorizationDenied as error:
+        if response_meta is not None:
+            response_meta["authorization_denied"] = True
+        return str(error)
     except Exception as error:
         # A provider/config error should not make the Telegram handler crash.
         error_context = {
@@ -257,6 +278,7 @@ def ask_ai_stream(
         task_mode=False,
         enable_web_search=enable_web_search,
     )
+    _copy_billing_context(response_meta, tool_context)
     stream_kwargs: dict[str, Any] = {
         "enable_web_search": enable_web_search,
         "extra_tools": extra_tools,

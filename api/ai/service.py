@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
+from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
 from api.i18n import tr
 
 
@@ -102,7 +103,10 @@ class AIService:
                 request.prepared_message.resized_image_data,
                 image_prompt,
             ),
-            metadata={"photo_file_id": request.prepared_message.photo_file_id},
+            metadata={
+                "operation_id": request.billing_helper.operation_id("ai_response"),
+                "photo_file_id": request.prepared_message.photo_file_id,
+            },
         )
         if not media_charge_error:
             return media_charge_meta, None
@@ -131,6 +135,21 @@ class AIService:
             **reserve_meta,
         }
 
+    @staticmethod
+    def _start_billing_session(
+        request: AIConversationRequest,
+        reservations: List[Optional[Dict[str, Any]]],
+        initial_segments: List[Mapping[str, Any]],
+    ) -> tuple[Any, Dict[str, Any]]:
+        session = request.billing_helper.create_authorizer(reservations)
+        for segment in initial_segments:
+            session.record_provider_segment(segment)
+        return session, {
+            AI_COST_AUTHORIZER_KEY: session,
+            AI_SEGMENT_RECORDER_KEY: session.record_provider_segment,
+            "billing_segments": initial_segments,
+        }
+
     def run_conversation(
         self,
         request: AIConversationRequest,
@@ -144,10 +163,11 @@ class AIService:
 
         admission_messages = [{"role": "user", "content": request.prompt_text}]
         media_charge_meta: Optional[Dict[str, Any]] = (
-            dict(request.prepared_message.image_charge_meta)
-            if getattr(request.prepared_message, "image_charge_meta", None)
+            dict(request.prepared_message.media_charge_meta)
+            if getattr(request.prepared_message, "media_charge_meta", None)
             else None
         )
+        media_billing_segments = list(request.prepared_message.media_billing_segments)
         main_reserve_credits, reserve_meta = self.estimate_ai_base_reserve_credits(
             admission_messages,
             extra_input_tokens=(
@@ -159,6 +179,7 @@ class AIService:
             "ai_response_base",
             main_reserve_credits,
             metadata={
+                "operation_id": request.billing_helper.operation_id("ai_response"),
                 "estimated_prompt_messages": len(admission_messages),
                 **reserve_meta,
             },
@@ -194,16 +215,21 @@ class AIService:
             request,
             ai_messages,
         )
+        context_charge_meta: Optional[Dict[str, Any]] = None
         if full_reserve_credits > main_reserve_credits:
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta, reason="ai_response_reserve_adjustment"
-            )
-            base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
-                "ai_response_base",
-                full_reserve_credits,
-                metadata=full_reserve_meta,
+            context_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
+                "ai_response_context_extension",
+                full_reserve_credits - main_reserve_credits,
+                metadata={
+                    "operation_id": request.billing_helper.operation_id("ai_response"),
+                    **full_reserve_meta,
+                },
             )
             if base_charge_error:
+                request.billing_helper.refund_reserved_ai_credits(
+                    base_charge_meta,
+                    reason="ai_response_reserve_adjustment_failed",
+                )
                 self._refund_if_present(
                     request,
                     media_charge_meta,
@@ -218,7 +244,17 @@ class AIService:
         if image_error:
             return image_error
 
-        ai_response_meta: Dict[str, Any] = {}
+        settlement_reservations: List[Optional[Dict[str, Any]]] = [
+            base_charge_meta,
+            context_charge_meta,
+        ]
+        if media_charge_meta:
+            settlement_reservations.append(media_charge_meta)
+        authorizer, ai_response_meta = self._start_billing_session(
+            request,
+            settlement_reservations,
+            media_billing_segments,
+        )
         response_msg = self.handle_ai_response(
             request.chat_id,
             request.handler_func,
@@ -237,10 +273,10 @@ class AIService:
             reply_to_message_id=request.reply_to_message_id,
         )
 
+        ai_response_meta.pop(AI_COST_AUTHORIZER_KEY, None)
+        ai_response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
         billing_segments = list(ai_response_meta.get("billing_segments") or [])
-        settlement_reservations: List[Optional[Dict[str, Any]]] = [base_charge_meta]
-        if media_charge_meta:
-            settlement_reservations.append(media_charge_meta)
+        settlement_reservations = list(authorizer.reservations)
 
         if bool(ai_response_meta.get("ai_fallback")):
             if billing_segments:
@@ -289,7 +325,11 @@ class AIService:
         base_charge_meta, base_charge_error = request.billing_helper.reserve_ai_credits(
             "ai_response_base",
             main_reserve_credits,
-            metadata={"estimated_prompt_messages": 1, **reserve_meta},
+            metadata={
+                "operation_id": request.billing_helper.operation_id("summary"),
+                "estimated_prompt_messages": 1,
+                **reserve_meta,
+            },
         )
         if base_charge_error:
             return base_charge_error, None, True
@@ -301,7 +341,11 @@ class AIService:
             return self.handle_rate_limit(request.chat_id, request.message), None, True
 
         try:
-            response_meta: dict[str, Any] = {}
+            authorizer = request.billing_helper.create_authorizer([base_charge_meta])
+            response_meta: dict[str, Any] = {
+                AI_COST_AUTHORIZER_KEY: authorizer,
+                AI_SEGMENT_RECORDER_KEY: authorizer.record_provider_segment,
+            }
             token_iterator, pending_marker = self.stream_summary_command(
                 request.chat_id,
                 request.redis_client,
@@ -325,25 +369,31 @@ class AIService:
             billing_segments = list(response_meta.get("billing_segments") or [])
             if billing_segments:
                 request.billing_helper.settle_reserved_ai_credits_batch(
-                    [base_charge_meta],
+                    authorizer.reservations,
                     billing_segments,
                     reason="summary_stream_provider_usage_before_delivery_failure",
                 )
             else:
-                request.billing_helper.refund_reserved_ai_credits(
-                    base_charge_meta, reason="summary_stream_failed"
-                )
+                for reservation in authorizer.reservations:
+                    request.billing_helper.refund_reserved_ai_credits(
+                        reservation,
+                        reason="summary_stream_failed",
+                    )
             return tr("summary.error"), None, True
 
+        response_meta.pop(AI_COST_AUTHORIZER_KEY, None)
+        response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
+
         if response_meta.get("provider_unavailable"):
-            request.billing_helper.refund_reserved_ai_credits(
-                base_charge_meta,
-                reason="summary_provider_unavailable",
-            )
+            for reservation in authorizer.reservations:
+                request.billing_helper.refund_reserved_ai_credits(
+                    reservation,
+                    reason="summary_provider_unavailable",
+                )
             return final_text, pending_marker, False
 
         request.billing_helper.settle_reserved_ai_credits_batch(
-            [base_charge_meta],
+            authorizer.reservations,
             response_meta.get("billing_segments", []),
             reason="summary_command_stream_success",
         )
