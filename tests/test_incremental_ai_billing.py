@@ -54,6 +54,38 @@ def test_concurrent_duplicate_extension_is_reserved_once():
     )
 
 
+def test_separate_provider_invocations_extend_the_same_operation():
+    billing = MagicMock()
+    billing.reserve_ai_credits.return_value = (
+        {"source": "user", "reserved_credit_units": 10},
+        None,
+    )
+    authorizer = AICreditAuthorizer(
+        billing=billing,
+        operation_id="operation-1",
+        reservations=[{"source": "user", "reserved_credit_units": 10}],
+    )
+
+    authorizer(
+        "model",
+        10,
+        {"invocation_id": "first", "round": 1, "attempt": 1},
+    )
+    authorizer(
+        "model",
+        10,
+        {"invocation_id": "second", "round": 1, "attempt": 1},
+    )
+    authorizer(
+        "model",
+        10,
+        {"invocation_id": "second", "round": 1, "attempt": 1},
+    )
+
+    billing.reserve_ai_credits.assert_called_once()
+    assert len(authorizer.reservations) == 2
+
+
 def test_billing_session_keeps_the_initial_payer_for_extensions():
     db = MagicMock()
     db.is_configured.return_value = True

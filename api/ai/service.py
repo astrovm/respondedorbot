@@ -43,6 +43,25 @@ class AIService:
         if reservation:
             request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
 
+    @staticmethod
+    def _settle_incurred_media(
+        request: AIConversationRequest,
+        reservation: Optional[Dict[str, Any]],
+        billing_segments: List[Mapping[str, Any]],
+        *,
+        reason: str,
+    ) -> None:
+        if not reservation:
+            return
+        if billing_segments:
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                [reservation],
+                billing_segments,
+                reason=reason,
+            )
+            return
+        request.billing_helper.refund_reserved_ai_credits(reservation, reason=reason)
+
     def _prepare_conversation_messages(
         self, request: AIConversationRequest
     ) -> Tuple[List[Dict[str, Any]], Any]:
@@ -185,9 +204,10 @@ class AIService:
             },
         )
         if base_charge_error:
-            self._refund_if_present(
+            self._settle_incurred_media(
                 request,
                 media_charge_meta,
+                media_billing_segments,
                 reason="ai_response_base_reserve_failed",
             )
             return ("ok", False) if request.is_spontaneous else (base_charge_error, False)
@@ -196,7 +216,12 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="chat_provider_unavailable"
             )
-            self._refund_if_present(request, media_charge_meta, reason="chat_provider_unavailable")
+            self._settle_incurred_media(
+                request,
+                media_charge_meta,
+                media_billing_segments,
+                reason="chat_provider_unavailable",
+            )
             rate_limit_msg = self.handle_rate_limit(request.chat_id, request.message)
             return ("ok", False) if request.is_spontaneous else (rate_limit_msg, False)
 
@@ -206,8 +231,11 @@ class AIService:
             request.billing_helper.refund_reserved_ai_credits(
                 base_charge_meta, reason="ai_request_preparation_failed"
             )
-            self._refund_if_present(
-                request, media_charge_meta, reason="ai_request_preparation_failed"
+            self._settle_incurred_media(
+                request,
+                media_charge_meta,
+                media_billing_segments,
+                reason="ai_request_preparation_failed",
             )
             raise
 
@@ -230,9 +258,10 @@ class AIService:
                     base_charge_meta,
                     reason="ai_response_reserve_adjustment_failed",
                 )
-                self._refund_if_present(
+                self._settle_incurred_media(
                     request,
                     media_charge_meta,
+                    media_billing_segments,
                     reason="ai_response_reserve_adjustment_failed",
                 )
                 response = "ok" if request.is_spontaneous else base_charge_error

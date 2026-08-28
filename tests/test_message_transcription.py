@@ -500,6 +500,9 @@ def test_handle_msg_auto_audio_charges_media_credits(monkeypatch):
     mock_transcribe.assert_called_once_with("voice_123", use_cache=False)
     assert mock_charge.call_count == 2
     assert mock_charge.call_args_list[0].kwargs["amount"] == 7
+    persisted = mock_credits.record_ai_provider_usage.call_args.kwargs
+    assert persisted["operation_id"] == "88:123:1:ai_response"
+    assert persisted["segment"]["kind"] == "transcribe"
     mock_send_msg.assert_called_once()
 
 

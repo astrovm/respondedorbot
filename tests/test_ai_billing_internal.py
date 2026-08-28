@@ -307,6 +307,43 @@ def test_settle_reserved_ai_credits_refunds_successful_unused_reserve():
     billing.credits_db_service.record_ai_settlement_result.assert_called_once()
 
 
+def test_unresolved_operation_persists_every_segment_before_reconciliation():
+    billing = _build_billing_helper()
+    reservation = {
+        "reserved_credit_units": 20,
+        "chat_scope_id": None,
+        "source": "user",
+        "usage_tag": "ai_response_base",
+        "metadata": {"operation_id": "operation-1"},
+    }
+    pending = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "source": "openrouter",
+        "metadata": {
+            "provider_generation_id": "generation-pending",
+            "provider_usage_pending": True,
+        },
+    }
+    completed = {
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "source": "openrouter",
+        "usage": {"cost": 0.0001},
+        "metadata": {"provider_generation_id": "generation-complete"},
+    }
+
+    billing.settle_reserved_ai_credits_batch(
+        [reservation],
+        [pending, completed],
+        reason="ai_response_success",
+    )
+
+    persisted = billing.credits_db_service.record_ai_provider_usage.call_args_list
+    assert [call.kwargs["segment"] for call in persisted] == [pending, completed]
+    billing.credits_db_service.settle_ai_operation_once.assert_not_called()
+
+
 def test_settle_reserved_ai_credits_charges_extra_when_actual_exceeds_reserve():
     billing = _build_billing_helper()
     billing.credits_db_service.charge_ai_credits.return_value = {

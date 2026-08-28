@@ -43,7 +43,10 @@ def _needs_reconciliation(segment: Mapping[str, Any]) -> bool:
     return bool(
         segment.get("source") == "openrouter"
         and isinstance(metadata, Mapping)
-        and metadata.get("stream_interrupted")
+        and (
+            metadata.get("stream_interrupted")
+            or metadata.get("provider_usage_pending")
+        )
         and not (
             isinstance(usage, Mapping)
             and _positive_number(usage.get("cost"))
@@ -100,6 +103,7 @@ def _reconciled_segment(
     metadata.update(
         {
             "stream_interrupted": False,
+            "provider_usage_pending": False,
             "usage_reconciled": True,
             "upstream_provider": generation.get(
                 "provider_name", metadata.get("upstream_provider")

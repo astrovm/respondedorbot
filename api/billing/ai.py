@@ -666,6 +666,8 @@ class AIMessageBilling:
             return None, self.billing_charge_error_message
 
         if not charge_result.get("ok"):
+            if charge_result.get("reason") == "operation_settled":
+                return None, self.billing_charge_error_message
             return None, self._build_insufficient_credits_reply(charge_result)
 
         source = str(charge_result.get("source") or "user")
@@ -1581,6 +1583,8 @@ class AIMessageBilling:
         if not operation_id or not callable(settle_once) or self.user_id is None:
             return False
         if has_unresolved_provider_usage(list(billing_segments)):
+            for segment in billing_segments:
+                self.record_provider_segment(operation_id, segment)
             return True
 
         batch = self._build_batch_reservation([dict(item) for item in reservations])

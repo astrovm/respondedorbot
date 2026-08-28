@@ -111,6 +111,7 @@ class OpenRouterProvider(StreamingAIProvider):
         messages: List[Dict[str, Any]],
         tool_context: Dict[str, Any],
         round_idx: int,
+        invocation_id: str,
     ) -> None:
         self._runtime.authorize_model_request(
             system_message=system_message,
@@ -118,6 +119,7 @@ class OpenRouterProvider(StreamingAIProvider):
             tool_context=tool_context,
             round_idx=round_idx,
             attempt=0,
+            invocation_id=invocation_id,
         )
 
     def _stream_web_metadata(
@@ -171,7 +173,7 @@ class OpenRouterProvider(StreamingAIProvider):
 
         output_token_limit = chat_output_token_limit(self._primary_model)
         current_messages = list(messages)
-        runtime_tool_context = dict(tool_context or {})
+        runtime_tool_context, invocation_id = self._runtime.new_invocation(tool_context)
         remaining_web_search_uses = self._runtime._configured_web_search_max_uses(enable_web_search)
         total_web_search_requests = 0
         possible_pseudo_tools = self._extra_tool_names(extra_tools)
@@ -184,6 +186,7 @@ class OpenRouterProvider(StreamingAIProvider):
                     current_messages,
                     runtime_tool_context,
                     round_idx,
+                    invocation_id,
                 )
                 request_kwargs = self._build_stream_request(
                     system_message,

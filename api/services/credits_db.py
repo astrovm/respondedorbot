@@ -615,7 +615,9 @@ def charge_ai_credits(
     """
 
     charge_amount = int(amount)
+    normalized_event_type = str(event_type or "ai_charge")
     metadata_dict = dict(metadata or {})
+    operation_id = str(metadata_dict.get("operation_id") or "").strip()
     normalized_source: Optional[ScopeType] = (
         "chat" if source == "chat" else "user" if source == "user" else None
     )
@@ -639,7 +641,7 @@ def charge_ai_credits(
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (int(user_id), str(event_type or "ai_charge"), normalized_key),
+                (int(user_id), normalized_event_type, normalized_key),
             )
             existing = cur.fetchone()
             if existing is not None:
@@ -648,6 +650,31 @@ def charge_ai_credits(
                     "applied": False,
                     "source": str(existing[1] or "user"),
                     "amount": max(0, -int(existing[0] or 0)),
+                    "user_balance": user_balance,
+                    "chat_balance": chat_balance,
+                    "user_balance_credit_units": user_balance,
+                    "chat_balance_credit_units": chat_balance,
+                }
+
+        if normalized_event_type == "ai_reserve" and operation_id:
+            cur.execute(
+                """
+                SELECT 1
+                FROM credit_ledger
+                WHERE user_id = %s
+                  AND event_type = 'ai_settlement_result'
+                  AND metadata->>'operation_id' = %s
+                LIMIT 1
+                """,
+                (int(user_id), operation_id),
+            )
+            if cur.fetchone() is not None:
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "reason": "operation_settled",
+                    "source": None,
+                    "amount": 0,
                     "user_balance": user_balance,
                     "chat_balance": chat_balance,
                     "user_balance_credit_units": user_balance,
@@ -670,7 +697,7 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_charge"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id) if chat_id is not None else None,
@@ -709,7 +736,7 @@ def charge_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_charge"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id),

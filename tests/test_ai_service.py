@@ -65,6 +65,66 @@ def test_run_conversation_rejects_before_history_or_prompt_preparation():
     handle_ai_response.assert_not_called()
 
 
+def test_run_conversation_settles_transcription_when_base_reserve_fails():
+    from api.ai.service import AIConversationRequest, build_ai_service
+    from api.bot.message_handler import PreparedMessage
+
+    segment = {
+        "kind": "transcribe",
+        "model": "whisper-large-v3",
+        "audio_seconds": 10,
+        "source": "groq",
+    }
+    media_reservation = {
+        "reserved_credit_units": 8,
+        "source": "user",
+        "usage_tag": "auto_audio_media",
+    }
+    ai_service = build_ai_service(
+        credits_db_service=MagicMock(is_configured=MagicMock(return_value=True)),
+        get_chat_history=MagicMock(),
+        prepare_chat_memory=MagicMock(),
+        build_ai_messages=MagicMock(),
+        check_provider_available=MagicMock(),
+        has_openrouter_fallback=MagicMock(),
+        handle_rate_limit=MagicMock(),
+        handle_ai_response=MagicMock(),
+        estimate_ai_base_reserve_credits=MagicMock(return_value=(3, {})),
+        estimate_image_context_reserve_credits=MagicMock(return_value=1),
+    )
+    billing_helper = _billing_mock()
+    billing_helper.reserve_ai_credits.return_value = (None, "sin créditos")
+
+    response = ai_service.run_conversation(
+        AIConversationRequest(
+            chat_id="900",
+            message={"chat": {"id": 900, "type": "private"}},
+            user_id=10,
+            prepared_message=PreparedMessage(
+                "transcripción",
+                None,
+                "audio-1",
+                media_charge_meta=media_reservation,
+                media_billing_segments=(segment,),
+            ),
+            billing_helper=billing_helper,
+            prompt_text="transcripción",
+            reply_context_text=None,
+            user_identity="10",
+            handler_func=lambda: None,
+            redis_client=MagicMock(),
+        )
+    )
+
+    assert response == ("sin créditos", False)
+    billing_helper.settle_reserved_ai_credits_batch.assert_called_once_with(
+        [media_reservation],
+        [segment],
+        reason="ai_response_base_reserve_failed",
+    )
+    billing_helper.refund_reserved_ai_credits.assert_not_called()
+
+
 def test_run_summary_rejects_before_history_or_provider_checks():
     from api.ai.service import SummaryCommandRequest, build_ai_service
 

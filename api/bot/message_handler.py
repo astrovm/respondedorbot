@@ -963,6 +963,19 @@ def _process_audio_media(
             media_charge_meta,
             reason="auto_audio_transcribe_failed",
         )
+    media_billing_segments: tuple[Mapping[str, Any], ...] = ()
+    if transcription:
+        segment = billing_segment or {
+            "kind": "transcribe",
+            "model": "",
+            "source": "unknown",
+            "metadata": {"missing_provider_usage": True},
+        }
+        billing_helper.record_provider_segment(
+            billing_helper.operation_id("ai_response"),
+            segment,
+        )
+        media_billing_segments = (segment,)
     message_text = transcription or (
         deps._transcription_error_message(
             error,
@@ -976,20 +989,7 @@ def _process_audio_media(
         message_text=message_text,
         audio_duration_seconds=duration,
         media_charge_meta=media_charge_meta if transcription else None,
-        media_billing_segments=(
-            (billing_segment,)
-            if billing_segment
-            else (
-                {
-                    "kind": "transcribe",
-                    "model": "",
-                    "source": "unknown",
-                    "metadata": {"missing_provider_usage": True},
-                },
-            )
-            if transcription
-            else ()
-        ),
+        media_billing_segments=media_billing_segments,
     )
 
 

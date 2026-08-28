@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
+from uuid import uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
@@ -132,6 +133,7 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
         attempt: int,
+        invocation_id: Optional[str] = None,
     ) -> None:
         """Authorize one model request before it reaches the provider."""
 
@@ -143,8 +145,20 @@ class ProviderRuntime:
                 messages=messages,
                 model=self._deps.primary_model,
             ),
-            metadata={"round": round_idx + 1, "attempt": attempt + 1},
+            metadata={
+                "invocation_id": str(invocation_id or "legacy"),
+                "round": round_idx + 1,
+                "attempt": attempt + 1,
+            },
         )
+
+    @staticmethod
+    def new_invocation(
+        tool_context: Optional[Mapping[str, Any]],
+    ) -> tuple[Dict[str, Any], str]:
+        """Return the context and identity for one provider invocation."""
+
+        return dict(tool_context or {}), uuid4().hex
 
     def _add_firecrawl_credits(
         self,
@@ -165,7 +179,7 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]] = None,
         on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
     ) -> Optional[AIUsageResult]:
-        runtime_tool_context = dict(tool_context or {})
+        runtime_tool_context, invocation_id = self.new_invocation(tool_context)
         log_context = dict(runtime_tool_context)
         log_context["model"] = self._deps.primary_model
         logger.info(
@@ -181,6 +195,7 @@ class ProviderRuntime:
             extra_tools=extra_tools,
             tool_context=runtime_tool_context,
             on_usage_result=on_usage_result,
+            invocation_id=invocation_id,
         )
 
     def _run_chat_completion(
@@ -194,6 +209,8 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
         web_search_max_uses: Optional[int] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[Any]:
         """Build request, retry on transient errors, and return the response."""
         request_kwargs: Dict[str, Any] = {
@@ -220,6 +237,7 @@ class ProviderRuntime:
                         tool_context=tool_context,
                         round_idx=round_idx,
                         attempt=attempt,
+                        invocation_id=invocation_id,
                     )
                     if attempt:
                         self._deps.increment_request_count()
@@ -258,6 +276,14 @@ class ProviderRuntime:
                     )
                     and attempt < _MAX_RETRIES - 1
                 ):
+                    self._record_retryable_response(
+                        response,
+                        choices[0],
+                        finish_reason,
+                        round_idx,
+                        tool_context,
+                        on_usage_result,
+                    )
                     wait = 2**attempt
                     retry_context = dict(tool_context or {})
                     retry_context.update(
@@ -303,6 +329,31 @@ class ProviderRuntime:
             )
             return None
         return None
+
+    def _record_retryable_response(
+        self,
+        response: Any,
+        choice: Any,
+        finish_reason: Any,
+        round_idx: int,
+        tool_context: Optional[Dict[str, Any]],
+        on_usage_result: Optional[Callable[[AIUsageResult], None]],
+    ) -> None:
+        """Persist a completed response whose usage may arrive asynchronously."""
+
+        result = self._build_round_result(
+            response,
+            getattr(choice, "message", None),
+            round_idx,
+            metadata={
+                "provider_usage_pending": True,
+                "retryable_finish_reason": finish_reason,
+            },
+        )
+        recorder = (tool_context or {}).get(AI_SEGMENT_RECORDER_KEY)
+        if callable(recorder):
+            recorder(result.billing_segment())
+        self._emit_usage_result(on_usage_result, result)
 
     def _is_retryable_finish_response(
         self,
@@ -433,6 +484,8 @@ class ProviderRuntime:
         tool_context: Optional[Dict[str, Any]],
         round_idx: int,
         web_search_max_uses: Optional[int] = None,
+        on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[tuple[Any, Any]]:
         response = self._run_chat_completion(
             client=client,
@@ -443,6 +496,8 @@ class ProviderRuntime:
             tool_context=tool_context,
             round_idx=round_idx,
             web_search_max_uses=web_search_max_uses,
+            on_usage_result=on_usage_result,
+            invocation_id=invocation_id,
         )
         choices = getattr(response, "choices", None) if response is not None else None
         return (response, choices[0]) if choices else None
@@ -1150,6 +1205,7 @@ class ProviderRuntime:
         extra_tools: Optional[List[Dict[str, Any]]],
         tool_context: Optional[Dict[str, Any]],
         on_usage_result: Optional[Callable[[AIUsageResult], None]] = None,
+        invocation_id: Optional[str] = None,
     ) -> Optional[AIUsageResult]:
         client = self._deps.get_client()
         if client is None:
@@ -1168,6 +1224,8 @@ class ProviderRuntime:
                 tool_context=tool_context,
                 round_idx=round_idx,
                 web_search_max_uses=remaining_web_search_uses,
+                on_usage_result=on_usage_result,
+                invocation_id=invocation_id,
             )
             if round_response is None:
                 return None
