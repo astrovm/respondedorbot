@@ -39,12 +39,15 @@ AI_LEDGER_EVENT_TYPES = (
     "ai_settlement_charge",
     "ai_settlement_debt",
     "ai_settlement_result",
+    "ai_reconciliation_correction",
     "memory_compaction_settlement",
 )
 CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_002
 CREDIT_UNITS_MIGRATION_NAME = "credit_amounts_scaled_to_tenths_v1"
 CREDIT_HUNDREDTHS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_003
 CREDIT_HUNDREDTHS_MIGRATION_NAME = "credit_amounts_scaled_to_hundredths_v2"
+COMPACTION_REPAIR_ADVISORY_LOCK_KEY = 48_610_004
+COMPACTION_REPAIR_MIGRATION_NAME = "repair_duplicate_compaction_refunds_v1"
 _LEGACY_WHOLE_TO_TENTHS_FACTOR = 10
 _TENTHS_TO_HUNDREDTHS_FACTOR = CREDIT_SCALE // 10
 _LEGACY_METADATA_CREDIT_KEYS = (
@@ -263,6 +266,7 @@ def ensure_schema() -> None:
                     """)
                 _migrate_credit_amounts_to_units(cur)
                 _migrate_credit_amounts_to_hundredths(cur)
+                _repair_duplicate_compaction_refunds(cur)
             conn.commit()
 
         _SCHEMA_READY = True
@@ -373,6 +377,104 @@ def _migrate_credit_amounts_to_hundredths(cur: Any) -> bool:
         ),
     )
     return True
+
+
+def _repair_duplicate_compaction_refunds(cur: Any) -> int:
+    """Reverse refunds created after an already-settled legacy compaction."""
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s)",
+        (COMPACTION_REPAIR_ADVISORY_LOCK_KEY,),
+    )
+    cur.execute(
+        """
+        INSERT INTO credit_schema_migrations (name)
+        VALUES (%s)
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name
+        """,
+        (COMPACTION_REPAIR_MIGRATION_NAME,),
+    )
+    if cur.fetchone() is None:
+        return 0
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (refund.id)
+            refund.id,
+            refund.user_id,
+            refund.chat_id,
+            refund.amount,
+            refund.metadata->>'source',
+            refund.metadata->>'operation_id',
+            refund.metadata->>'usage_tag'
+        FROM credit_ledger AS refund
+        JOIN credit_ledger AS result
+          ON result.user_id = refund.user_id
+         AND result.event_type = 'ai_settlement_result'
+         AND result.metadata->>'operation_id'
+             = refund.metadata->>'operation_id'
+        JOIN credit_ledger AS legacy
+          ON legacy.user_id = refund.user_id
+         AND legacy.event_type = 'memory_compaction_settlement'
+         AND legacy.metadata->>'usage_tag' = refund.metadata->>'usage_tag'
+         AND legacy.id < result.id
+        WHERE refund.event_type = 'ai_refund'
+          AND refund.amount > 0
+          AND refund.metadata->>'reason' = 'unused_stale_reservation'
+          AND refund.metadata->>'usage_tag' LIKE 'memory_compaction:%%'
+          AND COALESCE(result.metadata->>'settled_credit_units', '0') = '0'
+        ORDER BY refund.id, legacy.id DESC
+        """
+    )
+    repairs = cur.fetchall() or []
+    for row in repairs:
+        refund_id = int(row[0])
+        user_id = int(row[1])
+        chat_id = int(row[2]) if row[2] is not None else None
+        amount = int(row[3])
+        source: ScopeType = "chat" if row[4] == "chat" else "user"
+        operation_id = str(row[5] or "")
+        usage_tag = str(row[6] or "")
+        user_balance, chat_balance = _get_user_and_chat_balances_for_update(
+            cur, user_id, chat_id
+        )
+        if source == "chat":
+            if chat_id is None:
+                raise CreditsDBError("chat-funded correction requires chat_id")
+            _set_balance(cur, "chat", chat_id, chat_balance - amount)
+        else:
+            _set_balance(cur, "user", user_id, user_balance - amount)
+        cur.execute(
+            """
+            INSERT INTO credit_ledger (
+                event_type,
+                actor_user_id,
+                user_id,
+                chat_id,
+                amount,
+                metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                "ai_reconciliation_correction",
+                user_id,
+                user_id,
+                chat_id,
+                -amount,
+                json.dumps(
+                    {
+                        "source": source,
+                        "operation_id": operation_id,
+                        "usage_tag": usage_tag,
+                        "reversed_refund_ledger_id": refund_id,
+                        "reason": "duplicate_compaction_refund",
+                    }
+                ),
+            ),
+        )
+    return len(repairs)
 
 
 def _ensure_account(cur: Any, scope_type: ScopeType, scope_id: int) -> None:
@@ -929,9 +1031,16 @@ def list_unsettled_ai_operations(limit: int = 100) -> List[Dict[str, Any]]:
                   AND NOT EXISTS (
                       SELECT 1
                       FROM credit_ledger AS settled
-                      WHERE settled.event_type = 'ai_settlement_result'
-                        AND settled.metadata->>'operation_id'
-                            = ledger.metadata->>'operation_id'
+                      WHERE (
+                          settled.event_type = 'ai_settlement_result'
+                          AND settled.metadata->>'operation_id'
+                              = ledger.metadata->>'operation_id'
+                      ) OR (
+                          settled.event_type = 'memory_compaction_settlement'
+                          AND settled.user_id = ledger.user_id
+                          AND settled.metadata->>'usage_tag'
+                              = ledger.metadata->>'usage_tag'
+                      )
                   )
                 GROUP BY ledger.metadata->>'operation_id'
             )
@@ -1403,6 +1512,28 @@ def settle_ai_reservation_once(
     actual = max(0, int(actual_credit_units or 0))
     normalized_source: ScopeType = "chat" if source == "chat" else "user"
     metadata_dict = dict(metadata or {})
+    operation_id = str(metadata_dict.get("operation_id") or "").strip()
+
+    if operation_id:
+        payer_breakdown = (
+            [{"scope": normalized_source, "credit_units": actual}]
+            if actual > 0
+            else []
+        )
+        return settle_ai_operation_once(
+            user_id=user_id,
+            chat_id=chat_id,
+            operation_id=operation_id,
+            actual_credit_units=actual,
+            metadata={
+                **metadata_dict,
+                "usage_tag": str(usage_tag),
+                "reserved_credit_units": reserved,
+                "actual_credit_units": actual,
+                "adjustment_credit_units": reserved - actual,
+                "payer_breakdown": payer_breakdown,
+            },
+        )
 
     if normalized_source == "chat" and chat_id is None:
         raise CreditsDBError("chat-funded settlement requires chat_id")
@@ -1833,6 +1964,17 @@ def list_user_ai_charge_page(
                         'ai_settlement_result',
                         'memory_compaction_settlement'
                     )
+                      AND NOT (
+                          event_type = 'ai_settlement_result'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM user_ledger AS legacy
+                              WHERE legacy.event_type
+                                  = 'memory_compaction_settlement'
+                                AND legacy.metadata->>'usage_tag'
+                                    = user_ledger.metadata->>'usage_tag'
+                          )
+                      )
                 ),
                 pending_reservations AS (
                     SELECT DISTINCT ON (metadata->>'settlement_id')

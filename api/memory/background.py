@@ -36,6 +36,12 @@ def _reservation_settlement_id(reservation: Mapping[str, Any]) -> str:
     return str(reservation.get("settlement_id") or metadata_id or "")
 
 
+def _reservation_operation_id(reservation: Mapping[str, Any]) -> str:
+    metadata = reservation.get("metadata")
+    metadata_id = metadata.get("operation_id") if isinstance(metadata, Mapping) else None
+    return str(reservation.get("operation_id") or metadata_id or "")
+
+
 @dataclass
 class CompactionJob:
     chat_id: str
@@ -70,6 +76,7 @@ class DurableCompactionQueue:
         save_result: Callable[[Any, str, str, str], None],
         estimate_reserve: Callable[[CompactionPlan], int],
         settle_reservation: Callable[..., Mapping[str, Any]],
+        record_provider_usage: Callable[..., bool],
         logger: Any,
         admin_report: Callable[..., Any] | None = None,
     ) -> None:
@@ -80,6 +87,7 @@ class DurableCompactionQueue:
         self._save_result = save_result
         self._estimate_reserve = estimate_reserve
         self._settle_reservation = settle_reservation
+        self._record_provider_usage = record_provider_usage
         self._logger = logger
         self._admin_report = admin_report
         self._stop = threading.Event()
@@ -142,7 +150,12 @@ class DurableCompactionQueue:
                 reserved_credit_units=int(reservation.get("reserved_credit_units") or 0),
                 actual_credit_units=0,
                 usage_tag=str(reservation.get("usage_tag") or usage_tag),
-                metadata={"reason": "memory_compaction_enqueue_failed"},
+                metadata={
+                    "reason": "memory_compaction_enqueue_failed",
+                    "operation_id": _reservation_operation_id(reservation),
+                    "settlement_id": _reservation_settlement_id(reservation),
+                    "credit_scale": CREDIT_SCALE,
+                },
             )
         return stored
 
@@ -241,6 +254,7 @@ class DurableCompactionQueue:
                 json.dumps(asdict(job), ensure_ascii=False),
             )
 
+        self._persist_provider_usage(job)
         self._save_result(
             client,
             job.chat_id,
@@ -320,24 +334,46 @@ class DurableCompactionQueue:
                     "billing_segment": job.result_billing_segment,
                 },
             )
+        usage_tag = str(job.reservation.get("usage_tag") or "")
+        operation_id = self._persist_provider_usage(job)
+        pricing_breakdown = billing or {}
         self._settle_reservation(
             user_id=job.user_id,
             chat_id=job.reservation.get("chat_scope_id"),
             source=str(job.reservation.get("source") or "user"),
             reserved_credit_units=reserved,
             actual_credit_units=actual,
-            usage_tag=str(job.reservation.get("usage_tag") or ""),
+            usage_tag=usage_tag,
             metadata={
                 "reason": reason,
                 "message_id": job.message_id,
                 "settlement_id": _reservation_settlement_id(job.reservation),
+                "operation_id": operation_id,
                 "credit_scale": CREDIT_SCALE,
                 "billing_segments": [job.result_billing_segment]
                 if job.result_billing_segment is not None
                 else [],
-                "pricing_breakdown": billing or {},
+                "pricing_version": pricing_breakdown.get("pricing_version"),
+                "raw_usd_micros": pricing_breakdown.get("raw_usd_micros", 0),
+                "markup_multiplier": pricing_breakdown.get("markup_multiplier"),
+                "model_breakdown": pricing_breakdown.get("model_breakdown", []),
+                "tool_breakdown": pricing_breakdown.get("tool_breakdown", []),
+                "segment_breakdown": pricing_breakdown.get("segment_breakdown", []),
+                "pricing_complete": pricing_complete,
             },
         )
+
+    def _persist_provider_usage(self, job: CompactionJob) -> str:
+        operation_id = _reservation_operation_id(job.reservation)
+        if operation_id and job.result_billing_segment is not None:
+            self._record_provider_usage(
+                user_id=job.user_id,
+                chat_id=job.reservation.get("chat_scope_id"),
+                operation_id=operation_id,
+                segment_id=str(job.reservation.get("usage_tag") or ""),
+                segment=job.result_billing_segment,
+            )
+        return operation_id
 
     def _settle_invalid_job(self, decoded: Any, *, chat_id: str) -> bool:
         if not isinstance(decoded, Mapping):
@@ -364,6 +400,7 @@ class DurableCompactionQueue:
                     "reason": "memory_compaction_incompatible_job",
                     "chat_id": chat_id,
                     "settlement_id": _reservation_settlement_id(reservation),
+                    "operation_id": _reservation_operation_id(reservation),
                     "credit_scale": CREDIT_SCALE,
                 },
             )

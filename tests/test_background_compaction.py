@@ -41,7 +41,14 @@ class _FakeRedis:
         return int(self.values.pop(key, None) is not None)
 
 
-def _build_queue(redis_client, *, compact, save_result, settle_reservation):
+def _build_queue(
+    redis_client,
+    *,
+    compact,
+    save_result,
+    settle_reservation,
+    record_provider_usage=None,
+):
     from api.memory.background import DurableCompactionQueue
 
     return DurableCompactionQueue(
@@ -52,6 +59,7 @@ def _build_queue(redis_client, *, compact, save_result, settle_reservation):
         save_result=save_result,
         estimate_reserve=lambda _plan: 3,
         settle_reservation=settle_reservation,
+        record_provider_usage=record_provider_usage or MagicMock(return_value=True),
         logger=MagicMock(),
     )
 
@@ -69,6 +77,7 @@ def test_background_compaction_preserves_known_overage_when_model_cost_is_missin
         save_result=MagicMock(),
         estimate_reserve=MagicMock(),
         settle_reservation=settle_reservation,
+        record_provider_usage=MagicMock(return_value=True),
         logger=MagicMock(),
         admin_report=admin_report,
     )
@@ -111,11 +120,13 @@ def test_failed_compaction_settles_persisted_provider_usage():
 
     redis_client = _FakeRedis()
     settle_reservation = MagicMock(return_value={"applied": True})
+    record_provider_usage = MagicMock(return_value=True)
     queue = _build_queue(
         redis_client,
         compact=MagicMock(),
         save_result=MagicMock(),
         settle_reservation=settle_reservation,
+        record_provider_usage=record_provider_usage,
     )
     job = CompactionJob(
         chat_id="123",
@@ -128,6 +139,7 @@ def test_failed_compaction_settles_persisted_provider_usage():
             "credit_scale": 100,
             "source": "user",
             "usage_tag": "memory_compaction:123:m1",
+            "metadata": {"operation_id": "operation-1"},
         },
         user_id=42,
         message_id="99",
@@ -146,6 +158,16 @@ def test_failed_compaction_settles_persisted_provider_usage():
     queue._retry_or_refund(redis_client, job, RuntimeError("save failed"))
 
     assert settle_reservation.call_args.kwargs["actual_credit_units"] == 20
+    record_provider_usage.assert_called_once_with(
+        user_id=42,
+        chat_id=None,
+        operation_id="operation-1",
+        segment_id="memory_compaction:123:m1",
+        segment=job.result_billing_segment,
+    )
+    assert settle_reservation.call_args.kwargs["metadata"]["operation_id"] == (
+        "operation-1"
+    )
     assert redis_client.hgetall("memory:compaction:jobs") == {}
 
 
@@ -162,6 +184,7 @@ def test_obsolete_compaction_settles_persisted_provider_usage():
         save_result=MagicMock(),
         estimate_reserve=MagicMock(),
         settle_reservation=settle_reservation,
+        record_provider_usage=MagicMock(return_value=True),
         logger=MagicMock(),
     )
     job = CompactionJob(
