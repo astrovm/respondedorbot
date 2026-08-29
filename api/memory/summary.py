@@ -183,7 +183,11 @@ def compact_conversation(
             fallback_lines.append(f"{message.get('role', 'user')}: {content}")
     truncated = "\n".join(fallback_lines[:truncate_lines])
     fallback = f"[contexto anterior truncado: {truncated}]"
-    return (fallback, 0, billing_segment) if len(model_result) > 2 else (fallback, 0)
+    return (
+        (fallback, cost, billing_segment)
+        if len(model_result) > 2
+        else (fallback, cost)
+    )
 
 
 def build_summary_messages(

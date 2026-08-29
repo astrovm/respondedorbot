@@ -3,6 +3,41 @@ from types import SimpleNamespace
 from tests.support import *
 
 
+def test_compaction_uses_reasoning_model_output_limit():
+    from api.ai.pricing import REASONING_CHAT_OUTPUT_TOKEN_LIMIT
+
+    assert index.SUMMARY_MAX_TOKENS == REASONING_CHAT_OUTPUT_TOKEN_LIMIT == 8192
+    assert index.app_runtime.summary._deps.max_tokens == 8192
+
+
+def test_compaction_fallback_preserves_provider_cost_and_segment():
+    from api.memory.summary import compact_conversation
+
+    segment = {
+        "kind": "summary",
+        "text": "",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": 0.000337},
+        "source": "openrouter",
+    }
+
+    result = compact_conversation(
+        [{"role": "user", "content": "message to preserve"}],
+        None,
+        load_personality=lambda: "",
+        call_model=lambda _messages: (None, 337, segment),
+        sanitize_text=str,
+        max_summary_messages=200,
+        truncate_lines=25,
+    )
+
+    assert result == (
+        "[contexto anterior truncado: user: message to preserve]",
+        337,
+        segment,
+    )
+
+
 def test_summary_model_uses_openrouter_reported_cost():
     from api.memory.summary import call_summary_model
 

@@ -339,7 +339,7 @@ def make_chat_tz(offset: int = -3) -> timezone:
 
 PRIMARY_CHAT_MODEL = "deepseek/deepseek-v4-flash-0731"
 SUMMARY_MODEL = "deepseek/deepseek-v4-flash-0731"
-SUMMARY_MAX_TOKENS = 2048
+SUMMARY_MAX_TOKENS = chat_output_token_limit(SUMMARY_MODEL)
 COMPACTION_TIMEOUT_SECONDS = 600.0
 COMPACTION_THRESHOLD = 40
 COMPACTION_KEEP = 25
