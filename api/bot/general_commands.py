@@ -1,19 +1,34 @@
 from __future__ import annotations
 
+import json
+import logging
 import random
 import re
 import time
 import unicodedata
 from os import environ
-from typing import Any, Callable, cast
+from typing import Any, Callable, Mapping, Optional, Protocol, cast
 
 import emoji
 from pykakasi import kakasi
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import current_locale, tr
 
 KakasiFactory = Callable[[], Any]
 _kakasi = cast(KakasiFactory, kakasi)
+logger = logging.getLogger(__name__)
+
+
+class _RustBaseConverter(Protocol):
+    def convert_base(self, message_text: str) -> str: ...
+
+
+def _load_rust_base_converter() -> Optional[_RustBaseConverter]:
+    module = load_rust_bridge("RUST_BASE_CONVERSION_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBaseConverter, module)
 
 
 def gen_random(name: str) -> str:
@@ -48,7 +63,7 @@ def select_random(msg_text: str) -> str:
     return tr("random.invalid")
 
 
-def convert_base(msg_text: str) -> str:
+def _convert_base_python(msg_text: str) -> str:
     try:
         input_parts = msg_text.split(",")
         if len(input_parts) != 3:
@@ -90,6 +105,45 @@ def convert_base(msg_text: str) -> str:
         )
     except ValueError:
         return tr("convert_base.numbers")
+
+
+def _base_conversion_from_rust(raw_result: str) -> str:
+    result = json.loads(raw_result)
+    if not isinstance(result, Mapping):
+        raise ValueError("Rust base conversion result is not a mapping")
+    kind = result.get("kind")
+    if kind == "success":
+        return tr(
+            "convert_base.success",
+            number=str(result["number"]),
+            source=int(result["source"]),
+            result=str(result["result"]),
+            target=int(result["target"]),
+        )
+    if kind == "usage":
+        return tr("convert_base.usage")
+    if kind == "alphanumeric_required":
+        return tr("convert_base.alphanumeric")
+    if kind == "source_range":
+        return tr("convert_base.source_range", base=str(result["input"]))
+    if kind == "target_range":
+        return tr("convert_base.target_range", base=str(result["input"]))
+    if kind == "numbers_required":
+        return tr("convert_base.numbers")
+    raise ValueError("Rust base conversion result has an unknown kind")
+
+
+def convert_base(msg_text: str) -> str:
+    rust = _load_rust_base_converter()
+    if rust is not None:
+        try:
+            return _base_conversion_from_rust(rust.convert_base(msg_text))
+        except Exception as error:
+            logger.warning(
+                "Rust base conversion failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _convert_base_python(msg_text)
 
 
 def get_timestamp() -> str:

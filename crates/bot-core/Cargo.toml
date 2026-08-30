@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+num-bigint.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 

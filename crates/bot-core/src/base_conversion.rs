@@ -1,0 +1,178 @@
+//! Arbitrary-precision base conversion for the `/convertbase` command.
+
+use num_bigint::{BigInt, BigUint};
+
+/// A localized validation outcome or successful conversion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BaseConversion {
+    Success {
+        number: String,
+        source: u32,
+        result: String,
+        target: u32,
+    },
+    Usage,
+    AlphanumericRequired,
+    SourceRange {
+        input: String,
+    },
+    TargetRange {
+        input: String,
+    },
+    NumbersRequired,
+}
+
+/// Boundary incompatibility that should use the legacy implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnsupportedUnicodeInput;
+
+/// Parse and execute the legacy base-conversion command.
+pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInput> {
+    let parts: Vec<_> = input.split(',').collect();
+    if parts.len() != 3 {
+        return Ok(BaseConversion::Usage);
+    }
+    let number = parts[0].trim();
+    let source_input = parts[1].trim();
+    let target_input = parts[2].trim();
+    if !number.is_ascii() || !source_input.is_ascii() || !target_input.is_ascii() {
+        return Err(UnsupportedUnicodeInput);
+    }
+
+    let Some(source_integer) = BigInt::parse_bytes(source_input.as_bytes(), 10) else {
+        return Ok(BaseConversion::NumbersRequired);
+    };
+    let Some(target_integer) = BigInt::parse_bytes(target_input.as_bytes(), 10) else {
+        return Ok(BaseConversion::NumbersRequired);
+    };
+    if !number
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Ok(BaseConversion::AlphanumericRequired);
+    }
+
+    let minimum = BigInt::from(2_u8);
+    let maximum = BigInt::from(36_u8);
+    if source_integer < minimum || source_integer > maximum {
+        return Ok(BaseConversion::SourceRange {
+            input: source_input.to_owned(),
+        });
+    }
+    if target_integer < minimum || target_integer > maximum {
+        return Ok(BaseConversion::TargetRange {
+            input: target_input.to_owned(),
+        });
+    }
+    let Some(source) = source_integer.to_u32_digits().1.first().copied() else {
+        return Ok(BaseConversion::NumbersRequired);
+    };
+    let Some(target) = target_integer.to_u32_digits().1.first().copied() else {
+        return Ok(BaseConversion::NumbersRequired);
+    };
+
+    let mut value = BigUint::from(0_u8);
+    for character in number.chars() {
+        let Some(digit) = character.to_digit(36) else {
+            return Ok(BaseConversion::AlphanumericRequired);
+        };
+        value *= source;
+        value += digit;
+    }
+
+    let mut digits = Vec::new();
+    while value != BigUint::from(0_u8) {
+        let remainder = (&value % target)
+            .to_u32_digits()
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let Some(character) = char::from_digit(remainder, 36) else {
+            return Ok(BaseConversion::NumbersRequired);
+        };
+        digits.push(character.to_ascii_uppercase());
+        value /= target;
+    }
+    digits.reverse();
+
+    Ok(BaseConversion::Success {
+        number: number.to_owned(),
+        source,
+        result: digits.into_iter().collect(),
+        target,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BaseConversion, UnsupportedUnicodeInput, convert_base};
+
+    #[test]
+    fn converts_without_machine_integer_limits() {
+        assert_eq!(
+            convert_base("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, 16, 2"),
+            Ok(BaseConversion::Success {
+                number: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".to_owned(),
+                source: 16,
+                result: "1".repeat(128),
+                target: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_zero_as_an_empty_legacy_result() {
+        assert_eq!(
+            convert_base("0,2,10"),
+            Ok(BaseConversion::Success {
+                number: "0".to_owned(),
+                source: 2,
+                result: String::new(),
+                target: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_legacy_digit_outside_source_base_behavior() {
+        assert_eq!(
+            convert_base("2,2,10"),
+            Ok(BaseConversion::Success {
+                number: "2".to_owned(),
+                source: 2,
+                result: "2".to_owned(),
+                target: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn validates_structure_characters_and_ranges_in_order() {
+        assert_eq!(convert_base("101,2"), Ok(BaseConversion::Usage));
+        assert_eq!(
+            convert_base("101,base,10"),
+            Ok(BaseConversion::NumbersRequired)
+        );
+        assert_eq!(
+            convert_base("10!,2,10"),
+            Ok(BaseConversion::AlphanumericRequired)
+        );
+        assert_eq!(
+            convert_base("101,999999999999999999999999999,10"),
+            Ok(BaseConversion::SourceRange {
+                input: "999999999999999999999999999".to_owned()
+            })
+        );
+        assert_eq!(
+            convert_base("101,2,-3"),
+            Ok(BaseConversion::TargetRange {
+                input: "-3".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn asks_the_adapter_to_preserve_unicode_legacy_semantics() {
+        assert_eq!(convert_base("１２,10,2"), Err(UnsupportedUnicodeInput));
+    }
+}
