@@ -10,6 +10,7 @@ from api.ai import pipeline as ai_pipeline_module
 from api.ai import request_runtime as ai_request_runtime_module
 from api.ai import service as ai_service_module
 from api.billing import provider_usage as provider_usage_module
+from api.billing import reconciliation as billing_reconciliation_module
 from api.bot import streaming as bot_streaming_module
 from api.providers import errors as provider_errors_module
 from api.providers import base as provider_base_module
@@ -111,6 +112,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         provider_usage_module,
         "_load_rust_ai_usage_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        billing_reconciliation_module,
+        "_load_rust_openrouter_generation_adapter",
         lambda: None,
     )
     monkeypatch.setattr(

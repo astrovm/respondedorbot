@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+import json
 import os
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import Any, Protocol, cast
 
 import requests
 
 from api.ai.pricing import calculate_billing_for_segments
 from api.billing.provider_usage import provider_usage_needs_reconciliation
 from api.core.logging import get_logger
+from api.core.rust_bridge import load_rust_bridge
 
 
 logger = get_logger(__name__)
@@ -24,6 +26,37 @@ _DEFAULT_SAFETY_CREDIT_UNITS = 10
 _DEFAULT_STALE_SECONDS = 300
 _active_operation_counts: dict[str, int] = {}
 _active_operation_lock = Lock()
+
+
+class _RustOpenRouterGenerationAdapter(Protocol):
+    def openrouter_generation_fetch(
+        self,
+        api_key: str,
+        generation_id: str,
+    ) -> str: ...
+
+
+def _load_rust_openrouter_generation_adapter(
+) -> _RustOpenRouterGenerationAdapter | None:
+    module = load_rust_bridge("RUST_OPENROUTER_GENERATION_ADAPTER_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustOpenRouterGenerationAdapter, module)
+
+
+def _rust_openrouter_generation(raw_result: str) -> Mapping[str, Any] | None:
+    outcome = json.loads(raw_result)
+    if not isinstance(outcome, Mapping):
+        raise ValueError("Rust OpenRouter generation outcome must be an object")
+    status = outcome.get("status")
+    if status == "pending":
+        return None
+    if status != "success":
+        raise ValueError(f"invalid Rust OpenRouter generation status: {status!r}")
+    generation = outcome.get("generation")
+    if not isinstance(generation, Mapping):
+        raise ValueError("Rust OpenRouter generation must be an object")
+    return dict(generation)
 
 
 def mark_ai_operation_active(operation_id: str) -> None:
@@ -86,6 +119,16 @@ def fetch_openrouter_generation(generation_id: str) -> Mapping[str, Any] | None:
     api_key = str(os.environ.get("OPENROUTER_API_KEY") or "").strip()
     if not api_key:
         return None
+    rust = _load_rust_openrouter_generation_adapter()
+    if rust is not None:
+        try:
+            return _rust_openrouter_generation(
+                rust.openrouter_generation_fetch(api_key, str(generation_id))
+            )
+        except Exception:
+            logger.exception(
+                "Rust OpenRouter generation adapter failed; using Python fallback"
+            )
     response = requests.get(
         _GENERATION_URL,
         params={"id": str(generation_id)},

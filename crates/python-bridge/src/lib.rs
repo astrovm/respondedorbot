@@ -12,6 +12,10 @@ use bot_adapters::firecrawl::{
     HttpResponse as FirecrawlHttpResponse, parse_response as firecrawl_parse_response_adapter,
     search as firecrawl_search_adapter,
 };
+use bot_adapters::openrouter_generation::{
+    HttpResponse as OpenRouterGenerationHttpResponse, fetch as openrouter_generation_fetch_adapter,
+    parse_response as openrouter_generation_parse_response_adapter,
+};
 use bot_adapters::redis_chat_admin::{
     cache_chat_admin as cache_chat_admin_adapter,
     chat_admin_cache_key as chat_admin_cache_key_adapter,
@@ -2903,6 +2907,23 @@ fn firecrawl_parse_response(status_code: u16, body: &str, query: &str) -> PyResu
 }
 
 #[pyfunction]
+fn openrouter_generation_fetch(api_key: &str, generation_id: &str) -> PyResult<String> {
+    let outcome = openrouter_generation_fetch_adapter(api_key, generation_id)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn openrouter_generation_parse_response(status_code: u16, body: &str) -> PyResult<String> {
+    let outcome = openrouter_generation_parse_response_adapter(OpenRouterGenerationHttpResponse {
+        status_code,
+        body: body.to_owned(),
+    })
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3265,6 +3286,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ai_plan_image_context, module)?)?;
     module.add_function(wrap_pyfunction!(firecrawl_search, module)?)?;
     module.add_function(wrap_pyfunction!(firecrawl_parse_response, module)?)?;
+    module.add_function(wrap_pyfunction!(openrouter_generation_fetch, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        openrouter_generation_parse_response,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

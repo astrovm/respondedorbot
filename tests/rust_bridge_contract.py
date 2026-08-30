@@ -1123,6 +1123,36 @@ def verify_firecrawl_adapter(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_openrouter_generation_adapter(bridge: ModuleType) -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "contracts"
+        / "openrouter_generation_adapter.json"
+    )
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.openrouter_generation_parse_response(
+                case["status_code"],
+                case["body"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["errors"]:
+        try:
+            bridge.openrouter_generation_parse_response(
+                case["status_code"],
+                case["body"],
+            )
+        except RuntimeError as error:
+            if "error" in case:
+                assert str(error) == case["error"], case["name"]
+            else:
+                assert str(error).startswith(case["error_prefix"]), case["name"]
+        else:
+            raise AssertionError(f"expected generation failure for {case['name']}")
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1144,6 +1174,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
     verify_firecrawl_adapter(bridge)
+    verify_openrouter_generation_adapter(bridge)
 
 
 def main(arguments: list[str]) -> int:
