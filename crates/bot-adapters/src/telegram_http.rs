@@ -29,6 +29,12 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHttpResponse {
+    pub status_code: u16,
+    pub body: Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct TelegramMultipartRequest {
     pub token: String,
@@ -38,6 +44,13 @@ pub struct TelegramMultipartRequest {
     pub file_name: String,
     pub file_bytes: Vec<u8>,
     pub content_type: String,
+    pub timeout: Duration,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TelegramFileRequest {
+    pub token: String,
+    pub file_path: String,
     pub timeout: Duration,
 }
 
@@ -79,6 +92,13 @@ pub enum TelegramHttpOutcome {
     TransportError { kind: TransportFailureKind },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramFileOutcome {
+    Downloaded(Vec<u8>),
+    HttpError { status_code: u16 },
+    TransportError { kind: TransportFailureKind },
+}
+
 pub trait TelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind>;
 }
@@ -88,6 +108,13 @@ pub trait TelegramMultipartTransport {
         &self,
         request: &TelegramMultipartRequest,
     ) -> Result<HttpResponse, TransportFailureKind>;
+}
+
+pub trait TelegramFileTransport {
+    fn download(
+        &self,
+        request: &TelegramFileRequest,
+    ) -> Result<BinaryHttpResponse, TransportFailureKind>;
 }
 
 pub struct ReqwestTelegramTransport {
@@ -149,6 +176,27 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
                 .send()
                 .map_err(classify_error)?,
         )
+    }
+}
+
+impl TelegramFileTransport for ReqwestTelegramTransport {
+    fn download(
+        &self,
+        request: &TelegramFileRequest,
+    ) -> Result<BinaryHttpResponse, TransportFailureKind> {
+        let url = format!(
+            "{TELEGRAM_API_BASE}/file/bot{}/{}",
+            request.token, request.file_path
+        );
+        let response = self
+            .client
+            .get(url)
+            .timeout(request.timeout)
+            .send()
+            .map_err(classify_error)?;
+        let status_code = response.status().as_u16();
+        let body = response.bytes().map_err(classify_error)?.to_vec();
+        Ok(BinaryHttpResponse { status_code, body })
     }
 }
 
@@ -292,6 +340,42 @@ pub fn multipart_request(
     }
 }
 
+pub fn download_file_with<T: TelegramFileTransport>(
+    transport: &T,
+    token: &str,
+    file_path: &str,
+    timeout_seconds: u64,
+) -> Result<TelegramFileOutcome, TelegramHttpError> {
+    if timeout_seconds == 0 {
+        return Err(TelegramHttpError::InvalidTimeout);
+    }
+    let request = TelegramFileRequest {
+        token: token.to_owned(),
+        file_path: file_path.to_owned(),
+        timeout: Duration::from_secs(timeout_seconds),
+    };
+    match transport.download(&request) {
+        Ok(response) if (200..300).contains(&response.status_code) => {
+            Ok(TelegramFileOutcome::Downloaded(response.body))
+        }
+        Ok(response) => Ok(TelegramFileOutcome::HttpError {
+            status_code: response.status_code,
+        }),
+        Err(kind) => Ok(TelegramFileOutcome::TransportError { kind }),
+    }
+}
+
+pub fn download_file(
+    token: &str,
+    file_path: &str,
+    timeout_seconds: u64,
+) -> Result<TelegramFileOutcome, TelegramHttpError> {
+    match ReqwestTelegramTransport::new() {
+        Ok(transport) => download_file_with(&transport, token, file_path, timeout_seconds),
+        Err(kind) => Ok(TelegramFileOutcome::TransportError { kind }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -301,9 +385,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        HttpResponse, MultipartUpload, TelegramHttpError, TelegramHttpOutcome,
+        BinaryHttpResponse, HttpResponse, MultipartUpload, TelegramFileOutcome,
+        TelegramFileRequest, TelegramFileTransport, TelegramHttpError, TelegramHttpOutcome,
         TelegramMultipartRequest, TelegramMultipartTransport, TelegramRequest, TelegramTransport,
-        TransportFailureKind, multipart_request_with, request_with, response_outcome,
+        TransportFailureKind, download_file_with, multipart_request_with, request_with,
+        response_outcome,
     };
 
     struct FakeTransport {
@@ -331,6 +417,24 @@ mod tests {
             &self,
             request: &TelegramMultipartRequest,
         ) -> Result<HttpResponse, TransportFailureKind> {
+            self.requests.borrow_mut().push(request.clone());
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+    }
+
+    struct FakeFileTransport {
+        response: RefCell<Option<Result<BinaryHttpResponse, TransportFailureKind>>>,
+        requests: RefCell<Vec<TelegramFileRequest>>,
+    }
+
+    impl TelegramFileTransport for FakeFileTransport {
+        fn download(
+            &self,
+            request: &TelegramFileRequest,
+        ) -> Result<BinaryHttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
             self.response
                 .borrow_mut()
@@ -503,5 +607,61 @@ mod tests {
             Err(TelegramHttpError::InvalidPayload)
         );
         assert!(transport.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn file_download_preserves_binary_content_and_request_identity() {
+        let transport = FakeFileTransport {
+            response: RefCell::new(Some(Ok(BinaryHttpResponse {
+                status_code: 200,
+                body: vec![0, 127, 255],
+            }))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            download_file_with(&transport, "synthetic-token", "photos/file_123.jpg", 30,),
+            Ok(TelegramFileOutcome::Downloaded(vec![0, 127, 255]))
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].token, "synthetic-token");
+        assert_eq!(requests[0].file_path, "photos/file_123.jpg");
+        assert_eq!(requests[0].timeout.as_secs(), 30);
+    }
+
+    #[test]
+    fn file_download_classifies_http_transport_and_validation_failures() {
+        let http_error = FakeFileTransport {
+            response: RefCell::new(Some(Ok(BinaryHttpResponse {
+                status_code: 404,
+                body: b"not found".to_vec(),
+            }))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            download_file_with(&http_error, "token", "missing", 30),
+            Ok(TelegramFileOutcome::HttpError { status_code: 404 })
+        );
+
+        let transport_error = FakeFileTransport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Timeout))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            download_file_with(&transport_error, "token", "slow", 30),
+            Ok(TelegramFileOutcome::TransportError {
+                kind: TransportFailureKind::Timeout,
+            })
+        );
+
+        let invalid = FakeFileTransport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Request))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            download_file_with(&invalid, "token", "file", 0),
+            Err(TelegramHttpError::InvalidTimeout)
+        );
+        assert!(invalid.requests.borrow().is_empty());
     }
 }

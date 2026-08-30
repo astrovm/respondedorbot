@@ -295,6 +295,7 @@ def test_download_telegram_file_success():
     """Test download_telegram_file with successful download"""
     with (
         patch("api.bot.telegram.environ.get") as mock_env,
+        patch("api.bot.telegram._load_rust_telegram_http_adapter", return_value=None),
         patch("api.index.telegram_gateway._telegram_request") as mock_telegram_request,
         patch("api.services.http_client.get") as mock_get,
     ):
@@ -331,6 +332,7 @@ def test_download_telegram_file_api_error():
     """Test download_telegram_file with API error"""
     with (
         patch("api.bot.telegram.environ.get") as mock_env,
+        patch("api.bot.telegram._load_rust_telegram_http_adapter", return_value=None),
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (
@@ -352,6 +354,7 @@ def test_download_telegram_file_network_error():
     """Test download_telegram_file with network error"""
     with (
         patch("api.bot.telegram.environ.get") as mock_env,
+        patch("api.bot.telegram._load_rust_telegram_http_adapter", return_value=None),
         patch("api.services.http_client.get") as mock_get,
     ):
         mock_env.side_effect = lambda key, default=None: (

@@ -2,6 +2,7 @@
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -34,7 +35,8 @@ use bot_adapters::redis_media_cache::{
 use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
 use bot_adapters::redis_task_store::RedisTaskStore as RedisTaskStoreAdapter;
 use bot_adapters::telegram_http::{
-    MultipartUpload as TelegramMultipartUpload,
+    MultipartUpload as TelegramMultipartUpload, TelegramFileOutcome,
+    download_file as telegram_download_file_adapter,
     multipart_request as telegram_multipart_request_adapter,
     request as telegram_http_request_adapter,
     response_outcome as telegram_response_outcome_adapter,
@@ -2988,6 +2990,21 @@ fn telegram_multipart_request(
 }
 
 #[pyfunction]
+fn telegram_download_file<'py>(
+    py: Python<'py>,
+    token: &str,
+    file_path: &str,
+    timeout_seconds: u64,
+) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    let outcome = telegram_download_file_adapter(token, file_path, timeout_seconds)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(match outcome {
+        TelegramFileOutcome::Downloaded(bytes) => Some(PyBytes::new(py, &bytes)),
+        TelegramFileOutcome::HttpError { .. } | TelegramFileOutcome::TransportError { .. } => None,
+    })
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3358,6 +3375,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_http_request, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_http_response, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_multipart_request, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_download_file, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

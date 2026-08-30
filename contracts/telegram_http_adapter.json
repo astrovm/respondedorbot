@@ -107,5 +107,13 @@
       "timeout_seconds": 5,
       "error": "Telegram HTTP payload must be a JSON object"
     }
+  ],
+  "download_validation": [
+    {
+      "name": "zero timeout is rejected before file download",
+      "file_path": "photos/file_123.jpg",
+      "timeout_seconds": 0,
+      "error": "Telegram timeout must be positive"
+    }
   ]
 }

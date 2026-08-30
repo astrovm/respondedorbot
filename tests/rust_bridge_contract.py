@@ -1181,6 +1181,17 @@ def verify_telegram_http_adapter(bridge: ModuleType) -> None:
             assert str(error) == case["error"], case["name"]
         else:
             raise AssertionError(f"expected multipart failure for {case['name']}")
+    for case in contract["download_validation"]:
+        try:
+            bridge.telegram_download_file(
+                "synthetic-token",
+                case["file_path"],
+                case["timeout_seconds"],
+            )
+        except ValueError as error:
+            assert str(error) == case["error"], case["name"]
+        else:
+            raise AssertionError(f"expected download failure for {case['name']}")
 
 
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:

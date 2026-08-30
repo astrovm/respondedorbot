@@ -46,6 +46,13 @@ class _RustTelegramHttpAdapter(Protocol):
         timeout_seconds: int,
     ) -> str: ...
 
+    def telegram_download_file(
+        self,
+        token: str,
+        file_path: str,
+        timeout_seconds: int,
+    ) -> bytes | None: ...
+
 
 def _load_rust_telegram_http_adapter() -> _RustTelegramHttpAdapter | None:
     module = load_rust_bridge("RUST_TELEGRAM_HTTP_ADAPTER_ENABLED")
@@ -278,6 +285,23 @@ def _rust_multipart_file(
     if content_type not in {"image/png", "video/mp4"}:
         return None
     return str(file_field), file_name, bytes(file_bytes), content_type
+
+
+def _rust_file_download(
+    rust: _RustTelegramHttpAdapter,
+    token: str,
+    file_path: str,
+) -> tuple[bool, bytes | None]:
+    try:
+        downloaded = rust.telegram_download_file(token, file_path, 30)
+        if downloaded is None:
+            return True, None
+        if not isinstance(downloaded, (bytes, bytearray)):
+            raise ValueError("Rust Telegram file download must return bytes")
+        return True, bytes(downloaded)
+    except Exception:
+        logger.exception("Rust Telegram file download failed; using Python fallback")
+        return False, None
 
 
 def telegram_request(
@@ -689,14 +713,16 @@ class TelegramGateway:
             return None
 
         result = payload_response.get("result")
-        if not isinstance(result, dict):
-            return None
-
-        file_path = result.get("file_path")
+        file_path = result.get("file_path") if isinstance(result, dict) else None
         if not isinstance(file_path, str):
             return None
 
         file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        rust = _load_rust_telegram_http_adapter()
+        if rust is not None:
+            handled, downloaded = _rust_file_download(rust, token, file_path)
+            if handled:
+                return downloaded
         try:
             download_response = http_client.get(file_url, timeout=30)
             download_response.raise_for_status()

@@ -11,11 +11,19 @@ from api.bot import telegram
 
 
 class _FakeRustTelegramHttp:
-    def __init__(self, outcome: object, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        outcome: object,
+        *,
+        download_outcome: object = None,
+        fail: bool = False,
+    ) -> None:
         self.outcome = outcome
+        self.download_outcome = download_outcome
         self.fail = fail
         self.calls: list[tuple[object, ...]] = []
         self.multipart_calls: list[tuple[object, ...]] = []
+        self.download_calls: list[tuple[object, ...]] = []
 
     def telegram_http_request(self, *arguments: object) -> str:
         self.calls.append(arguments)
@@ -28,6 +36,12 @@ class _FakeRustTelegramHttp:
         if self.fail:
             raise ValueError("synthetic Rust Telegram multipart failure")
         return json.dumps(self.outcome)
+
+    def telegram_download_file(self, *arguments: object) -> object:
+        self.download_calls.append(arguments)
+        if self.fail:
+            raise ValueError("synthetic Rust Telegram download failure")
+        return self.download_outcome
 
 
 def _python_response(payload: object) -> MagicMock:
@@ -261,6 +275,72 @@ def test_unsupported_multipart_shape_remains_on_python(
     assert actual == ({"ok": True, "result": True}, None)
     loader.assert_not_called()
     send.assert_called_once()
+
+
+def test_rust_file_download_is_authoritative(monkeypatch) -> None:
+    rust = _FakeRustTelegramHttp({}, download_outcome=bytes([0, 127, 255]))
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", lambda: rust)
+    monkeypatch.setenv("TELEGRAM_TOKEN", "synthetic-token")
+    request = MagicMock(
+        return_value=(
+            {"ok": True, "result": {"file_path": "photos/file_123.jpg"}},
+            None,
+        )
+    )
+    python_download = MagicMock(
+        side_effect=AssertionError("Python download must not run")
+    )
+    monkeypatch.setattr(telegram.http_client, "get", python_download)
+    gateway = telegram.TelegramGateway(request)
+
+    assert gateway.download_file("file-id") == bytes([0, 127, 255])
+    assert rust.download_calls == [
+        ("synthetic-token", "photos/file_123.jpg", 30)
+    ]
+    python_download.assert_not_called()
+
+
+def test_rust_file_download_failure_is_authoritative(monkeypatch) -> None:
+    rust = _FakeRustTelegramHttp({}, download_outcome=None)
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", lambda: rust)
+    monkeypatch.setenv("TELEGRAM_TOKEN", "synthetic-token")
+    request = MagicMock(
+        return_value=(
+            {"ok": True, "result": {"file_path": "missing"}},
+            None,
+        )
+    )
+    python_download = MagicMock(
+        side_effect=AssertionError("failed download must not be repeated")
+    )
+    monkeypatch.setattr(telegram.http_client, "get", python_download)
+
+    assert telegram.TelegramGateway(request).download_file("file-id") is None
+    python_download.assert_not_called()
+
+
+def test_rust_file_download_bridge_error_uses_python_fallback(
+    monkeypatch, caplog
+) -> None:
+    rust = _FakeRustTelegramHttp({}, fail=True)
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", lambda: rust)
+    monkeypatch.setenv("TELEGRAM_TOKEN", "synthetic-token")
+    request = MagicMock(
+        return_value=(
+            {"ok": True, "result": {"file_path": "photos/file_123.jpg"}},
+            None,
+        )
+    )
+    response = MagicMock(content=b"python-fallback")
+    python_download = MagicMock(return_value=response)
+    monkeypatch.setattr(telegram.http_client, "get", python_download)
+
+    with caplog.at_level(logging.ERROR, logger=telegram.__name__):
+        actual = telegram.TelegramGateway(request).download_file("file-id")
+
+    assert actual == b"python-fallback"
+    assert "using Python fallback" in caplog.text
+    response.raise_for_status.assert_called_once()
 
 
 def test_rust_response_translation_matches_shared_contract(capsys) -> None:
