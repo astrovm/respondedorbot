@@ -17,6 +17,7 @@ must never enter balance mutations.
 | Current Stars writer | Rust owns payment insertion, duplicate handling, user balance updates, and top-up ledger rows | Rust only for Stars payments; Python owns all other mutations | Disable `RUST_BILLING_STAR_PAYMENTS_ENABLED` |
 | Current manual-credit writer | Rust owns administrator mint and user-to-chat transfer transactions | Rust only for these command mutations; Python owns all other mutations | Disable `RUST_BILLING_MANUAL_CREDITS_ENABLED` |
 | Current chat-owned AI writer | Rust owns chat-only AI reserves, refunds, and debts | Rust only for these automation mutations; Python owns all other AI billing | Disable `RUST_BILLING_CHAT_AI_CREDITS_ENABLED` |
+| Current general AI debt writer | Rust owns user-or-chat settlement debt | Rust only for this debt mutation; Python owns all other interaction billing | Disable `RUST_BILLING_AI_DEBT_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -101,3 +102,9 @@ chat-owned automation reserves, refunds, and debt. Each transaction locks only
 the chat account and commits the balance mutation with its ledger row. An
 insufficient reserve does not write a ledger row. These operations have no
 replay key, so uncertain failures fail closed without invoking Python.
+
+`RUST_BILLING_AI_DEBT_ENABLED=1` makes Rust authoritative for general
+user-or-chat settlement debt. It locks the user before the optional chat,
+allows the selected balance to become negative, and preserves the legacy user
+fallback when chat is not a valid payer. This operation has no replay key, so
+uncertain failures fail closed without invoking Python.

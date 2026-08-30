@@ -198,6 +198,39 @@ class _FakeRustChatAiCredits:
         return -100
 
 
+class _FakeRustAiDebt:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[
+            tuple[str, int, int | None, int, str, str, dict[str, object]]
+        ] = []
+
+    def billing_apply_ai_debt(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        amount: int,
+        source: str,
+        event_type: str,
+        metadata_json: str,
+    ) -> tuple[int, int]:
+        self.calls.append(
+            (
+                database_url,
+                user_id,
+                chat_id,
+                amount,
+                source,
+                event_type,
+                json.loads(metadata_json),
+            )
+        )
+        if self.fail:
+            raise ValueError("synthetic uncertain AI debt failure")
+        return 500, -200
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -560,3 +593,65 @@ def test_billing_chat_ai_uncertain_failure_does_not_start_python_writer(
             credits_db.refund_chat_ai_credits(202, 300)
         else:
             credits_db.apply_chat_ai_debt(202, 300)
+
+
+def test_billing_ai_debt_is_authoritative_and_preserves_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python AI debt writer must not run"),
+    )
+    rust = _FakeRustAiDebt()
+    monkeypatch.setattr(credits_db, "_load_rust_billing_ai_debt", lambda: rust)
+
+    assert credits_db.apply_ai_debt(
+        42,
+        202,
+        900,
+        "chat",
+        event_type="custom_debt",
+        metadata={"operation_id": "synthetic-operation"},
+    ) == {"user_balance": 500, "chat_balance": -200}
+    assert rust.calls == [
+        (
+            "postgresql://synthetic.invalid/db?sslmode=require",
+            42,
+            202,
+            900,
+            "chat",
+            "custom_debt",
+            {"operation_id": "synthetic-operation"},
+        )
+    ]
+
+
+def test_billing_ai_debt_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_ai_debt",
+        lambda: _FakeRustAiDebt(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="Rust AI debt"):
+        credits_db.apply_ai_debt(42, 202, 900, "chat")

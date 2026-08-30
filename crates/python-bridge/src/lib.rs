@@ -1929,6 +1929,29 @@ fn billing_apply_chat_ai_debt(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Apply AI debt to a user or chat payer while preserving lock order.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn billing_apply_ai_debt(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    amount: i32,
+    source: &str,
+    event_type: &str,
+    metadata_json: &str,
+) -> PyResult<(i64, i64)> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| {
+            repository.apply_ai_debt(user_id, chat_id, amount, source, event_type, &metadata)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((result.user_balance, result.chat_balance))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2044,6 +2067,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_charge_chat_ai_credits, module)?)?;
     module.add_function(wrap_pyfunction!(billing_refund_chat_ai_credits, module)?)?;
     module.add_function(wrap_pyfunction!(billing_apply_chat_ai_debt, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_apply_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

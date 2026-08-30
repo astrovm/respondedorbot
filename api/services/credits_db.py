@@ -154,6 +154,19 @@ class _RustBillingChatAiCredits(Protocol):
     ) -> int: ...
 
 
+class _RustBillingAiDebt(Protocol):
+    def billing_apply_ai_debt(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        amount: int,
+        source: str,
+        event_type: str,
+        metadata_json: str,
+    ) -> tuple[int, int]: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -194,6 +207,13 @@ def _load_rust_billing_chat_ai_credits() -> _RustBillingChatAiCredits | None:
     if module is None:
         return None
     return cast(_RustBillingChatAiCredits, module)
+
+
+def _load_rust_billing_ai_debt() -> _RustBillingAiDebt | None:
+    module = load_rust_bridge("RUST_BILLING_AI_DEBT_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingAiDebt, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1878,6 +1898,27 @@ def apply_ai_debt(
 
     debt_amount = int(amount)
     metadata_dict = dict(metadata or {})
+    normalized_event_type = str(event_type or "ai_settlement_debt")
+    rust = _load_rust_billing_ai_debt()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            user_balance, chat_balance = rust.billing_apply_ai_debt(
+                database_url,
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                debt_amount,
+                str(source),
+                normalized_event_type,
+                json.dumps(metadata_dict),
+            )
+            return {
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
+        except Exception as error:
+            raise CreditsDBError("Rust AI debt transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, int]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
@@ -1900,7 +1941,7 @@ def apply_ai_debt(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_settlement_debt"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id),
@@ -1928,7 +1969,7 @@ def apply_ai_debt(
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
             (
-                str(event_type or "ai_settlement_debt"),
+                normalized_event_type,
                 int(user_id),
                 int(user_id),
                 int(chat_id) if chat_id is not None else None,
