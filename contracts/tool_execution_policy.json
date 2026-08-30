@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "missing function is ignored",
+      "has_function": false,
+      "registered": false,
+      "expected": "skip_missing_function"
+    },
+    {
+      "name": "missing function wins over inconsistent registration",
+      "has_function": false,
+      "registered": true,
+      "expected": "skip_missing_function"
+    },
+    {
+      "name": "unknown function is skipped",
+      "has_function": true,
+      "registered": false,
+      "expected": "skip_unregistered"
+    },
+    {
+      "name": "registered function executes",
+      "has_function": true,
+      "registered": true,
+      "expected": "execute"
+    }
+  ]
+}

@@ -35,6 +35,7 @@ pub mod rulo;
 pub mod satoshi;
 pub mod task_triggers;
 pub mod telegram_streaming;
+pub mod tool_execution;
 pub mod tool_registry;
 pub mod weather;
 

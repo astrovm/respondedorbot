@@ -1023,6 +1023,17 @@ def verify_ai_request_sanitization(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_tool_execution_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "tool_execution_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.tool_execution_action(
+            case["has_function"],
+            case["registered"],
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1038,6 +1049,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_tool_registry_policy(bridge)
     verify_provider_chain_policy(bridge)
     verify_ai_request_sanitization(bridge)
+    verify_tool_execution_policy(bridge)
 
 
 def main(arguments: list[str]) -> int:

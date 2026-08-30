@@ -161,6 +161,7 @@ use bot_core::telegram_streaming::{
     plan_finalize as telegram_stream_plan_finalize_core,
     should_edit as telegram_stream_should_edit_core,
 };
+use bot_core::tool_execution::evaluate_tool_call as evaluate_tool_call_core;
 use bot_core::tool_registry::{
     ToolAvailabilityFacts, parse_tool_arguments as parse_tool_arguments_core,
     select_available_tools as select_available_tools_core,
@@ -2739,6 +2740,11 @@ fn tool_select_available(
 }
 
 #[pyfunction]
+fn tool_execution_action(has_function: bool, registered: bool) -> &'static str {
+    evaluate_tool_call_core(has_function, registered).as_str()
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3082,6 +3088,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_stream_plan_finalize, module)?)?;
     module.add_function(wrap_pyfunction!(tool_parse_arguments, module)?)?;
     module.add_function(wrap_pyfunction!(tool_select_available, module)?)?;
+    module.add_function(wrap_pyfunction!(tool_execution_action, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

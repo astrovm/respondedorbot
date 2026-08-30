@@ -2,18 +2,65 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 from api.ai.pricing import estimate_firecrawl_reserve_credits
 from api.billing.authorization import AI_SEGMENT_RECORDER_KEY, authorize_ai_cost
 from api.core.logging import format_log_context, get_logger
-from api.providers.types import AssistantMessageLike, ToolCallLike
+from api.core.rust_bridge import load_rust_bridge
 from api.tools.registry import TOOL_REGISTRY, execute_tool, parse_tool_call_arguments
+
+if TYPE_CHECKING:
+    from api.providers.types import AssistantMessageLike, ToolCallLike
 
 
 logger = get_logger(__name__)
 
 _FIRECRAWL_CREDITS_CONTEXT_KEY = "_firecrawl_credits_used"
+
+
+class _RustToolExecutionPolicy(Protocol):
+    def tool_execution_action(self, has_function: bool, registered: bool) -> str: ...
+
+
+def _load_rust_tool_execution_policy() -> _RustToolExecutionPolicy | None:
+    module = load_rust_bridge("RUST_TOOL_EXECUTION_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustToolExecutionPolicy, module)
+
+
+def _tool_execution_action(has_function: bool, registered: bool) -> str:
+    rust = _load_rust_tool_execution_policy()
+    if rust is not None:
+        try:
+            action = str(rust.tool_execution_action(has_function, registered))
+            if action not in {
+                "skip_missing_function",
+                "skip_unregistered",
+                "execute",
+            }:
+                raise ValueError(f"invalid Rust tool execution action: {action}")
+            return action
+        except Exception:
+            logger.exception(
+                "Rust tool execution policy failed; using Python fallback"
+            )
+    if not has_function:
+        return "skip_missing_function"
+    if not registered:
+        return "skip_unregistered"
+    return "execute"
 
 
 def _default_log(message: str) -> None:
@@ -113,14 +160,18 @@ class ToolRuntime:
 
         for tool_call in tool_calls:
             fn = getattr(tool_call, "function", None)
-            if fn is None:
+            tool_name = str(getattr(fn, "name", "") or "") if fn is not None else ""
+            registered = self.has_tool(tool_name) if fn is not None else False
+            action = _tool_execution_action(fn is not None, registered)
+            if action == "skip_missing_function":
                 continue
-            tool_name = str(getattr(fn, "name", "") or "")
-            if not self.has_tool(tool_name):
+            if action == "skip_unregistered":
                 self._print_fn(
                     "tool call skipped: not registered "
                     f"tool_name={tool_name}{format_log_context(tool_context)}"
                 )
+                continue
+            if fn is None:
                 continue
 
             tc_id = str(getattr(tool_call, "id", "") or "")

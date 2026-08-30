@@ -19,6 +19,7 @@ from api.providers.backoff import clear_all_cooldowns
 from api.services import bcra as bcra_service
 from api.services import credits_db as credits_db_service
 from api.tools import registry as tool_registry_module
+from api.tools import runtime as tool_runtime_module
 
 
 class _FastFailRedis:
@@ -81,6 +82,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         tool_registry_module,
         "_load_rust_tool_registry_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        tool_runtime_module,
+        "_load_rust_tool_execution_policy",
         lambda: None,
     )
     monkeypatch.setattr(
