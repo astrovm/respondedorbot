@@ -7,8 +7,9 @@ validates and dispatches those calls.
 
 from __future__ import annotations
 
-import os
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -21,6 +22,36 @@ from typing import (
     runtime_checkable,
     cast,
 )
+
+from api.core.rust_bridge import load_rust_bridge
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustToolRegistryPolicy(Protocol):
+    def tool_parse_arguments(self, raw: str) -> str | None: ...
+
+    def tool_select_available(
+        self,
+        tools_json: str,
+        context_provided: bool,
+        task_mode: bool,
+    ) -> list[int]: ...
+
+
+def _load_rust_tool_registry_policy() -> _RustToolRegistryPolicy | None:
+    module = load_rust_bridge("RUST_TOOL_REGISTRY_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustToolRegistryPolicy, module)
+
+
+def _rust_tool_registry_failed(operation: str) -> None:
+    logger.exception(
+        "Rust tool registry policy failed; using Python fallback: operation=%s",
+        operation,
+    )
 
 
 @dataclass(frozen=True)
@@ -116,6 +147,37 @@ def get_all_tool_schemas(
 ) -> List[Dict[str, Any]]:
     cache = _get_schema_cache()
 
+    rust = _load_rust_tool_registry_policy()
+    if rust is not None:
+        try:
+            facts = [
+                {
+                    "environment_requirements_met": all(
+                        os.environ.get(env_key) is not None
+                        for env_key in schema.requires_env
+                    ),
+                    "context_requirements_met": (
+                        context is None
+                        or all(
+                            ctx_key in context and context[ctx_key] is not None
+                            for ctx_key in schema.requires_context
+                        )
+                    ),
+                    "task_allowed": schema.task_allowed,
+                }
+                for schema, _entry in cache
+            ]
+            indices = rust.tool_select_available(
+                json.dumps(facts, separators=(",", ":")),
+                context is not None,
+                task_mode,
+            )
+            if any(index < 0 or index >= len(cache) for index in indices):
+                raise ValueError("Rust selected an invalid tool schema index")
+            return [cache[index][1] for index in indices]
+        except Exception:
+            _rust_tool_registry_failed("availability")
+
     if context is None and not task_mode:
         return [entry for _, entry in cache]
 
@@ -150,6 +212,17 @@ def parse_tool_call_arguments(arguments: Any) -> Dict[str, Any]:
     if isinstance(arguments, dict):
         return arguments
     if isinstance(arguments, str):
+        rust = _load_rust_tool_registry_policy()
+        if rust is not None:
+            try:
+                normalized = rust.tool_parse_arguments(arguments)
+                if normalized is not None:
+                    parsed = json.loads(normalized)
+                    if not isinstance(parsed, dict):
+                        raise ValueError("Rust returned non-object tool arguments")
+                    return cast(Dict[str, Any], parsed)
+            except Exception:
+                _rust_tool_registry_failed("arguments")
         try:
             parsed = json.loads(arguments)
             return cast(Dict[str, Any], parsed) if isinstance(parsed, dict) else {}

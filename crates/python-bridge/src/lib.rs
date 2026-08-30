@@ -156,6 +156,10 @@ use bot_core::telegram_streaming::{
     plan_finalize as telegram_stream_plan_finalize_core,
     should_edit as telegram_stream_should_edit_core,
 };
+use bot_core::tool_registry::{
+    ToolAvailabilityFacts, parse_tool_arguments as parse_tool_arguments_core,
+    select_available_tools as select_available_tools_core,
+};
 use bot_core::weather::{
     select_forecast_hour as select_forecast_hour_core,
     select_location_candidate as select_location_candidate_core,
@@ -2701,6 +2705,29 @@ fn telegram_stream_plan_finalize(
     (plan.text, plan.action.as_str().to_owned())
 }
 
+#[pyfunction]
+fn tool_parse_arguments(raw: &str) -> Option<String> {
+    parse_tool_arguments_core(raw)
+        .ok()
+        .map(|arguments| arguments.object_json().to_owned())
+}
+
+#[pyfunction]
+fn tool_select_available(
+    tools_json: &str,
+    context_provided: bool,
+    task_mode: bool,
+) -> PyResult<Vec<usize>> {
+    let tools: Vec<ToolAvailabilityFacts> = serde_json::from_str(tools_json).map_err(|error| {
+        PyValueError::new_err(format!("invalid tool availability facts: {error}"))
+    })?;
+    Ok(select_available_tools_core(
+        &tools,
+        context_provided,
+        task_mode,
+    ))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -3027,6 +3054,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_stream_should_edit, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_stream_plan_feed, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_stream_plan_finalize, module)?)?;
+    module.add_function(wrap_pyfunction!(tool_parse_arguments, module)?)?;
+    module.add_function(wrap_pyfunction!(tool_select_available, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

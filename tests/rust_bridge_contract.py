@@ -972,6 +972,40 @@ def verify_telegram_stream_planning(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case["name"]
 
 
+def verify_tool_registry_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "tool_registry_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["argument_cases"]:
+        actual = bridge.tool_parse_arguments(case["raw"])
+        if case["rust_valid"]:
+            assert actual is not None, case["name"]
+            assert json.loads(actual) == case["expected"], case["name"]
+        else:
+            assert actual is None, case["name"]
+    for case in contract["availability_cases"]:
+        actual = bridge.tool_select_available(
+            json.dumps(case["tools"], separators=(",", ":")),
+            case["context_provided"],
+            case["task_mode"],
+        )
+        assert actual == case["expected"], case["name"]
+
+
+def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
+    verify_ai_usage_policy(bridge)
+    verify_provider_error_policy(bridge)
+    verify_provider_retry_policy(bridge)
+    verify_provider_runtime_policy(bridge)
+    verify_provider_tool_policy(bridge)
+    verify_provider_web_search_policy(bridge)
+    verify_provider_stream_policy(bridge)
+    verify_ai_reserve_estimates(bridge)
+    verify_ai_pricing(bridge)
+    verify_ai_response_cleanup(bridge)
+    verify_telegram_stream_planning(bridge)
+    verify_tool_registry_policy(bridge)
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -1007,17 +1041,7 @@ def main(arguments: list[str]) -> int:
     verify_redis_maintenance(bridge)
     verify_task_store_io(bridge)
     verify_billing_contracts(bridge)
-    verify_ai_usage_policy(bridge)
-    verify_provider_error_policy(bridge)
-    verify_provider_retry_policy(bridge)
-    verify_provider_runtime_policy(bridge)
-    verify_provider_tool_policy(bridge)
-    verify_provider_web_search_policy(bridge)
-    verify_provider_stream_policy(bridge)
-    verify_ai_reserve_estimates(bridge)
-    verify_ai_pricing(bridge)
-    verify_ai_response_cleanup(bridge)
-    verify_telegram_stream_planning(bridge)
+    verify_ai_orchestration_contracts(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
