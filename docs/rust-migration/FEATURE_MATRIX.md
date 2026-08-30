@@ -46,6 +46,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Redis conversation Lua writes, ordered history reads, index lifecycle, and RediSearch queries | `rust-flagged` | `RUST_MESSAGE_HISTORY_IO_ENABLED=0` or missing bridge | `contracts/message_history_io.json` |
 | Redis media transcription/description cache I/O | `rust-flagged` | `RUST_MEDIA_CACHE_ENABLED=0` or missing bridge | `contracts/media_cache.json` |
 | Redis chat-administrator authorization cache I/O | `rust-flagged` | `RUST_CHAT_ADMIN_CACHE_ENABLED=0` or missing bridge | `contracts/chat_admin_cache.json` |
+| Redis external-request cache and stale-history I/O | `rust-flagged` | `RUST_REQUEST_CACHE_IO_ENABLED=0` or missing bridge | `contracts/request_cache_io.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

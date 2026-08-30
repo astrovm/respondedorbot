@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
+from functools import lru_cache
 from logging import Logger
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import redis
 
+from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.services.maintenance import (
     REQUEST_CACHE_HISTORY_TTL,
     request_cache_history_key,
@@ -24,6 +27,51 @@ RedisJsonSetter = Callable[..., bool]
 HistoryGetter = Callable[[int, str, redis.Redis], Any]
 HttpGetter = Callable[..., Any]
 AdminReporter = Callable[[str, Exception | None, dict[str, Any] | None], None]
+
+
+class _RustJsonCache(Protocol):
+    def get(self, key: str) -> str | None: ...
+    def set(self, key: str, value: str, *, ex: int | None = None) -> bool: ...
+
+
+class _RustJsonCacheModule(Protocol):
+    def RedisJsonCache(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+    ) -> _RustJsonCache: ...
+
+
+def _load_rust_request_cache() -> _RustJsonCacheModule | None:
+    module = load_rust_bridge("RUST_REQUEST_CACHE_IO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustJsonCacheModule, module)
+
+
+@lru_cache(maxsize=8)
+def _cached_rust_request_cache(
+    module: Hashable,
+    host: str,
+    port: int,
+    password: str | None,
+) -> _RustJsonCache:
+    return cast(_RustJsonCacheModule, module).RedisJsonCache(host, port, password)
+
+
+def _request_cache_client(redis_factory: RedisFactory) -> redis.Redis:
+    module = _load_rust_request_cache()
+    if module is None:
+        return redis_factory()
+    host, port, password = redis_endpoint_from_env()
+    cache = _cached_rust_request_cache(
+        cast(Hashable, module),
+        host,
+        port,
+        password,
+    )
+    return cast(redis.Redis, cache)
 
 
 def cached_request(
@@ -54,7 +102,7 @@ def cached_request(
             json.dumps(arguments, sort_keys=True).encode()
         ).hexdigest()
 
-        redis_client = redis_factory()
+        redis_client = _request_cache_client(redis_factory)
         redis_response = redis_get_json(
             redis_client, request_cache_key(request_hash)
         )

@@ -1,6 +1,13 @@
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_request_cache(monkeypatch):
+    """Keep legacy BCRA cache tests on the Python rollback path."""
+
+    monkeypatch.setattr("api.cache.http._load_rust_request_cache", lambda: None)
+
+
 def _bcra_service_patches():
     """Patch BCRA service to bypass _require_configured and use mock redis."""
     mock_redis = MagicMock()

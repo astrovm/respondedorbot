@@ -421,6 +421,18 @@ def verify_chat_admin_cache(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_request_cache_io(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "request_cache_io.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    cache = bridge.RedisJsonCache("invalid.invalid", 1, None)
+    for case in contract["ttl_validation"]:
+        try:
+            cache.set("synthetic", "value", ex=case["ttl"])
+        except ValueError:
+            continue
+        raise AssertionError(f"{case['name']} must be rejected")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -499,6 +511,7 @@ def main(arguments: list[str]) -> int:
     verify_message_history_io(bridge)
     verify_media_cache(bridge)
     verify_chat_admin_cache(bridge)
+    verify_request_cache_io(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

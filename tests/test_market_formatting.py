@@ -1,6 +1,13 @@
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_request_cache(monkeypatch):
+    """Keep legacy request-cache tests on the Python rollback path."""
+
+    monkeypatch.setattr("api.cache.http._load_rust_request_cache", lambda: None)
+
+
 def test_clean_crypto_data():
     from api.index import clean_crypto_data
 

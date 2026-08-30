@@ -13,6 +13,7 @@ use bot_adapters::redis_chat_admin::{
 };
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue as RedisCompactionQueueAdapter;
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_json_cache::RedisJsonCache as RedisJsonCacheAdapter;
 use bot_adapters::redis_media_cache::{
     cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
     media_cache_key as media_cache_key_adapter,
@@ -181,6 +182,36 @@ impl PyRedisCompactionQueue {
 #[pyclass(name = "RedisMessageState")]
 struct PyRedisMessageState {
     state: RedisMessageStateAdapter,
+}
+
+#[pyclass(name = "RedisJsonCache")]
+struct PyRedisJsonCache {
+    cache: RedisJsonCacheAdapter,
+}
+
+#[pymethods]
+impl PyRedisJsonCache {
+    #[new]
+    fn new(host: &str, port: u16, password: Option<&str>) -> PyResult<Self> {
+        let cache = RedisJsonCacheAdapter::new(&RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { cache })
+    }
+
+    fn get(&self, py: Python<'_>, key: &str) -> PyResult<Option<String>> {
+        py.detach(|| self.cache.get(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    #[pyo3(signature = (key, value, ex=None))]
+    fn set(&self, py: Python<'_>, key: &str, value: &str, ex: Option<i64>) -> PyResult<bool> {
+        py.detach(|| self.cache.set(key, value, ex))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
 }
 
 #[pymethods]
@@ -1679,6 +1710,7 @@ fn evaluate_response_routing(input_json: &str) -> PyResult<&'static str> {
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRedisCompactionQueue>()?;
+    module.add_class::<PyRedisJsonCache>()?;
     module.add_class::<PyRedisMessageState>()?;
     module.add_function(wrap_pyfunction!(migration_protocol_version, module)?)?;
     module.add_function(wrap_pyfunction!(whole_credits_to_units, module)?)?;
