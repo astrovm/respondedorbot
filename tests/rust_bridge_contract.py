@@ -58,6 +58,18 @@ def verify_command_parsing(bridge: ModuleType) -> None:
         )
 
 
+def verify_task_triggers(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "task_triggers.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.parse_task_trigger(
+                json.dumps(case["input"], separators=(",", ":")),
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -65,6 +77,7 @@ def main(arguments: list[str]) -> int:
     assert bridge.migration_protocol_version() == 1
     verify_credit_units(bridge)
     verify_command_parsing(bridge)
+    verify_task_triggers(bridge)
     return 0
 
 

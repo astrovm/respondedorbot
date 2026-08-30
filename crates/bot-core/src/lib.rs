@@ -2,6 +2,7 @@
 
 pub mod command_parsing;
 pub mod credit_units;
+pub mod task_triggers;
 
 /// Version of the temporary Python/Rust compatibility protocol.
 pub const MIGRATION_PROTOCOL_VERSION: u16 = 1;
