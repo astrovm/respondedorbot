@@ -7,7 +7,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, cast
 from uuid import uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
@@ -24,6 +24,7 @@ from api.billing.authorization import (
     authorize_ai_cost,
 )
 from api.core.logging import format_log_context, get_logger
+from api.core.rust_bridge import load_rust_bridge
 from api.providers.types import (
     EmptyAssistantMessage,
     ToolCall,
@@ -49,7 +50,60 @@ _DSML_TOOL_CALL_PATTERN = re.compile(
 )
 
 
+class _RustProviderRuntimePolicy(Protocol):
+    def provider_exception_is_retryable(
+        self,
+        json_decode_error: bool,
+        connection_error: bool,
+        timeout_error: bool,
+        rate_limit_error: bool,
+        api_status_code: int | None,
+    ) -> bool: ...
+
+    def provider_usage_has_billable_activity(self, usage_json: str) -> bool: ...
+
+    def provider_finish_response_is_retryable(
+        self,
+        has_content: bool,
+        tool_call_count: int,
+        has_usage: bool,
+        finish_reason: str | None,
+        error_status_code: int,
+        error_type: str,
+    ) -> bool: ...
+
+    def provider_retry_wait_seconds(self, attempt: int) -> int: ...
+
+
+def _load_rust_provider_runtime_policy() -> _RustProviderRuntimePolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_RUNTIME_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderRuntimePolicy, module)
+
+
+def _rust_runtime_policy_failed(operation: str) -> None:
+    logger.exception(
+        "Rust provider runtime policy failed; using Python fallback: operation=%s",
+        operation,
+    )
+
+
 def _is_retryable_provider_error(error: Exception) -> bool:
+    rust = _load_rust_provider_runtime_policy()
+    if rust is not None:
+        try:
+            return bool(
+                rust.provider_exception_is_retryable(
+                    _is_json_decode_error(error),
+                    isinstance(error, APIConnectionError),
+                    isinstance(error, APITimeoutError),
+                    isinstance(error, RateLimitError),
+                    error.status_code if isinstance(error, APIStatusError) else None,
+                )
+            )
+        except Exception:
+            _rust_runtime_policy_failed("exception_retryability")
     if _is_json_decode_error(error):
         return True
     if isinstance(error, (APIConnectionError, APITimeoutError, RateLimitError)):
@@ -57,6 +111,16 @@ def _is_retryable_provider_error(error: Exception) -> bool:
     if isinstance(error, APIStatusError):
         return error.status_code == 429 or error.status_code >= 500
     return False
+
+
+def _retry_wait_seconds(attempt: int) -> int:
+    rust = _load_rust_provider_runtime_policy()
+    if rust is not None:
+        try:
+            return int(rust.provider_retry_wait_seconds(int(attempt)))
+        except Exception:
+            _rust_runtime_policy_failed("retry_wait_seconds")
+    return cast(int, 2**attempt)
 
 
 def _is_json_decode_error(error: Exception) -> bool:
@@ -244,7 +308,7 @@ class ProviderRuntime:
                     response = client.chat.completions.create(**request_kwargs)
                 except Exception as error:
                     if _is_retryable_provider_error(error) and attempt < _MAX_RETRIES - 1:
-                        wait = 2**attempt
+                        wait = _retry_wait_seconds(attempt)
                         raw_body = _format_provider_error_body(error)
                         retry_context = dict(tool_context or {})
                         retry_context.update(
@@ -284,7 +348,7 @@ class ProviderRuntime:
                         tool_context,
                         on_usage_result,
                     )
-                    wait = 2**attempt
+                    wait = _retry_wait_seconds(attempt)
                     retry_context = dict(tool_context or {})
                     retry_context.update(
                         {
@@ -362,26 +426,43 @@ class ProviderRuntime:
         finish_reason: Any,
     ) -> bool:
         diagnostics = self._response_diagnostics(response, choice)
-        if (
-            diagnostics["has_content"]
-            or diagnostics["tool_call_count"]
-            or self._response_has_usage(response)
-        ):
-            return False
-        if finish_reason is None:
-            return True
-        if finish_reason != "error":
-            return False
-
+        has_content = bool(diagnostics["has_content"])
+        tool_call_count = int(diagnostics["tool_call_count"])
+        has_usage = (
+            False
+            if has_content or tool_call_count
+            else self._response_has_usage(response)
+        )
         error = self._response_error(response, choice)
         code = error.get("code")
         try:
             status_code = int(code) if code is not None else 0
         except TypeError, ValueError:
             status_code = 0
+        error_type = str((ensure_mapping(error.get("metadata")) or {}).get("error_type") or "")
+        rust = _load_rust_provider_runtime_policy()
+        if rust is not None:
+            try:
+                return bool(
+                    rust.provider_finish_response_is_retryable(
+                        has_content,
+                        tool_call_count,
+                        has_usage,
+                        str(finish_reason) if finish_reason is not None else None,
+                        status_code,
+                        error_type,
+                    )
+                )
+            except Exception:
+                _rust_runtime_policy_failed("finish_response_retryability")
+        if has_content or tool_call_count or has_usage:
+            return False
+        if finish_reason is None:
+            return True
+        if finish_reason != "error":
+            return False
         if status_code in {408, 409, 429} or status_code >= 500:
             return True
-        error_type = str((ensure_mapping(error.get("metadata")) or {}).get("error_type") or "")
         return error_type in {
             "rate_limit_exceeded",
             "provider_overloaded",
@@ -392,6 +473,16 @@ class ProviderRuntime:
 
     def _response_has_usage(self, response: Any) -> bool:
         usage = self._deps.extract_usage_map(response) or {}
+        rust = _load_rust_provider_runtime_policy()
+        if rust is not None:
+            try:
+                return bool(
+                    rust.provider_usage_has_billable_activity(
+                        json.dumps(usage, ensure_ascii=False, default=str)
+                    )
+                )
+            except Exception:
+                _rust_runtime_policy_failed("billable_usage")
         for key in (
             "cost",
             "prompt_tokens",

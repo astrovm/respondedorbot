@@ -785,6 +785,22 @@ def verify_provider_retry_policy(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_provider_runtime_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_runtime_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["exception_cases"]:
+        assert bridge.provider_exception_is_retryable(*case["facts"]) is case["expected"], case["name"]
+    for case in contract["usage_cases"]:
+        actual = bridge.provider_usage_has_billable_activity(
+            json.dumps(case["usage"], ensure_ascii=False)
+        )
+        assert actual is case["expected"], case["name"]
+    for case in contract["finish_cases"]:
+        assert bridge.provider_finish_response_is_retryable(*case["facts"]) is case["expected"], case["name"]
+    for case in contract["delay_cases"]:
+        assert bridge.provider_retry_wait_seconds(case["attempt"]) == case["expected"], case
+
+
 def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_reserve_estimates.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -899,6 +915,7 @@ def main(arguments: list[str]) -> int:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
     verify_provider_retry_policy(bridge)
+    verify_provider_runtime_policy(bridge)
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
     verify_media_routing(bridge)

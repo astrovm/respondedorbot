@@ -1,0 +1,33 @@
+{
+  "exception_cases": [
+    {"name": "json_decode", "facts": [true, false, false, false, null], "expected": true},
+    {"name": "connection", "facts": [false, true, false, false, null], "expected": true},
+    {"name": "timeout", "facts": [false, false, true, false, null], "expected": true},
+    {"name": "rate_limit", "facts": [false, false, false, true, null], "expected": true},
+    {"name": "status_429", "facts": [false, false, false, false, 429], "expected": true},
+    {"name": "status_503", "facts": [false, false, false, false, 503], "expected": true},
+    {"name": "permanent", "facts": [false, false, false, false, 400], "expected": false}
+  ],
+  "usage_cases": [
+    {"name": "none", "usage": {}, "expected": false},
+    {"name": "provider_cost", "usage": {"cost": "0.000001"}, "expected": true},
+    {"name": "token", "usage": {"prompt_tokens": 1}, "expected": true},
+    {"name": "search", "usage": {"server_tool_use": {"web_search_requests": "2"}}, "expected": true},
+    {"name": "invalid", "usage": {"cost": "invalid", "server_tool_use": {"web_search_requests": "invalid"}}, "expected": false}
+  ],
+  "finish_cases": [
+    {"name": "null_empty", "facts": [false, 0, false, null, 0, ""], "expected": true},
+    {"name": "server_status", "facts": [false, 0, false, "error", 503, ""], "expected": true},
+    {"name": "provider_type", "facts": [false, 0, false, "error", 0, "provider_unavailable"], "expected": true},
+    {"name": "content", "facts": [true, 0, false, null, 0, ""], "expected": false},
+    {"name": "tool_call", "facts": [false, 1, false, null, 0, ""], "expected": false},
+    {"name": "usage", "facts": [false, 0, true, null, 0, ""], "expected": false},
+    {"name": "ordinary_stop", "facts": [false, 0, false, "stop", 0, ""], "expected": false},
+    {"name": "permanent_error", "facts": [false, 0, false, "error", 400, "invalid_request"], "expected": false}
+  ],
+  "delay_cases": [
+    {"attempt": 0, "expected": 1},
+    {"attempt": 1, "expected": 2},
+    {"attempt": 5, "expected": 32}
+  ]
+}

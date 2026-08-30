@@ -21,6 +21,7 @@ pub mod polymarket;
 pub mod price_queries;
 pub mod provider_errors;
 pub mod provider_retry;
+pub mod provider_runtime_policy;
 pub mod random_reply;
 pub mod random_selection;
 pub mod routing;

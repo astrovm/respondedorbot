@@ -110,6 +110,13 @@ use bot_core::provider_retry::{
     parse_retry_window_seconds as parse_provider_retry_window_seconds_core,
     select_rate_limit_backoff_seconds as select_provider_backoff_seconds_core,
 };
+use bot_core::provider_runtime_policy::{
+    FinishResponseFacts, ProviderExceptionFacts,
+    is_retryable_finish_response as provider_finish_response_is_retryable_core,
+    is_retryable_provider_exception as provider_exception_is_retryable_core,
+    response_has_billable_usage as provider_usage_has_billable_activity_core,
+    retry_wait_seconds as provider_retry_wait_seconds_core,
+};
 use bot_core::random_reply::{
     RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
 };
@@ -2415,6 +2422,58 @@ fn select_provider_backoff_seconds(
     )
 }
 
+#[pyfunction]
+fn provider_exception_is_retryable(
+    json_decode_error: bool,
+    connection_error: bool,
+    timeout_error: bool,
+    rate_limit_error: bool,
+    api_status_code: Option<i64>,
+) -> bool {
+    provider_exception_is_retryable_core(ProviderExceptionFacts {
+        json_decode_error,
+        connection_error,
+        timeout_error,
+        rate_limit_error,
+        api_status_code,
+    })
+}
+
+#[pyfunction]
+fn provider_usage_has_billable_activity(usage_json: &str) -> PyResult<bool> {
+    let usage: Value = serde_json::from_str(usage_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| PyValueError::new_err("provider usage must be an object"))?;
+    Ok(provider_usage_has_billable_activity_core(usage))
+}
+
+#[pyfunction]
+fn provider_finish_response_is_retryable(
+    has_content: bool,
+    tool_call_count: usize,
+    has_usage: bool,
+    finish_reason: Option<&str>,
+    error_status_code: i64,
+    error_type: &str,
+) -> bool {
+    provider_finish_response_is_retryable_core(FinishResponseFacts {
+        has_content,
+        tool_call_count,
+        has_usage,
+        finish_reason,
+        error_status_code,
+        error_type,
+    })
+}
+
+#[pyfunction]
+fn provider_retry_wait_seconds(attempt: u32) -> PyResult<u64> {
+    provider_retry_wait_seconds_core(attempt)
+        .ok_or_else(|| PyValueError::new_err("provider retry delay exceeds supported range"))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2706,6 +2765,16 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(classify_provider_error, module)?)?;
     module.add_function(wrap_pyfunction!(parse_provider_retry_window, module)?)?;
     module.add_function(wrap_pyfunction!(select_provider_backoff_seconds, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_exception_is_retryable, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_usage_has_billable_activity,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_finish_response_is_retryable,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(provider_retry_wait_seconds, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;
