@@ -50,6 +50,10 @@ use bot_core::telegram_payments::{
     payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
     plan_topup_command, successful_payment_reply,
 };
+use bot_core::weather::{
+    WeatherObservation, classify_weather_command, render_weather, requested_location,
+    weather_load_error,
+};
 use num_bigint::BigInt;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -195,6 +199,16 @@ pub trait GreetingPoolSource {
     fn pool(&mut self, category: GreetingCategory) -> GreetingPoolLoad;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeatherObservationLoad {
+    pub observation: Option<WeatherObservation>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait WeatherSource {
+    fn load(&mut self, location: &str, now_unix: i64) -> WeatherObservationLoad;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -241,6 +255,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     rulo_source: Option<Box<dyn RuloSource>>,
     greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
+    weather_source: Option<Box<dyn WeatherSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -285,6 +300,7 @@ where
             dollar_quotes_source: None,
             rulo_source: None,
             greeting_pool_source: None,
+            weather_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -361,6 +377,12 @@ where
     #[must_use]
     pub fn with_greeting_pool_source(mut self, source: Box<dyn GreetingPoolSource>) -> Self {
         self.greeting_pool_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_weather_source(mut self, source: Box<dyn WeatherSource>) -> Self {
+        self.weather_source = Some(source);
         self
     }
 
@@ -1145,6 +1167,20 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_weather_command(&parsed.command) {
+            let location = requested_location(&parsed.message_text);
+            let Some(source) = self.weather_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(location, timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let text = load.observation.as_ref().map_or_else(
+                || weather_load_error(location, locale),
+                |observation| render_weather(observation, locale),
+            );
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(category) = classify_greeting_command(&parsed.command) {
             let Some(source) = self.greeting_pool_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1455,12 +1491,13 @@ mod tests {
         ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
         MessageStateSink, NativeDispatcher, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-        StarPaymentReceipt, StarPaymentSink, TransferResult,
+        StarPaymentReceipt, StarPaymentSink, TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
+    use bot_core::weather::WeatherObservation;
 
     struct Config {
         value: Result<ChatConfig, &'static str>,
@@ -1813,6 +1850,20 @@ mod tests {
         calls: Rc<RefCell<Vec<GreetingCategory>>>,
     }
 
+    struct WeatherObservations {
+        result: WeatherObservationLoad,
+        calls: Rc<RefCell<Vec<(String, i64)>>>,
+    }
+
+    impl WeatherSource for WeatherObservations {
+        fn load(&mut self, location: &str, now_unix: i64) -> WeatherObservationLoad {
+            self.calls
+                .borrow_mut()
+                .push((location.to_owned(), now_unix));
+            self.result.clone()
+        }
+    }
+
     impl GreetingPoolSource for GreetingPools {
         fn pool(&mut self, category: GreetingCategory) -> GreetingPoolLoad {
             self.calls.borrow_mut().push(category);
@@ -2125,6 +2176,115 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn weather_commands_use_default_or_requested_location_and_record_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_weather_source(Box::new(WeatherObservations {
+            result: WeatherObservationLoad {
+                observation: Some(WeatherObservation {
+                    location: "Example City, Exampleland".to_owned(),
+                    apparent_temperature: "19.5".to_owned(),
+                    precipitation_probability: "20".to_owned(),
+                    weather_code: 1,
+                    cloud_cover: "30".to_owned(),
+                    visibility_meters: 15_000.0,
+                }),
+                diagnostics: vec!["synthetic cache diagnostic".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/weather Example City, Exampleland", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[("Example City, Exampleland".to_owned(), 1_672_531_200)]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("Location: Example City, Exampleland"));
+        assert!(message.text.contains("Condition: mostly clear"));
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            &["synthetic cache diagnostic"]
+        );
+
+        let default_calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut default = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_weather_source(Box::new(WeatherObservations {
+            result: WeatherObservationLoad {
+                observation: None,
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::clone(&default_calls),
+        }));
+        assert_eq!(
+            default.dispatch(update("/clima", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(default_calls.borrow()[0].0, "Buenos Aires");
+        let Some(TelegramAction::SendMessage(message)) = default.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "no se pudo obtener el clima de Buenos Aires");
+    }
+
+    #[test]
+    fn weather_without_native_source_stays_on_legacy() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/weather Rosario", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+        assert!(dispatcher.state.incoming.is_empty());
     }
 
     #[test]

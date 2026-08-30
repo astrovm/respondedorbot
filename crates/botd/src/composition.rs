@@ -28,6 +28,10 @@ use bot_adapters::telegram_http::{
     ReqwestTelegramTransport, TelegramTransport, TransportFailureKind,
 };
 use bot_adapters::telegram_polling::{PollOutcome, PollingError, poll_once_with};
+use bot_adapters::weather::{
+    ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherCache,
+    WeatherTransport, load_weather,
+};
 use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_state::{
@@ -46,6 +50,7 @@ use crate::dispatcher::{
     ChatConfigSource, DollarQuotesSource, GreetingPoolLoad, GreetingPoolSource,
     GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
     RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -189,6 +194,21 @@ impl<T: GiphyTransport, C: GiphyPoolCache> GreetingPoolSource for GiphyGreetingP
         );
         GreetingPoolLoad {
             urls: load.urls,
+            diagnostics: load.diagnostics,
+        }
+    }
+}
+
+struct OpenMeteoWeatherSource<T, C> {
+    transport: T,
+    cache: C,
+}
+
+impl<T: WeatherTransport, C: WeatherCache> WeatherSource for OpenMeteoWeatherSource<T, C> {
+    fn load(&mut self, location: &str, now_unix: i64) -> WeatherObservationLoad {
+        let load = load_weather(&self.transport, &mut self.cache, location, now_unix);
+        WeatherObservationLoad {
+            observation: load.observation,
             diagnostics: load.diagnostics,
         }
     }
@@ -654,6 +674,10 @@ pub enum CompositionError {
     GiphyTransport(GiphyTransportFailureKind),
     #[error("could not construct Giphy Redis cache: {0}")]
     GiphyCache(RedisJsonCacheError),
+    #[error("could not construct Open-Meteo transport: {0:?}")]
+    WeatherTransport(WeatherTransportFailureKind),
+    #[error("could not construct weather Redis cache: {0}")]
+    WeatherCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -686,6 +710,10 @@ pub fn build_native_runtime(
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
     let giphy_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
+    let weather_transport =
+        ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
+    let weather_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::WeatherCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -719,6 +747,10 @@ pub fn build_native_runtime(
         transport: giphy_transport,
         cache: giphy_cache,
         api_key: options.giphy_api_key,
+    }))
+    .with_weather_source(Box::new(OpenMeteoWeatherSource {
+        transport: weather_transport,
+        cache: weather_cache,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -752,6 +784,10 @@ mod tests {
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
+    use bot_adapters::weather::{
+        HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure, WeatherCache,
+        WeatherRequest, WeatherTransport,
+    };
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
     use bot_core::telegram_payments::StarPaymentRecord;
@@ -766,17 +802,17 @@ mod tests {
 
     use crate::dispatcher::{
         ActionReceipt, ActionSink, BillingTransferSink, GroupAuthorizer, MessageStateSink,
-        RandomSource, RuntimeValues, StarPaymentSink,
+        RandomSource, RuntimeValues, StarPaymentSink, WeatherSource,
     };
     use crate::runtime::UpdateSource;
 
     use super::build_charge_history_page;
 
     use super::{
-        CriptoYaRuloSource, NativeRuntimeOptions, RedisCommandState, SystemRandomError,
-        SystemRandomSource, SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError,
-        TelegramGroupAuthorizer, TelegramUpdateSource, build_native_runtime,
-        publish_telegram_commands,
+        CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, RedisCommandState,
+        SystemRandomError, SystemRandomSource, SystemRuntimeValues, TelegramActionSink,
+        TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
+        build_native_runtime, publish_telegram_commands,
     };
     use crate::dispatcher::RuloSource;
 
@@ -788,6 +824,34 @@ mod tests {
     struct CriptoTransport {
         results: RefCell<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
         requests: RefCell<Vec<CriptoYaRequest>>,
+    }
+
+    struct WeatherTransportStub {
+        response: RefCell<Option<Result<WeatherHttpResponse, WeatherFailure>>>,
+    }
+
+    impl WeatherTransport for WeatherTransportStub {
+        fn get(&self, _request: &WeatherRequest) -> Result<WeatherHttpResponse, WeatherFailure> {
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(WeatherFailure::Request))
+        }
+    }
+
+    #[derive(Default)]
+    struct WeatherCacheStub;
+
+    impl WeatherCache for WeatherCacheStub {
+        type Error = std::convert::Infallible;
+
+        fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
+
+        fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl CriptoYaTransport for CriptoTransport {
@@ -1399,5 +1463,25 @@ mod tests {
             giphy_api_key: None,
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn weather_source_maps_the_typed_adapter_load() {
+        let transport = WeatherTransportStub {
+            response: RefCell::new(Some(Ok(WeatherHttpResponse {
+                status_code: 200,
+                body: r#"{"current":{"time":"2026-01-02T10:00"},"hourly":{"time":["2026-01-02T10:00"],"apparent_temperature":[19.5],"precipitation_probability":[20],"weather_code":[1],"cloud_cover":[30],"visibility":[15000]}}"#.to_owned(),
+            }))),
+        };
+        let mut source = OpenMeteoWeatherSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
+        let load = source.load("CABA", 1_767_345_000);
+        assert_eq!(
+            load.observation.map(|observation| observation.location),
+            Some("Buenos Aires, Argentina".to_owned())
+        );
+        assert!(load.diagnostics.is_empty());
     }
 }

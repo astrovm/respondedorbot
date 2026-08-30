@@ -23,6 +23,7 @@ pub mod telegram_actions;
 pub mod telegram_chat_admin;
 pub mod telegram_http;
 pub mod telegram_polling;
+pub mod weather;
 
 /// Return the core protocol version used by this adapter build.
 #[must_use]
