@@ -1,9 +1,16 @@
 from unittest.mock import call
 
-from tests.support import *
-
 from api.markets.stocks import StockQuote, get_stock_prices, search_yahoo_symbol
 from api.markets.weather import get_weather as get_weather_for_location
+from tests.support import *
+
+
+@pytest.fixture(autouse=True)
+def _use_python_stale_cache(monkeypatch):
+    """Keep legacy dollar-cache tests on the Python rollback path."""
+
+    monkeypatch.setattr("api.services.stale_cache._load_rust_stale_cache", lambda: None)
+    index.app_runtime.dollar._snapshot_cache = None
 
 
 def test_get_rulo():

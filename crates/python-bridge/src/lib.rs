@@ -13,7 +13,9 @@ use bot_adapters::redis_chat_admin::{
 };
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue as RedisCompactionQueueAdapter;
 use bot_adapters::redis_connection::RedisEndpoint;
-use bot_adapters::redis_json_cache::RedisJsonCache as RedisJsonCacheAdapter;
+use bot_adapters::redis_json_cache::{
+    RedisJsonCache as RedisJsonCacheAdapter, RedisJsonCacheError,
+};
 use bot_adapters::redis_media_cache::{
     cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
     media_cache_key as media_cache_key_adapter,
@@ -207,10 +209,26 @@ impl PyRedisJsonCache {
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
-    #[pyo3(signature = (key, value, ex=None))]
-    fn set(&self, py: Python<'_>, key: &str, value: &str, ex: Option<i64>) -> PyResult<bool> {
-        py.detach(|| self.cache.set(key, value, ex))
+    fn setex(&self, py: Python<'_>, key: &str, ttl: i64, value: &str) -> PyResult<bool> {
+        py.detach(|| self.cache.set(key, value, Some(ttl)))
             .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    #[pyo3(signature = (key, value, nx=false, ex=None))]
+    fn set(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        value: &str,
+        nx: bool,
+        ex: Option<i64>,
+    ) -> PyResult<bool> {
+        py.detach(|| match (nx, ex) {
+            (true, Some(ttl)) => self.cache.set_if_absent(key, value, ttl),
+            (true, None) => Err(RedisJsonCacheError::MissingLockTtl),
+            (false, ttl) => self.cache.set(key, value, ttl),
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 

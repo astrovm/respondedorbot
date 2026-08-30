@@ -8,6 +8,13 @@ import pytest
 from api.services import maintenance, stale_cache
 
 
+@pytest.fixture(autouse=True)
+def _use_python_stale_cache_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep cache-policy tests focused on the pure decision boundary."""
+
+    monkeypatch.setattr(stale_cache, "_load_rust_stale_cache", lambda: None)
+
+
 class _FakeRustCachePolicy:
     def __init__(self, *, decision: str = "stale", fail: bool = False) -> None:
         self.decision = decision

@@ -1,0 +1,5 @@
+{
+  "lock_ttl_validation": [
+    { "name": "negative stale-cache lock TTL", "ttl": -1 }
+  ]
+}

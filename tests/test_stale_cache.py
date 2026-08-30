@@ -1,6 +1,15 @@
 import json
 
+import pytest
+
 from api.services.stale_cache import StaleCache, StaleCacheResult
+
+
+@pytest.fixture(autouse=True)
+def _use_python_stale_cache(monkeypatch):
+    """Keep legacy stale-cache tests on the Python rollback path."""
+
+    monkeypatch.setattr("api.services.stale_cache._load_rust_stale_cache", lambda: None)
 
 
 class FakeRedis:
