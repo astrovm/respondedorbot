@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
@@ -13,6 +13,7 @@ use bot_adapters::telegram_http::{
     ReqwestTelegramTransport, TelegramTransport, TransportFailureKind,
 };
 use bot_adapters::telegram_polling::{PollOutcome, PollingError, poll_once_with};
+use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
@@ -26,8 +27,9 @@ use thiserror::Error;
 
 use crate::dispatcher::{
     ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
-    ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
-    NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    ChargeHistorySource, ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer,
+    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
+    StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -106,6 +108,71 @@ impl BillingTransferSink for BillingRepository {
             user_balance: result.user_balance,
             chat_balance: result.chat_balance,
         })
+    }
+}
+
+fn build_charge_history_page(
+    rows: Vec<ChargeHistoryRow>,
+    limit: usize,
+    cursor_id: Option<i64>,
+    direction: &str,
+) -> ChargeHistoryPage {
+    let mut groups = Vec::<ChargeHistoryGroup>::new();
+    for row in rows {
+        let entry = ChargeHistoryEntry {
+            id: row.id,
+            event_type: row.event_type,
+            metadata: row.metadata,
+        };
+        if let Some(group) = groups
+            .last_mut()
+            .filter(|group| group.cursor_id == row.group_cursor)
+        {
+            group.entries.push(entry);
+        } else {
+            groups.push(ChargeHistoryGroup {
+                cursor_id: row.group_cursor,
+                created_at: row.group_created_at,
+                entries: vec![entry],
+            });
+        }
+    }
+    let has_extra = groups.len() > limit;
+    groups.truncate(limit);
+    if direction == "newer" {
+        groups.reverse();
+    }
+    ChargeHistoryPage {
+        has_newer: if direction == "newer" {
+            has_extra
+        } else {
+            cursor_id.is_some()
+        },
+        has_older: if direction == "newer" {
+            cursor_id.is_some()
+        } else {
+            has_extra
+        },
+        newer_cursor: groups.first().map(|group| group.cursor_id),
+        older_cursor: groups.last().map(|group| group.cursor_id),
+        groups,
+    }
+}
+
+impl ChargeHistorySource for BillingRepository {
+    fn load(
+        &mut self,
+        user_id: i64,
+        limit: usize,
+        cursor_id: Option<i64>,
+        direction: &str,
+    ) -> Result<ChargeHistoryPage, String> {
+        let query_limit = i64::try_from(limit.saturating_add(1))
+            .map_err(|_| "charge history limit exceeds the query range".to_owned())?;
+        let rows = self
+            .list_user_ai_charge_rows(user_id, cursor_id, direction, query_limit)
+            .map_err(|error| error.to_string())?;
+        Ok(build_charge_history_page(rows, limit, cursor_id, direction))
     }
 }
 
@@ -447,7 +514,8 @@ pub fn build_native_runtime(
         )
         .with_payment_sink(Box::new(BillingRepository::new(database_url)))
         .with_balance_source(Box::new(BillingRepository::new(database_url)))
-        .with_transfer_sink(Box::new(BillingRepository::new(database_url))),
+        .with_transfer_sink(Box::new(BillingRepository::new(database_url)))
+        .with_charge_history_source(Box::new(BillingRepository::new(database_url))),
     ))
 }
 
@@ -459,7 +527,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use bot_adapters::billing_read::BillingRepository;
+    use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
@@ -482,6 +550,8 @@ mod tests {
         RandomSource, RuntimeValues, StarPaymentSink,
     };
     use crate::runtime::UpdateSource;
+
+    use super::build_charge_history_page;
 
     use super::{
         RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
@@ -638,6 +708,52 @@ mod tests {
             repository.transfer(42, -202, i64::from(i32::MAX) + 1),
             Err("credit transfer amount exceeds the persistent range".to_owned())
         );
+    }
+
+    #[test]
+    fn charge_history_page_groups_rows_and_preserves_bidirectional_cursors() {
+        let row = |id: i64, cursor: i64, group: &str| ChargeHistoryRow {
+            id,
+            event_type: "ai_settlement_result".to_owned(),
+            actor_user_id: Some(42),
+            user_id: Some(42),
+            chat_id: Some(-202),
+            amount: -1,
+            metadata: serde_json::json!({"charged_credit_units_total":1}),
+            created_at: "2026-08-26 17:00:00+00".to_owned(),
+            group_key: group.to_owned(),
+            group_cursor: cursor,
+            group_created_at: "2026-08-26 17:00:00+00".to_owned(),
+        };
+        let older = build_charge_history_page(
+            vec![row(30, 29, "a"), row(29, 29, "a"), row(28, 28, "b")],
+            1,
+            None,
+            "older",
+        );
+        assert_eq!(older.groups.len(), 1);
+        assert_eq!(older.groups[0].entries.len(), 2);
+        assert!(!older.has_newer);
+        assert!(older.has_older);
+        assert_eq!(older.newer_cursor, Some(29));
+        assert_eq!(older.older_cursor, Some(29));
+
+        let newer = build_charge_history_page(
+            vec![row(28, 28, "b"), row(30, 29, "a")],
+            2,
+            Some(27),
+            "newer",
+        );
+        assert_eq!(
+            newer
+                .groups
+                .iter()
+                .map(|group| group.cursor_id)
+                .collect::<Vec<_>>(),
+            [29, 28]
+        );
+        assert!(!newer.has_newer);
+        assert!(newer.has_older);
     }
 
     #[test]

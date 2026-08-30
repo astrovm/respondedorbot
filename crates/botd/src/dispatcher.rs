@@ -5,6 +5,10 @@ use bot_core::billing_commands::{
     TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
     transfer_result_reply,
 };
+use bot_core::charge_history::{
+    ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan, plan_charges_command,
+    render_charge_history_page,
+};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_parsing::parse_command;
 use bot_core::command_state::{
@@ -126,6 +130,16 @@ pub trait BillingTransferSink {
     ) -> Result<TransferResult, String>;
 }
 
+pub trait ChargeHistorySource {
+    fn load(
+        &mut self,
+        user_id: i64,
+        limit: usize,
+        cursor_id: Option<i64>,
+        direction: &str,
+    ) -> Result<ChargeHistoryPage, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -164,6 +178,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     payment_sink: Option<Box<dyn StarPaymentSink>>,
     balance_source: Option<Box<dyn BillingBalanceSource>>,
     transfer_sink: Option<Box<dyn BillingTransferSink>>,
+    charge_history_source: Option<Box<dyn ChargeHistorySource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -200,6 +215,7 @@ where
             payment_sink: None,
             balance_source: None,
             transfer_sink: None,
+            charge_history_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -228,6 +244,12 @@ where
     #[must_use]
     pub fn with_transfer_sink(mut self, sink: Box<dyn BillingTransferSink>) -> Self {
         self.transfer_sink = Some(sink);
+        self
+    }
+
+    #[must_use]
+    pub fn with_charge_history_source(mut self, source: Box<dyn ChargeHistorySource>) -> Self {
+        self.charge_history_source = Some(source);
         self
     }
 
@@ -695,6 +717,59 @@ where
                 }
                 BalanceCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
             }
+        } else if matches!(parsed.command.as_str(), "/charges" | "/history" | "/gastos") {
+            match plan_charges_command(
+                &content.text,
+                &self.bot_name,
+                ChargesCommandContext {
+                    chat_id,
+                    message_id,
+                    user_id: Some(sender_id.0),
+                    locale,
+                    timezone_offset_hours: config.timezone_offset,
+                    billing_available: self.billing_available,
+                },
+            ) {
+                ChargesCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
+                ChargesCommandPlan::Load {
+                    user_id,
+                    limit,
+                    timezone_minutes,
+                } => {
+                    let Some(source) = self.charge_history_source.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let (text, keyboard) = match source.load(user_id, limit, None, "older") {
+                        Ok(page) => render_charge_history_page(
+                            &page,
+                            user_id,
+                            limit,
+                            timezone_minutes,
+                            locale,
+                        ),
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "charge history load chat_id={} user_id={user_id} limit={limit}: {error}",
+                                chat_id.0
+                            ));
+                            let text = match locale {
+                                bot_core::locale::Locale::Es => {
+                                    "se trabó leyendo tus gastos, probá de nuevo"
+                                }
+                                bot_core::locale::Locale::En => {
+                                    "I could not load your expenses, try again"
+                                }
+                            };
+                            (text.to_owned(), None)
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    message.reply_markup = keyboard;
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                ChargesCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
+            }
         } else if parsed.command == "/transfer" {
             match plan_transfer_command(
                 &content.text,
@@ -934,10 +1009,11 @@ mod tests {
 
     use super::{
         ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
-        ChatConfigSource, DispatchError, DispatchOutcome, GroupAuthorizationDecision,
-        GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
-        StarPaymentReceipt, StarPaymentSink, TransferResult,
+        ChargeHistoryPage, ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
+        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
+    use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
 
     struct Config {
         value: Result<ChatConfig, &'static str>,
@@ -1209,6 +1285,28 @@ mod tests {
             amount: i64,
         ) -> Result<TransferResult, String> {
             self.calls.borrow_mut().push((user_id, chat_id, amount));
+            self.result.clone()
+        }
+    }
+
+    type ChargeHistoryCalls = Rc<RefCell<Vec<(i64, usize, Option<i64>, String)>>>;
+
+    struct ChargeHistories {
+        result: Result<ChargeHistoryPage, String>,
+        calls: ChargeHistoryCalls,
+    }
+
+    impl ChargeHistorySource for ChargeHistories {
+        fn load(
+            &mut self,
+            user_id: i64,
+            limit: usize,
+            cursor_id: Option<i64>,
+            direction: &str,
+        ) -> Result<ChargeHistoryPage, String> {
+            self.calls
+                .borrow_mut()
+                .push((user_id, limit, cursor_id, direction.to_owned()));
             self.result.clone()
         }
     }
@@ -2306,6 +2404,174 @@ mod tests {
         );
         assert_eq!(
             shadow.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(shadow.actions.0.is_empty());
+    }
+
+    #[test]
+    fn charges_command_loads_formats_and_paginates_the_calling_users_history() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(ChargeHistoryPage {
+                groups: vec![ChargeHistoryGroup {
+                    cursor_id: 30,
+                    created_at: "2026-08-26T17:32:00+00:00".to_owned(),
+                    entries: vec![ChargeHistoryEntry {
+                        id: 30,
+                        event_type: "ai_settlement_result".to_owned(),
+                        metadata: json!({
+                            "charged_credit_units_total":8,
+                            "model_breakdown":[{"kind":"chat","usd_micros":30}],
+                            "tool_breakdown":[{"tool":"web_search","count":1,"usd_micros":50}]
+                        }),
+                    }],
+                }],
+                has_newer: false,
+                has_older: true,
+                newer_cursor: Some(30),
+                older_cursor: Some(30),
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/charges 2", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [(88, 2, None, "older".to_owned())]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
+        );
+        let Some(keyboard) = message.reply_markup.as_ref() else {
+            return;
+        };
+        assert_eq!(
+            keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("chg:88:2:o:30:-180")
+        );
+    }
+
+    #[test]
+    fn charges_command_handles_empty_invalid_failed_and_shadow_paths() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut empty = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(ChargeHistoryPage {
+                groups: Vec::new(),
+                has_newer: false,
+                has_older: false,
+                newer_cursor: None,
+                older_cursor: None,
+            }),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            empty.dispatch(update("/history", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = empty.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "you have no recent AI expenses");
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut invalid = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            invalid.dispatch(update("/gastos 0", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = invalid.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "mandalo bien: /charges [cantidad]");
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Err("synthetic history failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/charges", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "se trabó leyendo tus gastos, probá de nuevo");
+        assert!(failed.state_diagnostics()[0].contains("synthetic history failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut shadow = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            shadow.dispatch(update("/charges", Some("es"))),
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(shadow.actions.0.is_empty());
