@@ -276,6 +276,25 @@ def verify_message_state(bridge: ModuleType) -> None:
             assert actual == case["expected"], case["name"]
         else:
             assert actual["role"] == case["expected_role"], case["name"]
+    for case in contract["search_escape"]:
+        assert bridge.escape_message_search_text(case["input"]) == case["expected"], case[
+            "name"
+        ]
+    for case in contract["tag_escape"]:
+        assert bridge.escape_message_search_tag(case["input"]) == case["expected"], case[
+            "name"
+        ]
+    ranking = contract["ranking"]
+    actual_ranking = json.loads(
+        bridge.rank_message_search_results(
+            json.dumps(ranking["candidates"], separators=(",", ":")),
+            ranking["search_text"],
+            ranking["reply_to_message_id"],
+            ranking["excluded_message_ids"],
+            ranking["limit"],
+        )
+    )
+    assert actual_ranking == ranking["expected"]
 
 
 def verify_media_routing(bridge: ModuleType) -> None:

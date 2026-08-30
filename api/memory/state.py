@@ -59,6 +59,19 @@ class _RustMessageState(Protocol):
         mentions_bot: bool,
     ) -> str: ...
 
+    def escape_message_search_text(self, query_text: str) -> str: ...
+
+    def escape_message_search_tag(self, value: str) -> str: ...
+
+    def rank_message_search_results(
+        self,
+        candidates_json: str,
+        search_text: str,
+        reply_to_message_id: str | None,
+        excluded_message_ids: list[str],
+        limit: int,
+    ) -> str: ...
+
 
 def _load_rust_message_state() -> _RustMessageState | None:
     module = load_rust_bridge("RUST_MESSAGE_STATE_ENABLED")
@@ -211,12 +224,24 @@ def _ensure_search_index(redis_client: redis.Redis) -> None:
 
 
 def _escape_search_text(query_text: str) -> str:
+    rust = _load_rust_message_state()
+    if rust is not None:
+        try:
+            return rust.escape_message_search_text(query_text)
+        except Exception:
+            pass
     tokens = [re.sub(r"[^\w@.-]", "", token) for token in str(query_text or "").split()]
     tokens = [token.replace("@", "\\@") for token in tokens if token]
     return " ".join(tokens)
 
 
 def _escape_tag_value(value: str) -> str:
+    rust = _load_rust_message_state()
+    if rust is not None:
+        try:
+            return rust.escape_message_search_tag(value)
+        except Exception:
+            pass
     return re.sub(r"([^A-Za-z0-9_])", r"\\\1", str(value or ""))
 
 
@@ -496,6 +521,72 @@ def get_chat_history(
         return []
 
 
+def _rank_search_results(
+    results: List[Dict[str, Any]],
+    search_text: str,
+    reply_to_message_id: Optional[str],
+    excluded_message_ids: Set[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    rust = _load_rust_message_state()
+    if rust is not None and limit >= 0:
+        try:
+            candidates = [
+                {
+                    "message_id": str(row.get("message_id") or ""),
+                    "text": str(row.get("text") or ""),
+                    "reply_to_message_id": str(row.get("reply_to_message_id") or ""),
+                    "timestamp": int(row.get("timestamp") or 0),
+                }
+                for row in results
+            ]
+            ranking = json.loads(
+                rust.rank_message_search_results(
+                    json.dumps(candidates, separators=(",", ":")),
+                    search_text,
+                    reply_to_message_id,
+                    sorted(excluded_message_ids),
+                    limit,
+                )
+            )
+            ranked_results: List[Dict[str, Any]] = []
+            if not isinstance(ranking, list):
+                raise TypeError("Rust search ranking must be a list")
+            for ranked in ranking:
+                index = int(ranked["index"])
+                row = results[index]
+                row["_reply_score"] = int(ranked["reply_score"])
+                row["_overlap_score"] = int(ranked["overlap_score"])
+                ranked_results.append(row)
+            return ranked_results
+        except Exception:
+            pass
+
+    query_tokens = set(search_text.lower().split())
+    ranked_results = []
+    for row in results:
+        message_id = str(row.get("message_id") or "")
+        if message_id and message_id in excluded_message_ids:
+            continue
+        row["_reply_score"] = (
+            1
+            if reply_to_message_id and row.get("reply_to_message_id") == reply_to_message_id
+            else 0
+        )
+        text_tokens = set(str(row.get("text") or "").lower().split())
+        row["_overlap_score"] = len(query_tokens & text_tokens)
+        ranked_results.append(row)
+    ranked_results.sort(
+        key=lambda item: (
+            int(item.get("_reply_score") or 0),
+            int(item.get("_overlap_score") or 0),
+            int(item.get("timestamp") or 0),
+        ),
+        reverse=True,
+    )
+    return ranked_results[:limit]
+
+
 def search_chat_history(
     redis_client: redis.Redis,
     chat_id: str,
@@ -535,31 +626,17 @@ def search_chat_history(
         if not isinstance(raw, list) or len(raw) <= 1:
             return []
         results: List[Dict[str, Any]] = []
-        excluded = exclude_message_ids or set()
-        query_tokens = set(search_text.lower().split())
         for idx in range(1, len(raw), 2):
             row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
-            message_id = str(row.get("message_id") or "")
-            if message_id and message_id in excluded:
-                continue
             row["timestamp"] = int(row.get("timestamp") or 0)
-            row["_reply_score"] = (
-                1
-                if reply_to_message_id and row.get("reply_to_message_id") == reply_to_message_id
-                else 0
-            )
-            text_tokens = set(str(row.get("text") or "").lower().split())
-            row["_overlap_score"] = len(query_tokens & text_tokens)
             results.append(row)
-        results.sort(
-            key=lambda item: (
-                int(item.get("_reply_score") or 0),
-                int(item.get("_overlap_score") or 0),
-                int(item.get("timestamp") or 0),
-            ),
-            reverse=True,
+        return _rank_search_results(
+            results,
+            search_text,
+            reply_to_message_id,
+            exclude_message_ids or set(),
+            limit,
         )
-        return results[:limit]
     except Exception as error:
         if admin_reporter is not None:
             admin_reporter(

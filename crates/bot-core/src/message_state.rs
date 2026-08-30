@@ -1,6 +1,8 @@
 //! Backward-compatible Redis conversation-state write preparation.
 
 use serde::Serialize;
+use std::cmp::Reverse;
+use std::collections::HashSet;
 
 pub const MESSAGE_HISTORY_SCHEMA_VERSION: u8 = 1;
 pub const CHAT_HISTORY_MAX_MESSAGES: usize = 200;
@@ -27,6 +29,22 @@ pub struct MessageWriteKeys {
     pub legacy_ids: String,
     pub sequence: String,
     pub search_document: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchCandidate {
+    pub index: usize,
+    pub message_id: String,
+    pub text: String,
+    pub reply_to_message_id: String,
+    pub timestamp: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RankedSearchCandidate {
+    pub index: usize,
+    pub reply_score: u8,
+    pub overlap_score: usize,
 }
 
 #[derive(Serialize)]
@@ -56,6 +74,92 @@ pub fn truncate_text(text: Option<&str>, max_length: usize) -> String {
     let mut truncated = text.chars().take(max_length - 3).collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+/// Escape the broad full-text query using the existing RediSearch contract.
+#[must_use]
+pub fn escape_search_text(query_text: &str) -> String {
+    query_text
+        .split_whitespace()
+        .filter_map(|token| {
+            let cleaned = token
+                .chars()
+                .filter(|character| {
+                    character.is_alphanumeric() || matches!(character, '_' | '@' | '.' | '-')
+                })
+                .collect::<String>()
+                .replace('@', "\\@");
+            (!cleaned.is_empty()).then_some(cleaned)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Escape one TAG query value using the legacy ASCII-safe rule.
+#[must_use]
+pub fn escape_search_tag(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if !character.is_ascii_alphanumeric() && character != '_' {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Rank adapter-parsed RediSearch rows without losing their original payloads.
+#[must_use]
+pub fn rank_search_candidates(
+    candidates: &[SearchCandidate],
+    search_text: &str,
+    reply_to_message_id: Option<&str>,
+    excluded_message_ids: &HashSet<String>,
+    limit: usize,
+) -> Vec<RankedSearchCandidate> {
+    let query_tokens = search_text
+        .to_lowercase()
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    let mut ranked = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.message_id.is_empty() || !excluded_message_ids.contains(&candidate.message_id)
+        })
+        .map(|candidate| {
+            let text_tokens = candidate
+                .text
+                .to_lowercase()
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
+            (
+                RankedSearchCandidate {
+                    index: candidate.index,
+                    reply_score: u8::from(
+                        reply_to_message_id
+                            .is_some_and(|reply_id| candidate.reply_to_message_id == reply_id),
+                    ),
+                    overlap_score: query_tokens.intersection(&text_tokens).count(),
+                },
+                candidate.timestamp,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(candidate, timestamp)| {
+        (
+            Reverse(candidate.reply_score),
+            Reverse(candidate.overlap_score),
+            Reverse(*timestamp),
+            candidate.index,
+        )
+    });
+    ranked.truncate(limit);
+    ranked
+        .into_iter()
+        .map(|(candidate, _timestamp)| candidate)
+        .collect()
 }
 
 /// Prepare all compatibility-sensitive values for the existing atomic Lua write.
@@ -111,7 +215,12 @@ pub fn prepare_message_write(
 
 #[cfg(test)]
 mod tests {
-    use super::{MESSAGE_HISTORY_SCHEMA_VERSION, prepare_message_write, truncate_text};
+    use std::collections::HashSet;
+
+    use super::{
+        MESSAGE_HISTORY_SCHEMA_VERSION, SearchCandidate, escape_search_tag, escape_search_text,
+        prepare_message_write, rank_search_candidates, truncate_text,
+    };
 
     #[test]
     fn truncates_by_unicode_characters_with_legacy_small_limit_rules() {
@@ -190,5 +299,50 @@ mod tests {
         };
         assert_eq!(explicit.role, "tool");
         assert_eq!(explicit.mentions_bot, "0");
+    }
+
+    #[test]
+    fn escapes_search_text_and_tag_values_for_redisearch() {
+        assert_eq!(
+            escape_search_text("wallet, @test_bot riesgo!"),
+            "wallet \\@test_bot riesgo"
+        );
+        assert_eq!(escape_search_text("¿qué pasó?"), "qué pasó");
+        assert_eq!(escape_search_tag("-1001"), "\\-1001");
+        assert_eq!(escape_search_tag("safe_value"), "safe_value");
+    }
+
+    #[test]
+    fn ranks_reply_overlap_and_timestamp_and_filters_exclusions() {
+        let candidates = vec![
+            SearchCandidate {
+                index: 0,
+                message_id: "10".to_owned(),
+                text: "wallet error happened".to_owned(),
+                reply_to_message_id: "99".to_owned(),
+                timestamp: 10,
+            },
+            SearchCandidate {
+                index: 1,
+                message_id: "11".to_owned(),
+                text: "wallet error generic".to_owned(),
+                reply_to_message_id: "1".to_owned(),
+                timestamp: 11,
+            },
+            SearchCandidate {
+                index: 2,
+                message_id: "12".to_owned(),
+                text: "wallet error excluded".to_owned(),
+                reply_to_message_id: "99".to_owned(),
+                timestamp: 12,
+            },
+        ];
+        let excluded = HashSet::from(["12".to_owned()]);
+        let ranked = rank_search_candidates(&candidates, "wallet error", Some("99"), &excluded, 5);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].index, 0);
+        assert_eq!(ranked[0].reply_score, 1);
+        assert_eq!(ranked[1].index, 1);
+        assert_eq!(ranked[1].overlap_score, 2);
     }
 }

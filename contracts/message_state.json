@@ -54,5 +54,29 @@
       },
       "expected_role": "assistant"
     }
-  ]
+  ],
+  "search_escape": [
+    { "name": "punctuation and mention", "input": "wallet, @test_bot riesgo!", "expected": "wallet \\@test_bot riesgo" },
+    { "name": "unicode words", "input": "¿qué pasó?", "expected": "qué pasó" },
+    { "name": "empty punctuation", "input": "!!!", "expected": "" }
+  ],
+  "tag_escape": [
+    { "name": "negative chat", "input": "-1001", "expected": "\\-1001" },
+    { "name": "safe tag", "input": "safe_value", "expected": "safe_value" }
+  ],
+  "ranking": {
+    "search_text": "wallet error",
+    "reply_to_message_id": "99",
+    "excluded_message_ids": ["12"],
+    "limit": 5,
+    "candidates": [
+      { "message_id": "10", "text": "wallet error happened", "reply_to_message_id": "99", "timestamp": 10 },
+      { "message_id": "11", "text": "wallet error generic", "reply_to_message_id": "1", "timestamp": 11 },
+      { "message_id": "12", "text": "wallet error excluded", "reply_to_message_id": "99", "timestamp": 12 }
+    ],
+    "expected": [
+      { "index": 0, "reply_score": 1, "overlap_score": 2 },
+      { "index": 1, "reply_score": 0, "overlap_score": 2 }
+    ]
+  }
 }

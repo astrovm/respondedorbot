@@ -40,6 +40,39 @@ class _FakeRustMessageState:
             }
         )
 
+    def escape_message_search_text(self, query_text: str) -> str:
+        if self.fail:
+            raise ValueError("synthetic search escape failure")
+        return f"rust-text:{query_text}"
+
+    def escape_message_search_tag(self, value: str) -> str:
+        if self.fail:
+            raise ValueError("synthetic tag escape failure")
+        return f"rust-tag:{value}"
+
+    def rank_message_search_results(
+        self,
+        candidates_json: str,
+        search_text: str,
+        reply_to_message_id: str | None,
+        excluded_message_ids: list[str],
+        limit: int,
+    ) -> str:
+        if self.fail:
+            raise ValueError("synthetic search ranking failure")
+        candidates = json.loads(candidates_json)
+        assert search_text
+        assert reply_to_message_id == "reply"
+        assert excluded_message_ids == ["excluded"]
+        assert limit == 2
+        assert len(candidates) == 2
+        return json.dumps(
+            [
+                {"index": 1, "reply_score": 1, "overlap_score": 2},
+                {"index": 0, "reply_score": 0, "overlap_score": 1},
+            ]
+        )
+
 
 def test_message_write_uses_one_rust_plan_and_one_atomic_redis_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -117,3 +150,53 @@ def test_message_write_falls_back_to_legacy_compatible_plan(
         "timestamp": 100,
         "role": "assistant",
     }
+
+
+def test_search_helpers_use_rust_without_losing_original_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rust = _FakeRustMessageState()
+    monkeypatch.setattr(state, "_load_rust_message_state", lambda: rust)
+    rows = [
+        {"message_id": "1", "text": "first", "timestamp": 1, "custom": "a"},
+        {
+            "message_id": "2",
+            "text": "second",
+            "reply_to_message_id": "reply",
+            "timestamp": 2,
+            "custom": "b",
+        },
+    ]
+
+    assert state._escape_search_text("hello") == "rust-text:hello"
+    assert state._escape_tag_value("-1") == "rust-tag:-1"
+    ranked = state._rank_search_results(
+        rows,
+        "query",
+        "reply",
+        {"excluded"},
+        2,
+    )
+
+    assert [row["custom"] for row in ranked] == ["b", "a"]
+    assert ranked[0]["_reply_score"] == 1
+    assert ranked[1]["_overlap_score"] == 1
+
+
+def test_search_helpers_fall_back_after_bridge_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        state,
+        "_load_rust_message_state",
+        lambda: _FakeRustMessageState(fail=True),
+    )
+    rows = [
+        {"message_id": "1", "text": "wallet", "timestamp": 1},
+        {"message_id": "2", "text": "wallet error", "timestamp": 2},
+    ]
+
+    assert state._escape_search_text("wallet, @bot") == "wallet \\@bot"
+    assert state._escape_tag_value("-1") == "\\-1"
+    ranked = state._rank_search_results(rows, "wallet error", None, set(), 2)
+    assert [row["message_id"] for row in ranked] == ["2", "1"]

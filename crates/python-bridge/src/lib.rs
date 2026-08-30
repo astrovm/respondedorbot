@@ -46,7 +46,12 @@ use bot_core::market_context::{
 use bot_core::market_models::{
     MarketModel, Valuation, evaluate_market_model as evaluate_market_model_core,
 };
-use bot_core::message_state::prepare_message_write as prepare_message_write_core;
+use bot_core::message_state::{
+    SearchCandidate, escape_search_tag as escape_search_tag_core,
+    escape_search_text as escape_search_text_core,
+    prepare_message_write as prepare_message_write_core,
+    rank_search_candidates as rank_search_candidates_core,
+};
 use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
@@ -1185,6 +1190,55 @@ fn prepare_message_write(
     serde_json::to_string(&plan).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[derive(Deserialize)]
+struct SearchCandidateDto {
+    message_id: String,
+    text: String,
+    reply_to_message_id: String,
+    timestamp: i64,
+}
+
+#[pyfunction]
+fn escape_message_search_text(query_text: &str) -> String {
+    escape_search_text_core(query_text)
+}
+
+#[pyfunction]
+fn escape_message_search_tag(value: &str) -> String {
+    escape_search_tag_core(value)
+}
+
+#[pyfunction]
+fn rank_message_search_results(
+    candidates_json: &str,
+    search_text: &str,
+    reply_to_message_id: Option<&str>,
+    excluded_message_ids: Vec<String>,
+    limit: usize,
+) -> PyResult<String> {
+    let candidates = serde_json::from_str::<Vec<SearchCandidateDto>>(candidates_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| SearchCandidate {
+            index,
+            message_id: candidate.message_id,
+            text: candidate.text,
+            reply_to_message_id: candidate.reply_to_message_id,
+            timestamp: candidate.timestamp,
+        })
+        .collect::<Vec<_>>();
+    let excluded = excluded_message_ids.into_iter().collect();
+    serde_json::to_string(&rank_search_candidates_core(
+        &candidates,
+        search_text,
+        reply_to_message_id,
+        &excluded,
+        limit,
+    ))
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1271,6 +1325,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(request_cache_ttl, module)?)?;
     module.add_function(wrap_pyfunction!(last_success_ttl, module)?)?;
     module.add_function(wrap_pyfunction!(prepare_message_write, module)?)?;
+    module.add_function(wrap_pyfunction!(escape_message_search_text, module)?)?;
+    module.add_function(wrap_pyfunction!(escape_message_search_tag, module)?)?;
+    module.add_function(wrap_pyfunction!(rank_message_search_results, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
