@@ -1,0 +1,45 @@
+{
+  "locations": [
+    {
+      "name": "qualifier selects second candidate",
+      "qualifiers": ["exampleland"],
+      "candidates": ["otherland ot", "exampleland ex"],
+      "expected": 1
+    },
+    {
+      "name": "no matching qualifier keeps provider order",
+      "qualifiers": ["missing"],
+      "candidates": ["firstland fi", "secondland se"],
+      "expected": 0
+    },
+    {
+      "name": "empty provider result",
+      "qualifiers": ["exampleland"],
+      "candidates": [],
+      "expected": null
+    }
+  ],
+  "hours": [
+    {
+      "name": "provider time match",
+      "forecast": ["2026-01-02T09", "2026-01-02T10"],
+      "provider": "2026-01-02T10",
+      "local": "2026-01-02T09",
+      "expected": 0
+    },
+    {
+      "name": "local time fallback",
+      "forecast": ["2026-01-02T09", "2026-01-02T10"],
+      "provider": "2026-01-02T11",
+      "local": "2026-01-02T10",
+      "expected": 1
+    },
+    {
+      "name": "no matching hour",
+      "forecast": ["2026-01-02T09"],
+      "provider": null,
+      "local": "2026-01-02T10",
+      "expected": null
+    }
+  ]
+}

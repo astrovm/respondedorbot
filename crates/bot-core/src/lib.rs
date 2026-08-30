@@ -14,6 +14,7 @@ pub mod routing;
 pub mod rulo;
 pub mod satoshi;
 pub mod task_triggers;
+pub mod weather;
 
 /// Version of the temporary Python/Rust compatibility protocol.
 pub const MIGRATION_PROTOCOL_VERSION: u16 = 1;

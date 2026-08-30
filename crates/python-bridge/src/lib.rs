@@ -47,6 +47,10 @@ use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
 };
+use bot_core::weather::{
+    select_forecast_hour as select_forecast_hour_core,
+    select_location_candidate as select_location_candidate_core,
+};
 
 #[derive(Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -891,6 +895,25 @@ fn evaluate_rulo(input_json: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(format!("cannot encode rulo result: {error}")))
 }
 
+/// Select one geocoding result from adapter-normalized qualifier keys.
+#[pyfunction]
+fn select_weather_location(
+    qualifier_keys: Vec<String>,
+    candidate_keys: Vec<String>,
+) -> Option<usize> {
+    select_location_candidate_core(&qualifier_keys, &candidate_keys)
+}
+
+/// Select one normalized hourly forecast row.
+#[pyfunction]
+fn select_weather_hour(
+    forecast_hours: Vec<String>,
+    provider_hour: Option<&str>,
+    local_hour: &str,
+) -> Option<usize> {
+    select_forecast_hour_core(&forecast_hours, provider_hour, local_hour)
+}
+
 /// Decide whether one normalized message should auto-process attached media.
 #[pyfunction]
 fn should_auto_process_media(
@@ -943,6 +966,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_devo_input, module)?)?;
     module.add_function(wrap_pyfunction!(calculate_devo, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_rulo, module)?)?;
+    module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
+    module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())

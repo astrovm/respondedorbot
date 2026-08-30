@@ -31,6 +31,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Satoshi quote calculation and formatting | `rust-flagged` | `RUST_SATOSHI_ENABLED=0` or missing bridge | `contracts/satoshi.json` |
 | Devo arbitrage parsing and calculation | `rust-flagged` | `RUST_DEVO_ENABLED=0` or missing bridge | `contracts/devo.json` |
 | Rulo route selection and calculation | `rust-flagged` | `RUST_RULO_ENABLED=0` or missing bridge | `contracts/rulo.json` |
+| Weather location and forecast-row selection | `rust-flagged` | `RUST_WEATHER_SELECTION_ENABLED=0` or missing bridge | `contracts/weather_selection.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

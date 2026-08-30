@@ -144,6 +144,19 @@ def verify_rulo(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_weather_selection(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "weather_selection.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["locations"]:
+        actual = bridge.select_weather_location(case["qualifiers"], case["candidates"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["hours"]:
+        actual = bridge.select_weather_hour(
+            case["forecast"], case["provider"], case["local"]
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -207,6 +220,7 @@ def main(arguments: list[str]) -> int:
     verify_satoshi(bridge)
     verify_devo(bridge)
     verify_rulo(bridge)
+    verify_weather_selection(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
