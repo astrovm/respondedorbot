@@ -1,0 +1,66 @@
+{
+  "text_cases": [
+    {"name": "none", "input": null, "expected": 0},
+    {"name": "empty", "input": "", "expected": 0},
+    {"name": "short", "input": "abc", "expected": 1},
+    {"name": "round_up", "input": "abcde", "expected": 2},
+    {"name": "unicode_characters", "input": "😀😀😀😀😀", "expected": 2}
+  ],
+  "nested_cases": [
+    {"name": "none", "input": null, "expected": 0},
+    {"name": "true_uses_python_spelling", "input": true, "expected": 1},
+    {"name": "false_uses_python_spelling", "input": false, "expected": 2},
+    {"name": "integer", "input": 123, "expected": 1},
+    {"name": "mapping_and_sequence", "input": {"first": "hello", "rest": ["world", true]}, "expected": 5}
+  ],
+  "message_cases": [
+    {
+      "name": "role_content_and_name_only",
+      "input": [
+        {"role": "user", "content": "hello", "name": "bob", "ignored": "not counted"},
+        {"role": "assistant", "content": [{"type": "text", "text": "world"}]}
+      ],
+      "expected": 10
+    }
+  ],
+  "chat_cases": [
+    {
+      "name": "reasoning_default_limit",
+      "system_message": {"role": "system", "content": "rules"},
+      "messages": [{"role": "user", "content": "hello"}],
+      "max_output_tokens": null,
+      "extra_input_tokens": 0,
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "expected": 17
+    },
+    {
+      "name": "unknown_model_uses_chat_fallback",
+      "system_message": null,
+      "messages": [],
+      "max_output_tokens": 100,
+      "extra_input_tokens": 10,
+      "model": "unknown",
+      "expected": 1
+    }
+  ],
+  "vision_cases": [
+    {"name": "empty_image", "prompt_text": "describe image", "image_byte_length": 0, "extra_input_tokens": 0, "max_output_tokens": 512, "model": "google/gemini-3.1-flash-lite-preview", "expected": 16},
+    {"name": "base64_rounding", "prompt_text": "describe image", "image_byte_length": 100, "extra_input_tokens": 0, "max_output_tokens": 512, "model": "google/gemini-3.1-flash-lite-preview", "expected": 16}
+  ],
+  "transcription_cases": [
+    {"name": "zero_minimum", "audio_seconds": 0, "expected": 1},
+    {"name": "ten_second_minimum", "audio_seconds": 1, "expected": 7},
+    {"name": "hour", "audio_seconds": 3600, "expected": 2220}
+  ],
+  "credit_cases": [
+    {"name": "negative", "usd_micros": -1, "expected": 0},
+    {"name": "zero", "usd_micros": 0, "expected": 0},
+    {"name": "round_up", "usd_micros": 51, "expected": 2},
+    {"name": "hundred_credits", "usd_micros": 5000, "expected": 100}
+  ],
+  "limit_cases": [
+    {"name": "reasoning", "model": "deepseek/deepseek-v4-flash-0731:free", "expected": 8192},
+    {"name": "ordinary", "model": "other", "expected": 1024}
+  ],
+  "firecrawl_expected": 34
+}

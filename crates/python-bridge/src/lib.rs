@@ -29,6 +29,18 @@ use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
 };
+use bot_core::ai_reserve::{
+    EstimatedMessage, TokenEstimateValue,
+    chat_output_token_limit as ai_chat_output_token_limit_core,
+    credit_units_from_usd_micros as ai_credit_units_from_usd_micros_core,
+    estimate_chat_reserve_credit_units as estimate_chat_reserve_credit_units_core,
+    estimate_firecrawl_reserve_credit_units as estimate_firecrawl_reserve_credit_units_core,
+    estimate_message_tokens as estimate_message_tokens_core,
+    estimate_nested_tokens as estimate_nested_tokens_core,
+    estimate_text_tokens as estimate_text_tokens_core,
+    estimate_transcription_reserve_credit_units as estimate_transcription_reserve_credit_units_core,
+    estimate_vision_reserve_credit_units as estimate_vision_reserve_credit_units_core,
+};
 use bot_core::ai_usage::{
     ProviderSegmentIdentity, ProviderUsageStatus,
     needs_reconciliation as provider_usage_needs_reconciliation_core,
@@ -2376,6 +2388,136 @@ fn classify_provider_error(
     (policy.rate_limited, policy.try_next_groq_account)
 }
 
+fn token_estimate_value(value: &Value) -> TokenEstimateValue {
+    match value {
+        Value::Null => TokenEstimateValue::Empty,
+        Value::String(value) => TokenEstimateValue::Text(value.clone()),
+        Value::Bool(true) => TokenEstimateValue::Scalar("True".to_owned()),
+        Value::Bool(false) => TokenEstimateValue::Scalar("False".to_owned()),
+        Value::Number(value) => TokenEstimateValue::Scalar(value.to_string()),
+        Value::Array(values) => {
+            TokenEstimateValue::Sequence(values.iter().map(token_estimate_value).collect())
+        }
+        Value::Object(values) => {
+            TokenEstimateValue::Mapping(values.values().map(token_estimate_value).collect())
+        }
+    }
+}
+
+fn estimated_message(value: &Value) -> PyResult<EstimatedMessage> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| PyValueError::new_err("AI message must be an object"))?;
+    Ok(EstimatedMessage {
+        role: object
+            .get("role")
+            .map_or(TokenEstimateValue::Empty, token_estimate_value),
+        content: object
+            .get("content")
+            .map_or(TokenEstimateValue::Empty, token_estimate_value),
+        name: object
+            .get("name")
+            .map_or(TokenEstimateValue::Empty, token_estimate_value),
+    })
+}
+
+fn estimated_messages(messages_json: &str) -> PyResult<Vec<EstimatedMessage>> {
+    let messages: Value = serde_json::from_str(messages_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    messages
+        .as_array()
+        .ok_or_else(|| PyValueError::new_err("AI messages must be an array"))?
+        .iter()
+        .map(estimated_message)
+        .collect()
+}
+
+#[pyfunction]
+fn ai_chat_output_token_limit(model: &str) -> i64 {
+    ai_chat_output_token_limit_core(model)
+}
+
+#[pyfunction]
+fn ai_estimate_text_tokens(text: Option<&str>) -> i64 {
+    estimate_text_tokens_core(text)
+}
+
+#[pyfunction]
+fn ai_estimate_nested_tokens(value_json: &str) -> PyResult<i64> {
+    let value: Value = serde_json::from_str(value_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(estimate_nested_tokens_core(&token_estimate_value(&value)))
+}
+
+#[pyfunction]
+fn ai_estimate_message_tokens(messages_json: &str) -> PyResult<i64> {
+    Ok(estimate_message_tokens_core(&estimated_messages(
+        messages_json,
+    )?))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn ai_estimate_chat_reserve_credit_units(
+    system_message_json: Option<&str>,
+    messages_json: &str,
+    max_output_tokens: Option<i64>,
+    extra_input_tokens: i64,
+    model: &str,
+) -> PyResult<i64> {
+    let system_message = system_message_json
+        .map(|value| {
+            serde_json::from_str(value)
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+                .and_then(|value| estimated_message(&value))
+        })
+        .transpose()?;
+    estimate_chat_reserve_credit_units_core(
+        system_message.as_ref(),
+        &estimated_messages(messages_json)?,
+        max_output_tokens,
+        extra_input_tokens,
+        model,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn ai_estimate_vision_reserve_credit_units(
+    prompt_text: &str,
+    image_byte_length: usize,
+    extra_input_tokens: i64,
+    max_output_tokens: i64,
+    model: &str,
+) -> PyResult<i64> {
+    estimate_vision_reserve_credit_units_core(
+        prompt_text,
+        image_byte_length,
+        extra_input_tokens,
+        max_output_tokens,
+        model,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn ai_estimate_transcription_reserve_credit_units(audio_seconds: f64) -> PyResult<i64> {
+    estimate_transcription_reserve_credit_units_core(audio_seconds)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn ai_estimate_firecrawl_reserve_credit_units() -> PyResult<i64> {
+    estimate_firecrawl_reserve_credit_units_core()
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn ai_credit_units_from_usd_micros(usd_micros: i64) -> PyResult<i64> {
+    ai_credit_units_from_usd_micros_core(i128::from(usd_micros))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2526,6 +2668,27 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(classify_provider_error, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_estimate_message_tokens, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        ai_estimate_chat_reserve_credit_units,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        ai_estimate_vision_reserve_credit_units,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        ai_estimate_transcription_reserve_credit_units,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        ai_estimate_firecrawl_reserve_credit_units,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(ai_credit_units_from_usd_micros, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

@@ -5,6 +5,7 @@ import pytest
 import redis as redis_module
 
 from api.core import config as config_module
+from api.ai import pricing as ai_pricing_module
 from api.billing import provider_usage as provider_usage_module
 from api.providers import errors as provider_errors_module
 from api import index as index_module
@@ -45,6 +46,11 @@ def cleanup_test_artifacts():
 @pytest.fixture(autouse=True)
 def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
+    monkeypatch.setattr(
+        ai_pricing_module,
+        "_load_rust_ai_reserve_estimates",
+        lambda: None,
+    )
     monkeypatch.setattr(
         provider_usage_module,
         "_load_rust_ai_usage_policy",

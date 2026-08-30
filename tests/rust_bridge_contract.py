@@ -767,6 +767,57 @@ def verify_provider_error_policy(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case["name"]
 
 
+def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_reserve_estimates.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["text_cases"]:
+        assert bridge.ai_estimate_text_tokens(case["input"]) == case["expected"], case["name"]
+    for case in contract["nested_cases"]:
+        value_json = json.dumps(case["input"], ensure_ascii=False)
+        assert bridge.ai_estimate_nested_tokens(value_json) == case["expected"], case["name"]
+    for case in contract["message_cases"]:
+        messages_json = json.dumps(case["input"], ensure_ascii=False)
+        assert bridge.ai_estimate_message_tokens(messages_json) == case["expected"], case["name"]
+    for case in contract["chat_cases"]:
+        system_message_json = (
+            json.dumps(case["system_message"], ensure_ascii=False)
+            if case["system_message"] is not None
+            else None
+        )
+        actual = bridge.ai_estimate_chat_reserve_credit_units(
+            system_message_json,
+            json.dumps(case["messages"], ensure_ascii=False),
+            case["max_output_tokens"],
+            case["extra_input_tokens"],
+            case["model"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["vision_cases"]:
+        actual = bridge.ai_estimate_vision_reserve_credit_units(
+            case["prompt_text"],
+            case["image_byte_length"],
+            case["extra_input_tokens"],
+            case["max_output_tokens"],
+            case["model"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["transcription_cases"]:
+        actual = bridge.ai_estimate_transcription_reserve_credit_units(
+            case["audio_seconds"]
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["credit_cases"]:
+        actual = bridge.ai_credit_units_from_usd_micros(case["usd_micros"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["limit_cases"]:
+        actual = bridge.ai_chat_output_token_limit(case["model"])
+        assert actual == case["expected"], case["name"]
+    assert (
+        bridge.ai_estimate_firecrawl_reserve_credit_units()
+        == contract["firecrawl_expected"]
+    )
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -804,6 +855,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_contracts(bridge)
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
+    verify_ai_reserve_estimates(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

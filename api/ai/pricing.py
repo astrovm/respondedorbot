@@ -3,12 +3,74 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import math
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, cast
 
 from api.billing.credit_units import CREDIT_SCALE, format_credit_units
+from api.core.rust_bridge import load_rust_bridge
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustAiReserveEstimates(Protocol):
+    def ai_chat_output_token_limit(self, model: str) -> int: ...
+
+    def ai_estimate_text_tokens(self, text: str | None) -> int: ...
+
+    def ai_estimate_nested_tokens(self, value_json: str) -> int: ...
+
+    def ai_estimate_message_tokens(self, messages_json: str) -> int: ...
+
+    def ai_estimate_chat_reserve_credit_units(
+        self,
+        system_message_json: str | None,
+        messages_json: str,
+        max_output_tokens: int | None,
+        extra_input_tokens: int,
+        model: str,
+    ) -> int: ...
+
+    def ai_estimate_vision_reserve_credit_units(
+        self,
+        prompt_text: str,
+        image_byte_length: int,
+        extra_input_tokens: int,
+        max_output_tokens: int,
+        model: str,
+    ) -> int: ...
+
+    def ai_estimate_transcription_reserve_credit_units(
+        self,
+        audio_seconds: float,
+    ) -> int: ...
+
+    def ai_estimate_firecrawl_reserve_credit_units(self) -> int: ...
+
+    def ai_credit_units_from_usd_micros(self, usd_micros: int) -> int: ...
+
+
+def _load_rust_ai_reserve_estimates() -> _RustAiReserveEstimates | None:
+    module = load_rust_bridge("RUST_AI_RESERVE_ESTIMATES_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAiReserveEstimates, module)
+
+
+def _rust_estimate_failed(operation: str) -> None:
+    logger.exception(
+        "Rust AI reserve estimate failed; using Python fallback: operation=%s",
+        operation,
+    )
+
+
+def _estimate_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
 
 PRICING_VERSION = "2026-08-28"
 CREDIT_USD_MICROS = 10_000
@@ -61,6 +123,13 @@ PROVIDER_MODEL_PRICING_USD_MICROS: Dict[tuple[str, str], Dict[str, int]] = {
 
 def chat_output_token_limit(model: str) -> int:
     """Return a larger budget only for chat models that use hidden reasoning."""
+
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_chat_output_token_limit(str(model or "")))
+        except Exception:
+            _rust_estimate_failed("chat_output_token_limit")
 
     if str(model or "").split(":", 1)[0] == "deepseek/deepseek-v4-flash-0731":
         return REASONING_CHAT_OUTPUT_TOKEN_LIMIT
@@ -115,6 +184,13 @@ def ensure_mapping(value: Any) -> Optional[Dict[str, Any]]:
 def estimate_text_tokens(text: Optional[str]) -> int:
     """Approximate token count from text length."""
 
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_estimate_text_tokens(None if text is None else str(text)))
+        except Exception:
+            _rust_estimate_failed("estimate_text_tokens")
+
     if not text:
         return 0
     return max(1, math.ceil(len(str(text)) / 4))
@@ -122,6 +198,13 @@ def estimate_text_tokens(text: Optional[str]) -> int:
 
 def estimate_nested_tokens(value: Any) -> int:
     """Approximate token count for nested chat/response payload values."""
+
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_estimate_nested_tokens(_estimate_json(value)))
+        except Exception:
+            _rust_estimate_failed("estimate_nested_tokens")
 
     if value is None:
         return 0
@@ -143,6 +226,13 @@ def estimate_nested_tokens(value: Any) -> int:
 def estimate_message_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     """Approximate token count for a chat message list."""
 
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_estimate_message_tokens(_estimate_json(messages)))
+        except Exception:
+            _rust_estimate_failed("estimate_message_tokens")
+
     total = 0
     for message in messages:
         total += estimate_nested_tokens(message.get("role"))
@@ -159,6 +249,20 @@ def estimate_chat_reserve_credits(
     extra_input_tokens: int = 0,
     model: str = "deepseek/deepseek-v4-flash-0731",
 ) -> int:
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(
+                rust.ai_estimate_chat_reserve_credit_units(
+                    _estimate_json(system_message) if system_message is not None else None,
+                    _estimate_json(messages),
+                    int(max_output_tokens) if max_output_tokens is not None else None,
+                    int(extra_input_tokens),
+                    str(model),
+                )
+            )
+        except Exception:
+            _rust_estimate_failed("estimate_chat_reserve_credits")
     pricing = MODEL_PRICING_USD_MICROS.get(
         model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash-0731"]
     )
@@ -183,6 +287,20 @@ def estimate_vision_reserve_credits(
     max_output_tokens: int = VISION_OUTPUT_TOKEN_LIMIT,
     model: str = "google/gemini-3.1-flash-lite-preview",
 ) -> int:
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(
+                rust.ai_estimate_vision_reserve_credit_units(
+                    str(prompt_text),
+                    len(image_data or b""),
+                    int(extra_input_tokens),
+                    int(max_output_tokens),
+                    str(model),
+                )
+            )
+        except Exception:
+            _rust_estimate_failed("estimate_vision_reserve_credits")
     pricing = MODEL_PRICING_USD_MICROS.get(
         model, MODEL_PRICING_USD_MICROS["google/gemini-3.1-flash-lite-preview"]
     )
@@ -208,6 +326,16 @@ def estimate_vision_reserve_credits(
 
 
 def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(
+                rust.ai_estimate_transcription_reserve_credit_units(
+                    float(audio_seconds)
+                )
+            )
+        except Exception:
+            _rust_estimate_failed("estimate_transcribe_reserve_credits")
     usd_micros = _calculate_transcription_usd_micros(audio_seconds)
     if usd_micros <= 0:
         return 1
@@ -216,6 +344,13 @@ def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
 
 def estimate_firecrawl_reserve_credits() -> int:
     """Reserve the published maximum cost of one application web search."""
+
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_estimate_firecrawl_reserve_credit_units())
+        except Exception:
+            _rust_estimate_failed("estimate_firecrawl_reserve_credits")
 
     return max(
         1,
@@ -227,6 +362,13 @@ def estimate_firecrawl_reserve_credits() -> int:
 
 def credit_units_from_usd_micros(usd_micros: int) -> int:
     """Convert raw USD micros into hundredths of credits with markup."""
+
+    rust = _load_rust_ai_reserve_estimates()
+    if rust is not None:
+        try:
+            return int(rust.ai_credit_units_from_usd_micros(int(usd_micros or 0)))
+        except Exception:
+            _rust_estimate_failed("credit_units_from_usd_micros")
 
     micros = max(0, int(usd_micros or 0))
     if micros == 0:

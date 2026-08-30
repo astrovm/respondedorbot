@@ -1,6 +1,7 @@
 //! Typed domain and application logic for respondedorbot.
 
 pub mod admin_reports;
+pub mod ai_reserve;
 pub mod ai_usage;
 pub mod base_conversion;
 pub mod cache_policy;
