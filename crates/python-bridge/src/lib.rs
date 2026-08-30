@@ -3,6 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use bot_core::command_parsing::parse_command as parse_command_core;
 use bot_core::credit_units::{
@@ -10,6 +11,10 @@ use bot_core::credit_units::{
     parse_credit_units as parse_credit_units_core,
     rescale_credit_units as rescale_credit_units_core,
     whole_credits_to_units as whole_credits_to_units_core,
+};
+use bot_core::market_context::{
+    CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
+    format_market_context as format_market_context_core,
 };
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
@@ -249,6 +254,171 @@ impl From<PriceQuery> for PriceQueryDto {
     }
 }
 
+fn dynamic_number(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Number(number) => number.as_f64(),
+        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        Value::String(value) if !value.trim().is_empty() => value.trim().parse().ok(),
+        Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn dynamic_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn dynamic_text(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn first_truthy<'a>(row: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter()
+        .filter_map(|key| row.get(*key))
+        .find(|value| dynamic_truthy(value))
+}
+
+fn nested_object<'a>(row: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Map<String, Value>> {
+    let mut current = row;
+    for key in keys {
+        current = current.get(*key)?.as_object()?;
+    }
+    Some(current)
+}
+
+fn normalize_market_crypto(value: Option<&Value>) -> Vec<MarketCryptoQuote> {
+    let Some(rows) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .take(3)
+        .filter_map(|value| {
+            let row = value.as_object()?;
+            let symbol = first_truthy(row, &["symbol", "name"])
+                .map(dynamic_text)
+                .unwrap_or_default()
+                .trim()
+                .to_uppercase();
+            let usd = nested_object(row, &["quote", "USD"]);
+            let has_usd_quote = usd.is_some_and(|value| !value.is_empty());
+            let price = if has_usd_quote {
+                dynamic_number(usd.and_then(|value| value.get("price")))
+            } else {
+                dynamic_number(row.get("price"))
+            }?;
+            if symbol.is_empty() {
+                return None;
+            }
+            let change_24h = if has_usd_quote {
+                dynamic_number(
+                    usd.and_then(|value| value.get("changes"))
+                        .and_then(Value::as_object)
+                        .and_then(|changes| changes.get("24h")),
+                )
+            } else {
+                dynamic_number(row.get("change_24h"))
+            };
+            let dominance = has_usd_quote
+                .then(|| usd.and_then(|value| dynamic_number(value.get("dominance"))))
+                .flatten();
+            Some(MarketCryptoQuote {
+                symbol,
+                price,
+                change_24h,
+                dominance,
+            })
+        })
+        .collect()
+}
+
+fn market_dollar_quote(
+    label: &str,
+    row: Option<&Map<String, Value>>,
+    price_keys: &[&str],
+) -> Option<MarketDollarQuote> {
+    let row = row?;
+    let price = price_keys
+        .iter()
+        .find_map(|key| dynamic_number(row.get(*key)))?;
+    Some(MarketDollarQuote {
+        label: label.to_owned(),
+        price,
+        bid: dynamic_number(row.get("bid")),
+    })
+}
+
+fn normalize_market_dollars(value: Option<&Value>) -> Vec<MarketDollarQuote> {
+    match value {
+        Some(Value::Array(rows)) => rows
+            .iter()
+            .filter_map(|value| {
+                let row = value.as_object()?;
+                let label = first_truthy(row, &["name", "label"])
+                    .map(dynamic_text)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                let price = dynamic_number(row.get("price"))?;
+                (!label.is_empty()).then_some(MarketDollarQuote {
+                    label,
+                    price,
+                    bid: None,
+                })
+            })
+            .collect(),
+        Some(Value::Object(row)) => {
+            let mep = nested_object(row, &["mep", "al30", "ci"]);
+            let crypto = nested_object(row, &["cripto", "usdt"]);
+            [
+                market_dollar_quote(
+                    "oficial",
+                    row.get("oficial").and_then(Value::as_object),
+                    &["price"],
+                ),
+                market_dollar_quote(
+                    "blue",
+                    row.get("blue").and_then(Value::as_object),
+                    &["ask", "price"],
+                ),
+                market_dollar_quote("mep al30 ci", mep, &["price"]),
+                market_dollar_quote(
+                    "tarjeta",
+                    row.get("tarjeta").and_then(Value::as_object),
+                    &["price"],
+                ),
+                market_dollar_quote("usdt", crypto, &["ask"]),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) | None => {
+            Vec::new()
+        }
+    }
+}
+
+fn normalize_market_snapshot(value: &Value) -> Option<MarketSnapshot> {
+    let market = value.as_object()?;
+    Some(MarketSnapshot {
+        crypto: normalize_market_crypto(market.get("crypto")),
+        dollars: normalize_market_dollars(market.get("dollar")),
+    })
+}
+
 /// Return the compatibility protocol version shared with Python.
 #[pyfunction]
 fn migration_protocol_version() -> u16 {
@@ -322,6 +492,16 @@ fn parse_price_query(message_text: &str, valid_timeframes_json: &str) -> PyResul
     .map_err(|error| PyValueError::new_err(format!("cannot encode price query: {error}")))
 }
 
+/// Normalize cached market data and format the compact AI prompt context.
+#[pyfunction]
+fn format_market_info(market_json: &str) -> PyResult<String> {
+    let value: Value = serde_json::from_str(market_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid market snapshot: {error}")))?;
+    let snapshot = normalize_market_snapshot(&value)
+        .ok_or_else(|| PyValueError::new_err("market snapshot must be an object"))?;
+    Ok(format_market_context_core(&snapshot))
+}
+
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -333,5 +513,6 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_command, module)?)?;
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
+    module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
     Ok(())
 }

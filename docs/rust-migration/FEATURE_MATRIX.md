@@ -25,6 +25,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Command parsing | `rust-flagged` | `RUST_COMMAND_PARSING_ENABLED=0` or missing bridge | `contracts/command_parsing.json` |
 | Scheduled-task trigger parsing | `rust-flagged` | `RUST_TASK_TRIGGERS_ENABLED=0` or missing bridge | `contracts/task_triggers.json` |
 | Unified price-query parsing | `rust-flagged` | `RUST_PRICE_QUERY_PARSING_ENABLED=0` or missing bridge | `contracts/price_queries.json` |
+| AI market-context normalization and formatting | `rust-flagged` | `RUST_MARKET_CONTEXT_ENABLED=0` or missing bridge | `contracts/market_context.json` |
 
 ## Commands and user-visible features
 

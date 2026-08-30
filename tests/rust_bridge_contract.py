@@ -79,6 +79,16 @@ def verify_price_queries(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_market_context(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "market_context.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.format_market_info(
+            json.dumps(case["input"], separators=(",", ":")),
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -88,6 +98,7 @@ def main(arguments: list[str]) -> int:
     verify_command_parsing(bridge)
     verify_task_triggers(bridge)
     verify_price_queries(bridge)
+    verify_market_context(bridge)
     return 0
 
 
