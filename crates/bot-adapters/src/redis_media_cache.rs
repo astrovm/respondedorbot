@@ -1,14 +1,8 @@
 //! Single-owner Redis adapter for expensive media results.
 
-use redis::{Commands, IntoConnectionInfo, RedisConnectionInfo};
 use thiserror::Error;
 
-#[derive(Clone)]
-pub struct RedisEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub password: Option<String>,
-}
+use crate::redis_connection::{RedisEndpoint, RedisStringCommands, connect};
 
 #[derive(Debug, Error)]
 pub enum RedisMediaCacheError {
@@ -18,27 +12,12 @@ pub enum RedisMediaCacheError {
     InvalidTtl,
 }
 
-pub trait MediaCacheCommands {
-    fn get_text(&mut self, key: &str) -> redis::RedisResult<Option<String>>;
-    fn set_text(&mut self, key: &str, value: &str, ttl_seconds: u64) -> redis::RedisResult<()>;
-}
-
-impl MediaCacheCommands for redis::Connection {
-    fn get_text(&mut self, key: &str) -> redis::RedisResult<Option<String>> {
-        self.get(key)
-    }
-
-    fn set_text(&mut self, key: &str, value: &str, ttl_seconds: u64) -> redis::RedisResult<()> {
-        self.set_ex(key, value, ttl_seconds)
-    }
-}
-
 #[must_use]
 pub fn media_cache_key(prefix: &str, file_id: &str) -> String {
     format!("{prefix}:{file_id}")
 }
 
-pub fn get_cached_media_with<C: MediaCacheCommands>(
+pub fn get_cached_media_with<C: RedisStringCommands>(
     connection: &mut C,
     prefix: &str,
     file_id: &str,
@@ -46,7 +25,7 @@ pub fn get_cached_media_with<C: MediaCacheCommands>(
     Ok(connection.get_text(&media_cache_key(prefix, file_id))?)
 }
 
-pub fn cache_media_with<C: MediaCacheCommands>(
+pub fn cache_media_with<C: RedisStringCommands>(
     connection: &mut C,
     prefix: &str,
     file_id: &str,
@@ -78,35 +57,15 @@ pub fn cache_media(
     cache_media_with(&mut connection, prefix, file_id, text, ttl_seconds)
 }
 
-fn connect(endpoint: &RedisEndpoint) -> Result<redis::Connection, RedisMediaCacheError> {
-    let mut settings = RedisConnectionInfo::default().set_skip_set_lib_name();
-    if let Some(password) = endpoint
-        .password
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        settings = settings.set_password(password);
-    }
-    let info = (endpoint.host.clone(), endpoint.port)
-        .into_connection_info()?
-        .set_redis_settings(settings);
-    Ok(redis::Client::open(info)?.get_connection()?)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        error::Error,
-        io::{BufRead, BufReader, Read, Write},
-        net::{TcpListener, TcpStream},
-        thread,
-        time::Duration,
-    };
+    use std::{error::Error, io::Write, net::TcpListener, thread, time::Duration};
 
     use super::{
-        MediaCacheCommands, RedisEndpoint, RedisMediaCacheError, cache_media, cache_media_with,
-        get_cached_media, get_cached_media_with, media_cache_key,
+        RedisMediaCacheError, cache_media, cache_media_with, get_cached_media,
+        get_cached_media_with, media_cache_key,
     };
+    use crate::redis_connection::{RedisEndpoint, RedisStringCommands, test_support::read_command};
 
     #[derive(Default)]
     struct FakeCommands {
@@ -115,7 +74,7 @@ mod tests {
         sets: Vec<(String, String, u64)>,
     }
 
-    impl MediaCacheCommands for FakeCommands {
+    impl RedisStringCommands for FakeCommands {
         fn get_text(&mut self, key: &str) -> redis::RedisResult<Option<String>> {
             self.gets.push(key.to_owned());
             Ok(self.value.clone())
@@ -205,33 +164,5 @@ mod tests {
             Err(_) => return Err("synthetic Redis server panicked".into()),
         }
         Ok(())
-    }
-
-    fn read_command(stream: &mut TcpStream) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let count = line
-            .strip_prefix('*')
-            .and_then(|value| value.trim_end().parse::<usize>().ok())
-            .ok_or("invalid Redis array header")?;
-        let mut parts = Vec::with_capacity(count);
-        for _ in 0..count {
-            line.clear();
-            reader.read_line(&mut line)?;
-            let length = line
-                .strip_prefix('$')
-                .and_then(|value| value.trim_end().parse::<usize>().ok())
-                .ok_or("invalid Redis bulk-string header")?;
-            let mut bytes = vec![0; length];
-            reader.read_exact(&mut bytes)?;
-            let mut terminator = [0; 2];
-            reader.read_exact(&mut terminator)?;
-            if terminator != *b"\r\n" {
-                return Err("invalid Redis bulk-string terminator".into());
-            }
-            parts.push(String::from_utf8(bytes)?);
-        }
-        Ok(parts)
     }
 }

@@ -1,6 +1,16 @@
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_chat_admin_cache(monkeypatch):
+    """Keep legacy admin-cache tests scoped to the Python implementation."""
+
+    monkeypatch.setattr(
+        "api.bot.chat_settings._load_rust_chat_admin_cache",
+        lambda: None,
+    )
+
+
 def test_decode_redis_value_variants():
     assert _decode_redis_value(b"value") == "value"
     assert _decode_redis_value("value") == "value"

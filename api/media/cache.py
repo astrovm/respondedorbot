@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from logging import Logger
-import os
 from typing import Protocol, cast
 
 import redis
 
 from api.core.config_runtime import ConfigRuntime
 from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 
 RedisFactory = Callable[[], redis.Redis]
 
@@ -44,13 +44,6 @@ def _load_rust_media_cache() -> _RustMediaCache | None:
     return cast(_RustMediaCache, module)
 
 
-def _redis_endpoint() -> tuple[str, int, str | None]:
-    host = str(os.environ.get("REDIS_HOST") or "localhost")
-    port = int(os.environ.get("REDIS_PORT") or "6379")
-    password = os.environ.get("REDIS_PASSWORD") or None
-    return host, port, password
-
-
 def get_cached_media(
     prefix: str,
     file_id: str,
@@ -63,7 +56,7 @@ def get_cached_media(
     rust = _load_rust_media_cache()
     if rust is not None:
         try:
-            host, port, password = _redis_endpoint()
+            host, port, password = redis_endpoint_from_env()
             return rust.redis_media_cache_get(host, port, password, prefix, file_id)
         except Exception:
             logger.exception("Error getting cached %s through Rust", prefix)
@@ -92,7 +85,7 @@ def cache_media(
     rust = _load_rust_media_cache()
     if rust is not None:
         try:
-            host, port, password = _redis_endpoint()
+            host, port, password = redis_endpoint_from_env()
             rust.redis_media_cache_set(
                 host,
                 port,

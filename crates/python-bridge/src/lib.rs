@@ -6,9 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
+use bot_adapters::redis_chat_admin::{
+    cache_chat_admin as cache_chat_admin_adapter,
+    chat_admin_cache_key as chat_admin_cache_key_adapter,
+    get_cached_chat_admin as get_cached_chat_admin_adapter,
+};
+use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_media_cache::{
-    RedisEndpoint, cache_media as cache_media_adapter,
-    get_cached_media as get_cached_media_adapter, media_cache_key as media_cache_key_adapter,
+    cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
+    media_cache_key as media_cache_key_adapter,
 };
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
@@ -1371,6 +1377,56 @@ fn redis_media_cache_set(
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+fn redis_chat_admin_get(
+    host: &str,
+    port: u16,
+    password: Option<&str>,
+    chat_id: &str,
+    user_id: &str,
+) -> PyResult<Option<bool>> {
+    get_cached_chat_admin_adapter(
+        &RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        },
+        chat_id,
+        user_id,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn redis_chat_admin_key(chat_id: &str, user_id: &str) -> String {
+    chat_admin_cache_key_adapter(chat_id, user_id)
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn redis_chat_admin_set(
+    host: &str,
+    port: u16,
+    password: Option<&str>,
+    chat_id: &str,
+    user_id: &str,
+    is_admin: bool,
+    ttl_seconds: i64,
+) -> PyResult<()> {
+    cache_chat_admin_adapter(
+        &RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        },
+        chat_id,
+        user_id,
+        is_admin,
+        ttl_seconds,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1469,6 +1525,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_media_cache_get, module)?)?;
     module.add_function(wrap_pyfunction!(redis_media_cache_key, module)?)?;
     module.add_function(wrap_pyfunction!(redis_media_cache_set, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_chat_admin_get, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_chat_admin_key, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Union, cast
 
 import redis
 
@@ -16,9 +16,79 @@ from api.bot.chat_config_defaults import (
     TIMEZONE_OFFSET_MIN,
 )
 from api.i18n import Locale, current_locale, normalize_locale, tr
+from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.services.redis_helpers import redis_get_json, redis_setex_json
 
 ConfigLogger = Callable[[str, Optional[Mapping[str, Any]]], None]
+
+
+class _RustChatAdminCache(Protocol):
+    def redis_chat_admin_get(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+        chat_id: str,
+        user_id: str,
+    ) -> bool | None: ...
+
+    def redis_chat_admin_set(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+        chat_id: str,
+        user_id: str,
+        is_admin: bool,
+        ttl: int,
+    ) -> None: ...
+
+
+def _load_rust_chat_admin_cache() -> _RustChatAdminCache | None:
+    module = load_rust_bridge("RUST_CHAT_ADMIN_CACHE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustChatAdminCache, module)
+
+
+def _rust_cached_chat_admin(
+    rust_cache: _RustChatAdminCache,
+    chat_id: str,
+    user_id: Union[str, int],
+) -> bool | None:
+    try:
+        host, port, password = redis_endpoint_from_env()
+        return rust_cache.redis_chat_admin_get(
+            host,
+            port,
+            password,
+            chat_id,
+            str(user_id),
+        )
+    except Exception:
+        return None
+
+
+def _rust_cache_chat_admin(
+    rust_cache: _RustChatAdminCache,
+    chat_id: str,
+    user_id: Union[str, int],
+    is_admin: bool,
+) -> None:
+    try:
+        host, port, password = redis_endpoint_from_env()
+        rust_cache.redis_chat_admin_set(
+            host,
+            port,
+            password,
+            chat_id,
+            str(user_id),
+            is_admin,
+            CHAT_ADMIN_STATUS_TTL,
+        )
+    except Exception:
+        pass
 
 
 def coerce_bool(value: Any, *, default: bool) -> bool:
@@ -277,10 +347,15 @@ def is_chat_admin(
     if not chat_id or user_id is None:
         return False
 
-    redis_client = redis_client or optional_redis_client()
     cache_key = chat_admin_cache_key(chat_id, user_id)
-
-    if redis_client:
+    rust_cache = _load_rust_chat_admin_cache()
+    if rust_cache is not None:
+        cached_flag = _rust_cached_chat_admin(rust_cache, chat_id, user_id)
+        if cached_flag is not None:
+            return cached_flag
+    else:
+        redis_client = redis_client or optional_redis_client()
+    if rust_cache is None and redis_client:
         cached_value = redis_get_json_fn(redis_client, cache_key)
         cached_flag = (
             cached_value.get("is_admin") if isinstance(cached_value, Mapping) else cached_value
@@ -310,7 +385,9 @@ def is_chat_admin(
             },
         )
 
-    if redis_client:
+    if rust_cache is not None:
+        _rust_cache_chat_admin(rust_cache, chat_id, user_id, is_admin)
+    elif redis_client:
         redis_setex_json_fn(
             redis_client,
             cache_key,

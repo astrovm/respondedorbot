@@ -365,6 +365,14 @@ def verify_media_cache(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_chat_admin_cache(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "chat_admin_cache.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["keys"]:
+        actual = bridge.redis_chat_admin_key(case["chat_id"], case["user_id"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -439,6 +447,7 @@ def main(arguments: list[str]) -> int:
     verify_compaction_policy(bridge)
     verify_compaction_jobs(bridge)
     verify_media_cache(bridge)
+    verify_chat_admin_cache(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
