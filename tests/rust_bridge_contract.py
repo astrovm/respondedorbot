@@ -594,6 +594,17 @@ def verify_billing_legacy_settlements(bridge: ModuleType) -> None:
         raise AssertionError("Rust legacy AI settlement bridge is unavailable")
 
 
+def verify_billing_audit_writes(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_audit_writes.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["idempotency_key"] != ["user_id", "metadata.settlement_id"]:
+        raise AssertionError("AI settlement audit idempotency changed")
+    if contract["amount"] != 0:
+        raise AssertionError("AI settlement audit amount changed")
+    if not callable(bridge.billing_record_ai_settlement_result):
+        raise AssertionError("Rust AI settlement audit bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -687,6 +698,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_provider_usage(bridge)
     verify_billing_ai_settlements(bridge)
     verify_billing_legacy_settlements(bridge)
+    verify_billing_audit_writes(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

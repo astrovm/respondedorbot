@@ -2139,6 +2139,31 @@ fn billing_settle_legacy_ai_reservation_once(
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Persist one idempotent, non-monetary AI settlement audit event.
+#[pyfunction]
+fn billing_record_ai_settlement_result(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    actor_user_id: i64,
+    event_type: &str,
+    metadata_json: &str,
+) -> PyResult<bool> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    py.detach(|| {
+        repository.record_ai_settlement_result(
+            user_id,
+            chat_id,
+            actor_user_id,
+            event_type,
+            &metadata,
+        )
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2263,6 +2288,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_settle_ai_operation_once, module)?)?;
     module.add_function(wrap_pyfunction!(
         billing_settle_legacy_ai_reservation_once,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        billing_record_ai_settlement_result,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;

@@ -103,6 +103,11 @@ def reset_caches(monkeypatch):
         "_load_rust_billing_legacy_settlements",
         lambda: None,
     )
+    monkeypatch.setattr(
+        credits_db_service,
+        "_load_rust_billing_audit_writes",
+        lambda: None,
+    )
     clear_all_cooldowns()
     index_module._chat_config_service.clear_cache()
     monkeypatch.setenv(

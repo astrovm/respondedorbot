@@ -437,6 +437,35 @@ class _FakeRustLegacySettlements:
             raise ValueError("synthetic uncertain legacy settlement failure")
         return json.dumps(self.result)
 
+
+class _FakeRustBillingAuditWrites:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[object, ...]] = []
+
+    def billing_record_ai_settlement_result(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        actor_user_id: int,
+        event_type: str,
+        metadata_json: str,
+    ) -> bool:
+        self.calls.append(
+            (
+                database_url,
+                user_id,
+                chat_id,
+                actor_user_id,
+                event_type,
+                json.loads(metadata_json),
+            )
+        )
+        if self.fail:
+            raise ValueError("synthetic uncertain audit write failure")
+        return True
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1312,4 +1341,63 @@ def test_billing_legacy_settlement_uncertain_failure_does_not_start_python_write
             300,
             100,
             "synthetic-usage",
+        )
+
+
+def test_billing_audit_write_is_authoritative_and_preserves_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python audit writer must not run"),
+    )
+    rust = _FakeRustBillingAuditWrites()
+    monkeypatch.setattr(credits_db, "_load_rust_billing_audit_writes", lambda: rust)
+
+    assert (
+        credits_db.record_ai_settlement_result(
+            42,
+            202,
+            actor_user_id=99,
+            event_type="custom_settlement_result",
+            metadata={"settlement_id": "synthetic-settlement"},
+        )
+        is None
+    )
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            42,
+            202,
+            99,
+            "custom_settlement_result",
+            {"settlement_id": "synthetic-settlement"},
+        )
+    ]
+
+
+def test_billing_audit_write_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_audit_writes",
+        lambda: _FakeRustBillingAuditWrites(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="audit write"):
+        credits_db.record_ai_settlement_result(
+            42,
+            None,
+            metadata={"settlement_id": "synthetic-settlement"},
         )

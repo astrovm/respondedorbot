@@ -1002,6 +1002,30 @@ impl BillingRepository {
         })
     }
 
+    pub fn record_ai_settlement_result(
+        &self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        actor_user_id: i64,
+        event_type: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<bool, BillingError> {
+        self.run_transaction(|transaction| {
+            Ok(transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT DO NOTHING",
+                &[
+                    &event_type,
+                    &actor_user_id,
+                    &user_id,
+                    &chat_id,
+                    &Value::Object(metadata.clone()),
+                ],
+            )? > 0)
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -1349,6 +1373,10 @@ mod tests {
             ON credit_ledger ((metadata->>'operation_id'), (metadata->>'segment_id')) \
             WHERE event_type = 'ai_provider_usage' \
               AND metadata ? 'operation_id' AND metadata ? 'segment_id'; \
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_unique_ai_settlement \
+            ON credit_ledger (user_id, (metadata->>'settlement_id')) \
+            WHERE event_type = 'ai_settlement_result' \
+              AND metadata ? 'settlement_id'; \
             INSERT INTO credit_accounts (scope_type, scope_id, balance) \
             VALUES ('user', 7000000000001, 1234) \
             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
@@ -2710,6 +2738,35 @@ mod tests {
                 .all(|result| result.user_balance == 100)
         );
 
+        let audit_metadata = serde_json::Map::from_iter([(
+            "settlement_id".to_owned(),
+            serde_json::Value::String("synthetic-audit-result".to_owned()),
+        )]);
+        assert!(repository.record_ai_settlement_result(
+            7_000_000_000_037,
+            Some(7_000_000_000_035),
+            99,
+            "ai_settlement_result",
+            &audit_metadata,
+        )?);
+        assert!(!repository.record_ai_settlement_result(
+            7_000_000_000_037,
+            Some(7_000_000_000_035),
+            99,
+            "ai_settlement_result",
+            &audit_metadata,
+        )?);
+        let audit_evidence = client.query_one(
+            "SELECT COUNT(*), COALESCE(SUM(amount), 0), MIN(actor_user_id) \
+             FROM credit_ledger WHERE user_id = $1 \
+               AND event_type = 'ai_settlement_result' \
+               AND metadata->>'settlement_id' = 'synthetic-audit-result'",
+            &[&7_000_000_000_037_i64],
+        )?;
+        assert_eq!(audit_evidence.get::<_, i64>(0), 1);
+        assert_eq!(audit_evidence.get::<_, i64>(1), 0);
+        assert_eq!(audit_evidence.get::<_, Option<i64>>(2), Some(99));
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -2747,6 +2804,7 @@ mod tests {
             7_000_000_000_034_i64,
             7_000_000_000_035_i64,
             7_000_000_000_036_i64,
+            7_000_000_000_037_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

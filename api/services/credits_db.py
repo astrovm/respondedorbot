@@ -248,6 +248,18 @@ class _RustBillingLegacySettlements(Protocol):
     ) -> str: ...
 
 
+class _RustBillingAuditWrites(Protocol):
+    def billing_record_ai_settlement_result(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        actor_user_id: int,
+        event_type: str,
+        metadata_json: str,
+    ) -> bool: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -332,6 +344,13 @@ def _load_rust_billing_legacy_settlements() -> (
     if module is None:
         return None
     return cast(_RustBillingLegacySettlements, module)
+
+
+def _load_rust_billing_audit_writes() -> _RustBillingAuditWrites | None:
+    module = load_rust_bridge("RUST_BILLING_AUDIT_WRITES_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingAuditWrites, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2446,6 +2465,23 @@ def record_ai_settlement_result(
 
     actor_id = int(actor_user_id) if actor_user_id is not None else int(user_id)
     metadata_dict = dict(metadata or {})
+    normalized_event_type = str(event_type or "ai_settlement_result")
+    rust = _load_rust_billing_audit_writes()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            rust.billing_record_ai_settlement_result(
+                database_url,
+                int(user_id),
+                int(chat_id) if chat_id is not None else None,
+                actor_id,
+                normalized_event_type,
+                json.dumps(metadata_dict, default=str),
+            )
+            return
+        except Exception as error:
+            raise CreditsDBError("Rust AI settlement audit write failed") from error
 
     def operation(cur: Any) -> None:
         cur.execute(
@@ -2462,7 +2498,7 @@ def record_ai_settlement_result(
             ON CONFLICT DO NOTHING
             """,
             (
-                str(event_type or "ai_settlement_result"),
+                normalized_event_type,
                 actor_id,
                 int(user_id),
                 int(chat_id) if chat_id is not None else None,

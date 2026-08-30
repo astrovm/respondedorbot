@@ -23,6 +23,7 @@ must never enter balance mutations.
 | Current provider-usage writer | Rust owns idempotent provider segment insertion | Rust only for provider segment records; Python owns settlement | Disable `RUST_BILLING_PROVIDER_USAGE_ENABLED` |
 | Current AI settlement writer | Rust owns exact-once operation settlement, refunds, and settlement debt | Rust only for current operation settlement; Python owns legacy usage-tag settlement | Disable `RUST_BILLING_AI_SETTLEMENTS_ENABLED` |
 | Legacy AI settlement writer | Rust owns exact-once memory-compaction settlement by usage tag | Rust only for legacy usage-tag settlement; Python owns audit and reporting paths | Disable `RUST_BILLING_LEGACY_SETTLEMENTS_ENABLED` |
+| AI settlement audit writer | Rust owns idempotent non-monetary audit insertion | Rust only for settlement result audit writes; Python owns reporting reads | Disable `RUST_BILLING_AUDIT_WRITES_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -139,3 +140,7 @@ returns current balances on replay. Uncertain failures never start Python.
 legacy usage-tag settlement used by memory compaction. It preserves the
 user-before-chat lock order, legacy audit payload merge order, and fail-closed
 retries.
+
+`RUST_BILLING_AUDIT_WRITES_ENABLED=1` makes Rust authoritative for non-monetary
+AI settlement result records. The partial unique settlement index remains the
+restart-safe idempotency boundary, and uncertain failures never start Python.
